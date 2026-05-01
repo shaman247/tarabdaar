@@ -205,6 +205,7 @@ class NoteManager: ObservableObject {
         }
     }
 
+
     /// Indices of voices that are currently sounding or releasing.
     var activeVoiceIndices: [Int] {
         pitchChannels.indices.filter { pitchChannels[$0].state != .idle }
@@ -227,6 +228,14 @@ class NoteManager: ObservableObject {
         return Array(pitchHistoryBuffer[start...]) + Array(pitchHistoryBuffer[..<start])
     }
     var recentPeakDelays: [Double] = []
+
+    // MARK: - Profiling counters (in ms; refreshed every UI tick)
+    private(set) var lastGlideTickMs: Double = 0
+    private(set) var maxGlideTickMs: Double = 0
+    private(set) var lastLockWaitMicros: Double = 0
+    private(set) var lastLockAcquisitions: UInt64 = 0
+    private var profilingWindowStart: TimeInterval = 0
+    private var maxGlideTickInWindow: Double = 0
 
     // Throttled UI update counter
     private var uiUpdateCounter: Int = 0
@@ -264,6 +273,30 @@ class NoteManager: ObservableObject {
     /// True if any parameter is mapped to the accelPressure dimension.
     /// When false, the velocity capture delay is skipped for lower latency.
     private(set) var pressureInUse: Bool = false
+
+    /// Apply a named sound preset by overwriting each affected parameter's
+    /// `defaultValue` in the dimension mapping. Bindings are left untouched,
+    /// so any dimension the user has already wired up keeps behaving the same;
+    /// the preset only changes what unbound parameters fall back to (and the
+    /// starting point for newly-bound dimensions).
+    func applyPreset(_ preset: SoundPreset) {
+        applyParameterValues(preset.values())
+    }
+
+    /// Overwrite the `defaultValue` of a set of parameters. Used by the
+    /// sound-preset buttons and the blend-triangle widget. Bindings are
+    /// untouched, so any dimension the user has already wired up keeps
+    /// behaving the same — only unbound parameters pick up the new defaults.
+    func applyParameterValues(_ values: [MappableParameter: Double]) {
+        var updated = dimensionMapping
+        for (param, value) in values {
+            var m = updated.mapping(for: param)
+            m.defaultValue = value
+            updated.mappings[param.storageKey] = m
+        }
+        // Single reassignment triggers didSet → save + rebuildMappingCache.
+        dimensionMapping = updated
+    }
 
     private func rebuildMappingCache() {
         let allMappings = MappableParameter.allCases.map { dimensionMapping.mapping(for: $0) }
@@ -376,9 +409,144 @@ class NoteManager: ObservableObject {
     var midiEngine: MIDIEngine?
     var audioEngine: AudioEngine?
 
-    /// The active scale and tuning system. Loaded from persistence on init.
+    /// The playing scale (keyboard layout + tuning). Loaded from persistence.
     var scale: Scale = Scale.load() {
         didSet { scale.save() }
+    }
+
+    /// The sympathetic-string scale that drives the resonance envelope.
+    /// Independent from `scale` so the user can, e.g., play in one key while
+    /// strings ring at a different tuning. On first run falls back to a copy
+    /// of the playing scale.
+    var sympatheticScale: Scale = Scale.loadSympathetic() {
+        didSet {
+            sympatheticScale.saveSympathetic()
+            reconfigureSympatheticVoices()
+        }
+    }
+
+    /// Cached list of sympathetic voice frequencies, parallel to what the
+    /// audio engine's sympatheticVoices array holds. Used on the main thread
+    /// to compute per-tick excitations and to render the stem visualization.
+    private(set) var sympatheticFrequencies: [Double] = []
+
+    /// Rebuild the sympathetic voices from the sympathetic scale's enabled
+    /// notes. Called on sympathetic-scale change and once on init.
+    func reconfigureSympatheticVoices() {
+        guard let audioEngine else { return }
+        sympatheticFrequencies = sympatheticScale.enabledNotesInRange().map {
+            sympatheticScale.frequency(for: $0)
+        }
+        audioEngine.configureSympatheticVoices(frequencies: sympatheticFrequencies)
+    }
+
+    // MARK: - Sympathetic excitation
+
+    /// Simple-ratio kernel for sympathetic excitation. Each entry is a
+    /// frequency ratio (sym/base) and a weight reflecting the strength of the
+    /// harmonic relation. The unison weight is the only one fixed at 1.0;
+    /// all others are scaled at call time by the `spread` parameter so the
+    /// user can tune how much harmonic relationships matter relative to pure
+    /// proximity (= the unison Gaussian's wings).
+    private static let excitationRatios: [(ratio: Double, weight: Double, isUnison: Bool)] = [
+        (0.5,       0.6,  false), // octave down
+        (2.0 / 3.0, 0.8,  false), // fifth down
+        (3.0 / 4.0, 0.5,  false), // fourth down
+        (4.0 / 5.0, 0.3,  false), // major third down
+        (5.0 / 6.0, 0.2,  false), // minor third down
+        (8.0 / 9.0, 0.15, false), // major second down
+        (1.0,       1.0,  true),  // unison — always full weight
+        (9.0 / 8.0, 0.15, false), // major second up
+        (6.0 / 5.0, 0.2,  false), // minor third up
+        (5.0 / 4.0, 0.3,  false), // major third up
+        (4.0 / 3.0, 0.5,  false), // fourth up
+        (3.0 / 2.0, 0.8,  false), // fifth up
+        (5.0 / 3.0, 0.3,  false), // major sixth up
+        (2.0,       0.6,  false), // octave up
+    ]
+
+    /// Kernel with effective weights precomputed for the current values of
+    /// `spread` and `consonance`. Shared across all sympathetic voices on a
+    /// single tick so we don't redo `pow(w, consonance)` for every voice.
+    struct PrecomputedKernel {
+        let entries: [(logR: Double, weight: Double)]
+        let twoSigmaSq: Double
+    }
+
+    /// Build the per-tick kernel from the dimension parameter values.
+    static func precomputeKernel(sigmaSemitones: Double,
+                                 spread: Double,
+                                 consonance: Double) -> PrecomputedKernel {
+        let sigmaOct = max(0.01, sigmaSemitones) / 12.0
+        let twoSigmaSq = 2.0 * sigmaOct * sigmaOct
+        let entries: [(Double, Double)] = excitationRatios.compactMap { (r, w, isUnison) in
+            let effectiveW = isUnison ? w : pow(w, consonance) * spread
+            guard effectiveW > 0 else { return nil }
+            return (log2(r), effectiveW)
+        }
+        return PrecomputedKernel(entries: entries, twoSigmaSq: twoSigmaSq)
+    }
+
+    /// Excitation at `fSym` driven by base pitch `fBase`, using a precomputed
+    /// kernel so the per-voice cost is just N Gaussian evaluations.
+    static func excitation(fBase: Double, fSym: Double,
+                           kernel: PrecomputedKernel) -> Double {
+        guard fBase > 0, fSym > 0 else { return 0 }
+        let logRatio = log2(fSym / fBase)
+        var best = 0.0
+        for (logR, w) in kernel.entries {
+            let d = logRatio - logR
+            let g = exp(-(d * d) / kernel.twoSigmaSq)
+            let e = w * g
+            if e > best { best = e }
+        }
+        return best
+    }
+
+    /// Frequency of the first sounding base voice (in iteration order).
+    /// Returns nil if no voice is currently sounding.
+    private var firstSoundingBaseFreq: Double? {
+        for i in 0..<Config.maxPolyVoices {
+            if pitchChannels[i].state == .sounding {
+                return pitchChannels[i].currentFrequency
+            }
+        }
+        return nil
+    }
+
+    /// Compute target amplitudes for every sympathetic voice and push them
+    /// to the audio engine. Called once per glide tick.
+    private func updateSympatheticAmps(audioEngine: AudioEngine) {
+        guard !sympatheticFrequencies.isEmpty else { return }
+        let volume = cachedParamValue(for: .sympatheticVolume)
+        let maxLevel = volume * Config.maxAmplitude
+        let sigma = cachedParamValue(for: .sympatheticWidth)
+        let spread = cachedParamValue(for: .sympatheticSpread)
+        let consonance = cachedParamValue(for: .sympatheticConsonance)
+        // Each sympathetic nominal note is rendered as a detuned pair, so the
+        // amps array the engine expects is 2× the fundamentals count.
+        let pairCount = sympatheticFrequencies.count * 2
+        guard let baseFreq = firstSoundingBaseFreq else {
+            audioEngine.setSympatheticTargetAmps([Double](repeating: 0, count: pairCount))
+            return
+        }
+        // Fold the current vibrato offset into the base frequency driving the
+        // excitation so sympathetic voices pulse with the bow's inflection.
+        let vibDepth = cachedParamValue(for: .vibratoDepth)
+        let vibSemitones = sin(vibratoPhase) * vibDepth * currentVibratoIntensity
+        let vibratedBase = baseFreq * pow(2.0, vibSemitones / 12.0)
+        let kernel = Self.precomputeKernel(sigmaSemitones: sigma,
+                                           spread: spread,
+                                           consonance: consonance)
+        var amps = [Double]()
+        amps.reserveCapacity(pairCount)
+        for fSym in sympatheticFrequencies {
+            // Each pair of voices (−detune / +detune) shares one excitation.
+            let e = Self.excitation(fBase: vibratedBase, fSym: fSym, kernel: kernel) * maxLevel
+            amps.append(e)
+            amps.append(e)
+        }
+        audioEngine.setSympatheticTargetAmps(amps)
     }
 
     var startNote: Int { scale.startNote }
@@ -490,6 +658,7 @@ class NoteManager: ObservableObject {
             lastTickTime = CACurrentMediaTime()
             return
         }
+        let tickStart = CACurrentMediaTime()
 
         // Cache tilt for consistent use this tick
         if let tilts = motionManager?.normalizedTilts {
@@ -527,6 +696,29 @@ class NoteManager: ObservableObject {
             }
         }
 
+        // Push all control-rate modal-synth parameters and sym-coupling gains
+        // once per tick. Setters are idempotent at the engine side — they
+        // short-circuit when the incoming value is unchanged, so calling
+        // them unconditionally every tick is cheap.
+        if synthEnabled, let audioEngine {
+            audioEngine.setHarmonicFalloff(cachedParamValue(for: .harmonicFalloff))
+            audioEngine.setReverbMix(Float(cachedParamValue(for: .reverbMix)))
+            audioEngine.setBowForce(cachedParamValue(for: .bowForce))
+            audioEngine.setStringDecay(cachedParamValue(for: .stringDecay))
+            audioEngine.setSymDecay(cachedParamValue(for: .symDecay))
+            audioEngine.setDampingTilt(cachedParamValue(for: .dampingTilt))
+            audioEngine.setInharmonicity(cachedParamValue(for: .inharmonicity))
+            audioEngine.setSymCoupling(cachedParamValue(for: .symCoupling))
+            audioEngine.setPluckPosition(cachedParamValue(for: .pluckPosition))
+            audioEngine.setPartialCount(Int(cachedParamValue(for: .partialCount).rounded()))
+            audioEngine.setFundamentalBoost(cachedParamValue(for: .fundamentalBoost))
+            audioEngine.setBreathLevel(cachedParamValue(for: .breathLevel))
+            audioEngine.setBreathOffset(cachedParamValue(for: .breathOffset))
+            audioEngine.setBreathSpread(cachedParamValue(for: .breathSpread))
+            audioEngine.setSympatheticDetune(cents: cachedParamValue(for: .sympatheticDetune))
+            updateSympatheticAmps(audioEngine: audioEngine)
+        }
+
         // --- Record pitch history for the graph ---
         let vibrato = sin(vibratoPhase) * cachedParamValue(for: .vibratoDepth) * currentVibratoIntensity
         let frequencies: [Double?] = (0..<Config.maxPolyVoices).map { i in
@@ -559,10 +751,28 @@ class NoteManager: ObservableObject {
         }
         pitchHistoryIndex += 1
 
+        // Per-tick profiling: track this tick's duration vs. the rolling max.
+        let tickElapsed = (CACurrentMediaTime() - tickStart) * 1000.0
+        lastGlideTickMs = tickElapsed
+        if tickElapsed > maxGlideTickInWindow { maxGlideTickInWindow = tickElapsed }
+
         // Throttle SwiftUI updates to ~15Hz
         uiUpdateCounter += 1
         if uiUpdateCounter >= uiUpdateInterval {
             uiUpdateCounter = 0
+            // Snapshot rolling stats once per UI tick (~15Hz).
+            let nowSec = CACurrentMediaTime()
+            if profilingWindowStart == 0 { profilingWindowStart = nowSec }
+            let windowElapsed = nowSec - profilingWindowStart
+            if windowElapsed >= 0.5 {
+                maxGlideTickMs = maxGlideTickInWindow
+                if let stats = audioEngine?.snapshotLockStats() {
+                    lastLockWaitMicros = stats.avgWaitMicros
+                    lastLockAcquisitions = stats.count
+                }
+                maxGlideTickInWindow = 0
+                profilingWindowStart = nowSec
+            }
             objectWillChange.send()
         }
     }
@@ -642,11 +852,15 @@ class NoteManager: ObservableObject {
         let vibratoSemitones = sin(vibratoPhase) * vibDepth * vibIntensity
         let outputFreq = pitchChannels[i].currentFrequency * pow(2.0, vibratoSemitones / 12.0)
 
-        if synthEnabled {
-            audioEngine?.setFrequency(channel: i, frequency: outputFreq)
+        if synthEnabled, let audioEngine {
             let ampMultiplier = cachedParamValue(for: .amplitude, voiceIndex: i)
             let baseAmp = Double(pitchChannels[i].velocity) / 127.0 * Config.maxAmplitude
-            audioEngine?.setAmplitude(channel: i, amplitude: baseAmp * ampMultiplier)
+            audioEngine.updateVoiceParams(
+                channel: i,
+                frequency: outputFreq,
+                amplitude: baseAmp * ampMultiplier,
+                attackMs: cachedParamValue(for: .noteAttack, voiceIndex: i)
+            )
         }
 
         let midiCh = pitchChannels[i].midiChannel

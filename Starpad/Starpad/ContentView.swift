@@ -47,6 +47,7 @@ struct ContentView: View {
             noteManager.motionManager = motion
             noteManager.midiEngine = midi
             noteManager.audioEngine = audioEngine
+            noteManager.reconfigureSympatheticVoices()
             midi.start()
             if !motion.isCalibrated {
                 showCalibration = true
@@ -70,7 +71,7 @@ struct ContentView: View {
                     pitchGraphPanel
                         .frame(width: 540)
                 }
-                .frame(height: geo.size.height * 0.5, alignment: .top)
+                .frame(height: geo.size.height * 0.42, alignment: .top)
                 .gesture(
                     DragGesture(minimumDistance: 40)
                         .onEnded { drag in
@@ -88,10 +89,21 @@ struct ContentView: View {
                 Divider()
                     .background(Color.gray)
 
+                // Full-width spectrum bar graph with resonance envelope overlay.
+                spectrumBarGraph
+                    .frame(height: geo.size.height * 0.13)
+
+                Divider()
+                    .background(Color.gray)
+
                 // Bottom half: keyboard or scale editor
                 if showScaleEditor {
-                    ScaleEditorView(scale: $noteManager.scale, isActive: $showScaleEditor)
-                        .frame(height: geo.size.height * 0.5)
+                    ScaleEditorView(
+                        playingScale: $noteManager.scale,
+                        sympatheticScale: $noteManager.sympatheticScale,
+                        isActive: $showScaleEditor
+                    )
+                        .frame(height: geo.size.height * 0.45)
                 } else {
                     ZStack {
                         keyboardView
@@ -122,7 +134,7 @@ struct ContentView: View {
                             touchDot(for: touch)
                         }
                     }
-                    .frame(height: geo.size.height * 0.5)
+                    .frame(height: geo.size.height * 0.45)
                 }
             }
         }
@@ -254,6 +266,78 @@ struct ContentView: View {
                 }
             )
         }
+    }
+
+    // MARK: - Spectrum Bar Graph
+    //
+    // Full-width strip above the keyboard. Shows:
+    //   • Live FFT magnitude bars (log-frequency x axis, ~50Hz..10kHz)
+    //   • Resonance envelope curve overlaid (pink)
+    //   • Scale-tone tick marks along the bottom (gray)
+    //
+    // Replaces the previous envelope strip on the pitch graph — the pitch
+    // graph's semitone y-axis only covered one playable octave range, so
+    // most audible harmonics were above its range.
+
+    /// Low end of the spectrum bar graph's frequency axis (Hz).
+    private static let spectrumMinHz: Double = 50
+    /// High end of the spectrum bar graph's frequency axis (Hz).
+    private static let spectrumMaxHz: Double = 10000
+
+    private var spectrumBarGraph: some View {
+        Canvas { ctx, size in
+            let minHz = Self.spectrumMinHz
+            let maxHz = Self.spectrumMaxHz
+            let logMin = log2(minHz)
+            let logMax = log2(maxHz)
+            let logSpan = logMax - logMin
+
+            // Background
+            ctx.fill(Path(CGRect(origin: .zero, size: size)),
+                     with: .color(.black.opacity(0.6)))
+
+            let bottomMargin: CGFloat = 2
+            let plotH = size.height - bottomMargin
+            let maxAmp = CGFloat(Config.maxAmplitude)   // 1.0 amplitude = full stem height
+
+            // --- Octave grid lines ---
+            var octaveLines = Path()
+            for octaveNum in 1...14 {
+                let f = 55.0 * pow(2.0, Double(octaveNum))
+                if f < minHz || f > maxHz { continue }
+                let xFrac = (log2(f) - logMin) / logSpan
+                let x = CGFloat(xFrac) * size.width
+                octaveLines.addRect(CGRect(x: x, y: 0, width: 1, height: plotH))
+            }
+            ctx.fill(octaveLines, with: .color(.white.opacity(0.05)))
+
+            // --- Sympathetic voice stems (pink) ---
+            // Height of each stem = current amplitude / maxAmplitude.
+            let syms = audioEngine.sympatheticSnapshot()
+            var symStems = Path()
+            for sv in syms {
+                let xFrac = (log2(sv.freq) - logMin) / logSpan
+                if xFrac < 0 || xFrac > 1 { continue }
+                let x = CGFloat(xFrac) * size.width
+                let h = plotH * min(1.0, CGFloat(sv.amp) / maxAmp)
+                symStems.addRect(CGRect(x: x - 1, y: plotH - h, width: 2, height: h))
+            }
+            ctx.fill(symStems, with: .color(.pink.opacity(0.85)))
+
+            // --- Base voice stem (cyan) ---
+            if let base = audioEngine.baseVoiceSnapshot() {
+                let xFrac = (log2(base.freq) - logMin) / logSpan
+                if xFrac >= 0 && xFrac <= 1 {
+                    let x = CGFloat(xFrac) * size.width
+                    let h = plotH * min(1.0, CGFloat(base.amp) / maxAmp)
+                    let rect = CGRect(x: x - 1.5, y: plotH - h, width: 3, height: h)
+                    ctx.fill(Path(rect), with: .color(.cyan.opacity(0.9)))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .background(Color.black)
+        .allowsHitTesting(false)
     }
 
     private func touchNoteDots(history: [PitchSample], geo: GeometryProxy, lowNote: Double, highNote: Double, stepX: CGFloat) -> some View {
@@ -573,6 +657,12 @@ struct ContentView: View {
                 }
             }
 
+            Divider()
+                .frame(height: 100)
+                .background(Color.gray.opacity(0.3))
+
+            SoundTriangleView(noteManager: noteManager)
+
             Spacer()
         }
         .padding()
@@ -697,6 +787,30 @@ struct ContentView: View {
             }
             .font(.system(.caption, design: .monospaced))
 
+            // Profiling readout
+            HStack(spacing: 10) {
+                let renderMs = audioEngine.lastRenderTime * 1000
+                let renderMaxMs = audioEngine.maxRenderTime * 1000
+                let frames = audioEngine.lastRenderFrames
+                let budgetMs = Double(frames) / Config.sampleRate * 1000
+                let pctBudget = budgetMs > 0 ? (renderMaxMs / budgetMs) * 100 : 0
+                let renderColor: Color = pctBudget > 80 ? .red : (pctBudget > 50 ? .orange : .green)
+                Text(String(format: "render: %.2f/%.2fms (%.0f%% of %.1fms @ %d)", renderMs, renderMaxMs, pctBudget, budgetMs, frames))
+                    .foregroundColor(renderColor)
+                Text(String(format: "tick: %.2f/%.2fms", noteManager.lastGlideTickMs, noteManager.maxGlideTickMs))
+                    .foregroundColor(noteManager.maxGlideTickMs > 8 ? .orange : .green)
+                Text(String(format: "lock: %.0fµs ×%d", noteManager.lastLockWaitMicros, noteManager.lastLockAcquisitions))
+                    .foregroundColor(noteManager.lastLockWaitMicros > 200 ? .red : .gray)
+                Text("sym:\(noteManager.sympatheticFrequencies.count)")
+                    .foregroundColor(.gray)
+                Text("v:\(audioEngine.lastRenderVoiceCount)")
+                    .foregroundColor(.gray)
+                let sv = noteManager.cachedParamValue(for: .sympatheticVolume)
+                Text(String(format: "symVol:%.2f", sv))
+                    .foregroundColor(sv > 0.01 ? .pink : .gray)
+            }
+            .font(.system(.caption2, design: .monospaced))
+
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
@@ -768,6 +882,7 @@ struct MappingMatrixPanel: View {
             HStack(spacing: 0) {
                 // Left 2/3: Matrix
                 VStack(spacing: 0) {
+                    presetStrip
                     // Header row
                     HStack(spacing: 0) {
                         Text("← Mapping")
@@ -926,6 +1041,44 @@ struct MappingMatrixPanel: View {
                 noteManager.dimensionMapping.setBinding(for: param, dimension: dim, to: newBinding)
             }
         )
+    }
+
+    // MARK: - Preset Strip
+
+    /// Row of sound-preset buttons above the mapping matrix. Each button
+    /// overwrites the default values of the synth-timbre parameters; it
+    /// doesn't touch glide, vibrato, or MIDI mappings.
+    private var presetStrip: some View {
+        HStack(spacing: 6) {
+            Text("Preset")
+                .font(smallFont)
+                .foregroundColor(.gray)
+                .frame(width: labelWidth - 18, alignment: .leading)
+                .padding(.leading, 12)
+            ForEach(SoundPreset.allCases, id: \.rawValue) { preset in
+                Button {
+                    noteManager.applyPreset(preset)
+                } label: {
+                    Text(preset.label)
+                        .font(smallFont).fontWeight(.medium)
+                        .foregroundColor(preset == .random ? .orange : .cyan)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 28)
+                        .background(Color.white.opacity(0.05))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(preset == .random ? Color.orange.opacity(0.4)
+                                                          : Color.cyan.opacity(0.4),
+                                        lineWidth: 1)
+                        )
+                        .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 6)
+        .padding(.trailing, 10)
+        .background(Color(white: 0.04))
     }
 
     // MARK: - Matrix Helpers
@@ -1118,6 +1271,135 @@ struct MappingMatrixPanel: View {
         if dim.isPerNote { return .green }
         if dim.isSlider { return .orange }
         return .gray
+    }
+}
+
+// MARK: - Sound Blend Triangle
+
+/// Tap anywhere in the triangle to blend the three vertex presets (Pluck,
+/// Bow, Noise) via barycentric coordinates. Parameters are applied live
+/// during drag for immediate audible feedback.
+struct SoundTriangleView: View {
+    @ObservedObject var noteManager: NoteManager
+    @State private var tap: CGPoint? = nil
+
+    // Fixed geometry. Equilateral-ish: apex at top-center, base across
+    // bottom. Inset from frame so the tap dot isn't clipped at edges.
+    private let width: CGFloat = 150
+    private let height: CGFloat = 130
+
+    private var pluckVertex: CGPoint { CGPoint(x: width / 2, y: 10) }
+    private var bowVertex:   CGPoint { CGPoint(x: 10,         y: height - 10) }
+    private var noiseVertex: CGPoint { CGPoint(x: width - 10, y: height - 10) }
+
+    var body: some View {
+        ZStack {
+            // Filled triangle background + outline.
+            trianglePath
+                .fill(Color.white.opacity(0.04))
+            trianglePath
+                .stroke(Color.cyan.opacity(0.55), lineWidth: 1.2)
+
+            // Corner labels, positioned inside the triangle near each vertex.
+            Text("PLUCK")
+                .font(.system(size: 10, weight: .bold, design: .default))
+                .foregroundColor(.cyan.opacity(0.85))
+                .position(x: pluckVertex.x, y: pluckVertex.y + 10)
+            Text("BOW")
+                .font(.system(size: 10, weight: .bold, design: .default))
+                .foregroundColor(.cyan.opacity(0.85))
+                .position(x: bowVertex.x + 18, y: bowVertex.y - 6)
+            Text("NOISE")
+                .font(.system(size: 10, weight: .bold, design: .default))
+                .foregroundColor(.cyan.opacity(0.85))
+                .position(x: noiseVertex.x - 22, y: noiseVertex.y - 6)
+
+            // Selected-position indicator.
+            if let t = tap {
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 10, height: 10)
+                    .position(t)
+                Circle()
+                    .stroke(Color.white.opacity(0.6), lineWidth: 1)
+                    .frame(width: 10, height: 10)
+                    .position(t)
+            }
+        }
+        .frame(width: width, height: height)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { drag in
+                    let (weights, clamped) = barycentric(drag.location)
+                    tap = clamped
+                    noteManager.applyParameterValues(blended(weights: weights))
+                }
+        )
+    }
+
+    private var trianglePath: Path {
+        Path { p in
+            p.move(to: pluckVertex)
+            p.addLine(to: bowVertex)
+            p.addLine(to: noiseVertex)
+            p.closeSubpath()
+        }
+    }
+
+    /// Compute barycentric weights for `point` relative to the three corners,
+    /// clamped to the triangle. Returns both the normalized weights (summing
+    /// to 1) and the cartesian position of those weights — so if the user
+    /// drags outside, the dot snaps to the triangle edge/corner.
+    private func barycentric(_ point: CGPoint) -> (weights: (pluck: Double, bow: Double, noise: Double), clamped: CGPoint) {
+        let A = pluckVertex, B = bowVertex, C = noiseVertex
+        let v0x = B.x - A.x, v0y = B.y - A.y
+        let v1x = C.x - A.x, v1y = C.y - A.y
+        let v2x = point.x - A.x, v2y = point.y - A.y
+        let d00 = v0x*v0x + v0y*v0y
+        let d01 = v0x*v1x + v0y*v1y
+        let d11 = v1x*v1x + v1y*v1y
+        let d20 = v2x*v0x + v2y*v0y
+        let d21 = v2x*v1x + v2y*v1y
+        let denom = d00 * d11 - d01 * d01
+        // Raw barycentric.
+        let rawB = (d11 * d20 - d01 * d21) / denom
+        let rawC = (d00 * d21 - d01 * d20) / denom
+        let rawA = 1 - rawB - rawC
+        // Clamp each weight to ≥0 and renormalize. When the point is inside
+        // the triangle this is a no-op; when outside, it projects onto the
+        // nearest triangle edge/corner while keeping the weights valid.
+        let cA = max(0, Double(rawA))
+        let cB = max(0, Double(rawB))
+        let cC = max(0, Double(rawC))
+        let sum = cA + cB + cC
+        let (nA, nB, nC): (Double, Double, Double) = sum > 0
+            ? (cA / sum, cB / sum, cC / sum)
+            : (1.0/3.0, 1.0/3.0, 1.0/3.0)
+        let clampedPt = CGPoint(
+            x: A.x * CGFloat(nA) + B.x * CGFloat(nB) + C.x * CGFloat(nC),
+            y: A.y * CGFloat(nA) + B.y * CGFloat(nB) + C.y * CGFloat(nC)
+        )
+        return ((pluck: nA, bow: nB, noise: nC), clampedPt)
+    }
+
+    /// Linear interpolation of each parameter across the three vertex
+    /// presets, weighted by the barycentric coordinates.
+    private func blended(weights w: (pluck: Double, bow: Double, noise: Double))
+        -> [MappableParameter: Double]
+    {
+        let pluck = SoundBlendVertex.pluck.values()
+        let bow   = SoundBlendVertex.bow.values()
+        let noise = SoundBlendVertex.noise.values()
+        var result: [MappableParameter: Double] = [:]
+        let allKeys = Set(pluck.keys).union(bow.keys).union(noise.keys)
+        for key in allKeys {
+            let vp = pluck[key] ?? key.midpointValue
+            let vb = bow[key]   ?? key.midpointValue
+            let vn = noise[key] ?? key.midpointValue
+            result[key] = vp * w.pluck + vb * w.bow + vn * w.noise
+        }
+        return result
     }
 }
 

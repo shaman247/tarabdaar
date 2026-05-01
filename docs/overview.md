@@ -1,13 +1,13 @@
 # Overview
 
-Armpad is an expressive electronic music instrument for iPad, loosely inspired by the [Ondes Martenot](https://en.wikipedia.org/wiki/Ondes_Martenot). The player rests the iPad on their inner forearm, plays notes on a touchscreen piano keyboard, and tilts the device to modulate pitch glide speed and volume. It is designed for genres with complex glissandi, such as Indian classical music.
+Starpad is an expressive electronic music instrument for iPad, loosely inspired by the [Ondes Martenot](https://en.wikipedia.org/wiki/Ondes_Martenot). The player rests the iPad on their inner forearm, plays notes on a touchscreen piano keyboard, and tilts the device to modulate pitch glide speed and volume. It is designed for genres with complex glissandi, such as Indian classical music.
 
 ## Design Philosophy
 
 - **Monophonic and expressive**. One voice with rich continuous pitch control, rather than many discrete notes. Every parameter that can vary continuously does.
 - **iPad as instrument**. The capacitive touchscreen provides the keyboard. The accelerometer detects strike velocity. The gyroscope senses tilt for expression. No external hardware needed.
 - **Glissandi first**. The pitch glide system is the core feature. Two methods (tap glides and drag glides) give the player control over pitch transitions ranging from instant jumps to slow, expressive slides.
-- **MIDI-native**. All expression (pitch bend, velocity, aftertouch) is output as standard MPE MIDI, so Armpad can control any synthesizer.
+- **MIDI-native**. All expression (pitch bend, velocity, aftertouch) is output as standard MPE MIDI, so Starpad can control any synthesizer.
 
 ## Current Capabilities
 

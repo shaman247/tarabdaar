@@ -15,16 +15,28 @@ struct Scale: Codable, Equatable {
 
     var tuning: TuningSystem = .equalTemperament
     var baseNote: Int = 60              // MIDI note for the JI root (C4)
-    var enabledDegrees: Set<Int> = Set(0...11)  // pitch classes 0-11, all on by default
+    var enabledDegrees: Set<Int> = Set(0...11)  // pitch classes 0-11 (when !specificNoteMode)
     var startNote: Int = 55             // lowest MIDI note on keyboard (G3)
     var endNote: Int = 79               // highest MIDI note on keyboard (G5)
+
+    /// When true, `enabledSpecificNotes` (specific MIDI notes) drives
+    /// `isEnabled` instead of the pitch-class-based `enabledDegrees`. Used
+    /// for the sympathetic-string scale where each "string" is a single
+    /// MIDI note, not a pitch class repeated across octaves.
+    var specificNoteMode: Bool = false
+    /// Specific MIDI notes that are enabled, used only when `specificNoteMode`.
+    var enabledSpecificNotes: Set<Int> = []
 
     /// Total number of semitones on the keyboard (inclusive)
     var noteCount: Int { max(1, endNote - startNote + 1) }
 
-    /// Ensure the JI root pitch class is always enabled
+    /// Ensure the JI root is always enabled. In specific-note mode, the
+    /// root note itself is pinned on; in pitch-class mode, the whole class.
     mutating func enforceRootEnabled() {
-        if tuning == .justIntonation {
+        guard tuning == .justIntonation else { return }
+        if specificNoteMode {
+            enabledSpecificNotes.insert(baseNote)
+        } else {
             let rootPC = ((baseNote % 12) + 12) % 12
             enabledDegrees.insert(rootPC)
         }
@@ -109,6 +121,9 @@ struct Scale: Codable, Equatable {
 
     /// Whether a MIDI note is enabled in the current scale.
     func isEnabled(_ midiNote: Int) -> Bool {
+        if specificNoteMode {
+            return enabledSpecificNotes.contains(midiNote)
+        }
         let pc = ((midiNote % 12) + 12) % 12
         return enabledDegrees.contains(pc)
     }
@@ -160,18 +175,44 @@ struct Scale: Codable, Equatable {
 
     // MARK: - Persistence
 
-    private static let storageKey = "armpad_scale"
+    private static let playingStorageKey = "starpad_scale"
+    private static let sympatheticStorageKey = "starpad_sympathetic_scale"
 
     func save() {
+        save(key: Self.playingStorageKey)
+    }
+
+    func saveSympathetic() {
+        save(key: Self.sympatheticStorageKey)
+    }
+
+    private func save(key: String) {
         guard let data = try? JSONEncoder().encode(self) else { return }
-        UserDefaults.standard.set(data, forKey: Self.storageKey)
+        UserDefaults.standard.set(data, forKey: key)
     }
 
     static func load() -> Scale {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
+        guard let data = UserDefaults.standard.data(forKey: playingStorageKey),
               let scale = try? JSONDecoder().decode(Scale.self, from: data)
         else { return Scale() }
         return scale
+    }
+
+    /// Load the sympathetic-string scale. On first run (no saved data) this
+    /// seeds from the playing scale but switches to specific-note mode so
+    /// the user gets per-MIDI-note control from the start.
+    static func loadSympathetic() -> Scale {
+        if let data = UserDefaults.standard.data(forKey: sympatheticStorageKey),
+           let scale = try? JSONDecoder().decode(Scale.self, from: data) {
+            return scale
+        }
+        var s = load()
+        // Capture the pitch-class-derived notes BEFORE flipping the mode,
+        // otherwise enabledNotesInRange() would use the empty specific set.
+        let inherited = Set(s.enabledNotesInRange())
+        s.specificNoteMode = true
+        s.enabledSpecificNotes = inherited
+        return s
     }
 
     /// Reset to defaults

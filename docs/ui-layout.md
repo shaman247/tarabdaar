@@ -2,9 +2,10 @@
 
 ## Screen Split
 
-The screen is divided 50/50 vertically:
-- **Top half**: Information displays (dimension values, pitch graph), with a debug overlay and sliders
-- **Bottom half**: Interactive piano keyboard with touch overlay
+The screen is divided into three horizontal regions:
+- **Top (~42%)**: Information displays (dimension values, pitch graph), with a debug overlay and sliders
+- **Middle strip (~13%)**: Full-width voice-stem plot — shows the current base-voice pitch and every sympathetic voice's pitch + amplitude as vertical stems on a log-frequency axis
+- **Bottom (~45%)**: Interactive piano keyboard with touch overlay
 
 ## Top Half
 
@@ -18,11 +19,24 @@ The screen is divided 50/50 vertically:
 - Y axis: MIDI note range (startNote to startNote + noteCount)
 - X axis: time (~2 seconds, scrolling)
 - Horizontal grid lines at each C note with labels
+- **Spectrogram (background)**: scrolling FFT magnitude heatmap of the synth output, aligned to the same MIDI-semitone y-axis. Purple → magenta → orange → yellow with intensity-scaled alpha so pitch lines remain readable on top.
 - **Cyan line**: tap glide pitch (non-dragging samples)
 - **Green line**: drag glide pitch (dragging samples)
 - **Yellow line**: snap pitch (snapping samples)
 - **White dots**: currently held touch target notes
 - Current note names shown in the header
+
+## Middle Strip: Voice-Stem Plot (full width)
+
+A full-width plot sitting between the top half and the keyboard, ~13% of the screen height. It shows the current pitch and amplitude of every audible voice — both the (single) base voice and every always-on sympathetic voice — as vertical stems on a log-frequency axis.
+
+- **X axis**: log-frequency, ~50 Hz to 10 kHz (8+ octaves)
+- **Y axis**: voice amplitude (0 at baseline, 1.0 amplitude = full stem height)
+- **Cyan stem**: the base voice, positioned at its current (possibly gliding) pitch; height = its current envelope amplitude
+- **Pink stems**: each sympathetic voice, positioned at its fixed pitch; height = its current amplitude (driven by the excitation formula — see [MIDI & Audio](midi-and-audio.md#sympathetic-excitation))
+- **Faint vertical lines**: octave boundaries
+
+Drag the base voice across the keyboard and watch which sympathetic stems rise/fall. Stems at simple-ratio intervals from the base (unison, fifth, fourth, octave) grow tall; unrelated stems stay short.
 
 ### Channel Readout (bottom overlay)
 

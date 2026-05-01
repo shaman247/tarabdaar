@@ -89,7 +89,7 @@ struct CalibrationData: Codable, Equatable {
 
     // MARK: - Persistence
 
-    private static let storageKey = "armpad_calibration_v2"
+    private static let storageKey = "starpad_calibration_v2"
 
     func save() {
         guard let data = try? JSONEncoder().encode(self) else { return }

@@ -2,11 +2,29 @@
 
 ## Overview
 
-Armpad supports custom scales (subsets of the 12-tone chromatic scale) and two tuning systems: 12-tone equal temperament (12-TET) and just intonation (JI). The keyboard always displays the standard piano layout, but disabled notes are grayed out and cannot be played.
+Starpad supports custom scales (subsets of the 12-tone chromatic scale) and two tuning systems: 12-tone equal temperament (12-TET) and just intonation (JI). The keyboard always displays the standard piano layout, but disabled notes are grayed out and cannot be played.
+
+Starpad maintains **two independent scales**:
+
+- **Playing scale** — what pitches appear on the keyboard and their tuning.
+- **Sympathetic-string scale** — what pitches have always-on sympathetic voices. Each enabled MIDI note in this scale gets its own pure-sine voice whose amplitude is modulated by how "related" its pitch is to the base voice currently being played (see [MIDI & Audio](midi-and-audio.md#sympathetic-excitation)).
+
+They can diverge freely: you can play in one key while the sympathetic strings ring in another, span different ranges, or use different tuning systems. On first run the sympathetic scale is initialised from the playing scale; after that the two persist separately.
+
+The two scales also differ in how "enabled" is interpreted:
+
+- **Playing scale**: octave-invariant. Enabling C turns on every C across the keyboard.
+- **Sympathetic scale**: per-MIDI-note. Enabling C4 adds exactly one "string" at 261.63 Hz. Enabling C5 would add a separate string at 523.25 Hz.
+
+This matters because each enabled sympathetic MIDI note becomes one continuously-running sine voice at that specific frequency, so two "same-pitch-class-different-octave" notes produce two independent voices rather than one voice echoed across octaves.
+
+Internally this is a `specificNoteMode` flag on `Scale`. The Strings tab in the editor activates it; the Playing tab leaves it off.
 
 ## Scale Editor
 
-Tap the **SCALE** button in the status bar to enter scale editing mode. The keyboard area transforms into an interactive editor:
+Tap the **SCALE** button in the status bar to enter scale editing mode. The keyboard area transforms into an interactive editor.
+
+The top-left toolbar has a **Playing / Strings** tab pair (pink when selected). It picks which scale every other control in the editor acts on. Switching tabs does not touch the other scale.
 
 ### Controls
 - **Tap a key**: Toggle that pitch class on/off (yellow = enabled, dim = disabled). At least one note must remain enabled. In JI mode, the root note cannot be disabled.
@@ -95,4 +113,4 @@ Key methods:
 
 ### Persistence
 
-Scale settings are encoded as JSON and stored in UserDefaults under `armpad_scale`. They load automatically when NoteManager initializes.
+Scale settings are encoded as JSON and stored in UserDefaults under `starpad_scale`. They load automatically when NoteManager initializes.

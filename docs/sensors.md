@@ -33,7 +33,7 @@ struct AccelSample {
 
 ## Velocity Detection
 
-iPads have no pressure-sensitive touch. Armpad estimates strike velocity from the accelerometer:
+iPads have no pressure-sensitive touch. Starpad estimates strike velocity from the accelerometer:
 
 1. `touchBegan` records the touch timestamp and starts a 20ms timer
 2. After 20ms, `fireNote` calls `motionManager.peakAccelSince(touchTimestamp)`
@@ -81,7 +81,7 @@ Result: 3 values, each -1 to +1 where -1 = negative endpoint, 0 = rest, +1 = pos
 
 ### Persistence
 
-Calibration data is `Codable` and saved to `UserDefaults` under key `armpad_calibration_v2`. It loads automatically on `MotionManager.init()`.
+Calibration data is `Codable` and saved to `UserDefaults` under key `starpad_calibration_v2`. It loads automatically on `MotionManager.init()`.
 
 ## Dimension System (Parameter Mapping)
 
@@ -138,7 +138,7 @@ When set to "None", the parameter uses 0.5 (midpoint of its range).
 
 ### ParameterMapping Model
 
-Each parameter's mapping is a `ParameterMapping` struct containing an array of `DimensionBinding` objects (many:many support). Each `DimensionBinding` holds a `Dimension` and 2–4 `ControlPoint` values defining a Catmull-Rom spline curve, with output clamped to the endpoint min/max. The `DimensionMapping` struct holds all mappings in a dictionary keyed by parameter `storageKey`, persisted to UserDefaults under `"armpad_dimensionMapping_v5"`.
+Each parameter's mapping is a `ParameterMapping` struct containing an array of `DimensionBinding` objects (many:many support). Each `DimensionBinding` holds a `Dimension` and 2–4 `ControlPoint` values defining a Catmull-Rom spline curve, with output clamped to the endpoint min/max. The `DimensionMapping` struct holds all mappings in a dictionary keyed by parameter `storageKey`, persisted to UserDefaults under `"starpad_dimensionMapping_v5"`.
 
 `TiltMapping.swift` defines the `Dimension` enum, `MappableParameter` enum (Int-backed for fast array indexing), `ControlPoint`, `DimensionBinding`, `ParameterMapping`, and `DimensionMapping` structs. NoteManager caches all binding arrays (`cachedBindings`) rebuilt only when the mapping changes, and reads values via `cachedParamValue(for: .amplitude, voiceIndex: i)` which resolves multiple bindings with priority (per-note > sliders when touched > tilts, highest deviation wins among same type).
 

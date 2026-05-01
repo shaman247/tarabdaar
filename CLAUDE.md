@@ -1,14 +1,15 @@
-# Armpad - Claude Development Guide
+# Starpad - Claude Development Guide
 
 ## Documentation
 
 The `docs/` directory contains comprehensive documentation. **Read the relevant pages before making changes.**
 
-- [Overview](docs/overview.md) - What Armpad is, design philosophy
+- [Overview](docs/overview.md) - What Starpad is, design philosophy
 - [Playing Guide](docs/playing-guide.md) - How to play the instrument
 - [Architecture](docs/architecture.md) - System design, module responsibilities, data flow
 - [Glide System](docs/glide-system.md) - Pitch glide mechanics (waypoint queue, drag mode, curves)
 - [MIDI & Audio](docs/midi-and-audio.md) - MPE output, synthesizer, pitch bend math
+- [Sound Design](docs/sound-design.md) - Sarangi-inspired synth model, current ingredients, presets, and roadmap
 - [Sensors](docs/sensors.md) - Accelerometer velocity, gyroscope tilt, calibration
 - [Scales & Tuning](docs/scales-and-tuning.md) - Scale editor, just intonation, custom scales
 - [Config Reference](docs/config-reference.md) - Every tunable parameter with guidance
@@ -30,22 +31,22 @@ The `docs/` directory contains comprehensive documentation. **Read the relevant 
 ## Building
 
 ```bash
-cd Armpad
-xcodebuild -project Armpad.xcodeproj -scheme Armpad \
+cd Starpad
+xcodebuild -project Starpad.xcodeproj -scheme Starpad \
   -destination 'platform=iOS Simulator,name=iPad Air 13-inch (M3)' \
   -quiet build 2>&1 | grep -E "error:|warning:"
 ```
 
 The simulator destination name may vary. Check available destinations with:
 ```bash
-xcodebuild -project Armpad.xcodeproj -scheme Armpad -showdestinations 2>&1 | grep "iPad"
+xcodebuild -project Starpad.xcodeproj -scheme Starpad -showdestinations 2>&1 | grep "iPad"
 ```
 
 Physical device required for accelerometer, gyroscope, and MIDI output.
 
 ## Adding Files to the Xcode Project
 
-When creating new `.swift` files, you must manually add them to `Armpad.xcodeproj/project.pbxproj`:
+When creating new `.swift` files, you must manually add them to `Starpad.xcodeproj/project.pbxproj`:
 1. Add a `PBXBuildFile` entry (A1xxxxxx)
 2. Add a `PBXFileReference` entry (A2xxxxxx)
 3. Add to the `PBXGroup` children list
@@ -61,5 +62,6 @@ When you modify code, update the corresponding docs/ page. Specifically:
 - Changed glide behavior? Update `docs/glide-system.md`.
 - Changed touch handling or UI? Update `docs/ui-layout.md` or `docs/playing-guide.md`.
 - Changed MIDI/audio output? Update `docs/midi-and-audio.md`.
+- Changed synth voicing, sympathetic model, reverb, or added a tone-shaping param? Update `docs/sound-design.md` (both the ingredient tables and the "Next steps" roadmap).
 - Changed sensor usage? Update `docs/sensors.md`.
 - Changed module structure? Update `docs/architecture.md`.

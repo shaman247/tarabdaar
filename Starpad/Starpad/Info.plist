@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSMotionUsageDescription</key>
-	<string>Armpad uses device motion to control sound parameters through tilting.</string>
+	<string>Starpad uses device motion to control sound parameters through tilting.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

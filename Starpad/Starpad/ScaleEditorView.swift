@@ -1,11 +1,32 @@
 import SwiftUI
 
+/// Which scale the user is currently editing: the playing (keyboard) scale
+/// or the sympathetic-string scale that drives the resonance envelope.
+enum ScaleEditTarget: String, CaseIterable {
+    case playing = "Playing"
+    case strings = "Strings"
+}
+
 /// In-place scale editor that replaces the keyboard's play behavior.
 /// Tap keys to toggle notes on/off. Drag to pan the range. Pinch to zoom.
 /// Long press (JI mode) to set the root note.
 struct ScaleEditorView: View {
-    @Binding var scale: Scale
+    @Binding var playingScale: Scale
+    @Binding var sympatheticScale: Scale
     @Binding var isActive: Bool
+
+    @State private var target: ScaleEditTarget = .playing
+
+    /// The scale the user is currently editing. Writing here routes to the
+    /// underlying binding for `target`. Existing code reads/writes via
+    /// `scale.x = y` just like before the split into two scales.
+    private var scale: Scale {
+        get { target == .playing ? playingScale : sympatheticScale }
+        nonmutating set {
+            if target == .playing { playingScale = newValue }
+            else { sympatheticScale = newValue }
+        }
+    }
 
     // Drag state for panning
     @State private var panStartNote: Int = 0
@@ -33,6 +54,21 @@ struct ScaleEditorView: View {
                 .fontWeight(.bold)
                 .foregroundColor(.yellow)
 
+            // Target tab: Playing vs Strings
+            HStack(spacing: 2) {
+                ForEach(ScaleEditTarget.allCases, id: \.self) { t in
+                    Button(action: { target = t }) {
+                        Text(t.rawValue)
+                            .font(.system(size: 11, weight: .bold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(target == t ? Color.pink.opacity(0.7) : Color.gray.opacity(0.2))
+                            .foregroundColor(.white)
+                            .cornerRadius(4)
+                    }
+                }
+            }
+
             Spacer()
 
             // Tuning picker
@@ -57,7 +93,9 @@ struct ScaleEditorView: View {
                     .foregroundColor(.green)
             }
 
-            Text("\(scale.enabledDegrees.count)/12")
+            Text(scale.specificNoteMode
+                 ? "\(scale.enabledSpecificNotes.count) notes"
+                 : "\(scale.enabledDegrees.count)/12")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.gray)
 
@@ -150,7 +188,7 @@ struct ScaleEditorView: View {
                     ForEach(0..<whiteCount, id: \.self) { i in
                         let midi = whites[i]
                         let isOn = scale.isEnabled(midi)
-                        let isRoot = scale.tuning == .justIntonation && midi % 12 == scale.baseNote % 12
+                        let isRoot = isRootKey(midi: midi)
 
                         Rectangle()
                             .fill(editKeyColor(isBlack: false, isOn: isOn, isRoot: isRoot))
@@ -180,7 +218,7 @@ struct ScaleEditorView: View {
                         let midi = scale.startNote + i
                         if Scale.isBlackKey(midi) {
                             let isOn = scale.isEnabled(midi)
-                            let isRoot = scale.tuning == .justIntonation && midi % 12 == scale.baseNote % 12
+                            let isRoot = isRootKey(midi: midi)
                             let cx = blackKeyCenter(midi: midi, whiteW: whiteW)
 
                             Rectangle()
@@ -243,14 +281,43 @@ struct ScaleEditorView: View {
         return CGFloat(whiteIndex) * whiteW
     }
 
-    private func toggleNote(_ midiNote: Int) {
-        let pc = ((midiNote % 12) + 12) % 12
+    /// A key qualifies as the JI root for highlighting. In specific-note mode
+    /// (sympathetic scale) only the exact root MIDI note is flagged — other
+    /// octaves of the root's pitch class are just regular sympathetic-string
+    /// slots and need to show their enabled/disabled state. In pitch-class
+    /// mode (playing scale) we still highlight all octaves since the user is
+    /// editing pitch classes, not specific notes.
+    private func isRootKey(midi: Int) -> Bool {
+        guard scale.tuning == .justIntonation else { return false }
+        if scale.specificNoteMode {
+            return midi == scale.baseNote
+        } else {
+            return midi % 12 == scale.baseNote % 12
+        }
+    }
 
-        // Don't allow disabling the JI root
-        if scale.tuning == .justIntonation && pc == ((scale.baseNote % 12) + 12) % 12 {
+    private func toggleNote(_ midiNote: Int) {
+        // Specific-note mode (typical for sympathetic-string scale): toggle the
+        // exact MIDI note, not its pitch class.
+        if scale.specificNoteMode {
+            if scale.tuning == .justIntonation && midiNote == scale.baseNote { return }
+            var s = scale
+            if s.enabledSpecificNotes.contains(midiNote) {
+                if s.enabledSpecificNotes.count > 1 {
+                    s.enabledSpecificNotes.remove(midiNote)
+                }
+            } else {
+                s.enabledSpecificNotes.insert(midiNote)
+            }
+            scale = s
             return
         }
 
+        // Pitch-class mode: toggle the entire pitch class (every octave of it).
+        let pc = ((midiNote % 12) + 12) % 12
+        if scale.tuning == .justIntonation && pc == ((scale.baseNote % 12) + 12) % 12 {
+            return
+        }
         if scale.enabledDegrees.contains(pc) {
             if scale.enabledDegrees.count > 1 {
                 scale.enabledDegrees.remove(pc)

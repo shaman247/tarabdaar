@@ -43,7 +43,7 @@ class MIDIEngine: ObservableObject {
             midiOutputPort = 0
         }
 
-        var status = MIDIClientCreateWithBlock("Armpad" as CFString, &midiClient) { [weak self] _ in
+        var status = MIDIClientCreateWithBlock("Starpad" as CFString, &midiClient) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.refreshEndpointCounts()
             }
@@ -57,7 +57,7 @@ class MIDIEngine: ObservableObject {
         // Create virtual source (for on-device apps)
         status = MIDISourceCreateWithProtocol(
             midiClient,
-            "Armpad Output" as CFString,
+            "Starpad Output" as CFString,
             ._1_0,
             &midiSource
         )
@@ -68,7 +68,7 @@ class MIDIEngine: ObservableObject {
         }
 
         // Create output port (for sending to external destinations like Mac over USB)
-        status = MIDIOutputPortCreate(midiClient, "Armpad Port" as CFString, &midiOutputPort)
+        status = MIDIOutputPortCreate(midiClient, "Starpad Port" as CFString, &midiOutputPort)
 
         guard status == noErr else {
             statusMessage = "Port error: \(Self.midiErrorString(status))"

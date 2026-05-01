@@ -87,7 +87,7 @@ The tilt values are based on your calibration, so "neutral" is wherever you cali
 4. Set your instrument's pitch bend range to **±48 semitones**
 5. Enable **MPE mode** on the track
 
-Armpad sends:
+Starpad sends:
 - Note on/off with accelerometer-derived velocity
 - Pitch bend (continuous, includes glides + vibrato)
 - Channel pressure / aftertouch (dimension-mapped)

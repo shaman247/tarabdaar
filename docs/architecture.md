@@ -3,7 +3,7 @@
 ## Module Overview
 
 ```
-ArmpadApp.swift
+StarpadApp.swift
   |
   +--> ContentView.swift (main UI, wires everything together)
          |
@@ -11,7 +11,7 @@ ArmpadApp.swift
          |      |
          |      +--> Scale.swift         (scale model, tuning, frequency calc)
          |      +--> TiltMapping.swift   (dimension → parameter mapping)
-         |      +--> AudioEngine.swift   (built-in sine synth)
+         |      +--> AudioEngine.swift   (modal-synthesis voice bank: played + sympathetic ModalBanks)
          |      +--> MIDIEngine.swift     (CoreMIDI MPE output)
          |      +--> MotionManager.swift  (accelerometer + gyro)
          |
@@ -41,7 +41,7 @@ A `Timer` fires 60 times per second (`glideUpdate`). Each tick:
 7. **UI throttle**: Send `objectWillChange` every 4th tick (~15Hz)
 
 ### Stage 3: Output
-- **AudioEngine**: `setFrequency(channel:frequency:)` and `setAmplitude(channel:amplitude:)` are called from the glide loop. The audio thread's render callback reads these values with per-sample exponential smoothing.
+- **AudioEngine**: `setFrequency(channel:frequency:)` and `updateVoiceParams(...)` are called from the glide loop. The audio thread's render callback runs a two-pass modal-synthesis render — played banks into a scratch buffer, then sympathetic banks driven by that buffer × kernel-derived coupling gain. Silent sympathetic banks skip their inner mode loop. See [Sound Design](sound-design.md) and [MIDI & Audio](midi-and-audio.md) for details.
 - **MIDIEngine**: `sendPitchBend`, `sendChannelPressure`, `sendNoteOn/Off` are called from the glide loop on the main thread.
 
 ## Threading Model
@@ -50,7 +50,7 @@ A `Timer` fires 60 times per second (`glideUpdate`). Each tick:
 |--------|-----------|----------------|
 | Main | NoteManager (Timer) | 60Hz glide loop, touch handling, MIDI sends |
 | Main | SwiftUI | UI rendering (~15Hz, throttled) |
-| Audio (real-time) | AudioEngine (AVAudioSourceNode callback) | Sine wave generation, envelope, frequency smoothing |
+| Audio (real-time) | AudioEngine (AVAudioSourceNode callback) | Modal-bank synthesis (coupled-form resonators), excitation generation, two-pass render, silent-bank skip |
 
 The audio callback reads `Voice.frequency`, `Voice.targetFrequency`, and `Voice.amplitude` which are written by the main thread. Thread safety is via `NSLock` (locked for the duration of each voice iteration in the render callback, and around each `noteOn`/`noteOff`/`setFrequency`/`setAmplitude` call).
 
@@ -67,7 +67,7 @@ midi.start()
 
 ## Polyphonic Mode
 
-Armpad supports a toggleable polyphonic mode (up to `Config.maxPolyVoices` simultaneous voices). The voice pool is an array of `PitchChannel` structs. In monophonic mode, only index 0 is used.
+Starpad supports a toggleable polyphonic mode (up to `Config.maxPolyVoices` simultaneous voices). The voice pool is an array of `PitchChannel` structs. In monophonic mode, only index 0 is used.
 
 ### Voice Model
 
