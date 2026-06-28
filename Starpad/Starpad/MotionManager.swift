@@ -1,7 +1,8 @@
 import CoreMotion
+import StarpadCore
 import SwiftUI
 
-class MotionManager: ObservableObject {
+class MotionManager: ObservableObject, MotionSource {
     private let motionManager = CMMotionManager()
 
     @Published var pitch: Double = 0.0  // tilt forward/back (radians)
@@ -97,11 +98,6 @@ class MotionManager: ObservableObject {
                 self.accelHistory.removeFirst(self.accelHistory.count - self.historyLength)
             }
         }
-    }
-
-    struct PeakResult {
-        let magnitude: Double
-        let timestamp: TimeInterval
     }
 
     /// Returns the peak accelerometer magnitude since a given timestamp,

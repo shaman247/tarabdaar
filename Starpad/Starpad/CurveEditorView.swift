@@ -1,9 +1,10 @@
+import StarpadCore
 import SwiftUI
 
 /// Edits the control points of a DimensionBinding's transfer curve.
 struct CurveEditorView: View {
     let parameter: MappableParameter
-    let dimension: Dimension
+    let dimension: InputDimension
     @Binding var binding: DimensionBinding
 
     private let graphPad: CGFloat = 40
@@ -64,7 +65,7 @@ struct CurveEditorView: View {
                         .offset(x: graphPad, y: graphPad)
 
                     // Control points
-                    ForEach(binding.controlPoints.indices, id: \.self) { i in
+                    ForEach(0..<binding.controlPoints.count, id: \.self) { i in
                         let pt = binding.controlPoints[i]
                         let screenX = graphPad + CGFloat(pt.x) * gw
                         let screenY = graphPad + yToScreen(pt.y, gh: gh, yr: yr)
@@ -176,7 +177,7 @@ struct CurveEditorView: View {
 
             // Point values immediately below graph
             VStack(spacing: 3) {
-                ForEach(binding.controlPoints.indices, id: \.self) { i in
+                ForEach(0..<binding.controlPoints.count, id: \.self) { i in
                     pointRow(index: i)
                 }
             }

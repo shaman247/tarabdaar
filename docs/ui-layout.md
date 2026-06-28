@@ -1,138 +1,158 @@
 # UI Layout
 
-## Screen Split
+Two devices, two layouts. The iPad is the controller (touchscreen Pitch Pad + tilt). The Mac is the sound module (hosted-AU host + the sarangi-model editor + the tanpura/sitar tabs).
 
-The screen is divided into three horizontal regions:
-- **Top (~42%)**: Information displays (dimension values, pitch graph), with a debug overlay and sliders
-- **Middle strip (~13%)**: Full-width voice-stem plot — shows the current base-voice pitch and every sympathetic voice's pitch + amplitude as vertical stems on a log-frequency axis
-- **Bottom (~45%)**: Interactive piano keyboard with touch overlay
+## iPad
 
-## Top Half
+The iPad's playing surface is the **Pitch Pad** (full screen), replacing
+the old piano keyboard. It is the same 2D Voronoi-cell JI surface as the
+Mac Pitch Pad tab — see [Pitch Pad](pitch-pad.md) for the cell geometry,
+soft-margin glide, octave-repeat ghosts, and OKLCH colors, all of which
+live in shared `StarpadCore` code (`PitchPadGeometry.swift`,
+`PitchPadEngine.swift`).
 
-### Left Side: Dimension & Controls Panel
-
-- **Dimension rows**: Shows current values for each active dimension (Tilt 1/2/3 always shown; Pressure, Key Y, Slider 1/2 shown only when mapped to a parameter). Each row has a label, numeric value, visual bar (-1 to +1), and the names of parameters mapped to it.
-- **Control buttons**: MONO/POLY toggle, SCALE editor toggle, PANIC button, MAP button (opens matrix mapping panel), Recalibrate link.
-
-### Right Side: Pitch Graph (540pt wide)
-
-- Y axis: MIDI note range (startNote to startNote + noteCount)
-- X axis: time (~2 seconds, scrolling)
-- Horizontal grid lines at each C note with labels
-- **Spectrogram (background)**: scrolling FFT magnitude heatmap of the synth output, aligned to the same MIDI-semitone y-axis. Purple → magenta → orange → yellow with intensity-scaled alpha so pitch lines remain readable on top.
-- **Cyan line**: tap glide pitch (non-dragging samples)
-- **Green line**: drag glide pitch (dragging samples)
-- **Yellow line**: snap pitch (snapping samples)
-- **White dots**: currently held touch target notes
-- Current note names shown in the header
-
-## Middle Strip: Voice-Stem Plot (full width)
-
-A full-width plot sitting between the top half and the keyboard, ~13% of the screen height. It shows the current pitch and amplitude of every audible voice — both the (single) base voice and every always-on sympathetic voice — as vertical stems on a log-frequency axis.
-
-- **X axis**: log-frequency, ~50 Hz to 10 kHz (8+ octaves)
-- **Y axis**: voice amplitude (0 at baseline, 1.0 amplitude = full stem height)
-- **Cyan stem**: the base voice, positioned at its current (possibly gliding) pitch; height = its current envelope amplitude
-- **Pink stems**: each sympathetic voice, positioned at its fixed pitch; height = its current amplitude (driven by the excitation formula — see [MIDI & Audio](midi-and-audio.md#sympathetic-excitation))
-- **Faint vertical lines**: octave boundaries
-
-Drag the base voice across the keyboard and watch which sympathetic stems rise/fall. Stems at simple-ratio intervals from the base (unison, fifth, fourth, octave) grow tall; unrelated stems stay short.
-
-### Channel Readout (bottom overlay)
-
-Floats as an overlay on the bottom of the top half (does not affect layout of elements beneath).
-
-For each active channel:
-- Channel number, target note name, current frequency (Hz), velocity
-- Glide progress percentage (during active glide)
-- Touch count
-
-**Glide debug line**:
-- `t`: current calibrated tilt values (3 axes, -1 to +1)
-- `ms/st`: current glide time per semitone
-- `maxWait`: current mid-glide compression threshold
-- `dur`: active glide duration in ms
-- `q`: waypoint queue depth
-
-**Status and sliders** (bottom row):
-- MIDI status message (green if active, red if error)
-- Audio status
-- Two horizontal sliders (S1, S2) stacked vertically on the right side
-
-### Sliders
-- Each slider is 150pt wide × 66pt tall (1.5× finger-width)
-- **0** at right edge, **1** at left edge (inward toward the center)
-- Cyan fill shows current value; brighter when touched
-- White marker shows the configured default value
-- When released, value snaps back to its default (`Config.slider1Default`, `Config.slider2Default`)
-- Designed for the non-dominant hand's index and middle fingers
-
-### Parameter Mapping Panel (MAP button or swipe-right)
-
-A full-screen matrix panel (rows = parameters, columns = dimensions) with a curve editor on the right third. Opened via the MAP button or swiping right on the top half. Dismissed by swiping left or tapping MAP again.
-
-**Matrix (left 2/3):**
-- Each cell represents a possible dimension→parameter binding. Tap to connect/select, long-press to disconnect.
-- Connected cells show a mini Catmull-Rom curve preview.
-- Cells can be dragged to move bindings across rows and columns.
-- Multiple dimensions can be bound to the same parameter (many:many).
-
-**Curve editor (right 1/3):**
-- Shows the selected binding's transfer curve with 2–4 draggable control points.
-- X axis = dimension input (0..1, or -1..+1 for tilts). Y axis = parameter output (full default range).
-- Endpoint Y values shown as dashed lines if they differ from the parameter bounds.
-- Tap graph to add points (up to 4). Long-press or drag off graph to remove interior points.
-- Point coordinates shown below the graph as draggable text fields.
-- Catmull-Rom spline interpolation; output clamped to endpoint min/max.
-
-**Performance:** The 60Hz glide loop is paused while the panel is open (`NoteManager.paused`).
-
-## Bottom Half: Keyboard
+The iPad can also show the **Chord Pad** (hex grid) instead — it follows the
+Mac's **active tab** (switch the Mac to the Chord Pad or Pitch Pad tab and
+the iPad follows), pushed over the synced state (`ContentView` swaps on
+`pad.layout`). See [Chord Pad](chord-pad.md). The toolbar and tilt/MAP
+behavior below are the same on both surfaces.
 
 ### Layout
 
-All keys have a black background. White keys have shaped outlines with cutouts for adjacent black keys (matching real piano key shapes). Black keys overlay the upper 60% at 65% of white key width.
+- **Slim toolbar (top)**: PANIC, MAP (open the dimension-mapping matrix),
+  the three calibrated **tilt bars** (T1/T2/T3, center-zero `-1…+1` meters
+  fed by `NoteManager.currentTilt`), a live `Hz (note ±cents)` readout
+  tinted in the sounding pitch's hue, a read-only Tonic readout, and
+  Recalibrate. (No SCALE button and no editable tonic — scale, tonic, and
+  margin are all set on the Mac and synced over.)
+- **Pitch Pad (rest of screen)**: the playing/rendering surface. The iPad
+  is **always in perform mode** — no control discs and no octave boundary
+  lines, just the cell outlines, the black field, and the live sounding
+  fills (the Mac tab keeps a PERFORM toggle for its editing chrome).
+  Touching a cell sounds its ratio; dragging glides through cells
+  (soft-margin blend); multiple fingers play polyphonically, each on its
+  own MPE channel. Inner-cell borders are tinted by pitch; the sounding
+  cell(s) fill with their hue, cross-faded by the same weights that drive
+  the pitch.
 
-### Dimensions
+The pad is **perform-only** on iPad — there's no scale editor. Scales are
+designed on the Mac Pitch Pad tab and synced to the iPad over USB-MIDI
+SysEx (see [Scale sync](midi-and-audio.md#scale-sync-mac--ipad)).
 
-For a 25-note range with ~15 white keys:
-- White key width: `screenWidth / whiteKeyCount`
-- Black key width: `whiteKeyWidth * 0.65`
-- Black key height: `keyboardHeight * 0.6`
+### Touch → pitch → MIDI
 
-### Hit Testing
+`TouchOverlayView` (UIKit multitouch) reports per-finger `(xFraction,
+yFraction)` over the pad's logical area. `PitchPadSurfaceIOS` maps each to
+a pixel point and calls the shared `pitchAt(...)` soft-Voronoi solver to
+get a ratio + per-cell fill weights, then drives `PitchPadEngine`:
+`noteOn` on touch-down (pins the nearest semitone to the tonic and bends
+to the ratio), `glide` on move (bend only), `noteOff` on lift. The pitch
+tracks the finger directly. See
+[Pitch Pad — MIDI signal path](pitch-pad.md#midi-signal-path).
 
-Touch y position determines which keys are available:
-- `y < 0.6`: Both black and white keys (black key zone). Black keys are tested first by checking if the x position falls within the black key's bounds.
-- `y >= 0.6`: White keys only (bottom portion)
+### Tilt expression
 
-### Color Coding
+On top of position→pitch, the iPad keeps its signature tilt expression.
+`PitchPadEngine` runs a 60 Hz loop (iPad init only) that reads the bound
+`DimensionMapping` values via the still-resident `NoteManager` (kept alive
+purely as the tilt sampler + mapping host — its keyboard/glide voice paths
+stay idle) and, per held touch, re-sends a pitch bend tracking the
+position ratio, plus channel pressure (aftertouch) and any mapped CCs.
+Map a tilt axis to aftertouch / a CC in the MAP matrix to engage it.
 
-| State | Fill | Outline |
-|-------|------|---------|
-| Inactive white key | Dark gray (0.12) | Black |
-| Inactive black key | Black | Black |
-| Active (any key) | Gradient: gray at top → highlight color at bottom (30% opacity), with blurred glow | Black |
+### Scale sync (Mac → iPad)
 
-Highlight colors: **cyan** for tap, **green** for drag, **yellow** for snap.
+The iPad has no scale editor. The Mac's Pitch Pad tab edits the scale and
+pushes it to the iPad over USB-MIDI SysEx (live, debounced, and on connect);
+a `ScaleSyncReceiver` on the iPad applies it. See
+[MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad).
 
-During drag, the highlighted key is the one physically under the finger (`displayNote` from `hitTest`), not the sounding pitch. This means dragging from C to D highlights only C or D — never C#.
+### Parameter Mapping Panel (MAP button)
 
-### Touch Dots
+A full-screen matrix panel (rows = parameters, columns = dimensions) with
+a curve editor on the right third. Opened via the MAP button, dismissed by
+its header. The matrix and curve editor are unchanged from before; only
+the way it's reached moved (the old top-half swipe is gone).
 
-Colored circles (44pt diameter) follow each active touch:
-- Cyan: tap mode
-- Green: drag mode
-- Yellow: snapping
-- Gray: touch not yet assigned to a channel
+**Matrix (left 2/3):**
+- Each cell is a possible dimension→parameter binding. Tap to connect /
+  select, long-press to disconnect. Connected cells show a mini curve.
+- Cells can be dragged to move bindings; many:many is allowed.
 
-### Note Labels
+**Curve editor (right 1/3):**
+- The selected binding's transfer curve with 2–4 draggable control points
+  (Catmull-Rom). X = dimension input, Y = parameter output.
 
-White keys have note name labels (e.g., "C4", "D4") at the bottom in monospaced gray text.
+**Performance:** opening MAP sets `NoteManager.paused`, which freezes tilt
+sampling while editing.
 
-## System UI
+## System UI (iPad)
 
 - Status bar: hidden
 - System overlays: hidden (`.persistentSystemOverlays(.hidden)`)
 - System gestures: deferred on all edges (`.defersSystemGestures(on: .all)`)
 - Orientation: locked to landscape right via AppDelegate + Info.plist
+
+## Mac
+
+A single window with a top bar and eleven tabs.
+
+### Top bar
+
+- **ConnectionPill** — shows USB-MIDI input status (`MIDI: N src` when sources are visible, `no MIDI in` otherwise). Click to pop a detailed status panel.
+- **PresetMenu** — dropdown of `SoundPreset` cases. Picking one runs `AppController.applyPreset(_:)`, which loads the hosted AU + its dry-SWAM params and FX in one go. Only **SWAM Violin** ships today; the menu is kept so future hosted-AU presets can drop in without re-plumbing. (The sarangi model itself is not part of the preset — it's edited and persisted independently in the Sarangi tab.)
+- **HostedAUPill** — shows MIDI events forwarded + the AU's output peak, with buttons to open the AU's own view (SWAM's configuration UI), reset CCs, and reload the AU instance.
+- **Tab picker** — segmented control: Live / Sarangi / Tarab / FX / Simulator / Pitch Pad / Chord Pad / String Pad / Tanpura / Sitar / Setup. ⌘1…⌘9 jump to the first nine (Sitar and Setup have no shortcut — ⌘ stops at 9).
+
+### Live tab
+
+MIDI input status (source count + status message), an audio render-time readout, and two live **time-series graphs** of the currently-played voice: **PITCH** (log-frequency, y-axis **fixed to the String Pad's lowest and highest playable pitches** — base strings plus their octave-repeat ghosts, via `stringPadRatioRange` — labelled with the nearest note name + Hz) and **VOLUME** (the commanded CC11 Expression, 0–100%). Traces are drawn as smooth Catmull-Rom curves (rounding the sample-to-sample steps). Both read `AudioEngine.performanceReadout()` — derived at the single MIDI choke point, so they reflect every source (the USB iPad, the Mac pads, the simulator). The graphs show a fixed **6-second** window and scroll **smoothly**: a 60 Hz timer appends timestamped samples to a ring buffer and a `TimelineView(.animation)` redraws every display frame, placing each sample at an x set by its age, so the trace slides left continuously instead of stepping at the sample rate. No keyboard rendering, because the Mac has no scale concept to map MIDI notes against.
+
+### Sarangi tab (⌘2)
+
+The sarangi model's **timbre** (`SarangiEditorView`, backed by `SarangiStore`) — a single column:
+- **Toolbar**: a **Load preset** menu (`pair1 — E♭ harmonic minor` / `pair2 — Bhairav`), **Reset params** (23 params → defaults, keeps tuning), and **Save…/Load…** (export/import a `.sarangi` JSON document).
+- **Model parameters**: the 23 `SarangiKit` params as sliders in collapsible groups — **Bank / Jawari / Body / Mix** (each from `ParamSpec`, labelled and ranged; the Reverb group is empty — `F_*` removed) — plus an **Output** (`gout`) slider in the header. See [Config Reference](config-reference.md#sarangi-model-mac).
+
+Reverb / filter / EQ for the sarangi are no longer here — they're the per-voice FX rack in the **FX tab** (⌘4) below. Param edits route through `SarangiStore`: a live-scalar push (gains/mixes) or a debounced structural rebuild. Open SWAM's own UI (via the HostedAUPill) to edit the bowed-violin timbre. The **sympathetic strings + tuning live in the Tarab tab** below.
+
+### Tarab tab (⌘3)
+
+The sarangi's **sympathetic strings** (`TarabView`). By default the bank **auto-tunes to the Pitch Pad scale** (the tonic + notes you play) — the physical sarangi behaviour. A header **"Follow the Pitch Pad scale"** switch + **"Re-sync"** button control this; a tonic readout shows the current pitch. Below, the strings are grouped into the four physical choirs, one collapsible section each:
+- **Chromatic** — 15 fixed JI-chromatic strings, always present.
+- **Scale-tuned** — the scale degrees (+ Sa/Pa doublings), following the current scale.
+- **Low octave** / **Upper octave** — octave repeats of the tonic / fifth / scale degrees.
+
+Each section has a count, an **Enable all / Disable all** toggle, an add (+) button, and per-string rows (editable **Note / Freq (Hz) / Gain / t60 / Bright / On** + delete). Editing a string, toggling a choir, or using the **Manual tuning** fallback (a **Raga** picker + **Tonic**/Set/Transpose/Regenerate) detaches auto-sync so your edits stick; the switch / Re-sync button re-engages it.
+
+### FX tab (⌘4)
+
+The sarangi's **per-voice FX rack** (`FXView`) — three sections, one per stage:
+
+- **Violin** — the bowed voice (dry + jawari). Also hosts **Drive (SWAM→model)** (moved here from the old Master-FX section). **On by default** (a touch of reverb + an open filter).
+- **Sympathetic** — the sympathetic bank. **Off by default** (dry).
+- **Global** — applied to the summed voices (mid/side, so off is an exact passthrough). **Off by default.**
+
+Each section has an **enable** toggle, a **reverb** (mix + width), a **filter** (cutoff + resonance), and a **3-band parametric EQ**. The model splits its output into the two voices, applies the per-voice stages, sums, then applies the Global stage. Enable + reverb mix/width are live; filter / EQ / reverb rt60 trigger a debounced rebuild. The defaults intentionally drop the old block-F Sarangi-Live reverb match. See [Sarangi — FX rack](sarangi.md#fx-rack-the-fx-tab-4).
+
+### Pitch Pad / Chord Pad / String Pad tabs
+
+Three Mac playing surfaces. The **Pitch Pad** (⌘6) is the scale design +
+playing surface shared with the iPad — see [Pitch Pad](pitch-pad.md). The
+**Chord Pad** (⌘7) is a hex grid for playing chords off the same scale
+(columns are diatonic chords, rows are chord tones) — see
+[Chord Pad](chord-pad.md). The **String Pad** (⌘8) is a box-plot / abacus
+where pitch shapes are dragged and resized along vertical gridlines, with the
+same fixed-inside / interpolated-between behavior generalized to arbitrary 2D
+polygons — see [String Pad](string-pad.md). All three are Mac-only-edited and
+read the scale/tonic from the Pitch Pad.
+
+The Pitch Pad scale is the configured *playing* scale, and the sarangi's
+sympathetic strings (the **Tarab tab**, ⌘3) **auto-tune to it by default** — the
+tarab resonates with the notes you play. You can detach the tarab (hand-edit or
+the raga fallback) for independent tuning. See [Scales and Tuning](scales-and-tuning.md) and
+[Sound Design — Sympathetic strings](sound-design.md#sympathetic-strings--the-editable-bank).
+
+### Setup tab
+
+Audio output device picker, MIDI status, system info.

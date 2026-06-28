@@ -11,17 +11,44 @@
 		A1000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000002 /* ContentView.swift */; };
 		A1000003 /* MotionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000003 /* MotionManager.swift */; };
 		A1000004 /* TouchOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000004 /* TouchOverlayView.swift */; };
-		A1000005 /* CalibrationData.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000005 /* CalibrationData.swift */; };
+		A1000020 /* PitchPadView_iOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000020 /* PitchPadView_iOS.swift */; };
 		A1000006 /* CalibrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000006 /* CalibrationView.swift */; };
-		A1000007 /* NoteManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000007 /* NoteManager.swift */; };
-		A1000008 /* MIDIEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000008 /* MIDIEngine.swift */; };
-		A1000009 /* AudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000009 /* AudioEngine.swift */; };
-		A100000A /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000A /* Config.swift */; };
-		A100000B /* Scale.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000B /* Scale.swift */; };
 		A100000C /* ScaleEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000C /* ScaleEditorView.swift */; };
-		A100000D /* TiltMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000D /* TiltMapping.swift */; };
 		A100000E /* CurveEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000E /* CurveEditorView.swift */; };
 		A1000010 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000010 /* Assets.xcassets */; };
+		B1000001 /* StarpadDSP in Frameworks */ = {isa = PBXBuildFile; productRef = B2000001 /* StarpadDSP */; };
+		E1000001 /* StarpadCore in Frameworks */ = {isa = PBXBuildFile; productRef = E2000001 /* StarpadCore */; };
+		E1000002 /* StarpadCore in Frameworks */ = {isa = PBXBuildFile; productRef = E2000002 /* StarpadCore */; };
+		C1000001 /* StarpadMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000001 /* StarpadMacApp.swift */; };
+		C1000004 /* AppController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000004 /* AppController.swift */; };
+		C1000005 /* MacMainWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000005 /* MacMainWindow.swift */; };
+		C1000006 /* SetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000006 /* SetupView.swift */; };
+		C1000007 /* LiveVisualizerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000007 /* LiveVisualizerView.swift */; };
+		C1000008 /* ConnectionStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000008 /* ConnectionStatusView.swift */; };
+		C100000B /* Panel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000B /* Panel.swift */; };
+		C100000D /* AudioSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000D /* AudioSettingsView.swift */; };
+		C100000E /* CoreAudioDevices.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000E /* CoreAudioDevices.swift */; };
+		C100000F /* MIDISettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000F /* MIDISettingsView.swift */; };
+		C1000010 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C2000010 /* Assets.xcassets */; };
+		C1000011 /* SoundPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000011 /* SoundPreset.swift */; };
+		C1000020 /* SwamDefaultState.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000023 /* SwamDefaultState.swift */; };
+		C1000012 /* SarangiEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000012 /* SarangiEditorView.swift */; };
+		C1000051 /* SarangiStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000051 /* SarangiStore.swift */; };
+		C1000052 /* SarangiKit in Frameworks */ = {isa = PBXBuildFile; productRef = C2000052 /* SarangiKit */; };
+		C1000014 /* MIDICCMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000014 /* MIDICCMapping.swift */; };
+		C1000015 /* MockMotionSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000015 /* MockMotionSource.swift */; };
+		C1000016 /* IPadSimulator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000016 /* IPadSimulator.swift */; };
+		C1000017 /* AuditionScore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000017 /* AuditionScore.swift */; };
+		C1000018 /* SimulatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000018 /* SimulatorView.swift */; };
+		C100001A /* PitchPadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200001A /* PitchPadView.swift */; };
+		C100001D /* ChordPadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200001D /* ChordPadView.swift */; };
+		C100001E /* TanpuraPadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200001E /* TanpuraPadView.swift */; };
+		C100001F /* SitarPadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000022 /* SitarPadView.swift */; };
+		C1000024 /* StringPadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000024 /* StringPadView.swift */; };
+		C1000025 /* TarabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000025 /* TarabView.swift */; };
+		C1000026 /* FXView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000026 /* FXView.swift */; };
+		C100001C /* Default.json in Resources */ = {isa = PBXBuildFile; fileRef = C200001C /* Default.json */; };
+		D1000001 /* StarpadDSP in Frameworks */ = {isa = PBXBuildFile; productRef = D2000001 /* StarpadDSP */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,18 +56,43 @@
 		A2000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A2000003 /* MotionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionManager.swift; sourceTree = "<group>"; };
 		A2000004 /* TouchOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchOverlayView.swift; sourceTree = "<group>"; };
-		A2000005 /* CalibrationData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalibrationData.swift; sourceTree = "<group>"; };
+		A2000020 /* PitchPadView_iOS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PitchPadView_iOS.swift; sourceTree = "<group>"; };
 		A2000006 /* CalibrationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalibrationView.swift; sourceTree = "<group>"; };
-		A2000007 /* NoteManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteManager.swift; sourceTree = "<group>"; };
-		A2000008 /* MIDIEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MIDIEngine.swift; sourceTree = "<group>"; };
-		A2000009 /* AudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEngine.swift; sourceTree = "<group>"; };
-		A200000A /* Config.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Config.swift; sourceTree = "<group>"; };
-		A200000B /* Scale.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scale.swift; sourceTree = "<group>"; };
 		A200000C /* ScaleEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScaleEditorView.swift; sourceTree = "<group>"; };
-		A200000D /* TiltMapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TiltMapping.swift; sourceTree = "<group>"; };
 		A200000E /* CurveEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurveEditorView.swift; sourceTree = "<group>"; };
 		A2000010 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A3000001 /* Starpad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Starpad.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C2000001 /* StarpadMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StarpadMacApp.swift; sourceTree = "<group>"; };
+		C2000004 /* AppController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppController.swift; sourceTree = "<group>"; };
+		C2000005 /* MacMainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MacMainWindow.swift; sourceTree = "<group>"; };
+		C2000006 /* SetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SetupView.swift; sourceTree = "<group>"; };
+		C2000007 /* LiveVisualizerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/LiveVisualizerView.swift; sourceTree = "<group>"; };
+		C2000008 /* ConnectionStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ConnectionStatusView.swift; sourceTree = "<group>"; };
+		C200000B /* Panel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Panel.swift; sourceTree = "<group>"; };
+		C200000D /* AudioSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/AudioSettingsView.swift; sourceTree = "<group>"; };
+		C200000E /* CoreAudioDevices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreAudioDevices.swift; sourceTree = "<group>"; };
+		C200000F /* MIDISettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MIDISettingsView.swift; sourceTree = "<group>"; };
+		C2000010 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		C2000011 /* SoundPreset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoundPreset.swift; sourceTree = "<group>"; };
+		C2000023 /* SwamDefaultState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwamDefaultState.swift; sourceTree = "<group>"; };
+		C2000012 /* SarangiEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SarangiEditorView.swift; sourceTree = "<group>"; };
+		C2000051 /* SarangiStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SarangiStore.swift; sourceTree = "<group>"; };
+		C2000014 /* MIDICCMapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MIDICCMapping.swift; sourceTree = "<group>"; };
+		C2000015 /* MockMotionSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockMotionSource.swift; sourceTree = "<group>"; };
+		C2000016 /* IPadSimulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPadSimulator.swift; sourceTree = "<group>"; };
+		C2000017 /* AuditionScore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditionScore.swift; sourceTree = "<group>"; };
+		C2000018 /* SimulatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SimulatorView.swift; sourceTree = "<group>"; };
+		C200001A /* PitchPadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/PitchPadView.swift; sourceTree = "<group>"; };
+		C200001D /* ChordPadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ChordPadView.swift; sourceTree = "<group>"; };
+		C200001E /* TanpuraPadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/TanpuraPadView.swift; sourceTree = "<group>"; };
+		C2000022 /* SitarPadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SitarPadView.swift; sourceTree = "<group>"; };
+		C2000024 /* StringPadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/StringPadView.swift; sourceTree = "<group>"; };
+		C2000025 /* TarabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/TarabView.swift; sourceTree = "<group>"; };
+		C2000026 /* FXView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/FXView.swift; sourceTree = "<group>"; };
+		C200001C /* Default.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Default.json; sourceTree = "<group>"; };
+		C2000020 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C2000021 /* StarpadMac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = StarpadMac.entitlements; sourceTree = "<group>"; };
+		C3000001 /* StarpadMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StarpadMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -48,6 +100,18 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B1000001 /* StarpadDSP in Frameworks */,
+				E1000001 /* StarpadCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C4000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D1000001 /* StarpadDSP in Frameworks */,
+				E1000002 /* StarpadCore in Frameworks */,
+				C1000052 /* SarangiKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -62,6 +126,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C4000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C1000010 /* Assets.xcassets in Resources */,
+				C100001C /* Default.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -69,6 +142,7 @@
 			isa = PBXGroup;
 			children = (
 				A5000002 /* Starpad */,
+				C5000001 /* StarpadMac */,
 				A5000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -80,15 +154,9 @@
 				A2000002 /* ContentView.swift */,
 				A2000003 /* MotionManager.swift */,
 				A2000004 /* TouchOverlayView.swift */,
-				A2000005 /* CalibrationData.swift */,
+				A2000020 /* PitchPadView_iOS.swift */,
 				A2000006 /* CalibrationView.swift */,
-				A2000007 /* NoteManager.swift */,
-				A2000008 /* MIDIEngine.swift */,
-				A2000009 /* AudioEngine.swift */,
-				A200000A /* Config.swift */,
-				A200000B /* Scale.swift */,
 				A200000C /* ScaleEditorView.swift */,
-				A200000D /* TiltMapping.swift */,
 				A200000E /* CurveEditorView.swift */,
 				A2000010 /* Assets.xcassets */,
 			);
@@ -99,8 +167,46 @@
 			isa = PBXGroup;
 			children = (
 				A3000001 /* Starpad.app */,
+				C3000001 /* StarpadMac.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		C5000001 /* StarpadMac */ = {
+			isa = PBXGroup;
+			children = (
+				C2000001 /* StarpadMacApp.swift */,
+				C2000004 /* AppController.swift */,
+				C2000005 /* MacMainWindow.swift */,
+				C2000006 /* PresetLibraryView.swift */,
+				C2000007 /* LiveStatusView.swift */,
+				C2000008 /* ConnectionStatusView.swift */,
+				C200000B /* Panel.swift */,
+				C200000D /* AudioSettingsView.swift */,
+				C200000E /* CoreAudioDevices.swift */,
+				C200000F /* MIDISettingsView.swift */,
+				C2000010 /* Assets.xcassets */,
+				C2000011 /* SoundPreset.swift */,
+				C2000023 /* SwamDefaultState.swift */,
+				C2000012 /* SarangiEditorView.swift */,
+				C2000051 /* SarangiStore.swift */,
+				C2000014 /* MIDICCMapping.swift */,
+				C2000015 /* MockMotionSource.swift */,
+				C2000016 /* IPadSimulator.swift */,
+				C2000017 /* AuditionScore.swift */,
+				C2000018 /* SimulatorView.swift */,
+				C200001A /* PitchPadView.swift */,
+				C200001D /* ChordPadView.swift */,
+				C200001E /* TanpuraPadView.swift */,
+				C2000022 /* SitarPadView.swift */,
+				C2000024 /* StringPadView.swift */,
+				C2000025 /* TarabView.swift */,
+				C2000026 /* FXView.swift */,
+				C200001C /* Default.json */,
+				C2000020 /* Info.plist */,
+				C2000021 /* StarpadMac.entitlements */,
+			);
+			path = ../StarpadMac;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -119,8 +225,34 @@
 			dependencies = (
 			);
 			name = Starpad;
+			packageProductDependencies = (
+				B2000001 /* StarpadDSP */,
+				E2000001 /* StarpadCore */,
+			);
 			productName = Starpad;
 			productReference = A3000001 /* Starpad.app */;
+			productType = "com.apple.product-type.application";
+		};
+		C6000001 /* StarpadMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C8000003 /* Build configuration list for PBXNativeTarget "StarpadMac" */;
+			buildPhases = (
+				C7000001 /* Sources */,
+				C4000001 /* Frameworks */,
+				C4000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = StarpadMac;
+			packageProductDependencies = (
+				D2000001 /* StarpadDSP */,
+				E2000002 /* StarpadCore */,
+				C2000052 /* SarangiKit */,
+			);
+			productName = StarpadMac;
+			productReference = C3000001 /* StarpadMac.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -136,6 +268,9 @@
 					A6000001 = {
 						CreatedOnToolsVersion = 15.0;
 					};
+					C6000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
 				};
 			};
 			buildConfigurationList = A8000001 /* Build configuration list for PBXProject "Starpad" */;
@@ -147,11 +282,17 @@
 				Base,
 			);
 			mainGroup = A5000001;
+			packageReferences = (
+				B3000001 /* XCLocalSwiftPackageReference "../Packages/StarpadDSP" */,
+				E3000001 /* XCLocalSwiftPackageReference "../Packages/StarpadCore" */,
+				C3000051 /* XCLocalSwiftPackageReference "../Packages/SarangiKit" */,
+			);
 			productRefGroup = A5000003 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				A6000001 /* Starpad */,
+				C6000001 /* StarpadMac */,
 			);
 		};
 /* End PBXProject section */
@@ -165,16 +306,43 @@
 				A1000002 /* ContentView.swift in Sources */,
 				A1000003 /* MotionManager.swift in Sources */,
 				A1000004 /* TouchOverlayView.swift in Sources */,
-				A1000005 /* CalibrationData.swift in Sources */,
+				A1000020 /* PitchPadView_iOS.swift in Sources */,
 				A1000006 /* CalibrationView.swift in Sources */,
-				A1000007 /* NoteManager.swift in Sources */,
-				A1000008 /* MIDIEngine.swift in Sources */,
-				A1000009 /* AudioEngine.swift in Sources */,
-				A100000A /* Config.swift in Sources */,
-				A100000B /* Scale.swift in Sources */,
 				A100000C /* ScaleEditorView.swift in Sources */,
-				A100000D /* TiltMapping.swift in Sources */,
 				A100000E /* CurveEditorView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C7000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C1000001 /* StarpadMacApp.swift in Sources */,
+				C1000004 /* AppController.swift in Sources */,
+				C1000005 /* MacMainWindow.swift in Sources */,
+				C1000006 /* PresetLibraryView.swift in Sources */,
+				C1000007 /* LiveStatusView.swift in Sources */,
+				C1000008 /* ConnectionStatusView.swift in Sources */,
+				C100000B /* Panel.swift in Sources */,
+				C100000D /* AudioSettingsView.swift in Sources */,
+				C100000E /* CoreAudioDevices.swift in Sources */,
+				C100000F /* MIDISettingsView.swift in Sources */,
+				C1000011 /* SoundPreset.swift in Sources */,
+				C1000020 /* SwamDefaultState.swift in Sources */,
+				C1000012 /* SarangiEditorView.swift in Sources */,
+				C1000051 /* SarangiStore.swift in Sources */,
+				C1000014 /* MIDICCMapping.swift in Sources */,
+				C1000015 /* MockMotionSource.swift in Sources */,
+				C1000016 /* IPadSimulator.swift in Sources */,
+				C1000017 /* AuditionScore.swift in Sources */,
+				C1000018 /* SimulatorView.swift in Sources */,
+				C100001A /* PitchPadView.swift in Sources */,
+				C100001D /* ChordPadView.swift in Sources */,
+				C100001E /* TanpuraPadView.swift in Sources */,
+				C100001F /* SitarPadView.swift in Sources */,
+				C1000024 /* StringPadView.swift in Sources */,
+				C1000025 /* TarabView.swift in Sources */,
+				C1000026 /* FXView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -361,6 +529,66 @@
 			};
 			name = Release;
 		};
+		C8000020 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ../StarpadMac/StarpadMac.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = WN86FWABN8;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ../StarpadMac/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Starpad;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.starpad.StarpadMac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		C8000021 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ../StarpadMac/StarpadMac.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = WN86FWABN8;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ../StarpadMac/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Starpad;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.starpad.StarpadMac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -382,7 +610,57 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		C8000003 /* Build configuration list for PBXNativeTarget "StarpadMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C8000020 /* Debug */,
+				C8000021 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		B3000001 /* XCLocalSwiftPackageReference "../Packages/StarpadDSP" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/StarpadDSP;
+		};
+		E3000001 /* XCLocalSwiftPackageReference "../Packages/StarpadCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/StarpadCore;
+		};
+		C3000051 /* XCLocalSwiftPackageReference "../Packages/SarangiKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/SarangiKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B2000001 /* StarpadDSP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = StarpadDSP;
+		};
+		D2000001 /* StarpadDSP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = StarpadDSP;
+		};
+		E2000001 /* StarpadCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E3000001 /* XCLocalSwiftPackageReference "../Packages/StarpadCore" */;
+			productName = StarpadCore;
+		};
+		E2000002 /* StarpadCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E3000001 /* XCLocalSwiftPackageReference "../Packages/StarpadCore" */;
+			productName = StarpadCore;
+		};
+		C2000052 /* SarangiKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C3000051 /* XCLocalSwiftPackageReference "../Packages/SarangiKit" */;
+			productName = SarangiKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A9000001 /* Project object */;
 }

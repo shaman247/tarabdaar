@@ -1,128 +1,115 @@
 # MIDI & Audio
 
-## Built-in Synthesizer (AudioEngine)
+Starpad's iPad target emits MPE MIDI over USB and produces no sound of its own. The Mac target (or any other USB-MIDI-aware host) receives the MIDI and synthesizes. There is **no settings sync** between the two — they share only standard MIDI on the wire. Edit a scale on the iPad and it stays on the iPad; pick a preset on the Mac and it stays on the Mac.
 
-The engine is a **modal-synthesis** voice bank. Every "string" — played or sympathetic — is a collection of decaying sinusoidal resonators (one per partial), excited by a generator that can morph from pluck to bow. Modes ring on their own Q after the exciter stops, which is what gives released notes a natural tail and gives sympathetic strings their distinctive "keeps humming after you lift the finger" behavior.
+## Mac MIDI input (MIDIInput.swift)
 
-- **Played banks** — fixed pool of `Config.maxPolyVoices` modal banks indexed by channel, activated by touch. Excited by a mix of pluck impulse (optionally passed through a pluck-position comb filter) and attack-ramped low-passed noise (the bow component).
-- **Sympathetic banks** — two modal banks per enabled note in `sympatheticScale` (one each at ±`sympatheticDetune` cents). Always alive; driven every sample by the played-audio sum × a per-bank coupling gain derived from the existing interval kernel.
+`MIDIInput` creates a CoreMIDI input port and `MIDIPortConnectSource`s every visible source on launch — and re-runs the connect pass whenever CoreMIDI fires a setup-changed notification, so plugging the iPad in mid-session brings it online automatically.
 
-### Resonator: coupled-form complex exponential
+**Every incoming MPE channel-voice byte is forwarded verbatim to the hosted Audio Unit** via `AudioEngine.sendHostedMIDI(...)`. The AU does its own voice allocation, pitch bending, and per-voice expression handling per the MPE spec. There is no in-house played-voice synth on the Mac — SWAM (run dry) produces the bowed-violin tone, which the **sarangi model** (`SarangiKit`) then turns into the full sarangi (see [Sound Design](sound-design.md)). The model needs no note information: it is driven purely by SWAM's tapped audio plus a signal-derived amplitude envelope. All note sources funnel through `sendHostedMIDI` — real-iPad MPE (here), the Mac in-process Pitch/Chord pads, and the simulator — so this one hook captures everything. It also tracks the played note/bend and the latest CC11 per channel and publishes a thread-safe `performanceReadout()` (played pitch in Hz + commanded loudness 0–1) that the **Live tab** graphs poll — see [UI Layout — Live tab](ui-layout.md#live-tab).
 
-Each mode is a 2-state resonator updated per sample:
+Two side observers run alongside the forwarding:
 
-```
-u' = R·cos(ω) · u  −  R·sin(ω) · v  +  drive · inGain
-v' = R·sin(ω) · u  +  R·cos(ω) · v
-output += v'
-```
+1. **RPN bend-range mirror** — `MIDIInput.handleCC` tracks the (CC 101, CC 100, CC 6) sequence so the Mac maintains a per-channel record of the agreed pitch-bend range. The AU has already received those bytes by the time the handler runs; the mirror is informational (used by any future feature that needs to know the controller-agreed range without polling the AU).
+2. **`onCC` callback** — every CC is also delivered to `AppController.handleIncomingCC`, which looks the CC up in the per-preset `ccMappings` table and drives the matching Mac-side FX parameter. This routing is global (channel-agnostic) — Starpad's Mac is monolithic, not multi-timbral.
 
-- `R = exp(−1 / (sampleRate · τ))` — mode decay
-- `ω = 2π · f / sampleRate` — mode angular frequency
-- `inGain = sin(ω) · g` — input gain; with `g = 1/k^falloff` (RMS-normalized) this makes an impulse produce a clean decaying sinusoid at amplitude `g`
-- `R` is clamped to `1 − 2^−20` for single-precision stability at long decays
-- Modes with `f_k ≥ 0.45·sampleRate` (high inharmonicity × high k × high pitch) are zeroed at coefficient time so they can't oscillate
+CC 123 (All Notes Off) clears the channel→slot binding so a future Note On allocates a fresh slot.
 
-Cost per mode: 4 multiplies + 2 adds + 2 state writes. ≈200 modes × 44.1 kHz is well inside the block budget.
+## Polyphonic hosted-AU model
 
-### Mode structure per bank
+SWAM Violin is monophonic. To support chord playing, `AudioEngine.loadHostedInstrument` instantiates `Config.maxHostedPolyVoices` copies (default 8) in parallel and dynamically assigns each Note On to an idle slot.
 
-Partial frequencies follow a stiffness-corrected harmonic series:
+- Per-slot state is a small `(channel, age)` pair under the engine lock; a parallel `[channel: slot]` dictionary indexes the reverse direction so per-voice messages (Pitch Bend, Channel Pressure, per-voice CCs) route in O(1).
+- On Note On: reuse the channel's slot if already bound (retrigger), else take the first idle slot, else steal the LRU slot (smallest `age`).
+- On Note Off: release the binding so the slot becomes idle.
+- Master-channel (ch 0) messages and channel-state CCs (RPN 101/100/6/38, CC 121 reset-all-controllers, CC 123 all-notes-off) **broadcast** to every loaded instance so global state stays consistent across slots.
+- Newly-loaded slots are seeded by `resetHostedInstrumentControllers`: every channel gets RPN-set pitch-bend range (`Config.midiPitchBendRange`), CC 11/71/74 mid-values, and centered pitch bend, so a slot allocated to channel X plays at the right pitch even if the iPad's RPN broadcast happened during async load.
+- Edits made via the AU's UI on the primary slot (slot 0) propagate to the other instances via an `AUParameterTree` observer installed once after all slots are loaded — so opening the SWAM window once configures every voice consistently. Limitation: per-parameter only — anything an AU exposes solely via `fullState` (some patch pickers, articulation menus) won't ride this path.
+- Slots whose async instantiation failed stay nil; their slot is skipped in allocation.
 
-```
-f_k = k · f₀ · √(1 + B · k²)
-```
+## Mac-side CC mapping
 
-Per-partial decay adds a frequency-dependent tilt so high partials can fade faster than the fundamental (natural string behavior):
+Any incoming CC can drive any of the Mac-side FX parameters listed in [MIDICCMapping.swift](../StarpadMac/MIDICCMapping.swift). Mappings are **per-preset** — `AppController` stores a `[Int: MappableMacParam]` table keyed by CC number, and `applyPreset` swaps in whichever table was saved for the incoming preset (or an empty one if none).
 
-```
-τ_k = τ₀ / k^α
-```
+UI lives in the voice-params panel: each slider row has a small **CC field**.
 
-Coefficients `(R·cos(ω), R·sin(ω), inGain)` are recomputed only when f₀, decay, tilt, falloff, or inharmonicity change — never per sample.
+- The field shows the bound CC number, or is empty if unmapped.
+- Type a number 0–127 and press Return (or tab away) to bind.
+- Clear the field to unmap.
+- Mappings are bijective by construction: rebinding a param frees its old CC, and entering a CC that was in use frees the param it pointed to. Invalid input snaps back to the current binding instead of clearing.
 
-### Excitation generator (played banks)
+Persistence is via `UserDefaults` under `starpad.ccMappingLibrary` — `[presetRawValue: [ccString: paramRawValue]]`. Lost mappings on a fresh install, but stable across launches.
 
-Each played bank's drive signal is the sum of two components:
+CoreMIDI delivers `onCC` on its high-priority thread; `AppController` hops to main before touching `@Published` state. The same CC also forwards to the AU (as above), so the AU may interpret the same CC for its own purposes — that's intentional and per MPE convention.
 
-1. **Pluck impulse**: a short (2–4 samples) ramp written into a delay line on `noteOn`, scaled by velocity.
-2. **Pluck-position comb**: `y = x − x[n−P]` where `P = round(pluckPosition · period_samples)`. The classic "where you pluck the string" filter — different P emphasize different partials.
-3. **Bow noise**: LCG white noise → one-pole LPF (~800 Hz cutoff) × `bowForce` × attack envelope. The envelope smooths toward `velocity` on `noteOn` with time constant `noteAttack` and toward 0 on `noteOff`.
+## Hosted AU + sarangi drive
 
-Short `noteAttack` + low `bowForce` = percussive pluck. Long `noteAttack` + high `bowForce` = sustained bow.
-
-### Sympathetic coupling
-
-Each sympathetic bank is driven by
+The Mac feeds the hosted AU's dry audio into the sarangi model, whose output **is** the played voice. The model is rendered **inline** by a custom in-process AUv3 effect, `SarangiProcessorAU` (`Packages/StarpadCore/Sources/StarpadCore/SarangiProcessorAU.swift`), spliced directly into the graph right after the SWAM AUs:
 
 ```
-drive[n] = (played_sum[n] · couplingGain[s] + whiteNoise[n] · couplingGain[s] · 0.005) · bowScaling
+N × SWAM AU(dry) → hostedDriveTap → SarangiProcessorAU → symGain → mainMixerNode → output
 ```
 
-where `couplingGain[s]` is the existing kernel excitation for that bank's pitch relative to the played fundamental, scaled by `sympatheticVolume · symCoupling`. `played_sum[n]` is the pre-gain-normalized sum of played banks' outputs for this frame. The small broadband-noise term ensures off-resonance sym strings still respond when the played spectrum misses their modes.
+1. All N hosted-AU instances feed into a shared `hostedDriveTap` mixer node (at full level), which **sums the poly instances** into one stereo drive.
+2. `SarangiProcessorAU.internalRenderBlock` pulls that summed stereo synchronously into a private scratch `AVAudioPCMBuffer`, then runs the installed `processBlock` closure (built by `AudioEngine.makeSarangiProcessBlock()`). The closure builds a mono drive (`0.5·(L+R)`) lifted by `sarangiDriveGain`, runs a per-sample causal `SignalAmpFollower` to get a 0..1 amplitude envelope, and calls `SarangiEngine.renderSample(input, amp:)` per sample — all under a single `AudioEngine.lock` acquisition (spanning `beginBuffer()` + the per-sample loop). The peak meter (`hostedOutputPeak`) is computed from the pulled SWAM input unconditionally. The model applies its own body (block E) and its **per-voice FX rack** (Violin/Sym/Global, each filter + EQ + reverb — replacing the old single block-F Freeverb) internally.
+3. That output goes through `symGain` **straight to `mainMixerNode`**, **bypassing** Starpad's master filter / reverb / `postReverbEQ` (those now serve only the tanpura + sitar). The sarangi's room is its own FX rack, not the shared `AVAudioUnitReverb`.
 
-When a played note is released, `couplingGain` naturally falls to 0 (no base pitch → kernel=0), drive stops, and the sym modes ring out on their own Q — which is the whole point of the modal rewrite.
+Because the effect renders in the **same engine pull** as SWAM, it adds **~0 ms latency** (verified: `sarangiEffect_latency = 0.00 ms`; model compute ≈ 0.2–0.9 ms per buffer). This removed the old `installTap(4096)` → `SPSCAudioRing` → separate `AVAudioSourceNode` transport, which added ~140 ms (the 4096-frame tap accumulation ≈ 93 ms + the ring producer/consumer phase ≈ 46 ms), audible even in pass-through.
 
-### Two-pass render
+The effect must be created **synchronously before `engine.start()`** — `AVAudioUnitEffect(audioComponentDescription:)` after a one-time `registerSarangiAUOnce()` (registers the `SarangiProcessorAU` subclass for component type `kAudioUnitType_Effect`, subtype `'Srng'`, manufacturer `'Strp'`) — because connecting a custom AU into an already-running engine does NOT allocate its render resources.
 
-`AVAudioSourceNode` callback at 44100 Hz, per block:
+## Audio graph
 
-1. Allocate a stack scratch buffer of `frames` doubles via `withUnsafeTemporaryAllocation`.
-2. **Pass 1**: render each active played bank into the scratch buffer; check bank lifecycle afterward (move to idle when energy < threshold or 10 s after noteOff).
-3. Apply equal-power gain `1/sqrt(voiceCount)` and copy scratch to the real output buffer. (Gain is applied after sym-drive extraction so sym level is invariant to poly count.)
-4. **Pass 2**: for each sym bank, silent-bank skip (skip entire inner loop when both `bank.energy()` and `couplingGain` are below threshold — the dominant CPU win). Otherwise run the resonator bank driven by `scratch × couplingGain + tiny noise`, accumulating into the output.
-5. Output feeds the reverb unit.
-
-Thread safety: `NSLock` protects bank pools, coefficient arrays, and parameter state. Held for the duration of the render callback. Main-thread setters (`noteOn`, `noteOff`, `setFrequency`, `updateVoiceParams`, `setHarmonicFalloff`, `setStringDecay`, `setSymDecay`, `setDampingTilt`, `setInharmonicity`, `setBowForce`, `setPluckPosition`, `setSymCoupling`, `setReverbMix`, `configureSympatheticVoices`, `setSympatheticDetune`, `setSympatheticTargetAmps`, `sympatheticSnapshot`, `baseVoiceSnapshot`) acquire the same lock.
-
-### Audio Graph
-
-```
-[AVAudioSourceNode]  →  [AVAudioUnitReverb (mediumHall)]  →  mainMixerNode
-```
-
-The reverb unit is inserted between the synthesis source node and the mixer. Its `wetDryMix` (0–100) is pushed per-tick from the `reverbMix` mappable parameter. Apple's reverb implementation handles the DSP off the audio render thread, so dialing it up doesn't steal cycles from the synthesis path.
-
-### Sympathetic Excitation Kernel
-
-Every 60 Hz glide tick, `NoteManager.updateSympatheticAmps` computes the per-bank coupling gain from the kernel and pushes the full array to the audio engine via `setSympatheticTargetAmps(_:)` (method name retained from the pre-modal era; values are now consumed as drive-scalars into each sym bank's modal resonator input). The formula for one sympathetic bank at `f_sym` driven by the played fundamental `f_base`:
+SWAM runs **dry** (its internal room/reverb/ambience/body are off). The sarangi
+model is rendered inline by the `SarangiProcessorAU` effect (it owns its own body
+(block E) + a per-voice **FX rack** — filter + EQ + reverb, replacing the old
+block-F Freeverb), so it goes `symGain → mainMixerNode` **directly, bypassing** the
+shared master filter / reverb / `postReverbEQ` — those are now the
+**tanpura/sitar Room** only. See [sarangi.md](sarangi.md).
 
 ```
-excitation(f_base, f_sym, σ, spread, consonance) = max over (r, w_raw, isUnison) in kernel of:
-    w = isUnison ? w_raw : pow(w_raw, consonance) · spread
-    w · exp( -(log2(f_sym/f_base) - log2(r))² / (2·σ²) )
-
-σ from `sympatheticWidth` (semitones, converted to octaves)
-spread from `sympatheticSpread` (linear multiplier on non-unison weights)
-consonance from `sympatheticConsonance` (exponent on each non-unison weight)
-
-kernel ratios + base consonance weights:
-    unison           1:1   weight 1.0    (always full — never scaled by spread)
-    perfect fifth    3:2   weight 0.8
-    fourth           4:3   weight 0.5
-    octave           2:1   weight 0.6
-    major third      5:4   weight 0.3
-    major sixth      5:3   weight 0.3
-    minor third      6:5   weight 0.2
-    major second     9:8   weight 0.15
-    …and reciprocals for intervals below base (1:2, 2:3, 3:4, …)
+N × SWAM AU(dry) ► hostedDriveTap ► SarangiProcessorAU ► symGain ───────────────────────────────────────────────────────────► mainMixerNode ► out
+                       (sums poly)   (SignalAmpFollower + SarangiEngine.renderSample —                                               ▲
+                                      full sarangi: bank+jawari+body, then the per-voice FX rack)                                    │
+                                                                                                                                     │
+   tanpuraSource/sitarSource ──► gains ──► preReverbMixer ► masterFilter ► reverb ► postReverbEQ ────────────────────────────────────┘
 ```
 
-The Gaussian at the unison peak gives the "proximity" feel. At the default σ ≈ 2 st, D4 (2 st above C4) gets ~0.5 of the unison peak → "somewhat excited". The kernel peaks at simple ratios give the "harmonic" feel — G4 (ratio 3:2) gets the fifth's full weight 0.8 × `spread`. The max-over-ratios combinator means each voice takes the strongest connection to the base without double-counting.
+- `hostedDriveTap`: full-level **sum** of all N AU buses; its output is pulled directly by `SarangiProcessorAU` (no tap, no ring).
+- `SarangiProcessorAU`: the in-process AUv3 effect spliced right after `hostedDriveTap`. Pulls the summed SWAM stereo into a private scratch buffer and runs the model render closure inline — `~0 ms` added latency (same engine pull as SWAM).
+- `symGain`: the sarangi effect's output gain (unity); the sarangi feeds **`mainMixerNode` directly**, bypassing the master FX (it has its own per-voice FX rack).
+- `preReverbMixer`: where the **tanpura + sitar** sum into the shared FX chain. Its `outputVolume` is set to `1.0` once in `setupAudio`. The sarangi is **not** routed here.
+- `masterFilter`: `AVAudioUnitEQ` with one band, type `.resonantLowPass`. Bypassed when cutoff is at max and resonance is zero.
+- `reverb`: `AVAudioUnitReverb` factory preset `.mediumHall` — the **tanpura/sitar Room** (the sarangi has its own FX-rack reverb). `wetDryMix` driven by `AppController.reverbMix` (the Tanpura tab's "Reverb mix").
+- `postReverbEQ`: 3-band parametric `AVAudioUnitEQ` after the reverb — final spectral shaping. Bypassed unless `AppController.postReverbEnabled`.
 
-Pulling `spread` to 0 leaves only the unison Gaussian — excitation becomes purely proximity-based, and voices a fifth away go silent. Pushing `spread` toward 2 doubly emphasizes harmonic relationships so a perfect fifth can ring as strongly as a near-unison.
+The old muted dry-SWAM passthrough branch is gone (it only existed to keep the
+tap pulled). The nodes `hostedInstrumentGain` / `hostedMakeupGain` / `sarangiMixer`
+/ `violaBodyEQ` remain **attached but disconnected** so that `AppController`'s
+`setViolaBodyEnabled` / `setViolaBodyBand` / `setHostedMakeupGainDB` property
+setters stay valid; they no longer carry signal.
 
-`excitation` is multiplied by `sympatheticVolume · symCoupling` to produce the per-bank coupling gain. The `symCoupling` mappable parameter lets the player scale the entire sympathetic drive bus without touching the perceptual balance the kernel provides.
+On macOS the output IO buffer is requested down to
+`Config.preferredOutputBufferFrames` (128 frames ≈ 2.7 ms, was the 512-frame
+device default) at engine start via `AudioEngine.setOutputBufferFrames(_:)` — Mac
+has no per-app IO buffer (no AVAudioSession), so this sets the device's CoreAudio
+HAL buffer, clamped to its allowed range (`AudioEngine.outputBufferFrames` reads it
+back; `logAudioLatencyReport(_:)` is a diagnostic). The engine + all fitted models
+run at `Config.sampleRate` (44100); to avoid an output resampler, `AudioEngine`
+sets the **output device** to 44.1 kHz at start (and on `setOutputDevice`) via
+`matchOutputDeviceToEngineRate` when the device supports it, and restores the prior
+rate on quit (`restoreOutputDeviceRate`, wired to `willTerminate` + `deinit`). A
+device that lacks 44.1 kHz keeps AVAudioEngine's converter (best-effort). The
+engine sample rate itself is **not** changed — the body FIR is a 44.1 kHz-measured
+impulse response and would mistune ~8.8% at 48 kHz.
 
-The `f_base` value fed into the kernel isn't the raw glide-smoothed frequency — it's already vibrated: `f_base · 2^(sin(vibratoPhase) · depth · intensity / 12)`. That way sympathetic drive pulses with the bow's vibrato, which is the physically correct behavior for real sympathetic strings and is an essential part of the sarangi's "shimmer".
+See [Sound Design](sound-design.md) for the sarangi model's DSP details.
 
-When no played note is sounding, all coupling gains go to 0 — drive stops, but sym modes keep ringing on their own Q until their `symDecay` carries them to silence. That lingering halo is the modal rewrite's main perceptual payoff over the previous always-on-sine model.
+## Parameter update cadence
 
-### Parameter update cadence
+`AppController`'s `@Published` FX setters push to `AudioEngine` via `didSet` hooks — slider drags fire immediately, with no 60 Hz timer involved. The **sarangi model** routes through `SarangiStore`: a **live-scalar** param (gain/mix) is pushed lock-free every buffer, while a **structural** param (raga/tonic/strings/filter coefficient) schedules a debounced (~50 ms) off-thread rebuild of the `SarangiEngine`, swapped in under the lock — so rapid slider drags coalesce into one rebuild.
 
-60 Hz main-thread control-rate updates push every modal parameter (`harmonicFalloff`, `stringDecay`, `symDecay`, `dampingTilt`, `inharmonicity`, `bowForce`, `pluckPosition`, `sympatheticDetune`, `symCoupling`, `reverbMix`) plus the per-bank coupling-gain array. Each setter short-circuits when the incoming value is unchanged, so idempotent ticks are cheap. Coefficient recomputation (a few cos/sin/exp calls per bank per mode) happens at parameter-change time, not per sample.
-
-## MIDI Engine (MIDIEngine)
+## MIDI Engine (MIDIEngine, iPad)
 
 ### Initialization
 
@@ -145,15 +132,14 @@ Each `activateChannel` call in NoteManager allocates the next MIDI channel via r
 - Pitch bends on a new note don't affect reverb tails of previous notes
 - Each note has independent aftertouch
 
-At activation, a pitch bend range RPN is sent on the new channel to set ±48 semitones.
+On first use of a channel, a pitch bend range RPN is sent to set ±48 semitones (`Config.midiPitchBendRange`). `NoteManager` caches per-channel after that — the hosted-AU's RPN state is sticky, so resending on every Note On is just wire chatter. PitchPad uses the same channel pool and the same value, so the cache stays coherent.
 
 ### Pitch Bend Calculation
 
 ```
 baseSemitone = MIDI note number of the original noteOn
 currentSemitone = 12 * log2(currentFreq / 440) + 69
-vibratoSemitones = sin(phase) * maxDepth * intensity
-offset = (currentSemitone - baseSemitone) + vibratoSemitones
+offset = currentSemitone - baseSemitone
 normalizedBend = clamp(offset / pitchBendRange, -1, 1)
 midiValue = 8192 + int(normalizedBend * 8191)
 ```
@@ -175,16 +161,62 @@ This is the MPE standard for per-note continuous expression.
 |---------|--------|-------|
 | Note On | 0x90 | Channel activation |
 | Note Off | 0x80 | Channel release |
-| Pitch Bend | 0xE0 | Continuous pitch (glide + vibrato) |
+| Pitch Bend | 0xE0 | Continuous pitch (glide + finger movement) |
 | Channel Pressure | 0xD0 | Tilt expression |
-| Control Change | 0xB0 | RPN setup, all-notes-off (panic) |
+| Control Change | 0xB0 | RPN setup, dimension-routed CCs, all-notes-off (panic) |
 
-## Connecting to Ableton over USB
+## Connecting iPad to Mac over USB
 
-1. Connect iPad to Mac via USB cable
-2. On Mac: **Audio MIDI Setup** > **Window > Show MIDI Studio** > Enable iPad
-3. In Ableton: **Preferences > Link, Tempo & MIDI** > Enable iPad MIDI input (Track on)
-4. Set instrument pitch bend range to ±48 semitones
-5. Enable MPE on the track (so per-note pitch bend works)
+1. Connect the iPad to the Mac via USB cable.
+2. On the Mac: open **Audio MIDI Setup → Window → Show MIDI Studio**, double-click the iPad icon, and enable it.
+3. Launch the Starpad app on the iPad and the StarpadMac app on the Mac. The Mac's top-bar pill should turn green and show `MIDI: N src` once it sees the iPad as a source. The first MIDI Note On from the iPad will trigger SWAM on the Mac immediately.
+
+That's it — no Bonjour pairing, no IP addresses. Each side keeps its own settings; only MIDI flows between them (plus the one scale-sync SysEx below).
+
+## Scale sync (Mac → iPad)
+
+StarpadMac is the scale **editor**; the iPad is the **performer**. The Mac
+pushes its Pitch Pad scale to the iPad over the same USB cable as a MIDI
+**SysEx** message — the only non-MPE, cross-device data Starpad sends.
+
+- **Encoding** (`PitchScaleSysEx`, StarpadCore, blob `version 3`): `F0 7D 01
+  <payload> F7`, where `7D` is the non-commercial SysEx ID, `01` the "scale"
+  subtype, and the payload is base64 (7-bit-safe) of a **compact binary** blob
+  (`[ver][tonic][margin][layout][count]` then per point `num/den` as 14-bit
+  pairs, `y`, `enabled`, and a length-prefixed UTF-8 label) — kept small so it
+  clears the iOS USB-MIDI SysEx bridge comfortably. The synced state is a
+  `SyncedScaleState` = the scale plus `tonicMidi`, `marginPixels`, and
+  `layout` (`PadLayout` — which surface the iPad shows, Pitch Pad or Chord
+  Pad).
+- **iPad receive** (`ScaleSyncReceiver`, StarpadCore): a virtual CoreMIDI
+  **destination** named "Starpad Scale" so the Mac sees the iPad as a MIDI
+  destination. It reassembles SysEx across packets (`F0`…`F7`), decodes, and
+  calls `PitchPadEngine.applySyncedState` — which panics on a scale or
+  layout change (so a note isn't stranded on a vanishing cell), swaps the
+  scale/tonic/margin/layout, and persists the state to `SyncedScaleStore`
+  (UserDefaults) so it survives an offline relaunch.
+- **Mac send** (`AppController` + `MIDIEngine.sendSysEx`): Combine
+  subscriptions push on every `pitchPad.scale` / `tonic` / `margin` / `layout`
+  edit (debounced ~300 ms) and whenever a destination appears (iPad connect).
+  `sendSysEx` targets only destinations whose name contains "Starpad Scale",
+  so the blob doesn't hit SWAM or other gear.
+
+One-way Mac→iPad; the iPad has no scale editor. The synced state includes
+the **tonic** (which MIDI note 1/1 maps to), the **margin** (soft-zone
+half-width — the **active** surface's margin, since each pad owns its own
+slider), and the **layout** (Pitch Pad vs Chord Pad — see
+[Chord Pad](chord-pad.md)), all set on the Mac (the iPad's tonic readout is
+read-only and it can't pick its own layout). The iPad's `ContentView` swaps
+playing surfaces on the synced `layout`. The iPad persists the last synced
+state (`SyncedScaleStore`, UserDefaults) and opens on it after an offline
+relaunch.
+
+### Routing iPad MIDI to other hosts (Ableton, etc.)
+
+The iPad acts as a standard USB-MIDI controller, so the same cable can drive any MPE-aware DAW alongside the Mac. In Ableton, for example:
+
+1. Open **Preferences → Link, Tempo & MIDI** and enable the iPad MIDI input (Track on).
+2. Set the destination instrument's pitch bend range to ±48 semitones.
+3. Enable MPE on the track so per-note pitch bend works.
 
 If using Ableton's "Note PB" mode, pitch bends are automatically per-note when MPE is enabled.

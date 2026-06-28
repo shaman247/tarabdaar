@@ -1,31 +1,20 @@
+import StarpadCore
 import SwiftUI
-
-/// Which scale the user is currently editing: the playing (keyboard) scale
-/// or the sympathetic-string scale that drives the resonance envelope.
-enum ScaleEditTarget: String, CaseIterable {
-    case playing = "Playing"
-    case strings = "Strings"
-}
 
 /// In-place scale editor that replaces the keyboard's play behavior.
 /// Tap keys to toggle notes on/off. Drag to pan the range. Pinch to zoom.
-/// Long press (JI mode) to set the root note.
+/// Long press (JI mode) to set the root note. iPad-only editor —
+/// sympathetic-string scale is now Mac-side and edited from StarpadMac.
 struct ScaleEditorView: View {
     @Binding var playingScale: Scale
-    @Binding var sympatheticScale: Scale
     @Binding var isActive: Bool
 
-    @State private var target: ScaleEditTarget = .playing
-
-    /// The scale the user is currently editing. Writing here routes to the
-    /// underlying binding for `target`. Existing code reads/writes via
-    /// `scale.x = y` just like before the split into two scales.
+    /// The scale the user is currently editing. Existing code reads/writes
+    /// via `scale.x = y`; we proxy onto `playingScale` so call sites stay
+    /// unchanged after dropping the dual-target (playing/strings) editor.
     private var scale: Scale {
-        get { target == .playing ? playingScale : sympatheticScale }
-        nonmutating set {
-            if target == .playing { playingScale = newValue }
-            else { sympatheticScale = newValue }
-        }
+        get { playingScale }
+        nonmutating set { playingScale = newValue }
     }
 
     // Drag state for panning
@@ -54,21 +43,6 @@ struct ScaleEditorView: View {
                 .fontWeight(.bold)
                 .foregroundColor(.yellow)
 
-            // Target tab: Playing vs Strings
-            HStack(spacing: 2) {
-                ForEach(ScaleEditTarget.allCases, id: \.self) { t in
-                    Button(action: { target = t }) {
-                        Text(t.rawValue)
-                            .font(.system(size: 11, weight: .bold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(target == t ? Color.pink.opacity(0.7) : Color.gray.opacity(0.2))
-                            .foregroundColor(.white)
-                            .cornerRadius(4)
-                    }
-                }
-            }
-
             Spacer()
 
             // Tuning picker
@@ -89,18 +63,18 @@ struct ScaleEditorView: View {
 
             if scale.tuning == .justIntonation {
                 Text("Root: \(Scale.noteName(for: scale.baseNote))")
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11))
                     .foregroundColor(.green)
             }
 
             Text(scale.specificNoteMode
                  ? "\(scale.enabledSpecificNotes.count) notes"
                  : "\(scale.enabledDegrees.count)/12")
-                .font(.system(size: 11, design: .monospaced))
+                .font(.system(size: 11))
                 .foregroundColor(.gray)
 
             Text("\(Scale.noteName(for: scale.startNote))-\(Scale.noteName(for: scale.endNote))")
-                .font(.system(size: 11, design: .monospaced))
+                .font(.system(size: 11))
                 .foregroundColor(.cyan)
 
             Button(action: { scale = .default }) {
@@ -138,7 +112,7 @@ struct ScaleEditorView: View {
                             let ratioText = scale.tuning == .justIntonation ? ratioString(for: pc) : "\(pc)"
 
                             Text(ratioText)
-                                .font(.system(size: 8, design: .monospaced))
+                                .font(.system(size: 8))
                                 .foregroundColor(.yellow.opacity(0.8))
                                 .position(x: x, y: geo.size.height / 2)
                         }
@@ -208,7 +182,7 @@ struct ScaleEditorView: View {
                             .offset(x: CGFloat(i) * whiteW)
 
                         Text(Scale.noteName(for: midi))
-                            .font(.system(size: 10, design: .monospaced))
+                            .font(.system(size: 10))
                             .foregroundColor(isOn ? .white.opacity(0.7) : .gray.opacity(0.3))
                             .position(x: CGFloat(i) * whiteW + whiteW / 2, y: geo.size.height - 14)
                     }

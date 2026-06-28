@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Required for loading third-party Audio Units (signed by other
+	     teams) into a Hardened-Runtime host. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	<!-- Many third-party AUs (including SWAM products) JIT-compile DSP
+	     paths or rely on dynamically-generated executable memory. Without
+	     these, the AU loads but its view / synthesis can hang or silently
+	     fail under Hardened Runtime. -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.disable-executable-page-protection</key>
+	<true/>
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+</dict>
+</plist>

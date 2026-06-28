@@ -2,48 +2,31 @@
 
 ## Overview
 
-Starpad supports custom scales (subsets of the 12-tone chromatic scale) and two tuning systems: 12-tone equal temperament (12-TET) and just intonation (JI). The keyboard always displays the standard piano layout, but disabled notes are grayed out and cannot be played.
+Starpad is a just-intonation instrument. There is **one configured scale** — the set of exact frequency ratios laid out on the **Pitch Pad** — and everything else follows it.
 
-Starpad maintains **two independent scales**:
+- **Playing scale**. A `PitchScale` of JI ratios (`num/den` over the tonic), one per Pitch Pad cell. **Edited on StarpadMac** (the Pitch Pad tab) and **synced to the iPad** over USB-MIDI SysEx, where it's performed — the iPad has no editor of its own. The scale spans the half-open octave `[1, 2)` and repeats up and down the pad. Persisted as JSON via `ScaleStore` on both sides. See [Pitch Pad](pitch-pad.md) and [MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad).
+- **Sympathetic-string scale** (Mac). **Not separately configured** — the sympathetic strings (the sarangi *tarab*) just track the configured Pitch Pad scale, tuned to the same tonic and extended **half an octave above and below** (so the played register always sits inside the tarab). The pool is re-derived automatically whenever the scale or tonic changes; there is no sym-string editor. See [Sound Design — Sympathetic strings](sound-design.md#sympathetic-strings) and [Sarangi — Sympathetic-string tuning](sarangi.md#sympathetic-string-tuning-tarab).
 
-- **Playing scale** — what pitches appear on the keyboard and their tuning.
-- **Sympathetic-string scale** — what pitches have always-on sympathetic voices. Each enabled MIDI note in this scale gets its own pure-sine voice whose amplitude is modulated by how "related" its pitch is to the base voice currently being played (see [MIDI & Audio](midi-and-audio.md#sympathetic-excitation)).
+So the tarab is always in tune with whatever raga is on the pad.
 
-They can diverge freely: you can play in one key while the sympathetic strings ring in another, span different ranges, or use different tuning systems. On first run the sympathetic scale is initialised from the playing scale; after that the two persist separately.
+## Scale Editors
 
-The two scales also differ in how "enabled" is interpreted:
+### Playing scale (StarpadMac Pitch Pad tab → iPad)
 
-- **Playing scale**: octave-invariant. Enabling C turns on every C across the keyboard.
-- **Sympathetic scale**: per-MIDI-note. Enabling C4 adds exactly one "string" at 261.63 Hz. Enabling C5 would add a separate string at 523.25 Hz.
+The playing scale is the set of `PitchPoint` ratios on the Pitch Pad,
+**edited on the Mac** Pitch Pad tab: drag handles, shift-click to add/remove,
+snap-drag to "simple" fractions, scroll-wheel to retune, right-click to
+disable, and a sidebar with text fields. See [Pitch Pad — Sidebar editor](pitch-pad.md#sidebar-editor)
+and [Snap system](pitch-pad.md#snap-system).
 
-This matters because each enabled sympathetic MIDI note becomes one continuously-running sine voice at that specific frequency, so two "same-pitch-class-different-octave" notes produce two independent voices rather than one voice echoed across octaves.
+Edits are pushed to the connected iPad live (debounced) and on connect, so
+the performer always plays the current scale — see [MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad).
+The default scale is 12 just-intonation degrees (1/1 … 15/8). Disabled
+pitches drop their cell from the pad but stay listed to toggle back in.
 
-Internally this is a `specificNoteMode` flag on `Scale`. The Strings tab in the editor activates it; the Playing tab leaves it off.
+### Sympathetic scale (Mac)
 
-## Scale Editor
-
-Tap the **SCALE** button in the status bar to enter scale editing mode. The keyboard area transforms into an interactive editor.
-
-The top-left toolbar has a **Playing / Strings** tab pair (pink when selected). It picks which scale every other control in the editor acts on. Switching tabs does not touch the other scale.
-
-### Controls
-- **Tap a key**: Toggle that pitch class on/off (yellow = enabled, dim = disabled). At least one note must remain enabled. In JI mode, the root note cannot be disabled.
-- **Drag left/right**: Pan the keyboard range (shifts start and end notes together).
-- **Pinch**: Zoom in/out to change the keyboard range (arbitrary semitone ranges, min 5, max 48).
-- **Long press** (JI only): Set that key as the just intonation root (shown in green).
-- **Toolbar**: Tuning system picker (12-TET / JI), range display, reset button.
-- **SCALE/DONE button**: The same button in the status bar toggles between play and edit modes. Shows "SCALE" (purple) in play mode, "DONE" (blue) in edit mode.
-
-### Ratio Band
-When scale editor mode is active, a band above the keyboard shows the interval ratio for each enabled note relative to the JI root (e.g., "3/2" for a perfect fifth). In equal temperament mode, it shows the pitch class number (0-11).
-
-### Visual Indicators
-- **Yellow keys**: Enabled notes
-- **Green keys**: JI root note
-- **Dim keys**: Disabled notes
-- **Note labels**: Shown at the bottom of each white key
-
-Changes take effect immediately and persist across app launches.
+There is **no sympathetic-scale editor**. The sympathetic strings are derived from the playing scale: one string per enabled scale pitch, octave-replicated to fill `[tonic, tonic + 2 octaves)` (the **tonic is the lowest sympathetic string** — no sub-tonic strings, in the scale's own JI ratios over the same tonic). `AppController.sympatheticFrequencies()` computes this set, and a Combine sink rebuilds the resonator pool whenever `pitchPad.scale` or `pitchPad.tonicMidi` changes. Edit the scale on the Pitch Pad tab and the tarab follows.
 
 ## Tuning Systems
 

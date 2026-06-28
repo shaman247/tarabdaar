@@ -106,7 +106,9 @@ Parameters are driven by **dimensions** — configurable input sources. Each par
 
 Each binding uses a Catmull-Rom spline defined by 2–4 control points, replacing the previous linear interpolation. The spline output is clamped to the endpoint min/max. Tilt dimensions are normalized from -1..+1 to 0..1 via `(tilt + 1) / 2`. Per-note dimensions are already 0..1. Multiple dimensions can be bound to a single parameter (many:many mapping).
 
-**Internal parameters** (affect the built-in synth and glide engine):
+The dimension matrix on the iPad covers only the iPad's responsibilities — MIDI emission and glide. iPad sensors **only ever drive MIDI** (pitch bend, channel pressure, CCs); the Mac's hosted AU and sym pool consume those MIDI bytes downstream, but no iPad sensor maps directly into Mac-side DSP. Voice timbre lives in the hosted AU (configured via its own UI); sym / FX live in StarpadMac's Voice tab.
+
+**Internal parameters** (affect the iPad's glide engine and MIDI output shape):
 
 | Parameter | Default Min | Default Max | Unit | Default Dimension |
 |-----------|-----------|-----------|------|-------------------|
@@ -114,13 +116,10 @@ Each binding uses a Catmull-Rom spline defined by 2–4 control points, replacin
 | Glide Speed | 20 | 200 | ms/st | Tilt 1 |
 | Compression | 15 | 40 | ms | Tilt 1 |
 | Amplitude | 0.3 | 1.5 | x | Tilt 1 |
-| Vib Depth | 0 | 0.5 | st | None |
-| Vib Rate | 4 | 10 | Hz | None |
-| Vib Intensity | 0 | 1 | — | Key Y |
 | Drag Smooth | 0.1 | 0.5 | (coeff) | None |
 | Glide Curve | 3 | 12 | (k) | None |
 
-**MIDI output parameters** (sent to external synths via MPE):
+**MIDI output parameters** (sent to whichever MPE receiver is downstream — StarpadMac, Ableton, etc.):
 
 | Parameter | CC# | Default Range | Default Dimension | Description |
 |-----------|-----|--------------|-------------------|-------------|
@@ -140,7 +139,7 @@ When set to "None", the parameter uses 0.5 (midpoint of its range).
 
 Each parameter's mapping is a `ParameterMapping` struct containing an array of `DimensionBinding` objects (many:many support). Each `DimensionBinding` holds a `Dimension` and 2–4 `ControlPoint` values defining a Catmull-Rom spline curve, with output clamped to the endpoint min/max. The `DimensionMapping` struct holds all mappings in a dictionary keyed by parameter `storageKey`, persisted to UserDefaults under `"starpad_dimensionMapping_v5"`.
 
-`TiltMapping.swift` defines the `Dimension` enum, `MappableParameter` enum (Int-backed for fast array indexing), `ControlPoint`, `DimensionBinding`, `ParameterMapping`, and `DimensionMapping` structs. NoteManager caches all binding arrays (`cachedBindings`) rebuilt only when the mapping changes, and reads values via `cachedParamValue(for: .amplitude, voiceIndex: i)` which resolves multiple bindings with priority (per-note > sliders when touched > tilts, highest deviation wins among same type).
+`TiltMapping.swift` defines the `InputDimension` enum, `MappableParameter` enum (Int-backed for fast array indexing), `ControlPoint`, `DimensionBinding`, `ParameterMapping`, and `DimensionMapping` structs. `NoteManager` caches all binding arrays (`cachedBindings`) rebuilt only when the mapping changes, and reads values via `cachedParamValue(for: .amplitude, voiceIndex: i)` which resolves multiple bindings with priority (per-note > sliders when touched > tilts, highest deviation wins among same type).
 
 The MAP button or a swipe-right gesture on the top half opens a matrix panel for editing mappings.
 
@@ -150,16 +149,10 @@ When no parameter is mapped to the Pressure dimension (`pressureInUse == false`)
 
 ## Vibrato
 
-A sine wave LFO modulates pitch. Rate, depth, and intensity are all dimension-mapped:
-
-```
-vibratoOffset = sin(phase) * cachedParamValue(for: .vibratoDepth) * vibIntensity
-phase += 2pi * cachedParamValue(for: .vibratoRate) * dt
-vibIntensity = cachedParamValue(for: .vibratoIntensity, voiceIndex: i)
-```
-
-- Default vibrato rate range: 4–10 Hz (dimension-mappable)
-- Default vibrato depth range: 0–0.5 semitones (dimension-mappable)
-- Vibrato intensity defaults to Key Y dimension with range 0–1 (bottom of key = no vibrato, top = max)
-- All three can be remapped to any dimension (e.g., Slider 1 for manual vibrato control)
-- Multiple dimensions can drive the same vibrato parameter simultaneously
+There is **no automatic vibrato LFO**. The old sine-LFO-on-the-pitch-bend
+(the `vibratoDepth` / `vibratoRate` / `vibratoIntensity` dimension params)
+has been removed. Vibrato is now purely a **playing technique**: the pitch
+tracks your finger directly (see [Pitch Pad](pitch-pad.md)), so wiggling your
+finger left/right across a Pitch Pad cell bends the pitch with the motion.
+For an electronically generated vibrato, drive the hosted AU's own vibrato
+(e.g. map a tilt to a CC, or use SWAM's vibrato controls on the Mac).

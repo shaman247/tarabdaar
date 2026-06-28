@@ -27,7 +27,8 @@ DerivedData/
 .build/
 .swiftpm/
 Package.resolved
-Packages/
+# Note: `Packages/StarpadDSP/` is the local DSP package and IS tracked.
+# Don't `git ignore` Packages/ wholesale.
 
 # CocoaPods
 Pods/
@@ -40,3 +41,29 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+# Sound-matching tooling
+tools/sound-matching/.venv/
+tools/sound-matching/out/
+tools/sound-matching/audition/
+tools/sound-matching/references/*.wav
+tools/sound-matching/references/*.mp3
+tools/sound-matching/references/*.flac
+__pycache__/
+*.pyc
+
+# Editor / local tooling state
+.vscode/
+.playwright-mcp/
+
+# Local-only working areas
+_archive/
+auditions/
+
+# Media & render artifacts (asset-catalog images are re-included below)
+*.png
+*.wav
+*.mp3
+*.flac
+*.npz
+!**/*.xcassets/**/*.png

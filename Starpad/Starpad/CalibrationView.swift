@@ -1,3 +1,4 @@
+import StarpadCore
 import SwiftUI
 
 /// Calibration view that shows all 7 measurements and allows recalibrating any individual one.
@@ -182,7 +183,7 @@ struct CalibrationView: View {
 
             if let pt = captured {
                 Text(String(format: "P%+.0f° R%+.0f° Y%+.0f°", pt.pitchDegrees, pt.rollDegrees, pt.yawDegrees))
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 10))
                     .foregroundColor(.green.opacity(0.6))
                     .frame(width: 160, alignment: .trailing)
             } else {
@@ -278,7 +279,7 @@ struct CalibrationView: View {
                 .font(.caption)
                 .foregroundColor(.gray)
             Text(String(format: "%+.1f°", value))
-                .font(.system(.body, design: .monospaced))
+                .font(.system(.body))
                 .foregroundColor(.green)
         }
     }
