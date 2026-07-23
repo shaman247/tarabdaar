@@ -1,6 +1,6 @@
 # String Pad
 
-The **String Pad** is a third Mac-side playing surface (StarpadMac tab, ⌘8),
+The **String Pad** is a third Mac-side playing surface (StarpadMac tab, ⌘9),
 a box-plot / abacus. Where the [Pitch Pad](pitch-pad.md) lays one pitch per
 Voronoi cell along a log-frequency x-axis and the [Chord Pad](chord-pad.md) is a
 fixed hex grid, the String Pad is a row of discrete vertical **strings** (evenly
@@ -133,10 +133,11 @@ string; the header **+** adds a string. **Reset to Scale** rebuilds the default.
 ## Default arrangement
 
 `StringArrangement.defaultArrangement` builds **7 base strings**, one per svara,
-named in sargam. **String 1** carries a single note — **S**, 50 % height,
-centred. Strings with a vikrit (altered) variant carry two notes — the
+named in sargam. **String 1** carries a single tall key — **S**, centred at
+y=0.5. Strings with a vikrit (altered) variant carry two tall keys — the
 **shuddha/natural** in the **bottom** half and the **komal/tivra** in the **top**
-half, 30 % height each: string 2 = **R/r**, 3 = **G/g**, 4 = **m/M**, 6 = **D/d**,
+half, pulled close to the middle (centre-y 0.66 / 0.34) so they nearly meet with
+a small gap between them: string 2 = **R/r**, 3 = **G/g**, 4 = **m/M**, 6 = **D/d**,
 7 = **N/n**; string 5 = **P** (single). Together these are the 12 chromatic
 degrees of the default scale, with 4 octave-repeat ghost strings shown each side.
 
@@ -166,9 +167,39 @@ message** (`F0 7D 02 …`, `StringArrangementSysEx`) alongside the scale message
 sent whenever the arrangement changes while the String Pad is the active layout.
 `ScaleSyncReceiver` decodes it into its `@Published stringArrangement` (persisted
 via `StringArrangementSyncStore` for offline relaunch); `ContentView` hands that
-plus the synced scale/tonic/`marginPixels` (Sharpness) to the iPad surface. The
-iPad reuses the shared geometry (`stringPlacements`, `polyPitchAt`,
-`stringFillCells`) and the same `PitchPadEngine` (real USB-MPE). It is **always in
-perform mode** — a clean playing surface: no gridlines or labels, and the
-octave-repeat ghosts styled identically to the main octave. Editing stays on the
-Mac.
+plus the synced scale/tonic/`marginPixels` (Sharpness) to the iPad surface. It uses
+the same `PitchPadEngine` (real USB-MPE) and the shared `polyPitchAt` resolver, and
+is **always in perform mode** — a clean playing surface: no gridlines or labels.
+Editing stays on the Mac. There is **no top toolbar**: the surface fills the whole
+screen and the controls (PANIC, MAP, recalibrate, sync indicator, tilt bars, the
+live pitch readout, tonic) sit in a compact cluster in the **bottom-left corner**
+(`StringPadControlsIOS`), which the rotated layout leaves empty. The surface
+mirrors the Mac layout, rotated (see below).
+
+### Rotation (iPad only)
+
+The iPad **mirrors the Mac layout** — the *same* shared `stringPlacements`
+geometry (identical note heights, the band layout, octave-repeat ghost strings),
+so the two correspond — **rotated by a configurable angle**. Only the rotation
+differs; the Mac editor always stays upright.
+
+The angle is `StringArrangement.rotationDegrees` (**0–40°, default 30°**), set on
+the Mac String Pad toolbar's **Rotation** slider. At **0°** the iPad is upright
+(exactly the Mac axes); as it rises the strings lean toward the **top-right →
+bottom-left** diagonal. This is **iPad-only** — the Mac surface ignores it. The
+angle is part of the arrangement, so it auto-saves (`StringArrangementStore`, doc
+version 3) and syncs to the iPad on the same second SysEx message
+(`StringArrangementSysEx`, blob version 2).
+
+`StringPadSurfaceIOS.diagonalFillCells` (`PitchPadView_iOS.swift`) calls the shared
+`stringPlacements` to lay the **upright** layout out in a logical box, then rotates
+every hexagon polygon about the box centre onto the screen centre — all **directly
+in screen space**, so there is no `rotationEffect` and touches resolve in the same
+screen space (no inverse transform, no nested-UIView hit-testing concern). To make
+the strings reach across the tilted surface it keeps the Mac's column density and
+adds enough octave-repeat ghost strings to span the rotated width; the box height
+stays the screen height so the hexagons keep their Mac sizes (they are **not**
+stretched). `Canvas`/`CellFillsView` draw the rotated polygons (overscan clipped to
+the screen), and `polyPitchAt` resolves touches against them — pitch constant
+inside each hexagon, blending across the gaps, tuned by the synced **Sharpness**
+(`marginPixels`).

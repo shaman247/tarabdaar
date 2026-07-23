@@ -3,19 +3,25 @@ import SarangiKit
 import StarpadCore
 import SwiftUI
 
-/// The Sarangi tab (⌘2): the sarangi model's **timbre** — presets, the 27 model
-/// parameters, and a compact master-FX section (which now shapes only the
-/// tanpura/sitar, since the sarangi owns its own body + reverb). The sympathetic
-/// strings (tarab) + tuning live in their own **Sympathetic Strings** tab
-/// (`TarabView`). Backed by `controller.sarangi` (`SarangiStore`); the master-FX
-/// knobs bind to the `AppController` directly.
+/// The Sarangi tab (⌘3): the played voice's **timbre**. Since the String era
+/// the primary surface is the **String instrument's physics parameters**
+/// (`StringParamsView` — the `bowed_string.json` scalars, ported from the
+/// upstream Sarangi Live editor). The 25 coupled-network params remain below
+/// in a collapsed section — they shape the SWAM / sitar base-voice chain
+/// only. The sympathetic strings (tarab) + tuning live in the **Tarab** tab
+/// (`TarabView`); the FX rack (also SWAM/sitar-path-only) in the FX tab.
+/// Backed by `controller.sarangi` (`SarangiStore`) + `controller.stringParams`
+/// (`StringParamStore`).
 struct SarangiEditorView: View {
     @ObservedObject var controller: AppController
     @ObservedObject var store: SarangiStore
+    @ObservedObject var stringStore: StringParamStore
+    @State private var networkExpanded = false
 
     init(controller: AppController) {
         self.controller = controller
         self.store = controller.sarangi
+        self.stringStore = controller.stringParams
     }
 
     var body: some View {
@@ -23,13 +29,30 @@ struct SarangiEditorView: View {
             VStack(alignment: .leading, spacing: 16) {
                 SarangiToolbar(controller: controller)
                 Divider()
-                ParamSlidersSection()
+                StringParamsView()
+                Divider()
+                DisclosureGroup(isExpanded: $networkExpanded) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("These parameters drive the coupled bridge–body "
+                             + "network that colors the SWAM and sitar base "
+                             + "voices. The String instrument (the default "
+                             + "voice) does not read them — its sound is the "
+                             + "physics panel above + the Tarab tuning.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        ParamSlidersSection()
+                    }
+                    .padding(.top, 4)
+                } label: {
+                    Text("Coupled network (SWAM / sitar chain)")
+                        .font(.subheadline).bold()
+                }
             }
             .padding(16)
             .frame(maxWidth: 560, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .environmentObject(store)
+        .environmentObject(stringStore)
     }
 }
 
@@ -41,20 +64,26 @@ private struct SarangiToolbar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Sarangi model").font(.headline)
+            Text("Sarangi — String instrument").font(.headline)
             HStack(spacing: 8) {
                 Menu {
                     ForEach(Preset.allCases, id: \.self) { p in
-                        // Load timbre (params + FIR + strings); re-sync the tarab
-                        // to the Pitch Pad scale if auto-sync is on.
-                        Button(p.displayName) { store.loadPreset(p); controller.syncTarabFromScale() }
+                        // The Sarangi Live default: the EXACT fitted Pilu tarab
+                        // table + tonic (auto-sync turned OFF so the fitted
+                        // strings stick — re-enable it in the Tarab tab), the
+                        // network params, and the untouched bowed_string.json
+                        // physics (every String override cleared).
+                        Button(p.displayName) {
+                            store.loadSarangiLiveDefault(p)
+                            controller.stringParams.resetToDefault()
+                        }
                     }
                 } label: {
                     Label("Load preset", systemImage: "rectangle.stack")
                 }
                 .fixedSize()
-                Button("Reset params") { store.resetParams() }
-                    .help("Reset the 27 model parameters to defaults (keeps tuning + strings)")
+                Button("Reset network params") { store.resetParams() }
+                    .help("Reset the 25 coupled-network parameters (SWAM/sitar chain) to defaults — keeps tuning + strings; does not touch the String physics")
                 Spacer()
             }
             HStack(spacing: 8) {
@@ -85,7 +114,7 @@ private struct SarangiToolbar: View {
     }
 }
 
-// MARK: - Model parameters (27, grouped)
+// MARK: - Model parameters (22, grouped)
 
 private struct ParamSlidersSection: View {
     @EnvironmentObject var store: SarangiStore
@@ -101,9 +130,9 @@ private struct ParamSlidersSection: View {
                     Slider(value: store.goutBinding, in: 0...2).frame(width: 120)
                 }
             }
-            // Show every non-empty group, including Reverb: the sarangi now runs
-            // its OWN block-F reverb (matching Sarangi Live) and bypasses Starpad's
-            // master FX, so the F_* params are live. (Empty groups e.g. Drone hide.)
+            // Show every non-empty group. All 22 v57 params are live surface —
+            // the room (F_*) and drone ship 0 in the fitted preset but stay
+            // playable. (Empty groups hide.)
             ForEach(ParamGroup.allCases.filter { !ParamSpec.grouped($0).isEmpty }, id: \.self) { group in
                 DisclosureGroup(isExpanded: Binding(
                     get: { expanded.contains(group) },

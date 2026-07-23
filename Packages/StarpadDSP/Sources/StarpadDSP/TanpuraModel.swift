@@ -190,6 +190,21 @@ public final class TanpuraModel {
         doPluck(string: string, velocity: velocity)
     }
 
+    /// Live-retune one string's fundamental (cheap; for a played/glided voice).
+    /// Recomputes only frequency-dependent state, so it's safe at control rate.
+    public func retuneString(_ index: Int, f0: Double) {
+        guard strings.indices.contains(index) else { return }
+        strings[index].setF0(f0)
+    }
+
+    /// Silence one string's ringing state (e.g. before reusing it for a new
+    /// note in a voice pool, so the prior tail doesn't glissando to the new
+    /// pitch when the string is retuned).
+    public func clearString(_ index: Int) {
+        guard strings.indices.contains(index) else { return }
+        strings[index].clearState()
+    }
+
     /// Schedule a sample-accurate pluck (offline render path).
     public func pluckAt(sample: Int64, string: Int, velocity: Double) {
         guard strings.indices.contains(string) else { return }

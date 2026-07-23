@@ -101,6 +101,14 @@ public struct Biquad: Sendable {
         return Biquad(b0: b0, b1: b1, b2: b2, a0: a0, a1: a1, a2: a2)
     }
 
+    /// First-order one-pole low-pass (`y += (1−a)·(x − y)`, a = e^(−2πfc/sr))
+    /// expressed as a biquad — the generic bowed string's formula HF rolloff
+    /// (gentler than butter-2; matches gutstring.post's lfilter([1−a],[1,−a])).
+    public static func onePoleLowpass(fc: Double, sr: Double) -> Biquad {
+        let a = exp(-2.0 * Double.pi * fc / sr)
+        return Biquad(b0: 1.0 - a, b1: 0, b2: 0, a0: 1.0, a1: -a, a2: 0)
+    }
+
     /// 4th-order **Butterworth** band-pass (`butter(2, [lo, hi], 'band')`) as a
     /// cascade of two biquads — verified equal to scipy to 0.0000 dB. The offline
     /// jawari morph-bandpass uses this maximally-flat response; the older RBJ
@@ -151,6 +159,53 @@ public struct Biquad: Sendable {
         return (H.re * H.re + H.im * H.im).squareRoot()
     }
 
+    /// 2nd-order ALLPASS sharing a body mode's pole pair (R = e^{−πf/(Q·sr)}).
+    /// |H| = 1 — pure phase rotation. Exact port of `blocks.body_dispersion`'s
+    /// per-mode section (the phase half of the common-body transfer).
+    public static func modeAllpass(f0: Double, q: Double, sr: Double) -> Biquad {
+        let R = exp(-Double.pi * f0 / (max(q, 0.5) * sr))
+        let c = -2 * R * cos(2 * Double.pi * f0 / sr)
+        return Biquad(b0: R * R, b1: c, b2: 1, a0: 1, a1: c, a2: R * R)
+    }
+
+    // MARK: - Graphical-EQ helpers (shared by the DSP chain and the UI curve)
+
+    /// Build the biquad for one graphical-EQ node, mapping `type` → RBJ design.
+    /// Single source of truth so the drawn curve (`magnitude`) is bit-faithful to
+    /// the running filter. Clamps `freq` to `[20, 0.49·sr]`. (Shelves use a fixed
+    /// slope; the node's `q` is ignored for them — see `EQBandType.usesQ`.)
+    public static func forBand(_ b: EQBand, sr: Double) -> Biquad {
+        let f = min(max(20, b.freq), 0.49 * sr)
+        switch b.type {
+        case .peaking:   return peaking(f0: f, gainDB: b.gainDB, q: max(0.05, b.q), sr: sr)
+        case .lowShelf:  return lowShelf(f0: f, gainDB: b.gainDB, sr: sr)
+        case .highShelf: return highShelf(f0: f, gainDB: b.gainDB, sr: sr)
+        case .highPass:  return highpass(fc: f, sr: sr, q: max(0.05, b.q))
+        case .lowPass:   return lowpass(fc: f, sr: sr, q: max(0.05, b.q))
+        }
+    }
+
+    /// The per-voice stage low-pass (the graphical EQ's right-edge node):
+    /// resonance 0..1 → Q 0.707 (Butterworth) .. 8 (resonant peak). Shared by
+    /// `VoiceFX.makeLP` and the UI so the curve matches the filter.
+    public static func stageLowpass(cutoff: Double, resonance: Double, sr: Double) -> Biquad {
+        let q = 0.70710678 + max(0, min(1, resonance)) * (8.0 - 0.70710678)
+        return lowpass(fc: min(max(20, cutoff), 0.49 * sr), sr: sr, q: q)
+    }
+
+    /// |H(e^{jω})| of this (a0-normalised) biquad at `f` Hz — the linear magnitude
+    /// response, exact for any design. Used to draw the EQ curve and to derive the
+    /// post-EQ spectrum overlay analytically (post-dB = pre-dB + 20·log10(mag)).
+    public func magnitude(atHz f: Double, sr: Double) -> Double {
+        let w = 2 * Double.pi * f / sr
+        let cw = cos(w), sw = sin(w), c2 = cos(2 * w), s2 = sin(2 * w)
+        let numRe = b0 + b1 * cw + b2 * c2, numIm = -(b1 * sw + b2 * s2)
+        let denRe = 1 + a1 * cw + a2 * c2, denIm = -(a1 * sw + a2 * s2)
+        let num = (numRe * numRe + numIm * numIm).squareRoot()
+        let den = (denRe * denRe + denIm * denIm).squareRoot()
+        return num / max(den, 1e-12)
+    }
+
     /// Constant-skirt band-pass (RBJ BPF, peak gain = Q). `lo`/`hi` set the
     /// centre (geomean) and bandwidth in octaves.
     public static func bandpass(lo: Double, hi: Double, sr: Double) -> Biquad {
@@ -174,6 +229,10 @@ public struct Biquad: Sendable {
 struct Cx {
     var re: Double, im: Double
     init(_ re: Double, _ im: Double) { self.re = re; self.im = im }
+    static let zero = Cx(0, 0)
+    /// e^{-jθ} (unit phasor) — used by the coupled stability transfer sweeps.
+    static func expMinusJ(_ theta: Double) -> Cx { Cx(cos(theta), -sin(theta)) }
+    var magnitude: Double { (re * re + im * im).squareRoot() }
     static func + (a: Cx, b: Cx) -> Cx { Cx(a.re + b.re, a.im + b.im) }
     static func - (a: Cx, b: Cx) -> Cx { Cx(a.re - b.re, a.im - b.im) }
     static func * (a: Cx, b: Cx) -> Cx { Cx(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re) }

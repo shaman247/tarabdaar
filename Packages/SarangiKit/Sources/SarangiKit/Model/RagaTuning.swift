@@ -32,6 +32,10 @@ public enum RagaTuning {
     public static let ragas: [Raga] = [
         Raga(id: 1, name: "E♭ harmonic minor", intervals: [0, 2, 3, 5, 7, 8, 11], tonicHint: 311.13),
         Raga(id: 2, name: "Bhairav",           intervals: [0, 1, 4, 5, 7, 8, 11], tonicHint: 293.66),
+        // Pilu session (2026-07): 9-note mixed/thumri scale (both komal+shuddha
+        // ga AND ni). Sa = 328.9 Hz — the recorded session tonic (E4 − 4c, a
+        // semitone below concert F; upstream reports/pilu_pitch_map.md).
+        Raga(id: 3, name: "Pilu",              intervals: [0, 2, 3, 4, 5, 7, 9, 10, 11], tonicHint: 328.9),
     ]
     public static func raga(id: Int) -> Raga { ragas.first { $0.id == id } ?? ragas[0] }
 
@@ -61,24 +65,31 @@ public enum RagaTuning {
         let vadi = ratios.count >= 2 ? ratios[ratios.count - 2] : 1.6
 
         // (ratio, rel_gain, t60, bright, sigma_cents, group)
+        // t60s verbatim from raga.build_strings (goldens assert parity) — the
+        // 2026-07 refit lengthened them (5/7/9 s); with `B_damp` in-loop f²
+        // damping only the FUNDAMENTAL keeps that ring, upper partials decay
+        // in fractions of a second (sympathetic selectivity by harmonic order).
         var specs: [(Double, Double, Double, Bool, Double, StringGroup)] = []
-        for r in chromaticRatios { specs.append((r, 0.40, 2.5, false, 6.0, .chromatic)) }   // A: 15 chromatic
-        for r in ratios { specs.append((r, 0.85, 1.8, true, 3.5, .scale)) }                 // B: scale-tuned mid
-        specs.append((1.0, 0.95, 2.6, false, 9.0, .scale))                                  //   Sa doubling
-        specs.append((pa, 0.90, 2.6, false, 9.0, .scale))                                   //   Pa doubling
+        for r in chromaticRatios { specs.append((r, 0.40, 5.0, false, 6.0, .chromatic)) }   // A: 15 chromatic
+        for r in ratios { specs.append((r, 0.85, 5.0, true, 3.5, .scale)) }                 // B: scale-tuned mid
+        specs.append((1.0, 0.95, 7.0, false, 9.0, .scale))                                  //   Sa doubling
+        specs.append((pa, 0.90, 7.0, false, 9.0, .scale))                                   //   Pa doubling
         let lowSet = [1.0, pa, vadi, ratios.count > 2 ? ratios[2] : vadi]                   // C: low choir
-        for r in lowSet { specs.append((r * 0.5, 0.80, 3.0, false, 3.5, .lowOctave)) }
-        specs.append((0.5, 0.95, 3.5, false, 4.0, .lowOctave))                              //   low Sa
-        specs.append((pa * 0.5, 0.85, 3.5, false, 4.0, .lowOctave))                         //   low Pa
-        specs.append((vadi * 0.5, 0.75, 3.0, false, 4.0, .lowOctave))
-        for r in ratios.prefix(6) { specs.append((r * 2.0, 0.70, 1.2, true, 3.5, .upperOctave)) } // D: 6 upper octave
+        for r in lowSet { specs.append((r * 0.5, 0.80, 7.0, false, 3.5, .lowOctave)) }
+        specs.append((0.5, 0.95, 9.0, false, 4.0, .lowOctave))                              //   low Sa
+        specs.append((pa * 0.5, 0.85, 8.0, false, 4.0, .lowOctave))                         //   low Pa
+        specs.append((vadi * 0.5, 0.75, 7.0, false, 4.0, .lowOctave))
+        for r in ratios.prefix(6) { specs.append((r * 2.0, 0.70, 3.5, true, 3.5, .upperOctave)) } // D: 6 upper octave
 
         var out: [(ResolvedString, StringGroup)] = []
         for (ratio, gain, t60, bright, sigma, group) in specs {
             let cents = detune ? min(12.0, max(-12.0, rng.normal(sigma: sigma))) : 0.0
             let f = tonic * ratio * pow(2.0, cents / 1200.0)
             if f >= taraf_lo, f <= taraf_hi {
-                out.append((ResolvedString(freq: (f * 1000).rounded() / 1000, gain: gain, t60: t60, bright: bright), group))
+                // class law (raga.build_strings): choir A (chromatic) = chrom,
+                // diatonic/doublings/low/upper = RAGA-tuned (buzz most)
+                out.append((ResolvedString(freq: (f * 1000).rounded() / 1000, gain: gain, t60: t60, bright: bright,
+                                           raga: group != .chromatic), group))
             }
         }
         return out

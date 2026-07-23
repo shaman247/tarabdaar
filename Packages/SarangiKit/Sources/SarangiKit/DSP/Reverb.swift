@@ -5,8 +5,8 @@ import Foundation
 /// this uses a compact Freeverb-style tank with RT60-matched feedback, the same
 /// 100–9000 Hz band-limit, running-RMS energy match, and a **decorrelated side**
 /// so `L=mid+s, R=mid−s`: width changes the L/R correlation without touching the
-/// mono sum (the `width_for_corr` relationship `F_width` encodes). `F_width` is
-/// read directly from the preset (it's a baked scalar).
+/// mono sum (`w = sqrt((1−corr)/(1+corr))`, the relationship `F_width` encodes).
+/// `F_width` is read directly from the preset (it's a baked scalar).
 public struct Reverb: Sendable {
     private var predelay: DelayLine
     private var mid: ReverbTank
@@ -26,6 +26,19 @@ public struct Reverb: Sendable {
         hpS = Biquad.highpass(fc: 100, sr: sr); lpS = Biquad.lowpass(fc: min(9000, 0.45 * sr), sr: sr)
         rmsDry = RunningRMS(tauMs: 200, sr: sr); rmsWet = RunningRMS(tauMs: 200, sr: sr)
         rmsSide = RunningRMS(tauMs: 200, sr: sr); rmsMid = RunningRMS(tauMs: 200, sr: sr)
+    }
+
+    /// Mono `x` → ADDITIVE mono wet (scaled by `mix`, energy-matched to the
+    /// dry level). Stereo image now comes from the bank's per-string pans; the
+    /// room is mono and the caller splits it equally across channels.
+    public mutating func processMono(_ x: Double) -> Double {
+        let dRMS = rmsDry.process(x)
+        if mix <= 0 { return 0 }
+        let pre = predelay.process(x)
+        var wet = lpM.process(hpM.process(mid.process(pre)))
+        let wRMS = rmsWet.process(wet)
+        wet *= (dRMS + 1e-12) / (wRMS + 1e-12)
+        return mix * wet
     }
 
     /// Mono `x` → stereo (L, R).

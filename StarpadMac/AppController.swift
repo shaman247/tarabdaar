@@ -30,6 +30,10 @@ final class AppController: ObservableObject {
     let midi: MIDIEngine
     let midiIn: MIDIInput
 
+    /// Live FX-stage spectra for the graphical EQ (FX tab). Polls the audio
+    /// engine at 30 Hz while an EQ is visible; views read its published frames.
+    let spectrum: SpectrumProvider
+
     /// Mac-side iPad simulator (Simulator tab). Owns its own
     /// `NoteManager` + `MockMotionSource`. Constructed lazily here so
     /// `MacMainWindow` can hand a single live instance to the view.
@@ -48,13 +52,56 @@ final class AppController: ObservableObject {
     /// `PitchPadEngine` as the MPE emitter (fed the resolved ratio per shape);
     /// pitches derive from `pitchPad`'s scale + tonic (Mac-only, no sync).
     let stringPad: PitchPadEngine
+    /// Fret Pad tab — a fourth playing surface: vertical fret segments whose
+    /// x-position is their pitch, with onset-only snapping. Reuses a
+    /// `PitchPadEngine` as the MPE emitter; pitches derive from `pitchPad`'s
+    /// scale + tonic (Mac-only, no sync).
+    let fretPad: PitchPadEngine
+    /// Computer-keyboard note input. App-wide while enabled; plays the
+    /// Pitch Pad scale through `pitchPad`. See `KeyboardNotePlayer`.
+    let keyboard: KeyboardNotePlayer
 
     /// The String Pad's arrangement of pitch shapes (Mac-only). Auto-saved to
     /// disk (debounced) by a sink in `start()`; edited live from the tab.
     @Published var stringArrangement = StringArrangement(notes: [], stringCount: 0)
 
+    /// The Fret Pad's fret segments (Mac-only). Auto-saved to disk (debounced)
+    /// by a sink in `start()`; edited live from the tab.
+    @Published var fretArrangement = FretArrangement(segments: [])
+
     /// Active preset, or nil if none has been applied this session.
     @Published private(set) var currentPreset: SoundPreset?
+
+    /// Which base voice feeds the sarangi model (Setup tab): one of the four
+    /// dry SWAM Solo Strings, or our own **sitar model**. For SWAM, all four
+    /// share the dry bow `hostedAUParams` + CC blob, so switching only swaps the
+    /// component subType. For the sitar, the SWAM AU is unloaded and the sitar
+    /// model becomes the excitation (note→pluck+glide, rendered inside the
+    /// sarangi effect). Persisted; applies on change. (`applyPreset` applies it
+    /// too, so a preset switch keeps the chosen voice.)
+    @Published var baseVoice: BaseVoice = AppController.loadBaseVoice() {
+        didSet {
+            guard baseVoice != oldValue else { return }
+            UserDefaults.standard.set(baseVoice.rawValue, forKey: "starpad.baseVoice")
+            applyBaseVoice()
+        }
+    }
+
+    /// Restore the persisted base voice, migrating the older
+    /// `starpad.hostedInstrument` (SWAM-only) key if present. Fresh installs
+    /// default to the fitted sarangi model — the shipped instrument.
+    private static func loadBaseVoice() -> BaseVoice {
+        let d = UserDefaults.standard
+        if let raw = d.string(forKey: "starpad.baseVoice"),
+           let v = BaseVoice(rawValue: raw) { return v }
+        switch d.string(forKey: "starpad.hostedInstrument") {
+        case "viola":      return .swamViola
+        case "cello":      return .swamCello
+        case "doubleBass": return .swamDoubleBass
+        case "violin":     return .swamViolin
+        default:           return .sarangiModel
+        }
+    }
 
     /// Transient feedback for the "Capture SWAM State" dev action.
     @Published var swamCaptureStatus: String = ""
@@ -123,6 +170,11 @@ final class AppController: ObservableObject {
     }
 
     private var droneTimer: Timer?
+    // jt overload watchdog (see start())
+    private var jtStatsTimer: Timer?
+    private var lastJtDrops = 0.0
+    private var lastJtFlat = 0.0
+    private var lastRenderOverruns: UInt64 = 0
     private var dronePatternIndex = 0
 
     /// Pluck a tanpura string from the UI.
@@ -179,6 +231,8 @@ final class AppController: ObservableObject {
     }() {
         didSet {
             audio.setSitarParams(sitarParams)
+            // Keep the base-voice sitar's timbre in step when it's the source.
+            if baseVoice.isSitar { audio.setSitarBaseVoiceParams(sitarParams) }
             if let data = try? JSONEncoder().encode(sitarParams) {
                 UserDefaults.standard.set(data, forKey: Self.sitarParamsKey)
             }
@@ -230,6 +284,12 @@ final class AppController: ObservableObject {
 
     /// The ported sarangi model's editable state + engine bridge.
     let sarangi: SarangiStore
+
+    /// The String instrument's physics-parameter editor state (the
+    /// `bowed_string.json` scalars + persisted overrides). Edited in the
+    /// Sarangi tab (⌘3, `StringParamsView`); pushes into
+    /// `AudioEngine.stringVoiceOverrides` with a debounced engine rebuild.
+    let stringParams: StringParamStore
 
     // MARK: - Viola body formants (hosted-AU path)
 
@@ -320,6 +380,7 @@ final class AppController: ObservableObject {
         self.midi = midi
         self.midiIn = midiIn
         midiIn.audioEngine = audio
+        self.spectrum = SpectrumProvider(audio: audio)
         // Simulator + audition runner. The simulator's back-ref to
         // `self` is wired below after all stored properties are set,
         // since Swift forbids referencing `self` until init completes.
@@ -335,16 +396,32 @@ final class AppController: ObservableObject {
         // The String Pad is a third MPE emitter, same as the Chord Pad.
         self.stringPad = PitchPadEngine(audio: audio)
         self.stringPad.tonicMidi = self.pitchPad.tonicMidi
+        // The Fret Pad is a fourth MPE emitter, same pattern.
+        self.fretPad = PitchPadEngine(audio: audio)
+        self.fretPad.tonicMidi = self.pitchPad.tonicMidi
+        // Fret Pad Snap default: 24 px (not the shared 16) — fitted to real
+        // iPad onsets (2026-07-16 phrase recording: worst onset 14.9 px, so
+        // 16 left zero headroom; 24 ≈ 43¢ stays under the 40 px minimum fret
+        // gap). Syncs to the iPad while the Fret Pad layout is active.
+        self.fretPad.marginPixels = 24
+        // Computer-keyboard player drives the Pitch Pad engine directly.
+        self.keyboard = KeyboardNotePlayer(engine: self.pitchPad)
         // Restore the last-edited arrangement, or build a starter from the
         // current scale's degree count. (Assigning here doesn't fire the
         // autosave sink — that's wired in `start()`.)
         self.stringArrangement = StringArrangementStore.loadCurrent()
             ?? StringArrangement.defaultArrangement(
                 degreeCount: scaleDegrees(from: self.pitchPad.scale).count)
+        self.fretArrangement = FretArrangementStore.loadCurrent()
+            ?? FretArrangement.defaultArrangement(
+                degrees: scaleDegrees(from: self.pitchPad.scale))
         // The sarangi model owns its own tuning + strings (independent of the
         // Pitch Pad). Constructing the store loads the persisted/default state
         // and builds the initial `SarangiEngine`.
         self.sarangi = SarangiStore(audio: audio)
+        // The String voice's physics overrides (seeds the engine's override
+        // dict before `applyBaseVoice` builds the first BowEngine).
+        self.stringParams = StringParamStore(audio: audio)
 
         self.ccMappingLibrary = Self.loadCCMappingLibrary(
             defaultsKey: ccMappingDefaultsKey)
@@ -400,15 +477,47 @@ final class AppController: ObservableObject {
         pitchPad.start()
         chordPad.start()
         stringPad.start()
+        fretPad.start()
         audition.start()
         startScaleSync()
-        // Keep the Chord Pad's and String Pad's tonic locked to the Pitch
-        // Pad's. Independent of `startScaleSync` (which only pushes Pitch Pad
+        // jt overload watchdog: the String voice's async jawari web drops
+        // drive blocks / flat-fills when it misses its realtime budget —
+        // audible clicking. Log only when the counters GROW.
+        jtStatsTimer = Timer.scheduledTimer(withTimeInterval: 5.0,
+                                            repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if let s = self.audio.stringVoiceJtStats(), s.on > 0.5 {
+                if s.drops > self.lastJtDrops || s.flat > self.lastJtFlat {
+                    NSLog("Starpad: jt OVERLOAD — +%.0f dropped blocks, +%.0f flat-filled samples (totals %.0f/%.0f, fifo %.0f)",
+                          s.drops - self.lastJtDrops, s.flat - self.lastJtFlat,
+                          s.drops, s.flat, s.fill)
+                    self.lastJtDrops = s.drops
+                    self.lastJtFlat = s.flat
+                } else if s.drops < self.lastJtDrops || s.flat < self.lastJtFlat {
+                    // engine rebuilt — counters reset
+                    self.lastJtDrops = s.drops
+                    self.lastJtFlat = s.flat
+                }
+            }
+            // main-callback deadline: overruns glitch at the DEVICE (the
+            // audition WAV can't show them) — log whenever they grow
+            if let r = self.audio.stringVoiceRenderStats() {
+                if r.overruns > self.lastRenderOverruns {
+                    NSLog("Starpad: render OVERRUN — +%llu late callbacks (worst %.2f ms this period, total %llu/%llu)",
+                          r.overruns - self.lastRenderOverruns, r.maxMs,
+                          r.overruns, r.callbacks)
+                }
+                self.lastRenderOverruns = r.overruns
+            }
+        }
+        // Keep the Chord/String/Fret Pads' tonic locked to the Pitch Pad's.
+        // Independent of `startScaleSync` (which only pushes Pitch Pad
         // state to the iPad).
         pitchPad.$tonicMidi
             .sink { [weak self] in
                 self?.chordPad.tonicMidi = $0
                 self?.stringPad.tonicMidi = $0
+                self?.fretPad.tonicMidi = $0
             }
             .store(in: &cancellables)
 
@@ -417,6 +526,12 @@ final class AppController: ObservableObject {
         $stringArrangement
             .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
             .sink { StringArrangementStore.saveCurrent($0) }
+            .store(in: &cancellables)
+
+        // Auto-save the Fret Pad arrangement, same pattern.
+        $fretArrangement
+            .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
+            .sink { FretArrangementStore.saveCurrent($0) }
             .store(in: &cancellables)
 
         // Auto-sync the sarangi's sympathetic strings (tarab) to the Pitch Pad
@@ -466,7 +581,9 @@ final class AppController: ObservableObject {
             pitchPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             chordPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             stringPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
+            fretPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             $stringArrangement.map { _ in () }.eraseToAnyPublisher(),
+            $fretArrangement.map { _ in () }.eraseToAnyPublisher(),
             $ipadLayout.map { _ in () }.eraseToAnyPublisher(),
             midi.$destinationCount.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
         ]
@@ -483,6 +600,7 @@ final class AppController: ObservableObject {
         switch ipadLayout {
         case .chordPad:  margin = chordPad.marginPixels
         case .stringPad: margin = stringPad.marginPixels
+        case .fretPad:   margin = fretPad.marginPixels
         case .pitchPad:  margin = pitchPad.marginPixels
         }
         let state = SyncedScaleState(points: pitchPad.scale.points,
@@ -498,6 +616,11 @@ final class AppController: ObservableObject {
         // scale), so push it as a second SysEx message while it's active.
         if ipadLayout == .stringPad {
             midi.sendSysEx(StringArrangementSysEx.encode(stringArrangement),
+                           toDestinationsMatching: "Starpad")
+        }
+        // Likewise the Fret Pad's segment layout (third SysEx message).
+        if ipadLayout == .fretPad {
+            midi.sendSysEx(FretArrangementSysEx.encode(fretArrangement),
                            toDestinationsMatching: "Starpad")
         }
     }
@@ -525,12 +648,27 @@ final class AppController: ObservableObject {
         case "tanpuraGainDB":     tanpuraGainDB     = clamp(value, -24, 24)
         case "sitarGainDB":       sitarGainDB       = clamp(value, -24, 24)
         case "driveGain", "sarangiDriveGain": sarangiDriveGain = clamp(value, 0, 64)
+        // Base voice: 0 = SWAM Violin, 1 = Viola, 2 = Cello, 3 = Double Bass,
+        // 4 = sitar model. Lets a score A/B the excitation source.
+        case "baseVoice":
+            let all = BaseVoice.allCases
+            baseVoice = all[max(0, min(all.count - 1, Int(value.rounded())))]
         default:
-            // Sarangi model params: "sarangi.<paramId>" — the 27 ParamSpec ids
-            // (e.g. "sarangi.B_gain", "sarangi.mix_jaw", "sarangi.F_mix").
+            // Sarangi model params: "sarangi.<paramId>" — the 22 ParamSpec ids
+            // (e.g. "sarangi.B_gain", "sarangi.mix_drone", "sarangi.F_mix"),
+            // plus FX-rack paths ("sarangi.fx.<violinPre|global>.<field>").
             if name.hasPrefix("sarangi.") {
                 if sarangi.setAuditionParam(String(name.dropFirst(8)), value) { return }
                 NSLog("Starpad: no sarangi param '\(name.dropFirst(8))'")
+                return
+            }
+            // String-voice artifact overrides: "string.<key>" — any
+            // bowed_string.json scalar (e.g. "string.bow_jt_gain",
+            // "string.bow_rev_mix", "string.bow_live_trim"). Routed through
+            // the editor store (same path as the Sarangi-tab sliders), so
+            // scripted sweeps show in the UI and persist like hand edits.
+            if name.hasPrefix("string.") {
+                stringParams.setAuditionParam(String(name.dropFirst(7)), value)
                 return
             }
             // Sitar params route by path: "sitar.<path>" (same paths as
@@ -637,11 +775,45 @@ final class AppController: ObservableObject {
         // the old). The model expects dry SWAM input, so these stay.
         audio.setHostedAUFullState(state.hostedAUState)
         audio.setHostedAUParameterDefaults(state.hostedAUParams)
-        if let desc = state.hostedAudioUnit {
-            audio.loadHostedInstrument(desc)
+        // The preset supplies the dry params/state + whether a hosted AU is used
+        // at all; the *which* base voice (SWAM instrument or the sitar model) is
+        // the user's Setup-tab choice, applied here.
+        if state.hostedAudioUnit != nil {
+            applyBaseVoice()
         } else {
+            audio.setSitarBaseVoiceEnabled(false)
+            audio.setSarangiModelVoiceEnabled(false)
             audio.unloadHostedInstrument()
         }
+    }
+
+    /// Apply the selected base voice to the engine: a SWAM instrument loads the
+    /// hosted AU (model voices off); the sitar model or the fitted sarangi
+    /// model unloads SWAM and turns its own excitation on.
+    func applyBaseVoice() {
+        if let inst = baseVoice.swamInstrument {
+            audio.setSitarBaseVoiceEnabled(false)
+            audio.setSarangiModelVoiceEnabled(false)
+            audio.loadHostedInstrument(inst.descriptor)
+        } else if baseVoice.isSarangiModel {
+            audio.setSitarBaseVoiceEnabled(false)
+            audio.setSarangiModelVoiceEnabled(true)
+            audio.unloadHostedInstrument()
+        } else {
+            audio.setSarangiModelVoiceEnabled(false)
+            audio.setSitarBaseVoiceParams(sitarParams)
+            audio.setSitarBaseVoiceEnabled(true)
+            audio.unloadHostedInstrument()
+        }
+        // The Mac pads hold a flat CC11 per note (no tilt source). 100 ≈ a firm
+        // bow was tuned for the quiet SWAM; the fitted model's calibrated
+        // operating point is expr 0.251 (pair-3 gated median) — CC ≈ 32.
+        // Higher CC11 = deliberately loud bowing (the surfaces span ~16 dB).
+        let exprLevel: UInt8 = baseVoice.isSarangiModel ? 32 : 100
+        pitchPad.macExpressionLevel = exprLevel
+        chordPad.macExpressionLevel = exprLevel
+        stringPad.macExpressionLevel = exprLevel
+        fretPad.macExpressionLevel = exprLevel
     }
 
     // MARK: - Audio-engine pushes
@@ -754,9 +926,9 @@ final class AppController: ObservableObject {
     /// happens to land in a silent state and a fresh instantiation is
     /// the cheapest recovery.
     func reloadHostedInstrument() {
-        guard let preset = currentPreset,
-              let desc = preset.state().hostedAudioUnit else { return }
-        audio.loadHostedInstrument(desc)
+        guard currentPreset?.state().hostedAudioUnit != nil,
+              let inst = baseVoice.swamInstrument else { return }
+        audio.loadHostedInstrument(inst.descriptor)
     }
 
     /// Load a SWAM/AuMo hosted AU by 4-char subType (e.g. "Sva3" Viola,

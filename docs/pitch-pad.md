@@ -14,7 +14,7 @@ It runs on **both devices**, sharing the same geometry and engine:
   See [UI Layout — iPad](ui-layout.md#ipad). Perform-only: it has no scale
   editor — the scale is edited on the Mac and synced over USB-MIDI SysEx
   (see [MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad)).
-- **Mac** — the Pitch Pad **tab** (⌘4) is the design surface, where mouse +
+- **Mac** — the Pitch Pad **tab** (⌘7) is the design surface, where mouse +
   keyboard modifiers add the full editing toolkit described below.
 
 The sections below describe the full (Mac) feature set; the snap-drag /
@@ -54,7 +54,7 @@ in-process to `AudioEngine.sendHostedMIDI(...)` (like the
 in over USB. On the iPad, the engine is handed the app's shared
 `MIDIEngine` (`publishToCoreMIDI: true`) and emits real USB-MPE.
 
-Switch to the tab with **⌘4** (Mac).
+Switch to the tab with **⌘7** (Mac).
 
 ## Layout & visuals
 
@@ -401,3 +401,8 @@ MIDI bytes are delivered in-process: `MIDIEngine.onLocalEvent` →
 `PitchPadEngine.deliver(bytes:)` →
 `AudioEngine.sendHostedMIDI(status:data1:data2:)`. CoreMIDI is never
 touched.
+
+The Mac **computer keyboard** also plays through this same engine
+(`KeyboardNotePlayer` → `pitchPad.noteOn(touchId:ratio:)`), so a typed
+note is indistinguishable from a clicked one and inherits the pad's
+scale, tonic, and velocity. See [UI Layout — Computer keyboard](ui-layout.md).

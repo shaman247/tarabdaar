@@ -1,7 +1,7 @@
 # Chord Pad
 
 The **Chord Pad** is a second Mac-side playing surface (StarpadMac tab,
-⌘7), built for playing chords rather than designing scales. Where the
+⌘8), built for playing chords rather than designing scales. Where the
 [Pitch Pad](pitch-pad.md) lays one pitch per Voronoi cell along a
 log-frequency x-axis, the Chord Pad is a fixed **hex grid** whose pitch at
 each cell comes from a diatonic scale: every **column** is a stack of

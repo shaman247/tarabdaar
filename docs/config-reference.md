@@ -2,7 +2,7 @@
 
 System-level tunable parameters live in `Packages/StarpadCore/Sources/StarpadCore/Config.swift`. iPad dimension-mappable parameter ranges (glide speed, amplitude, MIDI CCs) are defined in `TiltMapping.swift` via `MappableParameter.defaultRange` and configured at runtime in the MAP editor. See [Sensors — Dimension System](sensors.md#dimension-system-parameter-mapping) for the full parameter table.
 
-The Mac-side **sarangi model** params (23 of them) live in `SarangiKit`'s `ParamSpec.all` (name, range, default, group, structural flag), edited in the Sarangi tab via `SarangiStore`. The sarangi's reverb / filter / EQ are **not** `ParamSpec` params — they're the per-voice **FX rack** (`FXRack` on `InstrumentState`, edited in the FX tab). The shared **master-FX** params (now the tanpura/sitar Room) live on `AppController` as `@Published` fields. Per-preset FX/hosted-AU defaults come from `SoundPreset.state()` in `StarpadMac/SoundPreset.swift`. The played voice is the sarangi model fed by a hosted Audio Unit (SWAM Violin, run dry); the AU has its own parameter space which you configure via its own UI (open via the HostedAUPill in the Mac top bar).
+The Mac-side **sarangi model** params (22 of them since the v57-only simplification) live in `SarangiKit`'s `ParamSpec.all` (name, range, default, group, structural flag), edited in the Sarangi tab via `SarangiStore`. The sarangi's FX-rack filter / EQ / reverb are **not** `ParamSpec` params — they're the 2-stage **FX rack** (`FXRack` on `InstrumentState`, edited in the FX tab; the model's own room is the `F_*` group). The shared **master-FX** params (now the tanpura/sitar Room) live on `AppController` as `@Published` fields. Per-preset FX/hosted-AU defaults come from `SoundPreset.state()` in `StarpadMac/SoundPreset.swift`. The played voice is the sarangi model fed by the selected base voice (the fitted sarangi source by default; optionally a hosted SWAM AU run dry — the AU has its own parameter space which you configure via its own UI, open via the HostedAUPill in the Mac top bar).
 
 ## Keyboard
 
@@ -98,85 +98,85 @@ The legacy keyboard is no longer on the playing path. The playing scale is the *
 
 ## Sarangi model (Mac)
 
-The Mac's played voice is the **sarangi model** (`SarangiKit`): the dry SWAM Violin audio is turned into a full sarangi by the block chain (body pre-EQ, a 37-string Karplus-Strong sympathetic bank, a jawari bridge exciter, body color + body FIR; the drone block was removed, and the old block-F Freeverb is now the per-voice FX rack). The model owns its own body + per-voice FX and goes straight to `mainMixerNode`, bypassing the master FX. See [Sound Design](sound-design.md) and [Sarangi](sarangi.md) for the architecture.
+The Mac's played voice is the **sarangi model** (`SarangiKit`): the base voice's dry audio (the fitted **sarangi model source** by default, or dry SWAM / the sitar) is turned into a full sarangi by the v57 **passive coupled bridge–body network** (played combs + the taraf web loading one bridge via a delay-free junction solve, the modal body + W side channel, the direct taraf tap, the radiation FIR + `E_lp`, and the optional drone/room — both fitted 0; Starpad's 2-stage FX rack sits on top, default off). The model owns its own body + room and goes straight to `mainMixerNode`, bypassing the master FX. See [Sound Design](sound-design.md) and [Sarangi](sarangi.md) for the architecture.
 
-There are **23 model parameters** (`SarangiKit.ParamSpec.all` — the upstream fit's set minus the 4 removed drone/`mix_drone` params and the 4 removed `F_*` reverb params, plus 3 Starpad-added: `sym_bow_follow`, `main_gain`, `sym_gain`), grouped Bank / Jawari / Body / Reverb (empty — `F_*` removed) / Mix. Each is either **structural** (rebuilds the engine's filter coefficients off-thread) or a **live scalar** (a gain/mix the render thread reads lock-free). They are owned + persisted by `SarangiStore` in `InstrumentState`; the Sarangi-tab sliders (⌘2) edit them directly, and audition scores reach them via `voiceParam` name `sarangi.<paramId>` (e.g. `sarangi.B_gain`, `sarangi.mix_jaw`). They are **not** part of the iPad's `MappableParameter` enum. Defaults below are the `ParamSpec` factory defaults; a fitted preset (`pair1`/`pair2`) overrides them.
+There are **22 model parameters** (`SarangiKit.ParamSpec.all` — the v57 live surface; the legacy jawari exciter `C_*`, `mix_dry`/`mix_bank`/`mix_jaw`, `sym_gain`, `sym_bow_follow`, `H1`–`H5`, `B_chorus`, `B_jawari`/`B_jawari_rel`, `B_couple`, `E_body`/`E_low_shelf_*`/`dry_lp`, and `F_width` were removed — none are read by the passive coupled render), grouped Bank / Drone / Body / Reverb / Mix. Each is either **structural** (rebuilds the engine's filter coefficients off-thread) or a **live scalar** (a gain the render thread reads per buffer). They are owned + persisted by `SarangiStore` in `InstrumentState`; the Sarangi-tab sliders (⌘3) edit them directly, and audition scores reach them via `voiceParam` name `sarangi.<paramId>` (e.g. `sarangi.B_gain`, `sarangi.N_taraf_dir`). They are **not** part of the iPad's `MappableParameter` enum. Defaults below are the `ParamSpec` factory defaults; the fitted preset (`sarangi_pilu`) overrides them.
 
-### Bank (block B — sympathetic strings)
-
-| Parameter | Range | Default | Structural | Label / description |
-|-----------|-------|---------|------------|---------------------|
-| `B_gain` | 0–1.2 | 0.4 | — | "Bank gain" — overall sympathetic-bank level. |
-| `B_t60_scale` | 0.5–2.8 | 1.0 | ✓ | "Decay × (t60)" — scales every string's t60 ring time. |
-| `B_bright` | 0–1.5 | 0.8 | — | "Bright choir" — level of the brighter raga-tuned choir relative to the clean chromatic row. |
-| `B_lp` | 0.1–1 | 0.4 | ✓ | "String brightness" — gut-string HF roll-off on the comb strings (clean choir = `0.6·B_lp`, bright/raga choir = `B_lp`). Lower = darker/muted tarab. |
-| `sym_bow_follow` | 0–1 | 0.7 | — | "Sym ↔ bow follow" — how much the bank fades WITH the bow (vs ringing on its own long t60). 0 = free authentic ring; 1 = the sym tracks the note for tight, responsive staccato. Non-fitted (Starpad-added). See [sarangi.md](sarangi.md) → Responsiveness. |
-
-### Jawari (block C — bridge buzz)
+### Bank (the taraf web + the junction tap)
 
 | Parameter | Range | Default | Structural | Label / description |
 |-----------|-------|---------|------------|---------------------|
-| `C_pre_hp` | 1500–3500 Hz | 2200 | ✓ | "Pre HP (Hz)" — high-pass before the shaper. |
-| `C_drive_min` | 1–3 | 1.5 | — | "Drive min" — shaper drive at low `amp`. |
-| `C_drive_max` | 4–20 | 12 | — | "Drive max" — shaper drive at full `amp`. |
-| `C_asym` | 0–0.5 | 0.3 | — | "Asymmetry" — `tanh` shaper asymmetry (even-harmonic content). |
-| `C_wet` | 0–0.6 | 0.25 | — | "Buzz wet" — wet level of the buzz. |
-| `C_rasp` | 0–1 | 0.2 | — | "Rasp" — extra buzz roughness. |
-| `C_top` | 0–0.8 | 0.15 | — | "Top edge" — high-frequency edge. |
-| `C_sweep_lo` | 3–7 ×f0 | 5 | ✓ | "Sweep lo (×f0)" — low bound of the morphing-bandpass sweep. |
-| `C_sweep_hi` | 10–20 ×f0 | 16 | ✓ | "Sweep hi (×f0)" — high bound of the sweep. |
-| `C_to_bank` | 0–1 | 0.3 | — | "Buzz → bright" — how much buzz feeds back into the bright choir's drive. |
+| `B_gain` | 0–6 | 0.4 | — | "Bank gain" — overall taraf level (also sets the per-string junction weights; within a choir the gain cancels in the impedance law). Fitted: ≈3.87. |
+| `B_t60_scale` | 0.5–3.55 | 1.0 | ✓ | "Decay × (t60)" — scales every string's t60 ring time. Fitted: ≈3.27. |
+| `B_bright` | 0–1.5 | 0 | — | "Bright choir" — level of the bright-tagged strings relative to the clean choir. |
+| `B_lp` | 0.1–1 | 0.4 | ✓ | "String brightness" — gut-string HF roll-off baked into the comb loop. |
+| `B_pol_split` | 0–6 ¢ | 0 | ✓ | "Polarization ¢" — every string becomes its two transverse polarizations, split ~this many cents (golden-ratio spread). Fitted: ≈2.75 ¢. |
+| `B_pol_gain` | 0.4–1 | 0.85 | ✓ | "Polarization gain" — the second polarization's gain. |
+| `B_pol_t60` | 0.3–1 | 0.65 | ✓ | "Polarization t60×" — the second polarization's decay multiplier. |
+| `B_inharm` | 0–0.3 | 0 | ✓ | "Wire stiffness" — in-loop dispersion allpass: partials ring sharp like stiff wire. Fitted: ≈0.245. |
+| `B_damp` | 0–1 | 0 | ✓ | "String damping" — in-loop f² damping: upper partials decay in fractions of a second while the fundamental keeps the string's t60 (sympathetic selectivity by harmonic order). Fitted: 0.6. |
+| `B_spread` | 0–1 | 0.7 | — | "Stereo spread" — per-string pan positions (frequency rank across the bridge) radiated through the W side channel → the mono sum is pan-invariant. |
+| `N_taraf_dir` | 0–0.12 | 0 | ✓ | "Taraf direct tap" — the direct taraf-velocity radiation tap: the ringing-comb persistence the junction's W cannot radiate. Preset-carried (never in `sarangi_coupled.json`). Fitted: 0.02. |
+| `N_taraf_dir_lp` | 0–4000 Hz | 900 | ✓ | "Tap low-pass (Hz)" — two cascaded one-poles shaping the tap (the causal twin of the offline zero-phase radiation-efficiency magnitude; ≤0 = unshaped). |
 
-> **Drone (block D) — REMOVED.** The `tonic/4` laraj drone (`DroneGen`, the
-> `D_*`/`mix_drone` params) was deleted: at sub‑bass it became a clipping low
-> rumble when the sym was boosted.
+### Drone (the sustained low drone, ≈ tonic/4)
 
-### Body (block E)
+The v57/Pilu fit ships `mix_drone` = 0 (session ground truth: no drone); the block stays playable live.
 
 | Parameter | Range | Default | Structural | Label / description |
 |-----------|-------|---------|------------|---------------------|
-| `E_low_shelf_f` | 80–300 Hz | 160 | ✓ | "Low shelf (Hz)". |
-| `E_low_shelf_db` | −6…+12 dB | 0 | ✓ | "Low shelf (dB)". |
-| `E_body` | 0–1.6 | 1.0 | — | "Body ring" — level of the 6 modal body resonances. |
+| `mix_drone` | 0–1 | 0 | — | "Drone" — drone level into the bridge force. |
+| `D_t60` | 0.5–6 s | 2.0 | ✓ | "Drone decay s". |
+| `D_level` | 0–1 | 0.36 | ✓ | "Drone level" (internal resonator level). |
+| `D_nharm` | 1–4 | 3 | ✓ | "Drone harmonics". |
+| `D_floor` | 0–1 | 0.6 | ✓ | "Drone floor" — activity-gate continuity floor. |
 
-> Block E also applies a measured min-phase **body FIR** (1025 taps) on the dry branch and the `eModes` body resonances (6 `BodyMode` peaks). The FIR + `D_nharm` + `E_modes` come from the fitted preset (`pairN.json` / `pairN_fir.json`) and are not slider-editable.
+### Body
 
-### Reverb — removed (now the per-voice FX rack)
+| Parameter | Range | Default | Structural | Label / description |
+|-----------|-------|---------|------------|---------------------|
+| `E_lp` | 6–19 kHz | 16000 | ✓ | "Body low-pass (Hz)" — the body's radiation low-pass (the skin's efficiency rolloff), after the radiation FIR. Fitted: ≈18.7 kHz. |
 
-The old block-F Freeverb params (`F_rt60` / `F_mix` / `F_predelay` / `F_width`) were **removed** from `ParamSpec` (the `ParamGroup.reverb` enum case is kept, empty). The sarangi's reverb / filter / EQ are now the per-voice **FX rack** (`FXRack`), stored on `InstrumentState.fx` (persisted; `SarangiStore.persistKey` bumped v3→v4) and edited in the **FX tab** (⌘4) — see [FX rack](#fx-rack-mac). It is not a slider group here.
+> The rest of the body is **not** slider-editable: the modal admittance/radiation bank + the radiation FIR come from `sarangi_coupled.json` (the FIR ships at both 44.1 kHz and 48 kHz), and the output user-EQ (`VoiceEQBand` on `InstrumentState.eqBands`) defaults **flat** (the fitted W valley superseded the old de-horn cuts; `VoiceEQBand.dehornA` remains available).
+
+### Reverb (the room)
+
+The v57 ear-law is **no reverb** — the ringing taraf is the room — so the preset ships `F_mix` = 0; the sliders stay for taste. (The FX rack's per-stage reverbs are separate, on `InstrumentState.fx`, also default off.)
+
+| Parameter | Range | Default | Structural | Label / description |
+|-----------|-------|---------|------------|---------------------|
+| `F_rt60` | 0.5–2 s | 1.2 | ✓ | "Room RT60 (s)". |
+| `F_mix` | 0–0.6 | 0 | — | "Room mix" — mono additive wet, split equally L/R. |
+| `F_predelay` | 8–40 ms | 20 | ✓ | "Pre-delay (ms)". |
 
 ### Mix
 
 | Parameter | Range | Default | Structural | Label / description |
 |-----------|-------|---------|------------|---------------------|
-| `mix_dry` | 0.5–1.2 | 0.85 | — | "Dry (violin)" — level of the dry bowed-violin branch (through block E body). |
-| `mix_bank` | 0–1.5 | 0.5 | — | "Bank" — sympathetic-bank level into the supplement mix. |
-| `mix_jaw` | 0–1.5 | 1.0 | — | "Jawari" — buzz level into the supplement mix. |
-| `main_gain` | 0–6 | 1.0 | — | "Main voice gain" — playback level of the bowed note (dry + jawari). Applied at the output mix only, so it does **not** change how hard the sympathetic strings are excited. Non-fitted (Starpad-added). |
-| `sym_gain` | 0–40 | 12 | — | "Sym voice gain" — playback level of the sympathetic bank. The bank is intrinsically ~30 dB below the main, so the range/default are large (12 ≈ −12 dB under the main; 40 ≈ equal). Non-fitted (Starpad-added). |
+| `main_gain` | 0–6 | 1.0 | — | "Main gain" — playback gain at the output mix only (never changes how hard the strings are driven). |
 
-Plus a Starpad-side **`sarangiDriveGain`** ("Drive (SWAM→model)", in the **FX tab's Violin section**, not a model param — lives on `AppController`/`AudioEngine`): lifts SWAM's raw output (~50× quieter than the fit reference) up to the model's operating level. A soft limiter (`SarangiEngine.softClip`) backstops loud peaks.
+Plus a Starpad-side **`sarangiDriveGain`** ("Drive (source→model)", FX tab's Pre-drive section — lives on `AppController`/`AudioEngine`, default 1): a trim on the drive into the network. With the model source, calibration is in the preset instead (`gin 2.6` / `gout 0.45`); with SWAM, raise it for presence. A soft limiter (`SarangiEngine.softClip`) backstops loud peaks.
 
-Plus two non-`ParamSpec` scalars on `SarangiParams`: `gin` (input gain, default 1.0) and `gout` (master output gain, default 1.0 — the Sarangi-tab "Output" slider, 0–2). Both are live scalars.
+Plus two non-`ParamSpec` scalars on `SarangiParams`: `gin` (input gain) and `gout` (master output gain — the Sarangi-tab "Output" slider). Both are live scalars.
 
 ### Sympathetic-string table + tuning
 
-The bank (block B) is a fully editable `[StringSpec]` table — each row `(freq, gain, t60, bright, enabled)` — **independent of the playing (Pitch Pad) scale** (the old auto-derive-from-scale behaviour was removed). It is generated for a **raga + tonic** by `RagaTuning.buildStrings` (JI ratios, a 37-string four-choir layout with seeded ±cents detune). Two ragas ship (E♭ harmonic minor, Bhairav). Editing a row, adding/removing strings, or changing raga/tonic triggers a structural rebuild. `regenerate()` rebuilds from raga + tonic (discarding edits); `transpose` scales every frequency to a new tonic keeping edits. See [Sarangi](sarangi.md).
+The taraf bank is a fully editable `[StringSpec]` table — each row `(freq, gain, t60, bright, enabled, group)` — edited in the **Tarab tab (⌘4)**. **By default it auto-tunes to the Pitch Pad scale** (`autoSyncToScale`); manual edits / raga picks detach it. Generated by `RagaTuning.buildChoirs` (JI ratios, four-choir layout, seeded ±cents detune — but note the fitted `sarangi_pilu` preset LOADS its exact offline table instead: a regeneration, including the default scale auto-sync, replaces it and audibly weakens the ring — the string-table law). Editing a row, adding/removing strings, or changing raga/tonic triggers a structural rebuild. Three ragas ship: E♭ harmonic minor, Bhairav, **Pilu** (fitted). See [Sarangi](sarangi.md).
 
-### Presets
+### Preset
 
-Two fitted presets — `pair1` (E♭ harmonic minor) and `pair2` (Bhairav) — each bundle a `pairN.json` parameter file plus a `pairN_fir.json` block-E body FIR. Loading one reproduces that pair's full setup (raga + tonic + regenerated bank + params + FIR), so the live model matches its offline render. `pair1` is the default. The whole `InstrumentState` persists to UserDefaults and exports/imports as a `.sarangi` JSON file.
+One fitted preset — **`sarangi_pilu`** (the v57 Pilu-session fit, default — pair with the **Sarangi (model)** base voice) — bundles the params JSON plus the **exact offline string table** (`sarangi_pilu_strings.json`, 39 strings). Loading it reproduces the offline render's setup. The whole `InstrumentState` persists to UserDefaults (`persistKey` **v7**) and exports/imports as a `.sarangi` JSON file. The bundle also carries **`sarangi_coupled.json`** (the REQUIRED coupled network config — modes/residues, junction impedances, radiation FIR at 44.1 k + 48 k; the engine is silent without it), `sarangi_model_v57.json` (the fitted source model), and `live_comp.json` (live loudness calibration).
 
 ### FX rack (Mac)
 
-The sarangi's reverb / filter / EQ are a **per-voice FX rack** (`FXRack` in `SarangiKit`), stored on `InstrumentState.fx` and edited in the **FX tab** (⌘4). The model splits its output into a **Violin** voice (dry + jawari), a **Sym** voice (the bank), and a **Global** stage over the sum; each of the three stages is a low-pass **filter** (cutoff + resonance) → **3-band parametric EQ** (`EQBand`: `freq` / `gainDB` / `q`) → **reverb** (`reverbMix` + `reverbWidth` + `reverbRT60`), behind an **enable** flag. Defaults: Violin **on** (reverb ≈ 0.25 + open filter), Sym **off** (dry), Global **off**.
+The **FX rack** (`FXRack` in `SarangiKit`) sits on top of the model's own room, stored on `InstrumentState.fx` and edited in the **FX tab** (⌘5). **Two stages** since the v57 re-vendor (the passive coupled network has one output stream, so the old per-voice Violin/Sym stages were removed): `violinPre` (a *pre-drive* stage that shapes the played voice BEFORE it excites the bridge/taraf web) and `global` (mid/side on the network's output). Each stage is a low-pass **filter** (cutoff + resonance) → an interactive **graphical EQ** (a variable-length list of `EQBand`s, each `{ id, freq, gainDB, q, type, enabled }`; `type` ∈ `peaking` / `lowShelf` / `highShelf` / `highPass` / `lowPass`; 0…`VoiceFXParams.maxEQBands` = 12) → **reverb** (`reverbMix` + `reverbWidth` + `reverbRT60`), behind an **enable** flag. **Defaults: BOTH stages OFF** (the fitted v57 chain is the sound). Old persisted data decodes tolerantly; `persistKey` is **v7**.
 
-A stage's `enabled` + `reverbMix` + `reverbWidth` are **live scalars** (`AudioEngine.applySarangiFXScalars`); its `filterCutoff` / `filterResonance` / EQ / `reverbRT60` are **structural** (rebuild). Audition `voiceParam` paths:
+A stage's `enabled` + `reverbMix` + `reverbWidth` are **live scalars** (`AudioEngine.applySarangiFXScalars`); its `filterCutoff` / `filterResonance` / **EQ bands** are **live filter** — an in-place biquad coefficient swap on the running engine (`AudioEngine.applySarangiFXFilters`, click-free, no rebuild). Only `reverbRT60` is **structural** (rebuild). Audition `voiceParam` paths:
 
-- `sarangi.fx.<violin|sym|global>.<enabled|reverbMix|reverbWidth|reverbRT60|filterCutoff|filterResonance>`
-- `sarangi.fx.<stage>.eq<0..2>.<freq|gainDB|q>`
+- `sarangi.fx.<violinPre|global>.<enabled|reverbMix|reverbWidth|reverbRT60|filterCutoff|filterResonance>`
+- `sarangi.fx.<stage>.eq<N>.<freq|gainDB|q>` (arbitrary existing band index N)
 
-See [Sarangi — FX rack](sarangi.md#fx-rack-the-fx-tab-4).
+See [Sarangi — FX rack](sarangi.md#fx-rack-the-fx-tab-5).
 
 ### Master FX (tanpura/sitar Room)
 
@@ -190,22 +190,22 @@ See [Sarangi — FX rack](sarangi.md#fx-rack-the-fx-tab-4).
 
 ### Hosted AU
 
-The sarangi model is fed by a hosted Audio Unit; each `SoundPreset.State` carries an `AudioEngine.HostedAUDescriptor`.
+The sarangi model can be fed by a hosted Audio Unit (a dry SWAM base voice — the shipping default is the fitted sarangi source instead); each `SoundPreset.State` carries an `AudioEngine.HostedAUDescriptor`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `hostedAudioUnit` | `HostedAUDescriptor?` | 3-tuple of 4-char codes `(type, subType, manufacturer)` passed to CoreAudio's `AudioComponentDescription` to locate the AU. `("aumu", "Svl3", "AuMo")` for SWAM **Violin** 3 (the shipping sarangi base). `nil` means "no hosted AU" (the model runs on silence — useful for testing only). |
+| `hostedAudioUnit` | `HostedAUDescriptor?` | 3-tuple of 4-char codes `(type, subType, manufacturer)` passed to CoreAudio's `AudioComponentDescription` to locate the AU. `("aumu", "Svl3", "AuMo")` for SWAM **Violin** 3 (the default SWAM pick; the shipping default base voice is the fitted sarangi source, which loads no AU). `nil` means "no hosted AU" (the model runs on silence — useful for testing only). |
 | `hostedAUParams` | `[String: Float]` | SWAM AU param id → value, applied to every slot on load by `setHostedAUParameterDefaults`. Carries the matched bow timbre (Bow Position/Pressure/Noise, String Resonance) **and the dry-SWAM block** — `Ambiente Room Simulator` / `Reverb Mix` / `Reverb Time` / `Early Reflection Gain` / `Ambience Amount` / `Room Sizes` / `Instrument Body` all 0, so SWAM contributes no internal room/body (the sarangi model handles both). The model needs a clean dry violin. |
 
 `AudioEngine.loadHostedInstrument` instantiates `Config.maxHostedPolyVoices` copies in parallel since SWAM Violin is monophonic. See [Polyphonic Mode](#polyphonic-mode) below.
 
 **Tuning**:
 
-- For a brighter/sharper sarangi: lower `B_t60_scale` for a tighter bank, raise `B_bright` for more of the bright choir, and lean on the jawari (`mix_jaw`, `C_wet`, `C_drive_max`, `C_top`).
-- For more bridge buzz/shimmer: raise `C_wet` / `C_rasp` / `C_to_bank`; sweep `C_sweep_lo`/`C_sweep_hi` for the buzz character.
-- Balance the layers with the **Mix** group (`mix_dry`/`main_gain` vs `mix_bank`/`mix_jaw`/`sym_gain`); `gout` is the master output trim, and "Drive (SWAM→model)" sets the input level.
-- Space comes from the per-voice **FX rack** (the FX tab's per-stage reverb mix/width/rt60), not the master reverb — the sarangi bypasses it.
-- **Tune the tarab to the raga.** Pick a raga + tonic (or load `pair1`/`pair2`) so the sympathetic strings match the played notes. A mistuned bank rings at unrelated pitches.
+- For a brighter/sharper sarangi: lower `B_t60_scale` for a tighter bank, raise `B_lp` for brighter strings, raise `E_lp` to open the body's radiation.
+- For more ringing-string presence: raise `B_gain`, and `N_taraf_dir` (with `N_taraf_dir_lp` shaping how dark the tap is).
+- Level with `main_gain`/`gout` (output only — the strings' excitation is set by `gin` and "Drive (source→model)").
+- Space comes from the room group (`F_mix`/`F_rt60` — fitted 0: the ringing taraf IS the room) or the **FX rack**'s per-stage reverbs, not the master reverb — the sarangi bypasses it.
+- **Tune the tarab to the raga.** By default the tarab follows the Pitch Pad scale; the fitted `sarangi_pilu` table is exact for Pilu (a re-sync replaces it). A mistuned bank rings at unrelated pitches.
 
 ## Tanpura drone (Mac)
 

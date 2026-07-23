@@ -9,6 +9,7 @@ public enum PadLayout: Int, Codable, CaseIterable, Identifiable {
     case pitchPad = 0
     case chordPad = 1
     case stringPad = 2
+    case fretPad = 3
 
     public var id: Int { rawValue }
     public var label: String {
@@ -16,6 +17,7 @@ public enum PadLayout: Int, Codable, CaseIterable, Identifiable {
         case .pitchPad:  return "Pitch Pad"
         case .chordPad:  return "Chord Pad"
         case .stringPad: return "String Pad"
+        case .fretPad:   return "Fret Pad"
         }
     }
 }
@@ -150,17 +152,18 @@ public enum SyncedScaleStore {
 /// is the active layout.
 ///
 /// Wire format: `F0 7D 02 <base64(binary blob) as ASCII> F7`. Blob layout:
-///   `[ver:1][stringCount:1][ghost:1][noteCount:1]` then per note
+///   `[ver:1][stringCount:1][ghost:1][rotationDeg:1][noteCount:1]` then per note
 ///   `[degreeIndex:1][octave+64:1][stringIndex:1][centerY:1][height:1][enabled:1]`.
 public enum StringArrangementSysEx {
     public static let nonCommercialID: UInt8 = 0x7D
     public static let arrangementSubID: UInt8 = 0x02
-    private static let version: UInt8 = 1
+    private static let version: UInt8 = 2
 
     public static func encode(_ a: StringArrangement) -> [UInt8] {
         func b7(_ v: Int) -> UInt8 { UInt8(max(0, min(127, v))) }
         let notes = a.notes.prefix(127)
         var blob: [UInt8] = [version, b7(a.stringCount), b7(a.ghostStringsPerSide),
+                             b7(Int(a.rotationDegrees.rounded())),
                              UInt8(notes.count)]
         for n in notes {
             blob.append(b7(n.degreeIndex))
@@ -183,12 +186,13 @@ public enum StringArrangementSysEx {
         if b.last == 0xF7 { b.removeLast() }
         guard b.count >= 2, b[0] == nonCommercialID, b[1] == arrangementSubID else { return nil }
         guard let blob = Data(base64Encoded: Data(b[2...])).map(Array.init),
-              blob.count >= 4, blob[0] == version else { return nil }
+              blob.count >= 5, blob[0] == version else { return nil }
 
         let stringCount = Int(blob[1])
         let ghost = Int(blob[2])
-        let count = Int(blob[3])
-        var i = 4
+        let rotation = Double(blob[3])
+        let count = Int(blob[4])
+        var i = 5
         var notes: [StringNote] = []
         for _ in 0..<count {
             guard i + 6 <= blob.count else { return nil }
@@ -201,7 +205,7 @@ public enum StringArrangementSysEx {
             i += 6
         }
         return StringArrangement(notes: notes, stringCount: stringCount,
-                                 ghostStringsPerSide: ghost)
+                                 ghostStringsPerSide: ghost, rotationDegrees: rotation)
     }
 }
 
@@ -218,6 +222,87 @@ public enum StringArrangementSyncStore {
     public static func load() -> StringArrangement? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return StringArrangementSysEx.decode([UInt8](data))
+    }
+}
+
+// MARK: - SysEx Fret-Pad arrangement codec
+
+/// Encodes / decodes a `FretArrangement` as a **third** Starpad SysEx message
+/// (subtype `0x03`), so the Mac can push the Fret Pad's segment layout to the
+/// iPad alongside the scale. Like the String Pad's arrangement, the fret
+/// layout is its own state (the vertical snap zones aren't derivable from the
+/// scale) — sent only while the Fret Pad is the active layout.
+///
+/// Wire format: `F0 7D 03 <base64(binary blob) as ASCII> F7`. Blob layout:
+///   `[ver:1][ghostQuarterOctaves:1][flags:1][count:1]` then per segment
+///   `[degreeIndex:1][topY:1][bottomY:1][enabled:1]` (y quantized to 7 bits;
+///   the ghost extent rides as quarter-octaves, so 0.5 → 2; flags bit0 =
+///   tap legato). Blob v2 replaced v1's integer octaves-per-side with the
+///   fractional extent; v3 added the flags byte.
+public enum FretArrangementSysEx {
+    public static let nonCommercialID: UInt8 = 0x7D
+    public static let arrangementSubID: UInt8 = 0x03
+    private static let version: UInt8 = 3
+
+    public static func encode(_ a: FretArrangement) -> [UInt8] {
+        func b7(_ v: Int) -> UInt8 { UInt8(max(0, min(127, v))) }
+        let segments = a.segments.prefix(127)
+        var blob: [UInt8] = [version,
+                             b7(Int((a.ghostExtentOctaves * 4).rounded())),
+                             a.legato ? 1 : 0,
+                             UInt8(segments.count)]
+        for s in segments {
+            blob.append(b7(s.degreeIndex))
+            blob.append(b7(Int((s.topY * 127).rounded())))
+            blob.append(b7(Int((s.bottomY * 127).rounded())))
+            blob.append(s.enabled ? 1 : 0)
+        }
+        let b64 = Data(blob).base64EncodedData()
+        var out: [UInt8] = [0xF0, nonCommercialID, arrangementSubID]
+        out.append(contentsOf: b64)
+        out.append(0xF7)
+        return out
+    }
+
+    public static func decode(_ bytes: [UInt8]) -> FretArrangement? {
+        var b = bytes
+        if b.first == 0xF0 { b.removeFirst() }
+        if b.last == 0xF7 { b.removeLast() }
+        guard b.count >= 2, b[0] == nonCommercialID, b[1] == arrangementSubID else { return nil }
+        guard let blob = Data(base64Encoded: Data(b[2...])).map(Array.init),
+              blob.count >= 4, blob[0] == version else { return nil }
+
+        let extent = Double(blob[1]) / 4.0
+        let legato = blob[2] & 1 != 0
+        let count = Int(blob[3])
+        var i = 4
+        var segments: [FretSegment] = []
+        for _ in 0..<count {
+            guard i + 4 <= blob.count else { return nil }
+            segments.append(FretSegment(degreeIndex: Int(blob[i]),
+                                        topY: Double(blob[i + 1]) / 127.0,
+                                        bottomY: Double(blob[i + 2]) / 127.0,
+                                        enabled: blob[i + 3] != 0))
+            i += 4
+        }
+        return FretArrangement(segments: segments, ghostExtentOctaves: extent,
+                               legato: legato)
+    }
+}
+
+/// Persists the last synced Fret-Pad arrangement on the iPad (UserDefaults,
+/// stored as the compact SysEx blob), so it survives an offline relaunch.
+/// iPad-only; the Mac never reads/writes this.
+public enum FretArrangementSyncStore {
+    private static let key = "starpad.syncedFretArrangement.v1"
+
+    public static func save(_ a: FretArrangement) {
+        UserDefaults.standard.set(Data(FretArrangementSysEx.encode(a)), forKey: key)
+    }
+
+    public static func load() -> FretArrangement? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return FretArrangementSysEx.decode([UInt8](data))
     }
 }
 
@@ -250,6 +335,11 @@ public final class ScaleSyncReceiver: ObservableObject {
     /// updated on each push.
     @Published public private(set) var stringArrangement: StringArrangement?
 
+    /// The last synced Fret-Pad arrangement (its own SysEx message, subtype
+    /// `0x03`), for the iPad Fret Pad surface. Seeded from the persisted store
+    /// on `start()` and updated on each push.
+    @Published public private(set) var fretArrangement: FretArrangement?
+
     /// Fired on the main thread with each decoded state (scale + tonic +
     /// margin). The receiver also persists it via `SyncedScaleStore`.
     public var onState: ((SyncedScaleState) -> Void)?
@@ -268,9 +358,10 @@ public final class ScaleSyncReceiver: ObservableObject {
 
     public func start() {
         guard client == 0 else { return }
-        // Seed the String-Pad arrangement from the last persisted push so the
-        // String Pad surface is populated on an offline relaunch.
+        // Seed the String-Pad / Fret-Pad arrangements from the last persisted
+        // push so those surfaces are populated on an offline relaunch.
         stringArrangement = StringArrangementSyncStore.load()
+        fretArrangement = FretArrangementSyncStore.load()
         let cs = MIDIClientCreateWithBlock("Starpad Scale In" as CFString, &client) { [weak self] _ in
             self?.connectAllSources()
         }
@@ -374,6 +465,12 @@ public final class ScaleSyncReceiver: ObservableObject {
                 guard let self else { return }
                 StringArrangementSyncStore.save(arrangement)
                 self.stringArrangement = arrangement
+            }
+        } else if let arrangement = FretArrangementSysEx.decode(bytes) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                FretArrangementSyncStore.save(arrangement)
+                self.fretArrangement = arrangement
             }
         }
     }

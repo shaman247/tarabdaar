@@ -1,7 +1,7 @@
 # Tanpura Drone
 
 A physically-informed, **harmonic-resolved** tanpura model built into
-StarpadMac, with its own Tanpura tab (⌘9), an offline renderer for
+StarpadMac, with its own Tanpura tab, an offline renderer for
 autonomous sound-matching, and a measurement pipeline that fits the model
 to a reference recording (`tanpura.mp3`).
 

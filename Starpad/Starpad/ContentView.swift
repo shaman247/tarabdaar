@@ -85,6 +85,14 @@ struct ContentView: View {
         }
         let onRecalibrate = { showCalibration = true }
         switch pad.layout {
+        case .fretPad:
+            // Offline fallback (never synced): build the default fret layout
+            // from the synced scale so the surface is playable, not blank.
+            FretPadViewIOS(engine: pad, noteManager: noteManager, scaleSync: scaleSync,
+                           arrangement: scaleSync.fretArrangement
+                               ?? FretArrangement.defaultArrangement(
+                                   degrees: scaleDegrees(from: pad.scale)),
+                           onShowMapping: onMap, onRecalibrate: onRecalibrate)
         case .stringPad:
             StringPadViewIOS(engine: pad, noteManager: noteManager, scaleSync: scaleSync,
                              arrangement: scaleSync.stringArrangement

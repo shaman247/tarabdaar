@@ -390,6 +390,17 @@ final class AuditionRunner: ObservableObject {
         case "padOff":
             guard let id = event.id else { return }
             simulator.controller?.pitchPad.noteOff(touchId: id)
+        case "spadOn":
+            // Drive the String Pad engine (`controller.stringPad`) directly, the
+            // analogue of `padOn` for the String Pad. `value` = ratio vs tonic.
+            guard let id = event.id else { return }
+            simulator.controller?.stringPad.noteOn(touchId: id, ratio: event.value ?? 1.0)
+        case "spadGlide":
+            guard let id = event.id else { return }
+            simulator.controller?.stringPad.glide(touchId: id, ratio: event.value ?? 1.0)
+        case "spadOff":
+            guard let id = event.id else { return }
+            simulator.controller?.stringPad.noteOff(touchId: id)
         case "tanpuraPluck":
             // `index` = string 0–3, `value` = velocity 0–1.
             guard let idx = event.index else { return }

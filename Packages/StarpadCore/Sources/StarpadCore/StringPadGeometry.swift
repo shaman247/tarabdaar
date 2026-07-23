@@ -67,12 +67,24 @@ public struct StringArrangement: Equatable {
     public var notes: [StringNote]
     public var stringCount: Int
     public var ghostStringsPerSide: Int
+    /// iPad-only display tilt for the String Pad surface, in **degrees (0–40)**.
+    /// On the iPad the strings render as hexagon lanes filling the *entire*
+    /// surface, tilted by this angle (0° = upright columns, larger = leaning
+    /// toward the top-left → bottom-right diagonal). The Mac editor always shows
+    /// the upright rectangular layout and ignores this. Edited via the String Pad
+    /// toolbar's Rotation slider and synced to the iPad with the arrangement.
+    public var rotationDegrees: Double
+
+    /// Default iPad tilt for a fresh arrangement / "Reset to Scale".
+    public static let defaultRotationDegrees: Double = 30
 
     public init(notes: [StringNote], stringCount: Int,
-                ghostStringsPerSide: Int = 4) {
+                ghostStringsPerSide: Int = 4,
+                rotationDegrees: Double = StringArrangement.defaultRotationDegrees) {
         self.notes = notes
         self.stringCount = stringCount
         self.ghostStringsPerSide = ghostStringsPerSide
+        self.rotationDegrees = min(40, max(0, rotationDegrees))
     }
 
     /// Total visible columns: the base strings plus the ghost strings on each
@@ -85,11 +97,12 @@ public struct StringArrangement: Equatable {
     private enum Pos { case center, bottom, top }
 
     /// The default arrangement: **7 base strings**, one per svara, named in
-    /// sargam. String 1 = **S** (single, 50 % height, centred). Strings with a
-    /// vikrit (altered) variant carry two notes — the **shuddha/natural** in the
-    /// bottom half and the **komal/tivra** in the top half (30 % height each):
-    /// 2 = **R/r**, 3 = **G/g**, 4 = **m/M**, 6 = **D/d**, 7 = **N/n**; string 5
-    /// = **P** (single). Plus 4 octave-repeat ghost strings on each side.
+    /// sargam. String 1 = **S** (single, tall key centred at y=0.5). Strings with
+    /// a vikrit (altered) variant carry two tall keys — the **shuddha/natural** in
+    /// the bottom half and the **komal/tivra** in the top half, pulled close to
+    /// the middle with a small gap between them: 2 = **R/r**, 3 = **G/g**,
+    /// 4 = **m/M**, 6 = **D/d**, 7 = **N/n**; string 5 = **P** (single). Plus 4
+    /// octave-repeat ghost strings on each side.
     public static func defaultArrangement(degreeCount: Int) -> StringArrangement {
         let sc = min(7, max(0, degreeCount))
         guard sc > 0 else {
@@ -108,18 +121,19 @@ public struct StringArrangement: Equatable {
         for (i, string) in strings.prefix(sc).enumerated() {
             for entry in string where entry.deg < degreeCount {
                 switch entry.pos {
-                // Heights scaled by 0.2 so that, with the new tips (10% top +
-                // 70% bottom → rect is 20% of the hexagon, ~5× taller overall),
-                // the overall hexagon matches the pre-long-tip total height.
+                // Tall keys: the rect is only a fraction of the hexagon (tips add
+                // the rest), so each `height` becomes a ~2× taller hexagon. The
+                // paired top/bottom keys sit close to the middle (centerY 0.34 /
+                // 0.66) leaving just a small gap between them around y=0.5.
                 case .center:
                     notes.append(StringNote(degreeIndex: entry.deg, stringIndex: i,
-                                            centerY: 0.5, height: 0.1))
+                                            centerY: 0.5, height: 0.18))
                 case .bottom:
                     notes.append(StringNote(degreeIndex: entry.deg, stringIndex: i,
-                                            centerY: 0.75, height: 0.06))
+                                            centerY: 0.66, height: 0.14))
                 case .top:
                     notes.append(StringNote(degreeIndex: entry.deg, stringIndex: i,
-                                            centerY: 0.25, height: 0.06))
+                                            centerY: 0.34, height: 0.14))
                 }
             }
         }

@@ -1,0 +1,252 @@
+import CoreGraphics
+import Foundation
+
+// MARK: - Fret Pad drag assist
+//
+// Intonation assistance for **drags** on the Fret Pad (the onset snap handles
+// note starts — see `fretSnap`). Musical premise: when a player *stops* or
+// *changes direction* near a scale pitch, that inflection point was intended
+// to be **on** the pitch; while they're moving quickly, they're gliding and
+// must be left alone.
+//
+// Mechanism — a **velocity-gated magnetic correction**, continuous by
+// construction. Each touch carries one state value, `correction` (log2
+// units), and the played pitch is always
+//
+//     played = uncorrectedLog + correction
+//
+// where `uncorrectedLog` is the raw x-mapped pitch plus the constant onset
+// offset. `correction` is *slewed* toward the nearest qualifying fret with a
+// rate that is the product of three continuous factors:
+//
+//   • **stationarity OR turn impulse** — the gate. Stationarity is smoothed
+//     horizontal speed through a smoothstep (1 below `speedFloor` px/s, 0
+//     above `speedCeiling`) and handles stops/slow turns. Fast connected
+//     playing turns in ~30 ms — too fast for any speed average — so a
+//     causally-detected **direction flip** (deadbanded dx sign change, ~one
+//     event of latency) fires an impulse that holds the gate open while it
+//     decays (`turnGain`, `turnTau`). Gate = min(1, max(speedGate,
+//     turnGain·impulse)).
+//   • **proximity** — the fret must be within the assist basin
+//     (`radiusScale` × the Snap radius, in log-pitch — fast landings are far
+//     sloppier than onsets) of the *uncorrected* pitch AND the touch's y
+//     must be inside the fret's vertical extent (above/below a segment stays
+//     free, and Snap = 0 disables assist entirely). The pull is full inside
+//     half the radius and fades linearly to 0 at the edge, so the field is
+//     continuous in space as well as time.
+//   • a **settle time constant** (`settleTau`) with a hard **slew cap**
+//     (~1500 cents/s) on the correction — smoothness is guaranteed by
+//     construction, whatever the fitted constants say.
+//
+// The constants are FITTED to recorded real playing (`FretGestureRecorder` +
+// `tools/fretpad_fit.py`); see the property comments for the fit provenance.
+//
+// When **no fret qualifies, the correction FREEZES** rather than decaying:
+// a deliberate microtonal hold doesn't drift, and each assisted landing
+// becomes the new tuning anchor (a relative frame, exactly like the onset
+// offset — bounded by the snap radius, re-anchored at the next inflection).
+//
+// Because the output is always the slew-filtered state, no input event —
+// candidate switch, zone entry/exit, speed spike — can produce a pitch
+// discontinuity.
+//
+// **Stops emit no move events**, so the settle must be driven by a ~60 Hz
+// timer while touches are down: hosts feed `move(...)` from drag events and
+// `tick(time:)` from the timer, and send the returned pitch to
+// `PitchPadEngine.glide`. Time is injected (no internal clock) — callers pass
+// `CACurrentMediaTime()`.
+public final class FretDragAssist {
+    /// Assisted result for one touch: the corrected pitch (log2 above the
+    /// tonic) and the fill-glow weights for the assisting fret.
+    public struct Output {
+        public let log2Pitch: Double
+        public let weights: [String: Double]
+    }
+
+    private struct TouchState {
+        var x: CGFloat
+        var y: CGFloat
+        var uncorrectedLog: Double
+        var speed: Double            // smoothed |dx/dt|, px/s
+        var correction: Double       // log2 units, slew-filtered
+        var impulse: Double          // direction-flip impulse, decaying 1→0
+        var dxSign: Int              // last movement direction (±1, 0 unknown)
+        var lastMoveTime: TimeInterval
+        var lastUpdateTime: TimeInterval
+    }
+
+    private var touches: [Int: TouchState] = [:]
+    private var placements: [FretPlacement] = []
+    private var radiusLog: Double = 0
+
+    // Constants fitted to real iPad playing (2026-07-16: 8 repetitions of the
+    // connected phrase p n d n p d m p g, `tools/fretpad_fit.py fit --phrase`;
+    // landing error 39.7c → 29.3c, transit warping 2.3c). The recording was
+    // fast connected playing — refit as more styles are recorded.
+
+    /// px/s below which the touch counts as fully stationary.
+    public var speedFloor: Double = 59
+    /// px/s above which the speed-based gate is fully released (gliding).
+    public var speedCeiling: Double = 375
+    /// Smoothing time constant for the speed estimate (s).
+    public var speedTau: Double = 0.026
+    /// Slew time constant for the correction (s). Fitted very fast — the
+    /// hard `slewCap` below is what actually bounds the correction rate,
+    /// guaranteeing smoothness regardless of the fitted taus.
+    public var settleTau: Double = 0.005
+    /// The assist's magnet basin = `radiusScale` × the Snap radius (the
+    /// onset snap stays at 1× — fast landings are far sloppier than onsets).
+    /// Fitted together with the Fret Pad's 24 px default Snap (basin ≈ 75¢).
+    public var radiusScale: Double = 1.75
+    /// Direction-flip impulse strength: a causally-detected turn (dx sign
+    /// flip) sets `impulse = 1`, and the gate is `max(speedGate, turnGain ×
+    /// impulse)` clamped to 1 — values > 1 hold the gate fully open for
+    /// `turnTau·ln(turnGain)` after the flip. The speed gate alone cannot
+    /// open during a ~30 ms turn at fast tempi; the flip can.
+    public var turnGain: Double = 2.0
+    /// Decay time constant of the flip impulse (s).
+    public var turnTau: Double = 0.026
+
+    /// px of movement below which direction is not re-evaluated (touch jitter
+    /// must not fire flips).
+    private let turnDeadband: CGFloat = 0.7
+    /// Hard cap on the correction's slew rate (log2 units/s ≈ 1500 cents/s,
+    /// well inside natural meend speeds) — **smoothness by construction**:
+    /// whatever the fitted constants, the output pitch can never step.
+    private let slewCap: Double = 1500.0 / 1200.0
+    /// Ticks arriving within this gap of the last move event don't decay the
+    /// speed estimate (the finger is still moving; events are just sparse).
+    private let stationaryGap: TimeInterval = 0.04
+
+    public init() {}
+
+    public var isEmpty: Bool { touches.isEmpty }
+
+    /// Refresh the geometry the assist resolves against. Call from the
+    /// surface whenever it has fresh placements (every down/drag event); the
+    /// timer reuses the last context between events.
+    public func setContext(placements: [FretPlacement], snapDistance: CGFloat,
+                           ghostExtentOctaves: Double, width: CGFloat) {
+        self.placements = placements
+        let span = 1.0 + 2.0 * max(0, ghostExtentOctaves)
+        self.radiusLog = Double(snapDistance / max(1, width)) * span * radiusScale
+    }
+
+    /// Register a play touch at note-on. The touch starts at `speedCeiling`
+    /// (treated as moving) with zero correction, so the onset — already
+    /// handled by the onset snap — is never re-corrected abruptly.
+    public func begin(touchId: Int, x: CGFloat, y: CGFloat,
+                      uncorrectedLog: Double, time: TimeInterval) {
+        touches[touchId] = TouchState(x: x, y: y, uncorrectedLog: uncorrectedLog,
+                                      speed: speedCeiling, correction: 0,
+                                      impulse: 0, dxSign: 0,
+                                      lastMoveTime: time, lastUpdateTime: time)
+    }
+
+    /// Feed a drag event; returns the assisted pitch to glide to.
+    public func move(touchId: Int, x: CGFloat, y: CGFloat,
+                     uncorrectedLog: Double, time: TimeInterval) -> Output {
+        guard var s = touches[touchId] else {
+            begin(touchId: touchId, x: x, y: y,
+                  uncorrectedLog: uncorrectedLog, time: time)
+            return Output(log2Pitch: uncorrectedLog, weights: [:])
+        }
+        let dt = min(max(time - s.lastUpdateTime, 1e-4), 0.1)
+        s.impulse *= exp(-dt / turnTau)
+        let dx = x - s.x
+        let inst = Double(abs(dx)) / dt
+        let alpha = 1 - exp(-dt / speedTau)
+        s.speed += (inst - s.speed) * alpha
+        // Causal direction-flip detection (deadbanded against jitter): a
+        // genuine turn fires the impulse that opens the gate — the speed
+        // gate alone can't react within a fast turn.
+        if abs(dx) >= turnDeadband {
+            let sign = dx > 0 ? 1 : -1
+            if s.dxSign != 0 && sign != s.dxSign { s.impulse = 1.0 }
+            s.dxSign = sign
+        }
+        s.x = x
+        s.y = y
+        s.uncorrectedLog = uncorrectedLog
+        s.lastMoveTime = time
+        let out = integrate(&s, dt: dt, time: time)
+        touches[touchId] = s
+        return out
+    }
+
+    /// Timer tick (~60 Hz while touches are down): decays the speed estimate
+    /// of touches that have stopped emitting move events and advances the
+    /// settle. Returns one assisted output per active touch.
+    public func tick(time: TimeInterval) -> [(touchId: Int, output: Output)] {
+        var outs: [(Int, Output)] = []
+        for (id, state) in touches {
+            var s = state
+            let dt = min(max(time - s.lastUpdateTime, 1e-4), 0.1)
+            s.impulse *= exp(-dt / turnTau)
+            if time - s.lastMoveTime > stationaryGap {
+                let alpha = 1 - exp(-dt / speedTau)
+                s.speed += (0 - s.speed) * alpha
+            }
+            let out = integrate(&s, dt: dt, time: time)
+            touches[id] = s
+            outs.append((id, out))
+        }
+        return outs
+    }
+
+    public func end(touchId: Int) {
+        touches.removeValue(forKey: touchId)
+    }
+
+    // MARK: Internals
+
+    /// One slew step: gate (stationarity OR turn impulse, × proximity) →
+    /// ease `correction` toward the candidate fret under the hard slew cap;
+    /// freeze when nothing qualifies.
+    private func integrate(_ s: inout TouchState, dt: Double,
+                           time: TimeInterval) -> Output {
+        s.lastUpdateTime = time
+
+        // Stationarity ∈ [0, 1], smoothstepped; the turn impulse can hold
+        // the gate open regardless. Clamped to 1.
+        let v = max(0.0, min(1.0, (speedCeiling - s.speed)
+                                    / (speedCeiling - speedFloor)))
+        let w = v * v * (3 - 2 * v)
+        let gate = min(1.0, max(w, turnGain * s.impulse))
+
+        // Candidate: nearest fret (in log-pitch, from the *uncorrected*
+        // pitch) within the assist basin (radiusScale × Snap) whose vertical
+        // extent contains the touch.
+        var cand: FretPlacement? = nil
+        var candD = Double.infinity
+        if radiusLog > 0 {
+            for p in placements {
+                guard s.y >= p.topY, s.y <= p.bottomY else { continue }
+                let d = abs(log2(p.ratio) - s.uncorrectedLog)
+                if d <= radiusLog, d < candD {
+                    cand = p
+                    candD = d
+                }
+            }
+        }
+
+        var weights: [String: Double] = [:]
+        if let cand {
+            // Full pull inside half the radius, fading to 0 at the edge —
+            // continuous in space.
+            let prox = max(0.0, min(1.0, 2.0 * (1.0 - candD / radiusLog)))
+            let rate = (1 - exp(-dt / settleTau)) * gate * prox
+            let target = log2(cand.ratio) - s.uncorrectedLog
+            let cap = slewCap * dt
+            let step = (target - s.correction) * rate
+            s.correction += min(cap, max(-cap, step))
+            // Glow: proximity-shaped, brightening as the gate opens.
+            let glow = (1.0 - candD / radiusLog) * (0.3 + 0.7 * gate)
+            if glow > 0.05 { weights[cand.id] = min(1.0, glow) }
+        }
+        // No candidate → correction frozen (the carried tuning anchor).
+
+        return Output(log2Pitch: s.uncorrectedLog + s.correction,
+                      weights: weights)
+    }
+}

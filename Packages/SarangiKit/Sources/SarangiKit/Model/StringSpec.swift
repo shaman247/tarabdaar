@@ -38,21 +38,28 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
     public var bright: Bool
     public var enabled: Bool
     public var group: StringGroup
+    /// raga/chrom CLASS (upstream 2026-07-12 law; drives the per-class jawari
+    /// buzz — raga-tuned taraf buzz most, the chromatic row stays cleaner).
+    /// Decoded with a group-derived default so older documents keep the
+    /// canonical class law (chromatic choir → chrom, everything else → raga).
+    public var raga: Bool
 
     public init(id: UUID = UUID(), freq: Double, gain: Double, t60: Double,
-                bright: Bool, enabled: Bool = true, group: StringGroup = .scale) {
+                bright: Bool, enabled: Bool = true, group: StringGroup = .scale,
+                raga: Bool? = nil) {
         self.id = id; self.freq = freq; self.gain = gain; self.t60 = t60
         self.bright = bright; self.enabled = enabled; self.group = group
+        self.raga = raga ?? (group != .chromatic)
     }
 
     public init(_ r: ResolvedString, group: StringGroup = .scale) {
         self.init(freq: r.freq, gain: r.gain, t60: r.t60, bright: r.bright,
-                  enabled: r.enabled, group: group)
+                  enabled: r.enabled, group: group, raga: r.raga)
     }
 
-    // Tolerant decode: `group` (and `enabled`) default when absent, so older
-    // `.sarangi` documents still load.
-    private enum CodingKeys: String, CodingKey { case id, freq, gain, t60, bright, enabled, group }
+    // Tolerant decode: `group`/`raga` (and `enabled`) default when absent, so
+    // older `.sarangi` documents still load.
+    private enum CodingKeys: String, CodingKey { case id, freq, gain, t60, bright, enabled, group, raga }
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
@@ -62,10 +69,12 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
         bright = try c.decode(Bool.self, forKey: .bright)
         enabled = (try? c.decode(Bool.self, forKey: .enabled)) ?? true
         group = (try? c.decode(StringGroup.self, forKey: .group)) ?? .scale
+        raga = (try? c.decode(Bool.self, forKey: .raga)) ?? (group != .chromatic)
     }
 
     public var resolved: ResolvedString {
-        ResolvedString(freq: freq, gain: gain, t60: t60, bright: bright, enabled: enabled)
+        ResolvedString(freq: freq, gain: gain, t60: t60, bright: bright,
+                       enabled: enabled, raga: raga)
     }
 
     public var noteName: String {

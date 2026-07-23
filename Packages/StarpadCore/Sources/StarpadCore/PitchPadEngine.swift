@@ -604,6 +604,22 @@ public final class PitchPadEngine: ObservableObject {
         sounding.ratio = r
     }
 
+    /// Move a sounding touch's voice to a new touch id with **no MIDI
+    /// events** — the held note keeps sounding on its channel and the new
+    /// touch bends it from here on (legato takeover, used by the Fret Pad's
+    /// tap-legato). Returns false if `from` holds no voice (stale takeover —
+    /// the caller should fall back to a fresh `noteOn`).
+    @discardableResult
+    public func transferTouch(from old: Int, to new: Int) -> Bool {
+        guard let channel = touchChannels.removeValue(forKey: old) else { return false }
+        touchChannels[new] = channel
+        channelHolders[channel] = new
+        if let r = currentRatio.removeValue(forKey: old) { currentRatio[new] = r }
+        if let w = touchWeights.removeValue(forKey: old) { touchWeights[new] = w }
+        if let b = lastBentRatio.removeValue(forKey: old) { lastBentRatio[new] = b }
+        return true
+    }
+
     public func noteOff(touchId: Int) {
         currentRatio.removeValue(forKey: touchId)
         touchWeights.removeValue(forKey: touchId)
@@ -784,14 +800,17 @@ public final class PitchPadEngine: ObservableObject {
         return c
     }
 
-    /// Clamp to a safety range wide enough for the octave-extended
-    /// pad, which plays ratios in `[2^-0.5, 2^1.5]` (half an octave
-    /// below the tonic up to half an octave above the octave). The
-    /// bound is a generous full octave on each side; the played note
-    /// is pinned to the nearest semitone of `r` and bent from there,
-    /// so even an edge-to-edge glide stays inside `bendRangeSemis`.
+    /// Clamp to a safety range. The octave-extended pad only reaches
+    /// `[2^-0.5, 2^1.5]`, but the Mac computer-keyboard player
+    /// (`KeyboardNotePlayer`) ribbons several octaves out, so the bound is
+    /// a generous ±5 octaves — wide enough to never collapse a played key
+    /// in practice while still rejecting nonsense. Safe regardless of
+    /// width: the played note is pinned to the nearest semitone of `r` and
+    /// bent from there, so even an extreme ratio stays inside
+    /// `bendRangeSemis` (the bend only ever carries the sub-semitone
+    /// residue) and lands on a valid MIDI note number.
     private func clampRatio(_ r: Double) -> Double {
         if !r.isFinite { return 1.0 }
-        return max(0.5, min(4.0, r))
+        return max(1.0 / 32.0, min(32.0, r))
     }
 }

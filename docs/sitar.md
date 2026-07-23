@@ -13,6 +13,23 @@ strings** with this same fitted voice, so the fit is **one pitch-invariant
 string timbre** (mirrored onto all four model strings at the matched tonic),
 not a per-note patch.
 
+## Sitar as the base voice (excitation into the sarangi model)
+
+Beyond the demo Sitar tab, the sitar model can be selected as the **base
+voice** — the excitation the sarangi model transforms, in place of a dry SWAM
+string. Pick "Sitar (model)" in the Setup tab's **Base voice** picker
+(`AppController.baseVoice`). `AudioEngine` then plays a dedicated `voiceSitar`
+(a third `TanpuraModel`, separate from this tab's `sitar` so their plucks don't
+collide), rendered inside the sarangi process block so its plucked audio drives
+the bank / jawari / body / FX (SWAM is unloaded). Notes drive it via a
+note→pluck bridge: each Note On plucks a pooled string tuned to the note (the
+timbre is pitch-invariant, so any of the four strings plays any note),
+**pitch bend glides** it continuously (a cheap `retuneString`/`setF0` that
+recomputes only the partial frequencies), and Note Off lets the string ring.
+The base-voice sitar shares this tab's `TanpuraParams.sitar` timbre. See
+[docs/sound-design.md](sound-design.md#hosted-au-integration) and
+[docs/sarangi.md](sarangi.md).
+
 ## The reference
 
 `sitar1.wav` (44.1 kHz stereo, 3.53 s) is **three plucks of a single note**.

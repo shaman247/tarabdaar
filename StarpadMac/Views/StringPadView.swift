@@ -71,6 +71,7 @@ struct StringPadView: View {
             Spacer()
             StringSoundingReadout(sounding: engine.sounding,
                                   tonicMidi: pitchPad.tonicMidi)
+            rotationControl
             sharpnessControl
             velocityControl
             tonicReadout
@@ -108,6 +109,21 @@ struct StringPadView: View {
                 .font(.system(.caption))
                 .frame(width: 28, alignment: .trailing)
         }
+    }
+
+    /// iPad-only surface tilt (0–40°). The Mac surface always stays upright; this
+    /// only changes how the iPad lays the strings out (lanes filling the whole
+    /// surface, leaning toward the top-left → bottom-right diagonal as it rises).
+    private var rotationControl: some View {
+        HStack(spacing: 6) {
+            Text("Rotation").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Slider(value: $controller.stringArrangement.rotationDegrees, in: 0...40)
+                .frame(width: 80)
+            Text("\(Int(controller.stringArrangement.rotationDegrees.rounded()))°")
+                .font(.system(.caption).monospacedDigit())
+                .frame(width: 28, alignment: .trailing)
+        }
+        .help("iPad-only: tilt of the String Pad surface (0–40°). On the iPad the strings render as lanes filling the whole surface at this angle; the Mac editor stays upright.")
     }
 
     /// Inverse-distance blend power (continuous everywhere — see `polyPitchAt`),

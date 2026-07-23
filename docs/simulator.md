@@ -169,6 +169,8 @@ race the file-size-stable check.
 | `rawNoteOff` | `at`, `note`, `id?`               | Raw MIDI note-off (matching channel). |
 | `preset`     | `at`, `param` (preset rawValue)   | Apply a `SoundPreset`. Currently only `"swamViola"` ships. |
 | `tanpuraPluck` | `at`, `index`, `value`          | Pluck tanpura-drone string `index` (0–3) at velocity `value` (0–1). The runner silences the drone and stops any auto-cycle at score start. |
+| `padOn` / `padGlide` / `padOff` | `at`, `id`, `value` | Drive the Mac **Pitch Pad** (`controller.pitchPad`, the real playing engine) — `value` = ratio vs the pad tonic (default 1.0). `padGlide` sends a real pitch bend to a new ratio; `padOff` releases. Use these (not `noteOn`/`glide`, which take the legacy NoteManager keyboard path that emits no bend headless) to exercise pitch bends / the sitar glide. |
+| `spadOn` / `spadGlide` / `spadOff` | `at`, `id`, `value` | Same as the `pad*` trio but for the **String Pad** engine (`controller.stringPad`). Lets a score play/test the String Pad path directly. |
 
 **Why `rawNote`:** `simulator.noteOn` routes through the iPad `NoteManager`, whose
 60 Hz loop runs the glide engine and per-tick pitch-bend re-emission. For matching a
@@ -221,6 +223,7 @@ hints below match what the on-screen knobs use.
 | `filterResonance`     | 0..1             | Master resonant LPF Q (UI 0..1 → bandwidth 4.0..0.1 octaves). |
 | `tanpuraGainDB`       | -24..24 dB       | Tanpura drone output gain (post-model makeup stage, default +12). |
 | `tanpura.<path>`      | per-path         | Any tanpura-drone parameter by path — e.g. `tanpura.jivaDepth`, `tanpura.body0.freq`, `tanpura.string3.decay`, `tanpura.string1.gainTrimDB13` (0-based harmonic index). Clamped by `TanpuraParams.set(path:value:)`; see [tanpura.md](tanpura.md). |
+| `baseVoice`           | 0..5             | Base voice feeding the sarangi model: 0 = SWAM Violin, 1 = Viola, 2 = Cello, 3 = Double Bass, 4 = **sitar model**, 5 = **sarangi model source** (the fitted `ViolinSynth` — the shipped default). With 4/5, SWAM is unloaded and notes (`noteOn`/`padOn` + bends) drive the model as the excitation. See [sarangi.md](sarangi.md) / [sitar.md](sitar.md). |
 
 Note: for fast autonomous tanpura iteration you usually do NOT need the
 audition runner — `tanpura-render` (StarpadDSP executable) renders a pluck

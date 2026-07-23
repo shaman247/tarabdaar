@@ -19,6 +19,7 @@ struct MacMainWindow: View {
 
     enum Tab: String, Hashable, CaseIterable {
         case live = "Live"
+        case harmonics = "Harmonics"
         case sarangi = "Sarangi"
         case tarab = "Tarab"
         case fx = "FX"
@@ -26,6 +27,7 @@ struct MacMainWindow: View {
         case pitchPad = "Pitch Pad"
         case chordPad = "Chord Pad"
         case stringPad = "String Pad"
+        case fretPad = "Fret Pad"
         case tanpura = "Tanpura"
         case sitar = "Sitar"
         case setup = "Setup"
@@ -43,11 +45,12 @@ struct MacMainWindow: View {
         }
         .background(
             // Hidden buttons for keyboard shortcuts: ⌘1..⌘9 jump to the first
-            // nine tabs. Plain Buttons don't render anything since they're sized
-            // to zero and clipped — the keyboardShortcut modifiers register with
-            // the window's responder chain. Only the first 9 get a shortcut: a
-            // two-digit `KeyEquivalent(Character("10"))` traps at runtime, and
-            // there's no single ⌘ key for a 10th tab anyway (Setup; use the picker).
+            // nine tabs (Live … String Pad). Plain Buttons don't render anything
+            // since they're sized to zero and clipped — the keyboardShortcut
+            // modifiers register with the window's responder chain. Only the
+            // first 9 get a shortcut: a two-digit `KeyEquivalent(Character("10"))`
+            // traps at runtime, and there's no single ⌘ key for the later tabs
+            // anyway (Fret Pad, Tanpura, Sitar, Setup; use the picker).
             ZStack {
                 ForEach(Array(Tab.allCases.enumerated()), id: \.element) { i, t in
                     if i < 9 {
@@ -75,6 +78,7 @@ struct MacMainWindow: View {
         case .pitchPad:  controller.ipadLayout = .pitchPad
         case .chordPad:  controller.ipadLayout = .chordPad
         case .stringPad: controller.ipadLayout = .stringPad
+        case .fretPad:   controller.ipadLayout = .fretPad
         default: break
         }
     }
@@ -84,6 +88,7 @@ struct MacMainWindow: View {
             ConnectionPill(controller: controller)
             PresetMenu(controller: controller)
             HostedAUPill(controller: controller)
+            KeyboardPlayPill(controller: controller)
             Spacer(minLength: 12)
             Picker("", selection: Binding(get: { tab }, set: { selectTab($0) })) {
                 ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -98,6 +103,7 @@ struct MacMainWindow: View {
     private var content: some View {
         switch tab {
         case .live:      LiveVisualizerView(controller: controller)
+        case .harmonics: HarmonicsView(controller: controller)
         case .sarangi:   SarangiEditorView(controller: controller)
         case .tarab:     TarabView(controller: controller)
         case .fx:        FXView(controller: controller)
@@ -105,6 +111,7 @@ struct MacMainWindow: View {
         case .pitchPad:  PitchPadView(controller: controller)
         case .chordPad:  ChordPadView(controller: controller)
         case .stringPad: StringPadView(controller: controller)
+        case .fretPad:   FretPadView(controller: controller)
         case .tanpura:   TanpuraPadView(controller: controller)
         case .sitar:     SitarPadView(controller: controller)
         case .setup:     SetupView(controller: controller)
@@ -150,6 +157,68 @@ private struct ConnectionPill: View {
     private var label: String {
         if !midi.isActive { return "MIDI off" }
         return midi.sourceCount > 0 ? "MIDI: \(midi.sourceCount) src" : "no MIDI in"
+    }
+}
+
+/// Top-bar control for computer-keyboard note input. The pill shows the
+/// on/off state; tapping opens a popover with the enable toggle, an octave
+/// stepper, and a legend of the key layout. Reachable from every tab since
+/// keyboard play is app-wide.
+private struct KeyboardPlayPill: View {
+    @ObservedObject var keyboard: KeyboardNotePlayer
+    @State private var showDetails = false
+
+    init(controller: AppController) {
+        self.keyboard = controller.keyboard
+    }
+
+    var body: some View {
+        Button {
+            showDetails = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "keyboard").font(.caption)
+                Text(keyboard.enabled ? "Keys" : "Keys off")
+                    .font(.system(.caption))
+            }
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Capsule().fill(
+                (keyboard.enabled ? Color.green : Color(white: 0.5)).opacity(0.25)))
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showDetails) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Play notes with the computer keyboard",
+                       isOn: $keyboard.enabled)
+                Divider()
+                HStack {
+                    Text("Octave shift").foregroundStyle(.secondary)
+                    Spacer()
+                    Stepper(value: $keyboard.octaveOffset, in: -3...3) {
+                        Text(keyboard.octaveOffset >= 0
+                             ? "+\(keyboard.octaveOffset)"
+                             : "\(keyboard.octaveOffset)")
+                            .monospacedDigit()
+                    }
+                    .disabled(!keyboard.enabled)
+                }
+                Divider()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Keys play ascending degrees of the Pitch Pad scale:")
+                        .foregroundStyle(.secondary)
+                    Text("Q W E R T Y U I O P").monospaced()
+                    Text("A S D F G H J K L ;").monospaced()
+                    Text("Z X C V B N M , . /").monospaced()
+                    Text("[ / ] shift down / up an octave")
+                        .foregroundStyle(.secondary)
+                    Text("Works on any tab; pauses while you type in a field.")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+            }
+            .padding(16)
+            .frame(width: 340, alignment: .leading)
+        }
     }
 }
 

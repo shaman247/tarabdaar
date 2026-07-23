@@ -2,11 +2,11 @@ import Foundation
 
 // MARK: - Raw snapshot (cheap copies, taken under the host lock)
 
-/// One sympathetic string's live state for the Live-tab harmonic display.
+/// One sympathetic string's live state for the Harmonics-tab display.
 /// `buffer` is the comb's one-period delay line (length `period`); its DFT at
 /// integer bins gives the per-harmonic amplitudes directly. `outWeight` scales
-/// those amplitudes to the string's audible contribution
-/// (`relOverSqrtN·gChoir·symGain·mixBank`).
+/// those amplitudes to the string's relative audible contribution
+/// (`relOverSqrtN·gChoir` — the passive junction's per-string weight law).
 public struct StringRawSnapshot: Sendable {
     public let freq: Double          // effective ringing f0 = sr/period
     public let isBright: Bool
@@ -28,7 +28,7 @@ public struct BankRawSnapshot: Sendable {
     public let sr: Double
     public let strings: [StringRawSnapshot]
     public let inputRing: [Double]     // recent drive `x`, time-ordered (oldest first)
-    public let playedWeight: Double    // mainGain·mixDry — the played voice's mix level
+    public let playedWeight: Double    // mainGain — the played voice's display level
     public var playedF0: Double        // current played pitch (Hz); set by host
     public var playedActive: Bool      // a note is held; set by host
     public init(sr: Double, strings: [StringRawSnapshot], inputRing: [Double],

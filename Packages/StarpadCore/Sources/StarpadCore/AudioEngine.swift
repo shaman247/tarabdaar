@@ -7,27 +7,28 @@ import SarangiKit
 /// macOS audio plumbing wrapper around the ported `SarangiKit.SarangiEngine`.
 ///
 /// The played voice is supplied by a hosted Audio Unit (SWAM Violin), run DRY.
-/// `SarangiEngine` is the full sarangi model: it takes the dry SWAM audio as
-/// input and produces the COMPLETE stereo sarangi (bank + jawari + drone + body
-/// + its own reverb). It therefore REPLACES the dry voice — the SWAM dry is not
-/// summed separately.
+/// `SarangiEngine` is the full sarangi model (the v57 PASSIVE coupled
+/// bridge–body network): it takes the played-voice audio as input and produces
+/// the COMPLETE stereo sarangi. It therefore REPLACES the dry voice — the dry
+/// source is not summed separately.
 ///
 /// Render flow each block (INLINE — no tap/ring; see `setupSarangiEffect`):
-///   1. The hosted AU(s) render into `hostedDriveTap` (which sums the poly
+///   1. The base voice renders into `hostedDriveTap` (which sums the poly
 ///      instances) as part of the normal graph pull.
 ///   2. The inline `sarangiEffect` AUv3 node (spliced `hostedDriveTap →
 ///      sarangiEffect → symGain`) pulls that summed audio synchronously in the
-///      SAME pull, derives a 0..1 `amp` envelope with `ampFollower`, and runs
-///      `sarangiEngine.renderSample(x, amp:)` per sample. Because the model runs
-///      in SWAM's own render pull, there is no transport latency (the old
+///      SAME pull, calls `sarangiEngine.beginBuffer()` once, then
+///      `renderSample(x)` per sample. Because the model runs in the source's
+///      own render pull, there is no transport latency (the old
 ///      `installTap(4096) → SPSCAudioRing → separate source node` added ~140 ms).
-///   3. The sarangi (model incl. its per-voice FX rack) goes `symGain →
+///   3. The sarangi (model incl. its Starpad FX rack) goes `symGain →
 ///      mainMixerNode` DIRECTLY, bypassing the master filter/reverb, which is the
-///      shared room for the tanpura + sitar only. The model keeps its own body.
+///      shared room for the tanpura + sitar only. The model owns its body
+///      (modal admittance + radiation FIR from `sarangi_coupled.json`).
 ///
 /// Sym public methods acquire `lock` and swap/configure `sarangiEngine`. The
 /// inline effect's render closure (`makeSarangiProcessBlock`) also takes the lock
-/// to read `sarangiEngine`/`ampFollower` and run `renderSample`.
+/// to read `sarangiEngine` and run `renderSample`.
 public class AudioEngine: ObservableObject {
     private let engine = AVAudioEngine()
     private let reverb = AVAudioUnitReverb()
@@ -81,25 +82,17 @@ public class AudioEngine: ObservableObject {
     /// reverb. Driven by `setMasterFilter(cutoff:resonance:)`.
     private let masterFilter = AVAudioUnitEQ(numberOfBands: 1)
     private let lock = NSLock()
-    /// The ported sarangi model: dry SWAM in → full stereo sarangi out (bank +
-    /// jawari + drone + body + reverb). Built/swapped under `lock` on a
-    /// structural change; nil until a model is configured (source node outputs
-    /// silence). Live scalar (gain/mix) changes mutate `.scalars` in place.
+    /// The ported sarangi model: played-voice audio in → full stereo sarangi out
+    /// (the v57 passive coupled bridge–body network). Built/swapped under `lock`
+    /// on a structural change; nil until a model is configured (the effect
+    /// outputs silence). Live scalar (gain) changes mutate `.scalars` in place.
     private var sarangiEngine: SarangiEngine?
-    /// Causal amplitude follower on the drive signal — drives the model's jawari
-    /// sweep/swell and the drone activity gate. One-pole on |x| vs a fixed
-    /// reference (the live replacement for the offline env/env.max normalisation).
-    private var ampFollower = SignalAmpFollower(sr: Config.sampleRate)
-    /// Calibration gain on the SWAM → model drive, applied in the source-node
-    /// callback before the amp follower + the model. **Default 1× = unity**, which
-    /// matches the standalone "Sarangi Live" app (it feeds SWAM straight into
-    /// `renderSample`). The old `10×` was tuned to the *previous, quiet* recipe;
-    /// the re-vendored shared recipe is ~15 dB hotter in the bank, so `10×` now
-    /// (a) drives the amp follower (reference 0.1) into permanent saturation →
-    /// the jawari sits at `C_drive_max` → a harsh constant buzz, and (b) over-hot
-    /// peaks downstream — both heard as distortion. At 1× the buzz tracks
-    /// dynamics like Sarangi Live. Raise toward ~3–4 for more presence before the
-    /// follower starts to saturate (~5× at SWAM ≈0.02). Set from `setSarangiDriveGain`.
+    /// Calibration gain on the base-voice → model drive, applied in the render
+    /// closure before the model. **Default 1× = unity**, which matches the
+    /// standalone "Sarangi Live" app (it feeds its voice straight into
+    /// `renderSample`; the fitted preset's `gin` carries the level calibration).
+    /// Raise only when driving the network from a quieter source (e.g. a SWAM
+    /// base voice). Set from `setSarangiDriveGain`.
     private var sarangiDriveGain: Double = 1
 
     /// Self-excited tanpura drone (StarpadDSP.TanpuraModel) on its own
@@ -126,6 +119,67 @@ public class AudioEngine: ObservableObject {
     private let sitarLock = NSLock()
     private var sitarSource: AVAudioSourceNode!
     private let sitarGain = AVAudioUnitEQ(numberOfBands: 0)
+
+    // MARK: - Sitar as base voice (excitation into the sarangi model)
+
+    /// A THIRD `TanpuraModel`, used only when the **sitar is the selected base
+    /// voice** (instead of a SWAM AU). Its note-driven plucks are the
+    /// EXCITATION into the sarangi model: it is rendered INSIDE the sarangi
+    /// process block and its audio replaces the SWAM drive, so the sympathetic
+    /// bank / jawari / body / FX color the plucked sitar. Distinct from `sitar`
+    /// (the Sitar tab's demo voice, which goes to the master room) so the two
+    /// never collide. Mutated + rendered only under the main `lock`.
+    private let voiceSitar: TanpuraModel
+    private var useSitarBaseVoice = false
+    /// Scratch buffers: render the base-voice sitar here, then collapse to mono
+    /// to drive `renderSample`. Sized to `sitarDriveCapacity`.
+    private var sitarDriveL: UnsafeMutablePointer<Float>?
+    private var sitarDriveR: UnsafeMutablePointer<Float>?
+    private let sitarDriveCapacity = 4096
+    /// Voice pool for the base-voice sitar: MPE channel → string index. The
+    /// model has `TanpuraModel.stringCount` strings (the sitar's timbre is
+    /// pitch-invariant, so any string can play any note); notes round-robin /
+    /// steal by `sitarStringAge`.
+    private var sitarVoiceForChannel: [UInt8: Int] = [:]
+    private var sitarStringAge = [UInt64](repeating: 0, count: TanpuraModel.stringCount)
+    private var sitarVoiceCounter: UInt64 = 0
+    /// Makeup gain on the base-voice sitar's drive into the model (~+18 dB,
+    /// matching the Sitar tab's default `sitarGainDB`). The sitar model's raw
+    /// output is far quieter than SWAM's, and `sarangiDriveGain` is tuned for
+    /// SWAM — without this the sitar under-drives the model to near-silence.
+    private let sitarBaseVoiceMakeup: Float = 8.0
+
+    // MARK: - Sarangi model source (the String pure-physics bowed gut string)
+
+    /// The String-physics source (`StringVoiceSource` wrapping
+    /// `SarangiKit.BowEngine` — the C friction kernel with the modal-jawari
+    /// taraf fused in-kernel), used when the **Sarangi (model)** base voice is
+    /// selected. It replaced the v57 `ViolinSynth` + coupled-network pair
+    /// (upstream 2026-07-21 String-only simplification). The kernel is the
+    /// WHOLE instrument (played strings + taraf + body + radiation + room), so
+    /// its node connects DIRECTLY to `symGain`, bypassing `SarangiProcessorAU`
+    /// — running it through the coupled network would double the taraf. Runs
+    /// at the artifact's native 48 kHz; the mixer input converts to the engine
+    /// rate. Kept attached; connected/disconnected on voice switches.
+    private var stringVoiceSource: StringVoiceSource?
+    private var stringVoiceAttached = false
+    private var stringVoiceConnected = false
+    /// Guarded by `lock` (checked on the MIDI path like `useSitarBaseVoice`).
+    private var useSarangiModelVoice = false
+    /// Last structural tarab push, retained so the String engine can be
+    /// (re)built from the current tuning when the voice is enabled later.
+    private var lastSarangiStrings: [ResolvedString] = []
+    private var lastSarangiT60Scale: Double = 1.0
+    private var lastSarangiTonic: Double = 261.63
+    /// String-editor / audition scalar overrides applied OVER the
+    /// `bowed_string.json` artifact at every String engine build.
+    public var stringVoiceOverrides: [String: Double] = [:]
+    /// Serial build queue for the String engine (tables + kernel init + jt
+    /// worker-pool spawn are too heavy for the main thread); `stringBuildGen`
+    /// discards builds that were superseded while in flight.
+    private let stringBuildQueue = DispatchQueue(label: "starpad.string.build",
+                                                 qos: .userInitiated)
+    private var stringBuildGen = 0
 
     @Published public var isRunning = false
 
@@ -276,6 +330,12 @@ public class AudioEngine: ObservableObject {
         self.tanpura = TanpuraModel(sampleRate: Config.sampleRate)
         self.sitar = TanpuraModel(sampleRate: Config.sampleRate,
                                   params: TanpuraParams.sitar)
+        self.voiceSitar = TanpuraModel(sampleRate: Config.sampleRate,
+                                       params: TanpuraParams.sitar)
+        sitarDriveL = .allocate(capacity: sitarDriveCapacity)
+        sitarDriveR = .allocate(capacity: sitarDriveCapacity)
+        sitarDriveL?.initialize(repeating: 0, count: sitarDriveCapacity)
+        sitarDriveR?.initialize(repeating: 0, count: sitarDriveCapacity)
         setupAudio()
     }
 
@@ -451,10 +511,10 @@ public class AudioEngine: ObservableObject {
 
     /// The per-buffer model render that the inline `sarangiEffect` runs on the
     /// realtime thread. This is the body the old source node ran, minus the ring
-    /// read: SWAM's audio arrives as the effect's pulled input. All model state
-    /// (`sarangiEngine`/`ampFollower`/`sarangiDriveGain`) is read under `lock`,
+    /// read: the base voice's audio arrives as the effect's pulled input. All
+    /// model state (`sarangiEngine`/`sarangiDriveGain`) is read under `lock`,
     /// exactly as before. The peak meter is computed from the INPUT
-    /// unconditionally so it tracks SWAM even when no model is configured.
+    /// unconditionally so it tracks the source even when no model is configured.
     private func makeSarangiProcessBlock() -> SarangiProcessBlock {
         return { [weak self] inL, inR, outL, outR, frames in
             guard let self else {
@@ -464,13 +524,15 @@ public class AudioEngine: ObservableObject {
             let renderStart = CACurrentMediaTime()
 
             // Peak meter from the pulled SWAM input — UNCONDITIONAL (matches the
-            // old tap: the meter reflects SWAM's output even with no model).
+            // old tap: the meter reflects SWAM's output even with no model). When
+            // the sitar drives the model instead, the meter is recomputed from
+            // its rendered scratch below.
             var peak: Float = 0
             for i in 0..<frames {
                 let a = abs(inL[i]); if a > peak { peak = a }
                 let b = abs(inR[i]); if b > peak { peak = b }
             }
-            let capturedPeak = peak
+            var capturedPeak = peak
 
             // Mono drive = 0.5·(L+R), lifted by `sarangiDriveGain` so the RAW
             // (quiet) SWAM output reaches the level the model was fit for; applied
@@ -478,16 +540,54 @@ public class AudioEngine: ObservableObject {
             // per-sample loop stay inside ONE lock acquisition so `sarangiEngine`
             // can't be swapped mid-buffer.
             self.lock.lock()
+            // String base voice: the kernel renders on its OWN source node
+            // straight to symGain (its taraf/body/room are in-kernel) — the
+            // coupled network must stay out of the path (double taraf) and
+            // its silent-input render is pure wasted CPU. Pass silence.
+            if self.useSarangiModelVoice {
+                for i in 0..<frames { outL[i] = 0; outR[i] = 0 }
+                self.lock.unlock()
+                DispatchQueue.main.async { self.hostedOutputPeak = capturedPeak }
+                return
+            }
+            // When the sitar is the base voice, render it here and use its audio
+            // as the drive INSTEAD of the (unloaded) SWAM input. Same lock, so
+            // its note-driven plucks/retunes can't race the render.
+            var driveL = inL
+            var driveR = inR
+            if self.useSitarBaseVoice, let sl = self.sitarDriveL, let sr = self.sitarDriveR {
+                let n = min(frames, self.sitarDriveCapacity)
+                for i in 0..<n { sl[i] = 0; sr[i] = 0 }
+                self.voiceSitar.renderAdd(intoL: sl, intoR: sr, frames: n)
+                // The sitar model's RAW output is quiet (the Sitar tab lifts it
+                // ~+18 dB to be audible); `sarangiDriveGain` is calibrated for
+                // SWAM's very different level, so without makeup the sitar
+                // under-drives the model to near-silence. Apply the same ~+18 dB
+                // here so the sitar excites the model at a healthy level at the
+                // default drive. Any tail beyond scratch capacity stays silent
+                // (frames > 4096 never happens with our buffer sizes).
+                let mk = self.sitarBaseVoiceMakeup
+                var sPeak: Float = 0
+                for i in 0..<n {
+                    sl[i] *= mk; sr[i] *= mk
+                    let a = abs(sl[i]); if a > sPeak { sPeak = a }
+                    let b = abs(sr[i]); if b > sPeak { sPeak = b }
+                }
+                capturedPeak = sPeak
+                driveL = UnsafePointer(sl)
+                driveR = UnsafePointer(sr)
+            }
             if let engine = self.sarangiEngine {
                 let driveGain = self.sarangiDriveGain
+                let n = self.useSitarBaseVoice ? min(frames, self.sitarDriveCapacity) : frames
                 engine.beginBuffer()
-                for i in 0..<frames {
-                    let x = driveGain * 0.5 * (Double(inL[i]) + Double(inR[i]))
-                    let amp = self.ampFollower.process(x)
-                    let (l, r) = engine.renderSample(x, amp: amp)
+                for i in 0..<n {
+                    let x = driveGain * 0.5 * (Double(driveL[i]) + Double(driveR[i]))
+                    let (l, r) = engine.renderSample(x)
                     outL[i] = Float(l)
                     outR[i] = Float(r)
                 }
+                for i in n..<frames { outL[i] = 0; outR[i] = 0 }
             } else {
                 for i in 0..<frames { outL[i] = 0; outR[i] = 0 }
             }
@@ -1125,6 +1225,22 @@ public class AudioEngine: ObservableObject {
                                   active: meterActive)
     }
 
+    /// Snapshot of the sympathetic bank + recent drive for the Live-tab harmonic
+    /// display. Copies state under `lock` (pure copies — the DFT runs in the
+    /// caller, off-lock), then stamps the current played pitch from the meter.
+    /// `lock` and `meterLock` are taken sequentially, never nested. Poll at
+    /// ≤30 Hz; only call while the Live tab is visible.
+    public func sarangiBankSnapshot() -> BankRawSnapshot? {
+        lock.lock()
+        let snap = sarangiEngine?.bankRawSnapshot()
+        lock.unlock()
+        guard var snap else { return nil }
+        let r = performanceReadout()                 // its own meterLock
+        snap.playedActive = r.active && r.pitchHz > 0
+        snap.playedF0 = r.pitchHz
+        return snap
+    }
+
     /// Recompute `(pitchHz, expression, active)` for the primary held voice
     /// from the tracked MPE maps. `lock` must be held; pure read → locals.
     private func meterSnapshotLocked() -> (Double, Double, Bool) {
@@ -1153,6 +1269,20 @@ public class AudioEngine: ObservableObject {
     public func sendHostedMIDI(status: UInt8, data1: UInt8, data2: UInt8) {
         let channel = UInt8(status & 0x0F)
         let statusHi = status & 0xF0
+
+        // Sitar base voice: notes drive the plucked model, not a SWAM AU.
+        if useSitarBaseVoice {
+            routeSitarBaseVoiceMIDI(channel: channel, statusHi: statusHi,
+                                    data1: data1, data2: data2)
+            return
+        }
+
+        // Sarangi-model base voice: notes drive the fitted ViolinSynth source.
+        if useSarangiModelVoice {
+            routeSarangiModelMIDI(channel: channel, statusHi: statusHi,
+                                  data1: data1, data2: data2)
+            return
+        }
 
         if channel == 0 {
             // Channel-0 (non-MPE controller on MIDI channel 1, or mono mode):
@@ -1273,6 +1403,9 @@ public class AudioEngine: ObservableObject {
     public func sendHostedMIDI2(status: UInt8, data1: UInt8) {
         let channel = UInt8(status & 0x0F)
 
+        // Sitar / sarangi-model base voices ignore channel pressure / program change.
+        if useSitarBaseVoice || useSarangiModelVoice { return }
+
         if channel == 0 {
             broadcastHostedMIDI(status: status, data1: data1, data2: 0, length: 2)
             return
@@ -1289,6 +1422,281 @@ public class AudioEngine: ObservableObject {
         guard let block else { return }
         block(AUEventSampleTimeImmediate, 0, 2, [status, data1])
         bumpHostedMIDICount()
+    }
+
+    // MARK: - Sitar base-voice note bridge
+
+    /// Route one MPE message to the base-voice sitar model (used instead of the
+    /// SWAM path when `useSitarBaseVoice`). Note On plucks a pooled string tuned
+    /// to the note; Pitch Bend glides it; Note Off frees the string (it rings
+    /// out naturally). Also updates the `hostedChannel*` bookkeeping so the Live
+    /// readout tracks pitch/expression exactly as it does for SWAM.
+    private func routeSitarBaseVoiceMIDI(channel: UInt8, statusHi: UInt8,
+                                         data1: UInt8, data2: UInt8) {
+        lock.lock()
+        if statusHi == 0x90 && data2 > 0 {
+            hostedChannelNote[channel] = data1
+            hostedChannelBend[channel] = 8192
+            heldChannelOrder.removeAll { $0 == channel }
+            heldChannelOrder.append(channel)
+            let s = allocateSitarStringLocked(forChannel: channel)
+            voiceSitar.clearString(s)                      // fresh — no glissando tail
+            voiceSitar.retuneString(s, f0: sitarF0(note: data1, bend14: 8192))
+            voiceSitar.pluck(string: s, velocity: Double(data2) / 127.0)
+        } else if statusHi == 0x80 || (statusHi == 0x90 && data2 == 0) {
+            // Free the string; let it ring out (plucked string, natural decay).
+            sitarVoiceForChannel.removeValue(forKey: channel)
+            hostedChannelNote.removeValue(forKey: channel)
+            hostedChannelBend.removeValue(forKey: channel)
+            hostedChannelExpr.removeValue(forKey: channel)
+            heldChannelOrder.removeAll { $0 == channel }
+        } else if statusHi == 0xE0 {
+            let bend = (Int(data2) << 7) | Int(data1)
+            if let note = hostedChannelNote[channel] {
+                hostedChannelBend[channel] = bend
+                if let s = sitarVoiceForChannel[channel] {
+                    voiceSitar.retuneString(s, f0: sitarF0(note: note, bend14: bend))
+                }
+            }
+        } else if statusHi == 0xB0 {
+            if data1 == 11 { hostedChannelExpr[channel] = data2 }
+            else if data1 == 123 {                          // all-notes-off
+                sitarVoiceForChannel.removeAll(keepingCapacity: true)
+                hostedChannelNote.removeAll(keepingCapacity: true)
+                hostedChannelBend.removeAll(keepingCapacity: true)
+                hostedChannelExpr.removeAll(keepingCapacity: true)
+                heldChannelOrder.removeAll(keepingCapacity: true)
+                voiceSitar.clearState()
+            }
+        }
+        let snap = meterSnapshotLocked()
+        lock.unlock()
+        storeMeter(snap)
+        bumpHostedMIDICount()
+    }
+
+    /// Pick a sitar string for a channel: reuse its existing one, else a free
+    /// string, else steal the oldest. `lock` held.
+    private func allocateSitarStringLocked(forChannel ch: UInt8) -> Int {
+        if let s = sitarVoiceForChannel[ch] { sitarVoiceCounter &+= 1; sitarStringAge[s] = sitarVoiceCounter; return s }
+        let used = Set(sitarVoiceForChannel.values)
+        var chosen = (0..<TanpuraModel.stringCount).first { !used.contains($0) }
+        if chosen == nil {
+            // Steal the oldest string and unmap whoever held it.
+            let victim = (0..<TanpuraModel.stringCount).min { sitarStringAge[$0] < sitarStringAge[$1] } ?? 0
+            if let owner = sitarVoiceForChannel.first(where: { $0.value == victim })?.key {
+                sitarVoiceForChannel.removeValue(forKey: owner)
+            }
+            chosen = victim
+        }
+        let s = chosen ?? 0
+        sitarVoiceCounter &+= 1
+        sitarStringAge[s] = sitarVoiceCounter
+        sitarVoiceForChannel[ch] = s
+        return s
+    }
+
+    /// MIDI note + 14-bit bend → Hz, using the app's wide bend range.
+    private func sitarF0(note: UInt8, bend14: Int) -> Double {
+        let semis = Double(note) + (Double(bend14 - 8192) / 8192.0) * Config.midiPitchBendRange
+        return 440.0 * pow(2.0, (semis - 69.0) / 12.0)
+    }
+
+    /// Enable/disable the sitar as the base voice (excitation into the sarangi
+    /// model). When enabling, the voice pool + ringing state are reset so a
+    /// stale note can't sound. Load/unload of the SWAM AU is the caller's job.
+    public func setSitarBaseVoiceEnabled(_ on: Bool) {
+        lock.lock()
+        useSitarBaseVoice = on
+        sitarVoiceForChannel.removeAll(keepingCapacity: true)
+        hostedChannelNote.removeAll(keepingCapacity: true)
+        hostedChannelBend.removeAll(keepingCapacity: true)
+        hostedChannelExpr.removeAll(keepingCapacity: true)
+        heldChannelOrder.removeAll(keepingCapacity: true)
+        voiceSitar.clearState()
+        lock.unlock()
+        storeMeter((0, 0, false))
+    }
+
+    /// Push the sitar timbre to the base-voice model (shares the Sitar tab's
+    /// `TanpuraParams.sitar`-derived params). Structural — recomputes coeffs.
+    public func setSitarBaseVoiceParams(_ params: TanpuraParams) {
+        lock.lock()
+        voiceSitar.setParams(params)
+        lock.unlock()
+    }
+
+    /// Whether the sitar is currently the base voice.
+    public var isSitarBaseVoice: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return useSitarBaseVoice
+    }
+
+    // MARK: - Sarangi-model base-voice bridge (the String physics instrument)
+
+    /// Route one MPE message to the String source (used instead of the SWAM
+    /// path when `useSarangiModelVoice`). The `BowControlMapper` allocates
+    /// gut-string slots physically (poly chords, mono meend on a single
+    /// line) with per-channel MPE pitch bend; CCs 11/1/74/2/75 drive the
+    /// expr/press/pos/tilt axes; aftertouch is player vibrato. Also updates
+    /// the `hostedChannel*` bookkeeping so the Live readout tracks
+    /// pitch/expression exactly as it does for SWAM.
+    private func routeSarangiModelMIDI(channel: UInt8, statusHi: UInt8,
+                                       data1: UInt8, data2: UInt8) {
+        lock.lock()
+        let mapper = stringVoiceSource?.mapper
+        if statusHi == 0x90 && data2 > 0 {
+            hostedChannelNote[channel] = data1
+            hostedChannelBend[channel] = 8192
+            heldChannelOrder.removeAll { $0 == channel }
+            heldChannelOrder.append(channel)
+        } else if statusHi == 0x80 || (statusHi == 0x90 && data2 == 0) {
+            hostedChannelNote.removeValue(forKey: channel)
+            hostedChannelBend.removeValue(forKey: channel)
+            hostedChannelExpr.removeValue(forKey: channel)
+            heldChannelOrder.removeAll { $0 == channel }
+        } else if statusHi == 0xE0 {
+            let bend = (Int(data2) << 7) | Int(data1)
+            if hostedChannelNote[channel] != nil { hostedChannelBend[channel] = bend }
+        } else if statusHi == 0xB0 {
+            if data1 == 11 { hostedChannelExpr[channel] = data2 }
+            else if data1 == 123 {
+                hostedChannelNote.removeAll(keepingCapacity: true)
+                hostedChannelBend.removeAll(keepingCapacity: true)
+                hostedChannelExpr.removeAll(keepingCapacity: true)
+                heldChannelOrder.removeAll(keepingCapacity: true)
+            }
+        }
+        let snap = meterSnapshotLocked()
+        lock.unlock()
+        storeMeter(snap)
+        mapper?.midi(statusHi | channel, data1, data2)
+        bumpHostedMIDICount()
+    }
+
+    /// Enable/disable the String physics instrument as the base voice. On
+    /// first enable the source node is created and connected DIRECTLY to
+    /// `symGain` (bypassing the coupled network — the kernel carries its own
+    /// taraf/body/room), and the `BowEngine` is built off-main from the
+    /// current tonic + tarab strings. Load/unload of the SWAM AU is the
+    /// caller's job. Returns false when `bowed_string.json` is missing.
+    @discardableResult
+    public func setSarangiModelVoiceEnabled(_ on: Bool) -> Bool {
+        if on && stringVoiceSource == nil {
+            guard Presets.bowedStringParams() != nil else {
+                NSLog("Starpad: bowed_string.json missing from the SarangiKit bundle")
+                return false
+            }
+            let src = StringVoiceSource()
+            src.mapper.bendRange = Config.midiPitchBendRange
+            stringVoiceSource = src
+        }
+        if let src = stringVoiceSource, on != stringVoiceConnected {
+            let wasRunning = engine.isRunning
+            if wasRunning { engine.pause() }
+            if on {
+                if !stringVoiceAttached {
+                    engine.attach(src.node)
+                    stringVoiceAttached = true
+                }
+                let fmt = AVAudioFormat(standardFormatWithSampleRate: src.modelSR, channels: 2)!
+                engine.connect(src.node, to: symGain, format: fmt)
+            } else {
+                engine.disconnectNodeOutput(src.node)
+            }
+            stringVoiceConnected = on
+            if wasRunning {
+                do { try engine.start() } catch {
+                    print("AudioEngine restart after model-voice switch failed: \(error)")
+                    isRunning = false
+                }
+            }
+        }
+        stringVoiceSource?.reset()
+        lockAndMeasure()
+        useSarangiModelVoice = on
+        let strings = lastSarangiStrings
+        let tonic = lastSarangiTonic
+        hostedChannelNote.removeAll(keepingCapacity: true)
+        hostedChannelBend.removeAll(keepingCapacity: true)
+        hostedChannelExpr.removeAll(keepingCapacity: true)
+        heldChannelOrder.removeAll(keepingCapacity: true)
+        lock.unlock()
+        if on { rebuildStringVoice(tonic: tonic, strings: strings) }
+        storeMeter((0, 0, false))
+        return true
+    }
+
+    /// Whether the String physics instrument is currently the base voice.
+    public var isSarangiModelVoice: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return useSarangiModelVoice
+    }
+
+    /// String-voice jawari-web overload telemetry (see
+    /// `StringVoiceSource.jtStats`). nil when the voice isn't created.
+    public func stringVoiceJtStats() -> (drops: Double, flat: Double,
+                                         fill: Double, on: Double)? {
+        stringVoiceSource?.jtStats()
+    }
+
+    /// String-voice render-deadline telemetry (see
+    /// `StringVoiceSource.renderStats`). nil when the voice isn't created.
+    public func stringVoiceRenderStats() -> (maxMs: Double, overruns: UInt64,
+                                             callbacks: UInt64)? {
+        stringVoiceSource?.renderStats()
+    }
+
+    /// Drive one of the String voice's control axes from the UI (0..1),
+    /// through the same axes the CCs drive (CC11 expr · CC1 press · CC74
+    /// pos · CC2/75 tilt). No-op when the source isn't created yet.
+    public func setSarangiModelVoiceAxis(cc: UInt8, value01: Double) {
+        guard let m = stringVoiceSource?.mapper else { return }
+        switch cc {
+        case 11: m.setAxis(expr: value01)
+        case 1: m.setAxis(press: value01)
+        case 74: m.setAxis(pos: value01)
+        case 2, 75: m.setAxis(tilt: value01)
+        default: break
+        }
+    }
+
+    /// Build a fresh String `BowEngine` for the tuning (tonic + tarab rows)
+    /// off the main thread and publish it lock-free. The long-lived mapper
+    /// keeps held notes/axes across the swap; a newer build supersedes any
+    /// in-flight older one. Called on voice enable and on every structural
+    /// tarab/tonic change while the String voice is active.
+    private func rebuildStringVoice(tonic: Double, strings: [ResolvedString]) {
+        guard let src = stringVoiceSource else { return }
+        stringBuildGen += 1
+        let gen = stringBuildGen
+        let overrides = stringVoiceOverrides
+        let mapper = src.mapper
+        stringBuildQueue.async { [weak self] in
+            let engine = StringVoiceSource.buildEngine(tonicHz: tonic,
+                                                      strings: strings,
+                                                      mapper: mapper,
+                                                      overrides: overrides)
+            DispatchQueue.main.async {
+                guard let self, gen == self.stringBuildGen else { return }
+                if engine == nil {
+                    NSLog("Starpad: String engine build failed (bowed_string.json missing?)")
+                }
+                self.stringVoiceSource?.setEngine(engine)
+            }
+        }
+    }
+
+    /// Re-apply the String-editor / audition overrides with a rebuild (the
+    /// artifact scalars are baked into the tables/kernel at build time).
+    public func setStringVoiceOverrides(_ overrides: [String: Double]) {
+        stringVoiceOverrides = overrides
+        lock.lock()
+        let on = useSarangiModelVoice
+        let tonic = lastSarangiTonic
+        let strings = lastSarangiStrings
+        lock.unlock()
+        if on { rebuildStringVoice(tonic: tonic, strings: strings) }
     }
 
     private func broadcastHostedMIDI(status: UInt8, data1: UInt8, data2: UInt8, length: Int) {
@@ -1582,19 +1990,33 @@ public class AudioEngine: ObservableObject {
 
     /// Build a fresh `SarangiEngine` from the current model state and swap it in
     /// (a STRUCTURAL change — raga/tonic/strings/filter-coefficient params). The
-    /// build (resonator bank + body FIR) runs OUTSIDE the lock; only the pointer
-    /// swap is under it. Callers debounce rapid slider drags in the UI.
+    /// build (web combs + modal body + radiation FIR) runs OUTSIDE the lock; only
+    /// the pointer swap is under it. Callers debounce rapid slider drags in the
+    /// UI. `coupled` is REQUIRED for sound since the v57-only simplification —
+    /// the engine renders only the passive junction (silent when unarmed).
     public func rebuildSarangi(params: SarangiParams, strings: [ResolvedString],
-                               tonic: Double, fir: [Double]?, fx: FXRack,
-                               groups: [StringGroup] = []) {
+                               tonic: Double, fx: FXRack,
+                               eqBands: [VoiceEQBand] = [],
+                               groups: [StringGroup] = [],
+                               coupled: CoupledConfig? = nil) {
         let engine = SarangiEngine(params: params, strings: strings,
-                                   tonic: tonic, sr: Config.sampleRate, firTaps: fir, fx: fx,
+                                   tonic: tonic, sr: Config.sampleRate,
+                                   eqBands: eqBands, coupled: coupled, fx: fx,
                                    groups: groups)
         engine.beginBuffer()                        // scalars (incl. live FX) set by init
+        if !engine.isArmed {
+            print("[AudioEngine] sarangi engine UNARMED — sarangi_coupled.json missing or not passive; output will be silent")
+        }
         lockAndMeasure()
         sarangiEngine = engine
-        ampFollower.reset()
+        lastSarangiStrings = strings
+        lastSarangiT60Scale = params["B_t60_scale"]
+        lastSarangiTonic = tonic
+        let armModel = useSarangiModelVoice
         lock.unlock()
+        // The String voice's kernel taraf tracks the same tuning as the bank
+        // (rebuilt off-main; the mapper keeps held notes across the swap).
+        if armModel { rebuildStringVoice(tonic: tonic, strings: strings) }
     }
 
     /// Apply a live (non-structural) scalar change — gains/mixes that need no
@@ -1608,11 +2030,32 @@ public class AudioEngine: ObservableObject {
     }
 
     /// Apply only the live FX fields (enabled + reverb mix/width per stage) —
-    /// used when an FX toggle/mix slider moves (the filter/EQ are structural).
+    /// used when an FX toggle/mix slider moves.
     public func applySarangiFXScalars(_ fx: FXRack) {
         lockAndMeasure()
         sarangiEngine?.scalars.applyFX(fx)
         lock.unlock()
+    }
+
+    /// Apply a live FILTER edit — the graphical-EQ bands + the stage low-pass
+    /// (cutoff/resonance) — by swapping the biquad coefficients in place on the
+    /// running engine (no rebuild, click-free; see `VoiceFX.updateFilters`). This
+    /// is the hot path for dragging EQ points. No-op until a model exists.
+    public func applySarangiFXFilters(_ fx: FXRack) {
+        lockAndMeasure()
+        sarangiEngine?.setVoiceFXFilters(fx)
+        lock.unlock()
+    }
+
+    /// Snapshot of the pre-EQ FX signals for the live FX-stage spectrum
+    /// display. Copies the rings under `lock` (pure copies — the broadband FFT
+    /// runs in the caller, off-lock), then releases. Poll at ≤30 Hz, only while an
+    /// FX stage's spectrum is visible. Returns nil when no model is configured.
+    public func sarangiFXSpectrumSnapshot() -> FXSpectrumSnapshot? {
+        lock.lock()
+        let snap = sarangiEngine?.fxSpectrumRawSnapshot()
+        lock.unlock()
+        return snap
     }
 
     /// Calibration gain lifting SWAM's raw output to the model's expected drive
@@ -1739,5 +2182,7 @@ public class AudioEngine: ObservableObject {
         restoreOutputDeviceRate()
         #endif
         engine.stop()
+        sitarDriveL?.deallocate()
+        sitarDriveR?.deallocate()
     }
 }

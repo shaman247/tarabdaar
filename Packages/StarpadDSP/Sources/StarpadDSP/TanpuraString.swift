@@ -220,6 +220,22 @@ final class TanpuraString {
         }
     }
 
+    /// Cheap live retune — recompute only the frequency-dependent state
+    /// (partial frequencies + rotation coefficients) for a new fundamental,
+    /// leaving the (f0-independent) gain / decay / bloom laws untouched. Safe
+    /// to call at control rate for a continuous glide; the full `apply` (with
+    /// its per-harmonic rise-time bisection) is far too heavy for that. The
+    /// linear oscillator states keep ringing, so the pitch slides continuously.
+    func setF0(_ f0: Double) {
+        guard f0 > 0 else { return }
+        sp.f0 = f0
+        for k in 0..<loopEnd where gain[k] > 0 {
+            let h = hValue(k)
+            freqHz[k] = h * f0 * (1 + sp.inharmonicity * h * h).squareRoot()
+        }
+        updateRotation()
+    }
+
     // MARK: - Excitation
 
     /// Pluck the string. Envelope states are linear, so this superposes

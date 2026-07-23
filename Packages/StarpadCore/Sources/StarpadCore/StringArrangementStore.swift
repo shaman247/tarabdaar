@@ -40,10 +40,11 @@ extension StringNote: Codable {
 /// format change can be migrated on load rather than failing to decode.
 /// `stringCount`/`ghostStringsPerSide` default for older files.
 struct StringArrangementDocument: Codable {
-    var version: Int = 2
+    var version: Int = 3
     var notes: [StringNote]
     var stringCount: Int?
     var ghostStringsPerSide: Int?
+    var rotationDegrees: Double?
 }
 
 // MARK: - StringArrangementStore
@@ -124,7 +125,8 @@ public enum StringArrangementStore {
         let doc = StringArrangementDocument(
             notes: arrangement.notes,
             stringCount: arrangement.stringCount,
-            ghostStringsPerSide: arrangement.ghostStringsPerSide)
+            ghostStringsPerSide: arrangement.ghostStringsPerSide,
+            rotationDegrees: arrangement.rotationDegrees)
         let data = try encoder.encode(doc)
         let tmp = dest.appendingPathExtension("tmp")
         try data.write(to: tmp)
@@ -140,6 +142,7 @@ public enum StringArrangementStore {
         return StringArrangement(
             notes: doc.notes,
             stringCount: doc.stringCount ?? max(derived, 1),
-            ghostStringsPerSide: doc.ghostStringsPerSide ?? 4)
+            ghostStringsPerSide: doc.ghostStringsPerSide ?? 4,
+            rotationDegrees: doc.rotationDegrees ?? StringArrangement.defaultRotationDegrees)
     }
 }

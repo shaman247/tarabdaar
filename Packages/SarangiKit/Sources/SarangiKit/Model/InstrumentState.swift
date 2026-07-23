@@ -9,7 +9,11 @@ public struct InstrumentState: Codable, Sendable {
     public var tonicHz: Double
     public var strings: [StringSpec]
     public var params: SarangiParams
-    public var fir: [Double]?              // block E body transfer (per fitted preset)
+    public var fir: [Double]?              // legacy-era field, kept so old saved documents load
+    /// User EQ bands — applied at the OUTPUT (default FLAT since the v57
+    /// re-vendor: the fitted W valley supersedes the de-horn cuts; `dehornA`
+    /// stays available as a selectable preset). Optional so older documents load.
+    public var eqBands: [VoiceEQBand]?
     public var manualEdits: Bool
     /// When true (default), the sympathetic strings auto-tune to the Pitch Pad
     /// scale (tonic + degrees). A manual string edit turns it off so edits stick;
@@ -21,17 +25,19 @@ public struct InstrumentState: Codable, Sendable {
 
     public init(ragaId: Int, ragaName: String, intervals: [Int], tonicHz: Double,
          strings: [StringSpec], params: SarangiParams, fir: [Double]? = nil,
+         eqBands: [VoiceEQBand]? = nil,
          manualEdits: Bool = false, autoSyncToScale: Bool = true,
          fx: FXRack = .makeDefault(), schemaVersion: Int = 2) {
         self.ragaId = ragaId; self.ragaName = ragaName; self.intervals = intervals
         self.tonicHz = tonicHz; self.strings = strings; self.params = params; self.fir = fir
+        self.eqBands = eqBands
         self.manualEdits = manualEdits; self.autoSyncToScale = autoSyncToScale
         self.fx = fx; self.schemaVersion = schemaVersion
     }
 
-    // Tolerant decode: `autoSyncToScale`/`fx` default for older documents.
+    // Tolerant decode: `autoSyncToScale`/`fx`/`eqBands` default for older documents.
     private enum CodingKeys: String, CodingKey {
-        case ragaId, ragaName, intervals, tonicHz, strings, params, fir, manualEdits, autoSyncToScale, fx, schemaVersion
+        case ragaId, ragaName, intervals, tonicHz, strings, params, fir, eqBands, manualEdits, autoSyncToScale, fx, schemaVersion
     }
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -42,19 +48,26 @@ public struct InstrumentState: Codable, Sendable {
         strings = try c.decode([StringSpec].self, forKey: .strings)
         params = try c.decode(SarangiParams.self, forKey: .params)
         fir = try c.decodeIfPresent([Double].self, forKey: .fir)
+        eqBands = try? c.decodeIfPresent([VoiceEQBand].self, forKey: .eqBands)
         manualEdits = (try? c.decode(Bool.self, forKey: .manualEdits)) ?? false
         autoSyncToScale = (try? c.decode(Bool.self, forKey: .autoSyncToScale)) ?? true
         fx = (try? c.decode(FXRack.self, forKey: .fx)) ?? .makeDefault()
         schemaVersion = (try? c.decode(Int.self, forKey: .schemaVersion)) ?? 2
     }
 
+    /// The effective output-EQ bands. DEFAULT FLAT (the fitted W valley carries
+    /// the 483–975 Hz antiresonance the de-horn EQ used to fake).
+    public var resolvedEQ: [VoiceEQBand] { eqBands ?? [] }
+
     /// Strings as the DSP bank consumes them (the bank filters `enabled` itself).
     public var resolvedStrings: [ResolvedString] { strings.map(\.resolved) }
 
-    /// Default to a fitted preset (the latest settings + body FIR) so the live
-    /// model matches the offline render out of the box. pair1 = E♭ harmonic minor,
-    /// matching Starpad's historically-deployed raga.
-    public static func makeDefault() -> InstrumentState { Presets.state(.pair1) }
+    /// Choir tags parallel to `resolvedStrings` (for the Live-tab harmonic display).
+    public var resolvedGroups: [StringGroup] { strings.map(\.group) }
+
+    /// The ONE instrument: the v57 sarangi (Pilu fit + exact string table).
+    /// Pair with the "Sarangi (model)" base voice for the full instrument.
+    public static func makeDefault() -> InstrumentState { Presets.state(.sarangiPilu) }
 
     /// Switch raga: reset tonic to the raga hint and regenerate the bank.
     public mutating func setRaga(id: Int) {
