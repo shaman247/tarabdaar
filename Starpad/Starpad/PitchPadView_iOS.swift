@@ -2,39 +2,21 @@ import QuartzCore
 import StarpadCore
 import SwiftUI
 
-/// The iPad Pitch Pad — the instrument's playing surface (replacing the
-/// piano keyboard). Touch position resolves to a JI ratio via the shared
-/// soft-Voronoi `pitchAt`; `PitchPadEngine` pins a MIDI note and bends to
-/// the ratio, while its 60 Hz tilt loop overlays aftertouch / CC from the
-/// `DimensionMapping` matrix. Scale editing lives on StarpadMac
-/// and syncs here over USB-MIDI SysEx (the iPad is perform-only); the MAP
-/// (dimension-matrix) editor is reached via the toolbar.
-struct PitchPadViewIOS: View {
-    @ObservedObject var engine: PitchPadEngine
-    /// Source of the live calibrated tilt values shown in the toolbar
-    /// (and the DimensionMapping host driving pad expression).
-    @ObservedObject var noteManager: NoteManager
-    /// Mac→iPad scale-sync receiver; drives the toolbar's sync indicator.
-    @ObservedObject var scaleSync: ScaleSyncReceiver
-    var onShowMapping: () -> Void
-    var onRecalibrate: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            PadToolbarIOS(engine: engine, noteManager: noteManager, scaleSync: scaleSync,
-                          onShowMapping: onShowMapping, onRecalibrate: onRecalibrate)
-            PitchPadSurfaceIOS(engine: engine)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background(Color.black.ignoresSafeArea())
-    }
-}
+/// The iPad's playing surface is the Fret Pad (`FretPadViewIOS`, below). Touch
+/// position resolves to a pitch via `FretPadGeometry`; `PitchPadEngine` pins a
+/// MIDI note and bends, while a 60 Hz loop streams the RAW tilt report
+/// (`TiltAxisWire` CCs 16/17/18) — the iPad knows nothing about what the
+/// tilts mean; the Mac evaluates its own bindings. Scale + fret editing
+/// live on StarpadMac and sync here over USB-MIDI SysEx (the iPad is
+/// perform-only). The MAP dimension-matrix editor was deleted 2026-07-24
+/// along with the iPad's parameter mapping.
 
 // MARK: - Shared pad toolbar (iPad)
 
-/// The common iPad pad toolbar — PANIC / MAP, the scale-sync indicator, live
+/// The common iPad pad toolbar — PANIC, an optional REC toggle, the
+/// scale-sync indicator, live
 /// tilt meters, the sounding readout, the (read-only) synced tonic, and
-/// recalibrate. Shared by all three iPad playing surfaces.
+/// recalibrate. Shared by the playing surface.
 struct PadToolbarIOS: View {
     @ObservedObject var engine: PitchPadEngine
     @ObservedObject var noteManager: NoteManager
@@ -42,13 +24,11 @@ struct PadToolbarIOS: View {
     /// When set (Fret Pad), a REC toggle records play strokes for offline
     /// assist fitting (see `FretGestureRecorder`).
     var recorder: FretGestureRecorder? = nil
-    var onShowMapping: () -> Void
     var onRecalibrate: () -> Void
 
     var body: some View {
         HStack(spacing: 14) {
             button("PANIC", color: .red) { engine.panic() }
-            button("MAP", color: .orange, action: onShowMapping)
             if let recorder {
                 RecToggleIOS(recorder: recorder)
             }
@@ -163,465 +143,68 @@ struct ScaleSyncIndicator: View {
     }
 }
 
-// MARK: - Tilt bars
+// MARK: - Tilt pad
 
-/// The three calibrated tilt axes (-1…+1) shown as horizontal center-zero
-/// meters, side by side. Driven by `NoteManager.currentTilt`, which the
-/// note manager refreshes from the motion source each tick.
+/// The three calibrated tilt axes (-1…+1) shown as a single X-Y square:
+/// tilt 1 on x, tilt 2 on y (up = positive), and the dot's color sweeping
+/// purple → cyan → orange as tilt 3 goes -1 → 0 → +1 (cyan at neutral).
+/// Driven by `NoteManager.currentTilt`, which the note manager refreshes
+/// from the motion source each tick.
 private struct TiltBars: View {
     let tilts: [Double]
 
-    var body: some View {
-        HStack(spacing: 12) {
-            ForEach(0..<3, id: \.self) { i in
-                VStack(spacing: 2) {
-                    Text("T\(i + 1)")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(.gray)
-                    TiltMeter(value: i < tilts.count ? tilts[i] : 0)
-                        .frame(width: 64, height: 6)
-                }
-            }
-        }
+    private func tilt(_ i: Int) -> Double {
+        max(-1.0, min(1.0, i < tilts.count ? tilts[i] : 0))
     }
-}
-
-/// A single center-zero bar: fill grows from the center toward the right
-/// for positive values, toward the left for negative.
-private struct TiltMeter: View {
-    let value: Double
 
     var body: some View {
+        let t3 = tilt(2)
         GeometryReader { geo in
             let w = geo.size.width
-            let clamped = max(-1.0, min(1.0, value))
-            let barWidth = w * CGFloat(abs(clamped)) / 2
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 2)
+            let h = geo.size.height
+            ZStack {
+                RoundedRectangle(cornerRadius: 4)
                     .fill(Color.gray.opacity(0.25))
                 Rectangle()
                     .fill(Color.white.opacity(0.3))
-                    .frame(width: 1)
-                    .offset(x: w / 2 - 0.5)
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.cyan)
-                    .frame(width: barWidth)
-                    .offset(x: clamped >= 0 ? w / 2 : w / 2 - barWidth)
+                    .frame(width: 1, height: h)
+                Rectangle()
+                    .fill(Color.white.opacity(0.3))
+                    .frame(width: w, height: 1)
+                Circle()
+                    .fill(Color(hue: 0.5 - t3 * 0.35, saturation: 0.9,
+                                brightness: 1.0))
+                    .frame(width: 7, height: 7)
+                    .position(x: (1 + CGFloat(tilt(0))) / 2 * w,
+                              y: (1 - CGFloat(tilt(1))) / 2 * h)
             }
         }
-    }
-}
-
-// MARK: - Pad surface
-
-private struct PitchPadSurfaceIOS: View {
-    @ObservedObject var engine: PitchPadEngine
-    /// Mirrors the Mac surface: memoize the seed list + Voronoi solve so
-    /// a fill-only re-render doesn't re-solve the O(N²) cells.
-    @State private var voronoiCache = VoronoiCache()
-    @State private var seedsCache = SeedsCache()
-    @State private var touchInfos: [TouchInfo] = []
-
-    /// Padding inset (matches the Mac pad) so edge cell borders, discs,
-    /// and labels have room instead of clipping at the bounds.
-    private let edgePad: CGFloat = 24
-    private var marginPixels: CGFloat { CGFloat(engine.marginPixels) }
-
-    var body: some View {
-        GeometryReader { geo in
-            let size = CGSize(
-                width: max(1, geo.size.width - 2 * edgePad),
-                height: max(1, geo.size.height - 2 * edgePad)
-            )
-            let seeds = seedsCache.seeds(points: engine.scale.points) {
-                computeDisplaySeeds(points: engine.scale.points)
-            }
-            let innerCells = voronoiCache.cells(
-                seeds: seeds, width: size.width, height: size.height,
-                inset: marginPixels, xMin: PadConstants.xLo, xMax: PadConstants.xHi
-            )
-
-            ZStack(alignment: .topLeading) {
-                Color.black
-
-                // Static layer: inner-polygon cell borders. The iPad is
-                // always in "perform" mode — no control discs and no
-                // octave boundary lines, just the cell outlines, the black
-                // field, and the live sounding fills.
-                Canvas { ctx, _ in
-                    ctx.translateBy(x: edgePad, y: edgePad)
-                    for cell in innerCells where cell.polygon.count >= 3 {
-                        ctx.stroke(Path(closedPolygon: cell.polygon),
-                                   with: .color(pitchColor(
-                                       forRatio: cell.seed.ratio,
-                                       lightness: 0.82, chroma: 0.20)),
-                                   lineWidth: 2)
-                    }
-                }
-
-                // Dynamic layer: live sounding fills (observes SoundingState).
-                CellFillsView(sounding: engine.sounding,
-                              cells: innerCells, edgePad: edgePad)
-
-                // Multitouch capture, inset to the logical pad area so
-                // its reported fractions map straight to `[0, size]`.
-                TouchOverlayView(
-                    touches: $touchInfos,
-                    onTouchBegan: { ev in handle(ev, seeds: seeds, size: size, began: true) },
-                    onTouchMoved: { ev in handle(ev, seeds: seeds, size: size, began: false) },
-                    onTouchEnded: { id in engine.noteOff(touchId: id) }
-                )
-                .padding(edgePad)
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .clipped()
-        }
-    }
-
-    private func handle(_ ev: TouchEvent, seeds: [DisplaySeed], size: CGSize,
-                        began: Bool) {
-        let pt = CGPoint(x: ev.xFraction * size.width,
-                         y: ev.yFraction * size.height)
-        guard let hit = pitchAt(point: pt, seeds: seeds, size: size,
-                                marginPixels: marginPixels) else { return }
-        if began {
-            engine.noteOn(touchId: ev.touchId, ratio: hit.ratio, weights: hit.weights)
-        } else {
-            engine.glide(touchId: ev.touchId, ratio: hit.ratio, weights: hit.weights)
-        }
-    }
-}
-
-
-// MARK: - Chord Pad (iPad)
-
-/// The iPad Chord Pad — the hex-grid chord surface, the iPad counterpart of
-/// the Mac [Chord Pad](../../docs/chord-pad.md) tab. Shown instead of the
-/// Pitch Pad when the Mac pushes `layout == .chordPad` over the synced state.
-/// Shares the same `PitchPadEngine` (real USB-MPE), `NoteManager` tilt
-/// expression, and synced scale/tonic; perform-only, like the Pitch Pad.
-struct ChordPadViewIOS: View {
-    @ObservedObject var engine: PitchPadEngine
-    @ObservedObject var noteManager: NoteManager
-    @ObservedObject var scaleSync: ScaleSyncReceiver
-    var onShowMapping: () -> Void
-    var onRecalibrate: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            PadToolbarIOS(engine: engine, noteManager: noteManager, scaleSync: scaleSync,
-                          onShowMapping: onShowMapping, onRecalibrate: onRecalibrate)
-            ChordPadSurfaceIOS(engine: engine)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background(Color.black.ignoresSafeArea())
-    }
-}
-
-private struct ChordPadSurfaceIOS: View {
-    @ObservedObject var engine: PitchPadEngine
-    @State private var touchInfos: [TouchInfo] = []
-
-    private var marginPixels: CGFloat { CGFloat(engine.marginPixels) }
-
-    var body: some View {
-        GeometryReader { geo in
-            let size = CGSize(width: max(1, geo.size.width),
-                              height: max(1, geo.size.height))
-            let degrees = chordDegrees(from: engine.scale)
-            let (a, origin, scale) = chordGridMetrics(cols: degrees.count + 1, size: size)
-            let cells = chordCells(degrees: degrees, a: a, origin: origin)
-            let R = chordHexCircumradius(a: a)
-
-            ZStack(alignment: .topLeading) {
-                Color.black
-
-                // Static layer: faint outer hexes + pitch-colored inner hexes
-                // with note-name labels, stretched to fill the surface.
-                Canvas { ctx, _ in
-                    for cell in cells {
-                        ctx.stroke(Path(closedPolygon: chordStretch(
-                            hexPolygon(center: cell.center, circumradius: R), by: scale)),
-                                   with: .color(.white.opacity(0.12)), lineWidth: 1)
-                    }
-                    for cell in cells {
-                        let hue = pitchColor(forRatio: cell.ratio,
-                                             lightness: 0.82, chroma: 0.20)
-                        ctx.stroke(Path(closedPolygon: chordStretch(innerHexPolygon(
-                            center: cell.center, circumradius: R, inset: marginPixels),
-                            by: scale)),
-                                   with: .color(hue), lineWidth: 2)
-                        ctx.draw(
-                            Text(Scale.noteName(for: engine.tonicMidi + cell.semitones))
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(.white),
-                            at: chordStretch(cell.center, by: scale))
-                    }
-                }
-
-                // Dynamic layer: live sounding fills (observes SoundingState).
-                CellFillsView(sounding: engine.sounding,
-                              cells: chordFillCells(cells, circumradius: R,
-                                                    inset: marginPixels, scale: scale),
-                              edgePad: 0)
-
-                TouchOverlayView(
-                    touches: $touchInfos,
-                    onTouchBegan: { ev in handle(ev, cells: cells, size: size, scale: scale, began: true) },
-                    onTouchMoved: { ev in handle(ev, cells: cells, size: size, scale: scale, began: false) },
-                    onTouchEnded: { id in engine.noteOff(touchId: id) }
-                )
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .clipped()
-        }
-    }
-
-    private func handle(_ ev: TouchEvent, cells: [ChordCell], size: CGSize,
-                        scale: CGSize, began: Bool) {
-        let screen = CGPoint(x: ev.xFraction * size.width,
-                             y: ev.yFraction * size.height)
-        let pt = chordUnstretch(screen, by: scale)
-        guard let hit = chordPitchAt(point: pt, cells: cells,
-                                     marginPixels: marginPixels) else { return }
-        if began {
-            engine.noteOn(touchId: ev.touchId, ratio: hit.ratio, weights: hit.weights)
-        } else {
-            engine.glide(touchId: ev.touchId, ratio: hit.ratio, weights: hit.weights)
-        }
-    }
-}
-
-// MARK: - String Pad (iPad)
-
-/// The iPad String Pad — the box-plot / abacus surface, the iPad counterpart of
-/// the Mac [String Pad](../../docs/string-pad.md) tab. Shown when the Mac pushes
-/// `layout == .stringPad`. The note layout (`StringArrangement`) is its own state
-/// (not derivable from the scale), synced from the Mac as a second SysEx message
-/// and held by `ScaleSyncReceiver.stringArrangement`. Perform-only, like the
-/// other pads — editing stays on the Mac. The pitch is constant inside each
-/// hexagon and interpolates (inverse-distance) between, including across the
-/// octave-repeat ghost strings.
-struct StringPadViewIOS: View {
-    @ObservedObject var engine: PitchPadEngine
-    @ObservedObject var noteManager: NoteManager
-    @ObservedObject var scaleSync: ScaleSyncReceiver
-    let arrangement: StringArrangement
-    var onShowMapping: () -> Void
-    var onRecalibrate: () -> Void
-
-    var body: some View {
-        // No top toolbar — the String Pad surface fills the whole screen and the
-        // controls live in the bottom-left corner, which the rotated layout leaves
-        // empty (the note band runs top-left → bottom-right).
-        StringPadSurfaceIOS(engine: engine, arrangement: arrangement)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .bottomLeading) {
-                StringPadControlsIOS(engine: engine, noteManager: noteManager,
-                                     scaleSync: scaleSync,
-                                     onShowMapping: onShowMapping,
-                                     onRecalibrate: onRecalibrate)
-                    .padding(16)
-            }
-            .background(Color.black.ignoresSafeArea())
-    }
-}
-
-/// The String Pad's controls, relocated from the (removed) top toolbar into the
-/// **bottom-left corner** of the iPad surface — the region the rotated layout
-/// leaves empty. A compact cluster overlaid on the playing surface; taps on the
-/// buttons hit the cluster, everything else falls through to the surface.
-private struct StringPadControlsIOS: View {
-    @ObservedObject var engine: PitchPadEngine
-    @ObservedObject var noteManager: NoteManager
-    @ObservedObject var scaleSync: ScaleSyncReceiver
-    var onShowMapping: () -> Void
-    var onRecalibrate: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                button("PANIC", color: .red) { engine.panic() }
-                button("MAP", color: .orange, action: onShowMapping)
-                Button(action: onRecalibrate) {
-                    Image(systemName: "arrow.counterclockwise")
-                        .font(.caption).foregroundColor(.blue)
-                }
-                ScaleSyncIndicator(scaleSync: scaleSync)
-            }
-            TiltBars(tilts: noteManager.currentTilt)
-            HStack(spacing: 8) {
-                PadSoundingReadout(sounding: engine.sounding, tonicMidi: engine.tonicMidi)
-                // Tonic is set on the Mac and synced over, so it's read-only here.
-                Text("Tonic \(Scale.noteName(for: engine.tonicMidi))")
-                    .font(.caption2).foregroundColor(.gray)
-                    .fixedSize()
-            }
-        }
-        .padding(10)
-        .background(Color.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private func button(_ title: String, color: Color,
-                        action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.caption).fontWeight(.bold)
-                .foregroundColor(.white)
-                .padding(.horizontal, 10).padding(.vertical, 4)
-                .background(color.opacity(0.7))
-                .cornerRadius(6)
-        }
-    }
-}
-
-/// One resolved hexagon lane for the iPad fill: a stable `id` (the
-/// `SoundingState`/`VoronoiCell` key), its live `ratio`, and its screen-space
-/// polygon (already tilted by the rotation angle).
-private struct DiagCell {
-    let id: String
-    let ratio: Double
-    let polygon: [CGPoint]
-}
-
-private struct StringPadSurfaceIOS: View {
-    @ObservedObject var engine: PitchPadEngine
-    let arrangement: StringArrangement
-    @State private var touchInfos: [TouchInfo] = []
-
-    /// Inverse-distance blend power, mapped from the synced `marginPixels`
-    /// (the String Pad's Sharpness), matching the Mac.
-    private var blendPower: Double { 1.0 + Double(engine.marginPixels) * 7.0 / 64.0 }
-
-    /// Mirror the Mac's String Pad layout on the iPad, **rotated by the
-    /// configurable angle** `arrangement.rotationDegrees` (0–40°). The iPad uses
-    /// the **same** shared `stringPlacements` geometry as the Mac — identical note
-    /// heights, the band layout, and octave-repeat ghost strings — so the two
-    /// **correspond**; only the rotation differs (the Mac stays upright). The
-    /// hexagons are NOT stretched, so they keep their Mac sizes.
-    ///
-    /// Built directly in screen space (no `rotationEffect`): `stringPlacements`
-    /// lays the upright layout out in a logical box, then every hexagon polygon is
-    /// rotated about the box centre onto the screen centre. Touches resolve in the
-    /// same screen space (no inverse transform, no nested-UIView hit-testing
-    /// concern). Enough octave-repeat ghost strings are added to span the rotated
-    /// width so the strings reach across the surface.
-    private func diagonalFillCells(size: CGSize,
-                                   degrees: [(ratio: Double, label: String)]) -> [DiagCell] {
-        let w = max(1, size.width), h = max(1, size.height)
-        let sc = max(0, arrangement.stringCount)
-        guard sc > 0, !degrees.isEmpty else { return [] }
-
-        let theta = min(40, max(0, arrangement.rotationDegrees)) * .pi / 180
-        let cT = CGFloat(cos(theta)), sT = CGFloat(sin(theta))
-
-        // Keep the Mac's column density (so the hexagons keep their proportions),
-        // adding octave-repeat ghost strings until the columns span the rotated
-        // width. Height stays the screen height so note heights match the Mac.
-        let baseCols = max(1, arrangement.totalColumns)
-        let spacing = w / CGFloat(baseCols)
-        let acrossExtent = w * cT + h * sT
-        let needCols = Int((acrossExtent / spacing).rounded(.up)) + 2
-        let ghosts = max(arrangement.ghostStringsPerSide, (needCols - sc + 1) / 2)
-
-        var filled = arrangement
-        filled.ghostStringsPerSide = ghosts
-        let lw = CGFloat(sc + 2 * ghosts) * spacing
-        let lh = h
-        let boxW = spacing * 0.72
-
-        let placements = stringPlacements(arrangement: filled, degrees: degrees,
-                                          size: CGSize(width: lw, height: lh), boxWidth: boxW)
-
-        // Rotate the upright layout about its centre onto the screen centre.
-        // (+theta leans the strings top-right → bottom-left — the opposite of the
-        // previous build.)
-        let cx = w / 2, cy = h / 2, hx = lw / 2, hy = lh / 2
-        func rot(_ p: CGPoint) -> CGPoint {
-            let dx = p.x - hx, dy = p.y - hy
-            return CGPoint(x: cx + dx * cT - dy * sT, y: cy + dx * sT + dy * cT)
-        }
-
-        return placements.map { p in
-            DiagCell(id: p.id, ratio: p.ratio, polygon: stringShapePolygon(p).map(rot))
-        }
-    }
-
-    var body: some View {
-        GeometryReader { geo in
-            let size = geo.size
-            let degrees = scaleDegrees(from: engine.scale)
-            let cells = diagonalFillCells(size: size, degrees: degrees)
-
-            ZStack(alignment: .topLeading) {
-                Color.black
-
-                // The iPad is always in perform mode: a clean playing surface —
-                // no gridlines, no labels. It mirrors the Mac layout (same notes
-                // and sizes), rotated by the configured angle (see
-                // `diagonalFillCells`). Drawn directly in screen space, so the
-                // Canvas clips any overscan to the screen.
-                Canvas { ctx, _ in
-                    for cell in cells {
-                        let hue = pitchColor(forRatio: cell.ratio, lightness: 0.82, chroma: 0.20)
-                        ctx.stroke(Path(closedPolygon: cell.polygon),
-                                   with: .color(hue), lineWidth: 2)
-                    }
-                }
-
-                CellFillsView(sounding: engine.sounding,
-                              cells: cells.map(voronoiCell), edgePad: 0)
-
-                TouchOverlayView(
-                    touches: $touchInfos,
-                    onTouchBegan: { ev in handle(ev, cells: cells, size: size, began: true) },
-                    onTouchMoved: { ev in handle(ev, cells: cells, size: size, began: false) },
-                    onTouchEnded: { id in engine.noteOff(touchId: id) }
-                )
-            }
-            .frame(width: size.width, height: size.height)
-            .clipped()
-        }
-    }
-
-    private func voronoiCell(_ cell: DiagCell) -> VoronoiCell {
-        let seed = DisplaySeed(id: cell.id, sourceID: UUID(), octaveShift: 0,
-                               ratio: cell.ratio, y: 0, label: "", ratioString: "")
-        return VoronoiCell(seed: seed, polygon: cell.polygon)
-    }
-
-    private func handle(_ ev: TouchEvent, cells: [DiagCell], size: CGSize, began: Bool) {
-        let pt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
-        let resolver = cells.map { (id: $0.id, ratio: $0.ratio, polygon: $0.polygon) }
-        guard let hit = polyPitchAt(point: pt, cells: resolver, power: blendPower) else { return }
-        if began {
-            engine.noteOn(touchId: ev.touchId, ratio: hit.ratio, weights: hit.weights)
-        } else {
-            engine.glide(touchId: ev.touchId, ratio: hit.ratio, weights: hit.weights)
-        }
+        .frame(width: 36, height: 36)
     }
 }
 
 // MARK: - Fret Pad (iPad)
 
-/// The iPad Fret Pad — the fret-ribbon surface, the iPad counterpart of the
+/// The iPad Fret Pad — the free-fret surface, the iPad counterpart of the
 /// Mac [Fret Pad](../../docs/fret-pad.md) tab. Shown when the Mac pushes
 /// `layout == .fretPad`. The segment layout (`FretArrangement`) is its own
-/// state (the vertical snap zones aren't derivable from the scale), synced as
-/// a third SysEx message and held by `ScaleSyncReceiver.fretArrangement`.
-/// Perform-only — editing stays on the Mac.
+/// state (fret positions and snap zones aren't derivable from the scale),
+/// synced as a third SysEx message and held by
+/// `ScaleSyncReceiver.fretArrangement`. Perform-only — editing stays on the
+/// Mac.
 ///
-/// Playing matches the Mac: a touch **starting** within the synced Snap
-/// distance of a fret *and* inside its vertical extent snaps to its exact
-/// pitch; starting above/below approaches the note freely; drags glide
-/// continuously (per-touch constant log-offset from a snapped onset — never
-/// re-snaps). Fully multitouch: each finger keeps its own snap offset.
+/// Playing matches the Mac: frets are freely positioned and the pitch is the
+/// continuous fret **field** (`fretFieldLog` — exact on a fret, interpolated
+/// between them); a touch **starting** within the synced Snap distance of a
+/// fret *and* inside its vertical extent snaps to its exact pitch; starting
+/// elsewhere approaches the note freely; drags glide continuously (per-touch
+/// constant log-offset from a snapped onset — never re-snaps). Fully
+/// multitouch: each finger keeps its own snap offset.
 struct FretPadViewIOS: View {
     @ObservedObject var engine: PitchPadEngine
     @ObservedObject var noteManager: NoteManager
     @ObservedObject var scaleSync: ScaleSyncReceiver
     let arrangement: FretArrangement
-    var onShowMapping: () -> Void
     var onRecalibrate: () -> Void
 
     /// Records play strokes to Documents/FretRecordings/ for offline fitting
@@ -632,12 +215,54 @@ struct FretPadViewIOS: View {
         VStack(spacing: 0) {
             PadToolbarIOS(engine: engine, noteManager: noteManager, scaleSync: scaleSync,
                           recorder: recorder,
-                          onShowMapping: onShowMapping, onRecalibrate: onRecalibrate)
+                          onRecalibrate: onRecalibrate)
+            // The drone buttons live INSIDE the surface (drawn as an
+            // overlay, hit-tested in the surface's own touch handler) so
+            // the surface keeps its full width — a separate side column
+            // made the whole right edge dead space and swallowed touches
+            // aimed at the rightmost fret.
             FretPadSurfaceIOS(engine: engine, arrangement: arrangement,
                               recorder: recorder)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color.black.ignoresSafeArea())
+    }
+}
+
+/// Visual layer for the drone buttons (rects: the shared
+/// `droneButtonRects` in StarpadCore) (display only — presses are
+/// hit-tested in the surface's UIKit touch handler, never via SwiftUI
+/// gestures, so button touches and melody multitouch can't interfere).
+private struct DroneButtonsVisualIOS: View {
+    let ratios: [Double]
+    let held: Set<Int>
+    let size: CGSize
+    let edgePad: CGFloat
+
+    var body: some View {
+        let rects = droneButtonRects(size: size)
+        ZStack(alignment: .topLeading) {
+            ForEach(0..<4, id: \.self) { i in
+                let ratio = i < ratios.count ? ratios[i] : 1.0
+                let hue = pitchColor(forRatio: ratio, lightness: 0.75,
+                                     chroma: 0.17)
+                let r = rects[i]
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(hue.opacity(held.contains(i) ? 0.9 : 0.25))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(hue.opacity(0.8), lineWidth: 1)
+                    )
+                    .overlay(
+                        Text(sargamName(forRatio: ratio))
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundColor(.white)
+                    )
+                    .frame(width: r.width, height: r.height)
+                    .offset(x: edgePad + r.minX, y: edgePad + r.minY)
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -648,7 +273,7 @@ private struct FretPadSurfaceIOS: View {
     let recorder: FretGestureRecorder
     @State private var touchInfos: [TouchInfo] = []
     /// Per-touch constant log2 offset captured at a snapped onset: the drag
-    /// plays `2^(rawLog(x) + offset)`, so the snapped pitch is exact at the
+    /// plays `2^(fieldLog + offset)`, so the snapped pitch is exact at the
     /// onset point and finger movement glides relative to it. 0 for
     /// unsnapped (approach) touches; cleared on touch end.
     @State private var snapOffsets: [Int: Double] = [:]
@@ -660,6 +285,12 @@ private struct FretPadSurfaceIOS: View {
     /// Tap legato (see `FretLegato`): for very fast phrases the player taps
     /// notes instead of dragging; consecutive taps glide as one voice.
     @State private var legato = FretLegato()
+    /// Touches currently holding a drone button (touchId → button index).
+    /// Drone presses are hit-tested HERE, in the surface's own UIKit touch
+    /// handler — not via SwiftUI gestures — so the surface keeps its full
+    /// width and only the 4 button rectangles are claimed; everything
+    /// around/below them plays normally.
+    @State private var droneTouches: [Int: Int] = [:]
 
     private let edgePad: CGFloat = 12
     /// Horizontal onset-snap half-width in px — the synced `marginPixels`
@@ -696,12 +327,27 @@ private struct FretPadSurfaceIOS: View {
                 CellFillsView(sounding: engine.sounding,
                               cells: fretFillCells(placements), edgePad: edgePad)
 
+                // Drone buttons (display only — presses are hit-tested in
+                // `began` below): right edge, top → vertical center.
+                DroneButtonsVisualIOS(ratios: arrangement.droneRatios,
+                                      held: Set(droneTouches.values),
+                                      size: size, edgePad: edgePad)
+
                 TouchOverlayView(
                     touches: $touchInfos,
                     onTouchBegan: { ev in began(ev, placements: placements, size: size) },
                     onTouchMoved: { ev in moved(ev, placements: placements, size: size) },
                     onTouchEnded: { id in
                         let now = CACurrentMediaTime()
+                        // Drone touch: release the button (unless another
+                        // finger still holds the same one) and skip the
+                        // note path entirely.
+                        if let d = droneTouches.removeValue(forKey: id) {
+                            if !droneTouches.values.contains(d) {
+                                engine.setDrone(d, pressed: false)
+                            }
+                            return
+                        }
                         snapOffsets.removeValue(forKey: id)
                         assist.end(touchId: id)
                         // Legato: the voice owner's release is deferred by
@@ -726,25 +372,33 @@ private struct FretPadSurfaceIOS: View {
     }
 
     /// Onset: snap when within the Snap distance of a fret AND inside its
-    /// vertical extent, else play the raw x-mapped pitch (the approach path).
+    /// vertical extent, else play the fret-field pitch (the approach path).
     /// Registers the touch with the drag assist and starts its settle timer.
     private func began(_ ev: TouchEvent, placements: [FretPlacement], size: CGSize) {
         let pt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
-        let rawLog = fretLogRatio(atX: pt.x,
-                                  ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                                  width: size.width)
+        // Drone buttons first: a touch starting inside a button rect is a
+        // drone press, not a note. (Melody drags that WANDER into a button
+        // keep playing — only onsets are claimed.)
+        if let d = droneButtonRects(size: size).firstIndex(where: { $0.contains(pt) }) {
+            let alreadyHeld = droneTouches.values.contains(d)
+            droneTouches[ev.touchId] = d
+            if !alreadyHeld { engine.setDrone(d, pressed: true) }
+            return
+        }
+        guard let fieldLog = fretFieldLog(at: pt, placements: placements)
+        else { return }   // no frets — nothing to play
         let offset: Double
         let onsetLog: Double
         let weights: [String: Double]
         if snapDistance > 0,
            let hit = fretSnap(at: pt, placements: placements,
                               snapDistance: snapDistance) {
-            offset = log2(hit.ratio) - rawLog
+            offset = log2(hit.ratio) - fieldLog
             onsetLog = log2(hit.ratio)
             weights = [hit.id: 1.0]
         } else {
             offset = 0
-            onsetLog = rawLog
+            onsetLog = fieldLog
             weights = [:]
         }
         snapOffsets[ev.touchId] = offset
@@ -768,16 +422,14 @@ private struct FretPadSurfaceIOS: View {
         }
         legato.noteOutput(ev.touchId, log: sentLog)
 
-        assist.setContext(placements: placements, snapDistance: snapDistance,
-                          ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                          width: size.width)
+        assist.setContext(placements: placements, snapDistance: snapDistance)
         assist.begin(touchId: ev.touchId, x: pt.x, y: pt.y,
-                     uncorrectedLog: rawLog + offset, time: now)
+                     uncorrectedLog: fieldLog + offset, time: now)
         if recorder.isRecording {
             recorder.begin(touchId: ev.touchId,
                            context: strokeContext(placements: placements, size: size),
                            offset: offset, x: pt.x, y: pt.y,
-                           u: rawLog + offset, o: sentLog, time: now)
+                           u: fieldLog + offset, o: sentLog, time: now)
         }
         startAssistTimerIfNeeded()
     }
@@ -787,7 +439,7 @@ private struct FretPadSurfaceIOS: View {
                                size: CGSize) -> FretGestureRecorder.Context {
         FretGestureRecorder.Context(
             frets: placements.map {
-                .init(id: $0.id, log2Ratio: log2($0.ratio),
+                .init(id: $0.id, log2Ratio: log2($0.ratio), x: Double($0.x),
                       topY: Double($0.topY), bottomY: Double($0.bottomY),
                       ghost: $0.isGhost)
             },
@@ -803,28 +455,27 @@ private struct FretPadSurfaceIOS: View {
                            "turnTau": assist.turnTau])
     }
 
-    /// Drag: continuous glide — raw x-mapped pitch plus this touch's constant
-    /// onset offset, then the drag assist's slewed correction on top
+    /// Drag: continuous glide — the fret-field pitch plus this touch's
+    /// constant onset offset, then the drag assist's slewed correction on top
     /// (magnetic at stops/turns, transparent while gliding). Never re-snaps
-    /// mid-drag; the assist is continuous.
+    /// mid-drag; the field and assist are continuous.
     private func moved(_ ev: TouchEvent, placements: [FretPlacement], size: CGSize) {
+        // A finger holding a drone button never glides.
+        guard droneTouches[ev.touchId] == nil else { return }
         let pt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
-        let rawLog = fretLogRatio(atX: pt.x,
-                                  ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                                  width: size.width)
+        guard let fieldLog = fretFieldLog(at: pt, placements: placements)
+        else { return }
         let offset = snapOffsets[ev.touchId] ?? 0
-        assist.setContext(placements: placements, snapDistance: snapDistance,
-                          ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                          width: size.width)
+        assist.setContext(placements: placements, snapDistance: snapDistance)
         let now = CACurrentMediaTime()
         let out = assist.move(touchId: ev.touchId, x: pt.x, y: pt.y,
-                              uncorrectedLog: rawLog + offset, time: now)
+                              uncorrectedLog: fieldLog + offset, time: now)
         let final = out.log2Pitch + legato.offset(ev.touchId, time: now)
         engine.glide(touchId: ev.touchId, ratio: pow(2.0, final),
                      weights: out.weights)
         legato.noteOutput(ev.touchId, log: final)
         recorder.sample(touchId: ev.touchId, x: pt.x, y: pt.y,
-                        u: rawLog + offset, o: final, time: now)
+                        u: fieldLog + offset, o: final, time: now)
     }
 
     /// 60 Hz settle loop while any touch is down (stops emit no touch

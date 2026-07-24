@@ -6,7 +6,7 @@ Quick reference for shipping Starpad (iOS) and StarpadMac outside of Xcode's run
 
 For distribution outside the Mac App Store (e.g. direct download, internal builds), notarize a Hardened-Runtime-enabled `.app` against Apple's notarization service.
 
-**Hosted-AU dependency**: StarpadMac depends on SWAM Viola being installed as a system Audio Unit on the target Mac. The Starpad bundle does not ship the SWAM AU — users must install Audio Modeling's product separately. If SWAM isn't installed, `AudioEngine.loadHostedInstrument` reports "AU not found" via `hostedInstrumentStatus` and the sym pool runs on silence.
+**No external dependencies**: StarpadMac renders its own String voice (`SarangiKit.BowEngine` + the `CBowKernel` C target, both vendored in-repo) — there is no hosted-AU or plugin dependency to install on the target Mac. The whole instrument ships inside the bundle.
 
 ### One-time setup
 

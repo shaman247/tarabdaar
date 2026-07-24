@@ -254,93 +254,11 @@ public class NoteManager: ObservableObject {
     public var slider1Touched: Bool = false
     public var slider2Touched: Bool = false
 
-    /// Parameter-to-dimension mapping. Loaded from persistence on init.
-    public var dimensionMapping: DimensionMapping = DimensionMapping.load() {
-        didSet {
-            dimensionMapping.save()
-            rebuildMappingCache()
-        }
-    }
-
-    /// Cached binding arrays for O(1) lookup in the 60Hz loop.
-    /// Indexed by MappableParameter.rawValue.
-    private var cachedBindings: [[DimensionBinding]] = []
-    /// Cached default values per parameter. Used when no binding is active.
-    private var cachedDefaults: [Double] = []
-
-    /// Cached list of (CC number, param rawValue) for active CC mappings.
-    public private(set) var activeCCs: [(cc: UInt8, paramIndex: Int)] = []
-
-    /// True if any parameter is mapped to the accelPressure dimension.
-    /// When false, the velocity capture delay is skipped for lower latency.
-    public private(set) var pressureInUse: Bool = false
-
-    // Presets live on the Mac (StarpadMac/SoundPreset.swift). iPad is a
-    // MIDI controller and has no preset concept beyond what's in its
-    // own DimensionMapping defaults.
-
-    private func rebuildMappingCache() {
-        let allMappings = MappableParameter.allCases.map { dimensionMapping.mapping(for: $0) }
-        cachedBindings = allMappings.map(\.bindings)
-        cachedDefaults = allMappings.map(\.defaultValue)
-        activeCCs = MappableParameter.allCases.compactMap { param in
-            guard let cc = param.midiCC, !cachedBindings[param.rawValue].isEmpty else { return nil }
-            return (cc, param.rawValue)
-        }
-        pressureInUse = cachedBindings.contains { bindings in
-            bindings.contains { $0.dimension == .accelPressure }
-        }
-    }
-
-    /// Resolves a parameter value from its bound dimensions.
-    ///
-    /// Priority: per-note dimensions win over global. Among globals, touched sliders
-    /// override tilts. Among same-type dimensions, the one with the highest absolute
-    /// deviation from center wins.
-    public func cachedParamValue(for param: MappableParameter, voiceIndex: Int? = nil) -> Double {
-        let bindings = cachedBindings[param.rawValue]
-        if bindings.isEmpty { return cachedDefaults[param.rawValue] }
-        if bindings.count == 1 {
-            let b = bindings[0]
-            return b.evaluate(normalizedDimension(for: b.dimension, voiceIndex: voiceIndex))
-        }
-
-        // Multi-binding resolution
-        var bestPerNote: DimensionBinding?
-        var bestPerNoteNorm: Double = 0.5
-        var bestPerNoteDev: Double = -1
-
-        var bestGlobal: DimensionBinding?
-        var bestGlobalNorm: Double = 0.5
-        var bestGlobalDev: Double = -1
-
-        // Check if any bound slider is currently touched
-        let sliderActive = bindings.contains { b in
-            (b.dimension == .slider1 && slider1Touched) || (b.dimension == .slider2 && slider2Touched)
-        }
-
-        for b in bindings {
-            let norm = normalizedDimension(for: b.dimension, voiceIndex: voiceIndex)
-            let dev = abs(norm - 0.5)
-
-            if b.dimension.isPerNote {
-                if dev > bestPerNoteDev {
-                    bestPerNote = b; bestPerNoteNorm = norm; bestPerNoteDev = dev
-                }
-            } else {
-                // When a slider is touched, skip tilts
-                if sliderActive && b.dimension.isTilt { continue }
-                if dev > bestGlobalDev {
-                    bestGlobal = b; bestGlobalNorm = norm; bestGlobalDev = dev
-                }
-            }
-        }
-
-        // Per-note takes priority when present
-        if let pn = bestPerNote { return pn.evaluate(bestPerNoteNorm) }
-        if let gb = bestGlobal { return gb.evaluate(bestGlobalNorm) }
-        return cachedDefaults[param.rawValue]
-    }
+    // (2026-07-24 dead-param deletion: the dimension-mapping machinery —
+    // `dimensionMapping`, the binding caches, `cachedParamValue`,
+    // `activeCCs`, `pressureInUse` — is GONE. All parameter mapping is
+    // Mac-side now; this class only reports raw tilts and plays the
+    // legacy glide engine with fixed constants.)
 
     /// Per-note dimension values from the most recently activated voice (for UI display).
     public var lastActiveAccelPressure: Double { pitchChannels[lastActiveVoiceIndex].accelPressure }
@@ -378,12 +296,12 @@ public class NoteManager: ObservableObject {
 
     /// Glide time per semitone (seconds).
     public var glideTimePerSemitone: Double {
-        cachedParamValue(for: .glideSpeed) / 1000.0
+        NoteManager.glideSpeedSecPerSemitone
     }
 
     /// Glide max wait — mid-glide compression threshold (seconds).
     public var glideMaxWait: Double {
-        cachedParamValue(for: .glideCompression) / 1000.0
+        NoteManager.glideCompressionSec
     }
 
     public var motionSource: MotionSource?
@@ -497,8 +415,17 @@ public class NoteManager: ObservableObject {
     private var glideTimer: Timer?
     private var lastTickTime: TimeInterval = 0
 
+    // Legacy glide-engine constants (2026-07-24 dead-param deletion):
+    // formerly dimension-mapped; nothing on the live playing path reads
+    // them, and the audition/keyboard path uses these fixed values (the
+    // old defaults' resting midpoints).
+    static let glideSpeedSecPerSemitone = 0.110
+    static let glideCompressionSec = 0.0275
+    static let dragSmoothingCoeff = 0.3
+    static let glideCurveK = 7.5
+    static let fixedVelocity = 92
+
     public init() {
-        rebuildMappingCache()
         startGlideLoop()
     }
 
@@ -530,14 +457,18 @@ public class NoteManager: ObservableObject {
         lastTickTime = now
 
         if polyphonicMode {
+            var anyActive = false
             for i in 0..<Config.maxPolyVoices where pitchChannels[i].state != .idle {
                 updateVoiceGlide(voiceIndex: i, dt: dt)
                 updateVoiceExpression(voiceIndex: i, dt: dt)
+                anyActive = true
             }
+            if anyActive { sendTiltReport() }
         } else {
             if pitchChannels[0].state != .idle {
                 updateVoiceGlide(voiceIndex: 0, dt: dt)
                 updateVoiceExpression(voiceIndex: 0, dt: dt)
+                sendTiltReport()
             }
         }
 
@@ -605,7 +536,7 @@ public class NoteManager: ObservableObject {
         if pitchChannels[i].dragging && pitchChannels[i].dragTargetFreq > 0 {
             let logCurrent = log2(pitchChannels[i].currentFrequency)
             let logTarget = log2(pitchChannels[i].dragTargetFreq)
-            let baseSmoothingVal = cachedParamValue(for: .dragSmoothing, voiceIndex: i)
+            let baseSmoothingVal = NoteManager.dragSmoothingCoeff
             let smoothing = pitchChannels[i].snapping ? min(baseSmoothingVal * 2.0, 1.0) : baseSmoothingVal
             let logSmoothed = logCurrent + (logTarget - logCurrent) * smoothing
             pitchChannels[i].currentFrequency = pow(2.0, logSmoothed)
@@ -633,7 +564,7 @@ public class NoteManager: ObservableObject {
 
             // Asymmetric sigmoid easing in log-frequency space
             let t = pitchChannels[i].glideProgress
-            let k = cachedParamValue(for: .glideCurve)
+            let k = NoteManager.glideCurveK
             let m = Config.glideMidpoint
             let raw = 1.0 / (1.0 + exp(-k * (t - m)))
             let low = 1.0 / (1.0 + exp(-k * (0.0 - m)))
@@ -661,22 +592,30 @@ public class NoteManager: ObservableObject {
         }
     }
 
-    /// Applies pitch bend and tilt expression to a single voice.
+    /// Applies pitch bend to a single voice. (2026-07-24: per-voice
+    /// aftertouch/CC emission is GONE — the controller streams only the
+    /// raw tilt report (`sendTiltReport`) and the Mac evaluates its own
+    /// tilt bindings.)
     private func updateVoiceExpression(voiceIndex i: Int, dt: Double) {
-        let midiCh = pitchChannels[i].midiChannel
         guard midiOutputEnabled else { return }
-
         sendPitchBend(for: i)
-        if !cachedBindings[MappableParameter.aftertouch.rawValue].isEmpty {
-            let pressure = UInt8(max(0, min(127, Int(cachedParamValue(for: .aftertouch, voiceIndex: i)))))
-            midiEngine?.sendChannelPressure(value: pressure, channel: midiCh)
-        }
+    }
 
-        // Send MIDI CCs for active CC-mapped parameters
-        for (cc, paramIdx) in activeCCs {
-            guard let param = MappableParameter(rawValue: paramIdx) else { continue }
-            let val = UInt8(max(0, min(127, Int(cachedParamValue(for: param, voiceIndex: i)))))
-            midiEngine?.sendControlChange(controller: cc, value: val, channel: midiCh)
+    /// RAW TILT REPORT (2026-07-24): stream the three calibrated tilt
+    /// values (normalized 0…1 → 0…127) on the fixed axis messages
+    /// (`TiltAxisWire`), change-gated. The controller knows nothing about
+    /// parameters, slots, or mappings — the Mac interprets.
+    private var lastTiltSent: [UInt8] = [255, 255, 255]
+
+    private func sendTiltReport() {
+        guard midiOutputEnabled else { return }
+        for (i, cc) in TiltAxisWire.ccs.enumerated() {
+            let norm = normalizedDimension(for: TiltAxisWire.dims[i])
+            let v = UInt8(max(0, min(127, Int((norm * 127).rounded()))))
+            if v != lastTiltSent[i] {
+                lastTiltSent[i] = v
+                midiEngine?.sendControlChange(controller: cc, value: v, channel: 0)
+            }
         }
     }
 
@@ -795,22 +734,9 @@ public class NoteManager: ObservableObject {
 
         let normalizedY = Self.normalizedKeyY(yFraction: yFraction, isBlackKey: hit.isBlackKey)
 
-        if pressureInUse {
-            // Delay note to capture accelerometer spike for velocity
-            let timer = Timer.scheduledTimer(withTimeInterval: Config.velocityDelay, repeats: false) { [weak self] _ in
-                self?.fireNote(touchId: touchId, note: note, motionTimestamp: motionTimestamp, keyY: normalizedY)
-            }
-            pendingTouches[touchId] = PendingTouch(
-                touchId: touchId,
-                midiNote: note,
-                touchTimestamp: motionTimestamp,
-                keyY: normalizedY,
-                timer: timer
-            )
-        } else {
-            // No pressure mapping — fire immediately with no delay
-            fireNote(touchId: touchId, note: note, motionTimestamp: motionTimestamp, keyY: normalizedY)
-        }
+        // (2026-07-24: velocity is a fixed constant — the accelerometer
+        // capture delay is gone; notes always fire immediately.)
+        fireNote(touchId: touchId, note: note, motionTimestamp: motionTimestamp, keyY: normalizedY)
     }
 
     /// Called when a finger lifts from the keyboard.
@@ -1025,33 +951,13 @@ public class NoteManager: ObservableObject {
     private func fireNote(touchId: Int, note: Int, motionTimestamp: TimeInterval, keyY: Double) {
         pendingTouches.removeValue(forKey: touchId)
 
-        // Compute accel pressure only if any parameter uses it
-        let normalized: Double
-        if pressureInUse {
-            let result = motionSource?.peakAccelSince(timestamp: motionTimestamp)
-            let peakG = result?.magnitude ?? 0.0
-            let peakTimestamp = result?.timestamp ?? motionTimestamp
-            let peakDelayMs = (peakTimestamp - motionTimestamp) * 1000.0
-
-            recentPeakDelays.append(peakDelayMs)
-            if recentPeakDelays.count > Config.peakDelayHistory {
-                recentPeakDelays.removeFirst()
-            }
-
-            let minG = Config.velocityMinG
-            let maxG = Config.velocityMaxG
-            let clamped = min(max(peakG, minG), maxG)
-            normalized = (log(clamped) - log(minG)) / (log(maxG) - log(minG))
-            motionSource?.lastTouchVelocity = peakG
-        } else {
-            normalized = 0.5
-        }
-
-        // Temporarily stage per-note values so cachedParamValue can resolve them
-        // (the voice isn't set up yet, but lastActiveVoiceIndex is the fallback)
+        // (2026-07-24: accelerometer velocity capture deleted with the
+        // dead velocity parameter — fixed velocity, per-note dims kept
+        // only as UI state.)
+        let normalized = 0.5
         pitchChannels[lastActiveVoiceIndex].accelPressure = normalized
         pitchChannels[lastActiveVoiceIndex].keyY = keyY
-        let velocity = Int(max(1, min(127, cachedParamValue(for: .velocity))))
+        let velocity = NoteManager.fixedVelocity
 
         // --- Polyphonic mode: each touch gets its own voice ---
         if polyphonicMode {

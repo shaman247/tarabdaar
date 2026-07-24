@@ -1,100 +1,36 @@
 # Simulator & Audition Loop
 
-The **Simulator** tab in StarpadMac plays the same MPE pipeline an iPad
-would, driven from the Mac's mouse + keyboard + on-screen sliders. It
-exists so sound design can be iterated on without an iPad in the loop
-— and so an external tool (a script, a Claude session) can drop a JSON
-score in a watched folder and get back a recorded WAV, enabling
-fully-autonomous parameter sweeps and target-matching loops.
+The **audition loop** plays the same MPE pipeline an iPad would, driven
+from a JSON score dropped into a watched folder. It exists so sound
+design can be iterated without an iPad in the loop — an external tool (a
+script, a Claude session) drops a JSON score and gets back a recorded
+WAV, enabling fully-autonomous parameter sweeps and target-matching
+loops. (The on-screen **Simulator tab was removed** in the 2026-07-23
+simplification; `IPadSimulator` + `AuditionRunner` remain **headless**.)
 
 This page covers:
 
-- [What the Simulator tab is](#what-the-simulator-tab-is)
-- [Interactive controls](#interactive-controls)
-- [Recording](#recording)
+- [The headless simulator](#the-headless-simulator)
 - [The audition loop](#the-audition-loop)
 - [Audition score format](#audition-score-format)
 - [Tools](#tools)
 - [Reverse-engineering a target WAV](#reverse-engineering-a-target-wav)
 
-## What the Simulator tab is
+## The headless simulator
 
 A Mac-side host for an [iPad-equivalent `NoteManager`](architecture.md)
-with mocked sensors. The same touch → glide → MPE pipeline
-the iPad uses runs here, but tilts come from sliders and "strike
-velocity" comes from a single knob instead of an accelerometer spike.
-Emitted MPE bytes never touch CoreMIDI — they're delivered in-process
-to `AudioEngine.sendHostedMIDI(...)` and `AppController` CC handling,
-so the simulator coexists cleanly with a real iPad plugged in over USB
-(no double-triggering).
+with mocked sensors. The same touch → glide → MPE pipeline the iPad uses
+runs here, but tilts come from `tilt` events and "strike velocity" from
+`strike` events instead of an accelerometer spike. Emitted MPE bytes
+never touch CoreMIDI — they're delivered in-process to
+`AudioEngine.sendHostedMIDI(...)` (→ the String voice) and `AppController`
+CC handling, so the simulator coexists cleanly with a real iPad plugged
+in over USB (no double-triggering).
 
 The wiring lives in:
 
 - [`StarpadMac/IPadSimulator.swift`](../StarpadMac/IPadSimulator.swift) — owns the `NoteManager`, `MockMotionSource`, and the in-process `MIDIEngine` (constructed with `publishToCoreMIDI: false`)
 - [`StarpadMac/MockMotionSource.swift`](../StarpadMac/MockMotionSource.swift) — `MotionSource` shim with tilt/strike-force properties
-- [`StarpadMac/Views/SimulatorView.swift`](../StarpadMac/Views/SimulatorView.swift) — the UI
-
-## Interactive controls
-
-### Mouse
-
-| Action | Result |
-|--------|--------|
-| Click and drag a key | `touchBegan` → `touchMoved` → `touchEnded` — exactly what tapping the iPad does. Dragging horizontally engages the drag-glide system. |
-| Shift-click a key | Locks a finger on that key. Held until shift-clicked again on the same key. Build chords this way. The locked highlight is a fainter cyan than an actively-held key. |
-| Shift-click a locked key | Releases that lock. |
-
-### Computer keyboard (anchored to C4 = MIDI 60)
-
-```
-white :  A   S   D   F   G   H   J   K   L
-note  :  C   D   E   F   G   A   B   C5  D5
-black :  W   E       T   Y   U       O
-note  :  C#  D#      F#  G#  A#      C#5
-```
-
-- **Z / X** — octave down / up (range −3 to +3)
-- Held keys behave like fingers; releasing the key releases the touch
-- Repeats are ignored (no machine-gun retriggering)
-
-The key monitor is installed in the Simulator tab's `onAppear` and
-removed in `onDisappear`, so it only fires while the tab is visible.
-
-### Sliders
-
-| Control | Source of truth | Range | Reset |
-|---------|----------------|-------|-------|
-| Tilt 1 / 2 / 3 | `MockMotionSource.tilt{1,2,3}` (matches `MotionManager.normalizedTilts`) | [-1, +1] | "Center" button |
-| Slider 1 / 2 | `NoteManager.slider{1,2}Value` — same as iPad's on-screen sliders | [0, 1] | "Default" button (0.5) |
-| Strike | `MockMotionSource.strikeForce` (peak-G value `peakAccelSince` returns) | [0.01, 0.5] g | hand-set |
-
-Strike force feeds the velocity LUT (`Config.velocityMinG..velocityMaxG`,
-log-mapped to MIDI 1..127). 0.1 g ≈ v75; 0.5 g ≈ v127.
-
-The default `DimensionMapping` (shared with the iPad's persisted prefs)
-ties:
-
-- `velocity` → `accelPressure` → strike-force knob
-- `glideSpeed` / `glideCompression` / `amplitude` / `aftertouch` → `tilt1`
-
-Edit those bindings in the iPad's mapping matrix to change what the
-sliders actually control. The simulator reads the same persisted
-mapping; there's no separate "simulator preferences."
-
-## Recording
-
-Click **Record** in the Simulator tab to capture post-FX audio (after
-master EQ + reverb, before the output device) to a 16-bit stereo WAV.
-Files land in `~/Music/Starpad-Recordings/` with timestamped names.
-Right-click the Record button to reveal the most recent file in
-Finder. Last recording's path is also shown in the footer; clicking it
-opens Finder selected on the file.
-
-Implemented as an `installTap(onBus: 0)` on `engine.mainMixerNode` in
-[`AudioEngine.startRecording(to:)`](../Packages/StarpadCore/Sources/StarpadCore/AudioEngine.swift).
-The tap writes to an `AVAudioFile` with explicit Linear-PCM-Int16
-settings (AVAudioFile converts from the engine's Float32 buffers on
-write). `stopRecording` removes the tap and closes the file.
 
 ## The audition loop
 
@@ -164,106 +100,60 @@ race the file-size-stable check.
 | `tilt`       | `at`, `axis`, `value`             | Set a tilt axis. `axis` ∈ {0, 1, 2}, `value` ∈ [-1, +1]. Drives whatever parameters are bound to that tilt in the dimension mapping (default: tilt1 → glide/aftertouch/amplitude). |
 | `slider`     | `at`, `index`, `value`            | Set on-screen slider1/slider2. `index` ∈ {0, 1}, `value` ∈ [0, 1]. |
 | `strike`     | `at`, `value`                     | Set `MockMotionSource.strikeForce` (peak-G driving the velocity LUT). 0.1 ≈ v75; 0.5 ≈ v127. |
-| `voiceParam` | `at`, `param`, `value`            | Set a Mac-side voice / FX parameter — see the table below. |
-| `rawNote`    | `at`, `note`, `id?`, `value?`     | Raw MIDI note-on straight to the hosted AU, **bypassing the NoteManager** (no vibrato LFO, no glide, no tilt-CC emission) — a dead-steady pitch for sound-matching. `id` = MIDI channel (1–15, default 1), `value` = velocity (default 90). The sym halo still rings (it's driven by SWAM's audio, not the MIDI path). |
+| `voiceParam` | `at`, `param`, `value`            | Set a Mac-side String-voice parameter — see the table below. |
+| `rawNote`    | `at`, `note`, `id?`, `value?`     | Raw MIDI note-on straight to the String voice, **bypassing the NoteManager** (no glide, no tilt-CC emission) — a dead-steady pitch for sound-matching. `id` = MIDI channel (1–15, default 1), `value` = velocity (default 90). |
 | `rawNoteOff` | `at`, `note`, `id?`               | Raw MIDI note-off (matching channel). |
-| `preset`     | `at`, `param` (preset rawValue)   | Apply a `SoundPreset`. Currently only `"swamViola"` ships. |
-| `tanpuraPluck` | `at`, `index`, `value`          | Pluck tanpura-drone string `index` (0–3) at velocity `value` (0–1). The runner silences the drone and stops any auto-cycle at score start. |
-| `padOn` / `padGlide` / `padOff` | `at`, `id`, `value` | Drive the Mac **Pitch Pad** (`controller.pitchPad`, the real playing engine) — `value` = ratio vs the pad tonic (default 1.0). `padGlide` sends a real pitch bend to a new ratio; `padOff` releases. Use these (not `noteOn`/`glide`, which take the legacy NoteManager keyboard path that emits no bend headless) to exercise pitch bends / the sitar glide. |
-| `spadOn` / `spadGlide` / `spadOff` | `at`, `id`, `value` | Same as the `pad*` trio but for the **String Pad** engine (`controller.stringPad`). Lets a score play/test the String Pad path directly. |
+| `padOn` / `padGlide` / `padOff` | `at`, `id`, `value` | Drive the Mac playing engine (`controller.pitchPad`) — `value` = ratio vs the tonic (default 1.0). `padGlide` sends a real pitch bend to a new ratio; `padOff` releases. Use these (not `noteOn`/`glide`, which take the legacy NoteManager keyboard path that emits no bend headless) to exercise pitch bends / meend. |
 
 **Why `rawNote`:** `simulator.noteOn` routes through the iPad `NoteManager`, whose
 60 Hz loop runs the glide engine and per-tick pitch-bend re-emission. For matching a
 steady reference, `rawNote` skips all of that and sends a fixed Note On + bend
-straight to the hosted AU. (The Starpad-side vibrato LFO that this used to bypass has
-since been removed entirely; `rawNote` still bypasses the glide path. The sarangi live
-match, `tools/sarangi_iterate.py`, uses `rawNote`.)
-
-### Hosted-AU (SWAM) parameters
-
-Two extra `voiceParam` forms reach the hosted AU's own parameter tree:
-
-| `param`            | Effect |
-|--------------------|--------|
-| `swam.<identifier>`| Set a hosted-AU parameter by identifier (e.g. `swam.1484578252` = SWAM's Bow Pressure) on every loaded instance. `value` is in the parameter's native range. |
-| `__auDump__`       | Write the hosted AU's full parameter list (identifier, name, range, value) to `<auditions-root>/swam_params.json`. Run once to discover the identifiers. `value` is ignored. |
-
-These are how the sarangi match drives SWAM's *own* timbre (Bow Position/Pressure,
-String Resonance, etc.) and zeroes its auto-vibrato — far more reaching than a
-post-AU EQ. The winning values are persisted as `SoundPreset.State.hostedAUParams`
-and applied on preset load by `AudioEngine.setHostedAUParameterDefaults`.
+straight to the String voice.
 
 ### `voiceParam` names
 
-The setters clamp values into the same ranges as the UI sliders. Unit
-hints below match what the on-screen knobs use.
+The setters clamp values into the same ranges as the UI sliders.
 
 | Name                  | Range            | Effect |
 |-----------------------|------------------|--------|
-| `sympatheticVolume`   | 0..1             | Overall sym layer level. |
-| `symCoupling`         | 0..1             | Excitation depth — how readily a played note excites the sym strings. |
-| `symDecay`            | 0.05..30 seconds | Per-harmonic decay base τ (bloom-in / ring-out time). |
-| `symHarmonicFalloff`  | 0.5..4           | Spectral rolloff exponent (SA voicing). |
-| `symPluckPos`         | 0.02..0.5        | Pluck-position comb (suppresses the fundamental). |
-| `symDampingTilt`      | 0..2             | Per-harmonic decay tilt (highs decay faster). |
-| `symInharmonicity`    | 0..0.0005        | Stiffness B in `f_k = k·f0·√(1+B·k²)`. |
-| `symPartialCount`     | 4..64            | Harmonics per voice. |
-| `symDriveLevel`       | 0..8             | Excitation / output strength. |
-| `symAttackMs`         | 1..500 ms        | Excitation follower attack. |
-| `symAmpModDepth`      | 0..1             | Per-harmonic "jiva" depth (tanpura shimmer). |
-| `symAmpModRate`       | 0.01..10 Hz      | Mean per-harmonic jiva LFO rate. |
-| `symPitchDrift`       | 0..50 cents      | Per-string slow random-walk pitch drift amplitude. |
-| `symPitchDriftRate`   | 0.001..5 Hz      | LPF cutoff on the per-string drift walk. |
-| `symBody{0-2}.{freq,gain,q}`, `symBodyDry`, `symBodyTiltDB` | — | Sym-bus body (tanpura chamber). |
-| `symRoomWetDB`/`DecayS`/`Damp`/`PredelayMs` | — | Sym-bus Schroeder room. |
-| `violaBodyEnabled`, `violaBody{0-3}.{freq,gainDB,widthOct}` | — | Viola-path skin formants. |
-| `voiceMix`            | 0..1             | Equal-power crossfade between sym (0) and SWAM (1). |
-| `reverbMix`           | 0..100           | Master reverb wet/dry %. |
-| `filterCutoff`        | 20..20000 Hz     | Master resonant LPF cutoff. |
-| `filterResonance`     | 0..1             | Master resonant LPF Q (UI 0..1 → bandwidth 4.0..0.1 octaves). |
-| `tanpuraGainDB`       | -24..24 dB       | Tanpura drone output gain (post-model makeup stage, default +12). |
-| `tanpura.<path>`      | per-path         | Any tanpura-drone parameter by path — e.g. `tanpura.jivaDepth`, `tanpura.body0.freq`, `tanpura.string3.decay`, `tanpura.string1.gainTrimDB13` (0-based harmonic index). Clamped by `TanpuraParams.set(path:value:)`; see [tanpura.md](tanpura.md). |
-| `baseVoice`           | 0..5             | Base voice feeding the sarangi model: 0 = SWAM Violin, 1 = Viola, 2 = Cello, 3 = Double Bass, 4 = **sitar model**, 5 = **sarangi model source** (the fitted `ViolinSynth` — the shipped default). With 4/5, SWAM is unloaded and notes (`noteOn`/`padOn` + bends) drive the model as the excitation. See [sarangi.md](sarangi.md) / [sitar.md](sitar.md). |
-
-Note: for fast autonomous tanpura iteration you usually do NOT need the
-audition runner — `tanpura-render` (StarpadDSP executable) renders a pluck
-schedule offline ~50× faster than real time. The runner path is for final
-end-to-end verification through the live audio graph
-(`tools/tanpura_match.py make-score` emits a ready-made score).
+| `param.<key>` / `string.<key>` | per-key | **Any** parameter in `ParamRegistry` — e.g. `param.bow_jt_gain`, `param.bow_rev_mix`, `param.bow_taraf_jawari`, `param.bow_vib_cents`. Both prefixes are equivalent (`string.` is the historical spelling). Routed through `AppController.setParamValue`, the same path the Parameters-tab sliders take, so a sweep shows in the UI and persists; `live`/`hybrid` keys apply instantly, `rebuild` keys ride a debounced engine rebuild. A key the registry doesn't know still lands as a raw artifact override. See [parameters.md](parameters.md). |
+| `sarangi.<paramId>`   | per-param        | A tarab/model param on `SarangiStore` (e.g. tarab tuning). |
+| `drone1`..`drone4`    | press/release    | Press (`>0.5`) / release a Fret Pad drone (jawari-taraf row). |
+| `stringPurity`        | 0..1             | Taraf purity axis (composite slot 1: buzzy → clean — sweeps `bow_taraf_jawari` down through its live scaler). Runtime, no rebuild. |
+| `stringTarafDecay`    | 0..1             | Taraf decay axis (composite slot 2: natural → choked). |
+| `stringToneTilt`      | -1..1            | Tone tilt axis (composite slot 3: bass → treble). |
+| `composite1`..`composite8` | 0..1        | Generic composite-parameter slots (the named 0–1 controls in the Controls tab). |
 
 ### Minimal examples
 
-A single dry note:
+A single note:
 
 ```json
-{"name":"dry","tailSeconds":1,"events":[
-  {"at":0.0,"kind":"voiceParam","param":"reverbMix","value":0},
-  {"at":0.0,"kind":"voiceParam","param":"sympatheticVolume","value":0},
-  {"at":0.0,"kind":"noteOn","id":1,"note":65},
-  {"at":1.0,"kind":"noteOff","id":1}
+{"name":"note","tailSeconds":1,"events":[
+  {"at":0.0,"kind":"padOn","id":1,"value":1.0},
+  {"at":1.0,"kind":"padOff","id":1}
 ]}
 ```
 
-A glide with tilt-driven loudness swell:
+A glide with a tilt-driven taraf-purity sweep:
 
 ```json
 {"name":"swell","tailSeconds":2,"events":[
-  {"at":0.0,"kind":"tilt","axis":0,"value":0.2},
-  {"at":0.0,"kind":"noteOn","id":1,"note":60},
-  {"at":0.5,"kind":"tilt","axis":0,"value":0.8},
-  {"at":1.0,"kind":"glide","id":1,"note":64},
-  {"at":2.0,"kind":"noteOff","id":1}
+  {"at":0.0,"kind":"voiceParam","param":"stringPurity","value":0.2},
+  {"at":0.0,"kind":"padOn","id":1,"value":1.0},
+  {"at":0.5,"kind":"voiceParam","param":"stringPurity","value":0.9},
+  {"at":1.0,"kind":"padGlide","id":1,"value":1.2599},
+  {"at":2.0,"kind":"padOff","id":1}
 ]}
 ```
 
-A parameter sweep — render once for each sym-coupling setting:
+A physics sweep — render once for each brightness setting:
 
 ```json
-{"name":"sweep-low","tailSeconds":3,"events":[
-  {"at":0.0,"kind":"voiceParam","param":"symCoupling","value":0.2},
-  {"at":0.0,"kind":"voiceParam","param":"sympatheticVolume","value":0.6},
-  {"at":0.0,"kind":"noteOn","id":1,"note":67},
-  {"at":1.0,"kind":"noteOff","id":1}
+{"name":"sweep","tailSeconds":3,"events":[
+  {"at":0.0,"kind":"voiceParam","param":"string.bow_rev_mix","value":0.2},
+  {"at":0.0,"kind":"padOn","id":1,"value":1.0},
+  {"at":1.0,"kind":"padOff","id":1}
 ]}
 ```
 
@@ -283,14 +173,14 @@ Emits a first-pass score JSON. Pipeline:
    of its height — that's the noteOn time.
 3. Pitch per onset: autocorrelation modal pitch over the 250 ms after
    the onset, with readings ≤ MIDI 55 (G3) dropped from the vote so
-   sym-pool sub-octaves don't fool the pitch tracker.
+   taraf sub-octaves don't fool the pitch tracker.
 4. Note duration: release when the envelope decays past 40 % of the
    local peak, clamped to 150–600 ms (bowed-attack realism).
 5. `tailSeconds` sized so the rendered file matches the target's
    total duration exactly.
 
-The first detected note's RMS sets a `tilt1` value (mapped to MPE
-aftertouch by default → SWAM responds to that as loudness).
+The first detected note's RMS sets a `tilt1` value (mapped to the
+expression axis by default → the voice responds to that as loudness).
 
 Output to stdout, or `--out <path.json>` to write atomically.
 
@@ -302,7 +192,7 @@ distance, voiced-window count, and mean per-window semitone error.
 
 Both files share the same pitch tracker — so when the candidate's
 pitch trace matches the target's pattern (even where both are
-biased to a sub-octave by sym tail), the rendering is faithful.
+biased to a sub-octave by the taraf ring tail), the rendering is faithful.
 
 ### `audition_iterate.py <target.wav>`
 
@@ -333,17 +223,16 @@ residual envelope is the natural next extension.
 The pipeline currently nails:
 
 - Number of notes (within ±1 for clearly-articulated phrases)
-- Pitch class (within an octave for the played voice; sym-tail
+- Pitch class (within an octave for the played voice; taraf-tail
   sub-octaves get folded back via the `≤ G3` filter)
 - Onset timing (typically within 100 ms of the target)
-- Overall loudness (within ~3 dB of target peak — bounded by SWAM
-  Viola's own dynamic-range ceiling)
+- Overall loudness (within ~3 dB of target peak)
 
 What it doesn't do yet:
 
 - Per-note expression curves (tilt sweeps mid-note)
-- Sym-pool parameter sweeps to match a particular tail character
-- Pitch detection above the sym-pool sub-octave bias when the played
+- Physics-parameter sweeps to match a particular tail character
+- Pitch detection above the taraf sub-octave bias when the played
   note is itself ≤ G3 (the `≤ G3` filter would discard the truth)
 
 See [`architecture.md`](architecture.md) for how the simulator fits

@@ -44,155 +44,103 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     public static let real: [InputDimension] = [.tilt1, .tilt2, .tilt3, .accelPressure, .keyY, .slider1, .slider2]
 }
 
-/// Identifies each mappable parameter.
-public enum MappableParameter: Int, Codable, CaseIterable, Hashable {
-    // The iPad owns only MIDI / Glide parameters now; everything
-    // voice/sym/FX-related lives on the Mac as direct AppController
-    // state. Raw values must stay contiguous from 0 — the per-tick
-    // lookup caches (`cachedBindings`/`cachedDefaults`) are indexed by
-    // `rawValue` but built in `allCases` order. Persistence keys on
-    // `storageKey` (string), so unknown keys from older builds — incl.
-    // the removed vibrato params — deserialize and are silently dropped.
-    case velocity         = 0
-    case glideSpeed       = 1
-    case glideCompression = 2
-    case amplitude        = 3
-    case dragSmoothing    = 4
-    case glideCurve       = 5
-    case aftertouch       = 6
-    case midiCC74         = 7
-    case midiCC1          = 8
-    case midiCC11         = 9
-    case midiCC71         = 10
-    case midiCC73         = 11
-    case midiCC75         = 12
+/// What a tilt can drive — since the 2026-07-24 PARAMETER UNIFICATION a
+/// tilt binds either to a **composite parameter** (a named 0…1 control
+/// built from several parameters) or **directly to any single parameter**
+/// in `ParamRegistry`. The old `MappableParameter` enum — which was
+/// exactly the 8 composite slots — is gone: nothing is mappable-or-not
+/// anymore, every parameter is.
+///
+/// Endpoints are always in the target's NATIVE units: 0…1 for a composite,
+/// the parameter's own `lo…hi` for a direct binding (the old 0…127
+/// transport units are migrated away on load).
+///
+/// All Mac-evaluated (the iPad streams only its raw tilt report).
+/// Persistence keys on `storageKey`; the composite keys keep their legacy
+/// spellings so bindings saved by older builds survive.
+public struct MapTarget: Hashable {
+    public enum Kind: Hashable {
+        case composite(slot: Int)
+        case param(key: String)
+    }
 
-    public static let count = 13
+    public let kind: Kind
 
-    /// Display order for the mapping panel, grouped by category.
-    public static let displayOrder: [(group: String, params: [MappableParameter])] = [
-        ("MIDI / Volume", [.velocity, .amplitude, .aftertouch, .midiCC74, .midiCC1, .midiCC11, .midiCC71, .midiCC73, .midiCC75]),
-        ("Glide", [.glideSpeed, .glideCompression, .glideCurve, .dragSmoothing]),
+    public init(compositeSlot: Int) { kind = .composite(slot: compositeSlot) }
+    public init(paramKey: String) { kind = .param(key: paramKey) }
+    public init(kind: Kind) { self.kind = kind }
+
+    /// Legacy per-slot storage keys (pre-unification names, kept so saved
+    /// mappings deserialize unchanged).
+    public static let compositeStorageKeys = [
+        "midiCC71", "midiCC73", "midiCC72", "composite4",
+        "composite5", "composite6", "composite7", "composite8",
     ]
 
+    public static let paramPrefix = "param:"
+
     public var storageKey: String {
-        switch self {
-        case .velocity:         return "velocity"
-        case .glideSpeed:       return "glideSpeed"
-        case .glideCompression: return "glideCompression"
-        case .amplitude:        return "amplitude"
-        case .dragSmoothing:    return "dragSmoothing"
-        case .glideCurve:       return "glideCurve"
-        case .aftertouch:       return "aftertouch"
-        case .midiCC74:         return "midiCC74"
-        case .midiCC1:          return "midiCC1"
-        case .midiCC11:         return "midiCC11"
-        case .midiCC71:         return "midiCC71"
-        case .midiCC73:         return "midiCC73"
-        case .midiCC75:         return "midiCC75"
+        switch kind {
+        case .composite(let slot):
+            return slot < MapTarget.compositeStorageKeys.count
+                ? MapTarget.compositeStorageKeys[slot] : "composite\(slot + 1)"
+        case .param(let key):
+            return MapTarget.paramPrefix + key
         }
     }
 
+    public static func from(storageKey: String) -> MapTarget? {
+        if let i = compositeStorageKeys.firstIndex(of: storageKey) {
+            return MapTarget(compositeSlot: i)
+        }
+        if storageKey.hasPrefix(paramPrefix) {
+            let key = String(storageKey.dropFirst(paramPrefix.count))
+            guard ParamRegistry.spec(key) != nil else { return nil }
+            return MapTarget(paramKey: key)
+        }
+        return nil
+    }
+
+    public var compositeSlot: Int? {
+        if case .composite(let s) = kind { return s }
+        return nil
+    }
+
+    public var paramKey: String? {
+        if case .param(let k) = kind { return k }
+        return nil
+    }
+
+    /// Fallback label — for composites the app shows the live name via
+    /// `AppController.targetDisplayName`.
     public var label: String {
-        switch self {
-        case .velocity:         return "Velocity"
-        case .glideSpeed:       return "Glide Speed"
-        case .glideCompression: return "Compression"
-        case .amplitude:        return "Amplitude"
-        case .dragSmoothing:    return "Drag Smooth"
-        case .glideCurve:       return "Glide Curve"
-        case .aftertouch:       return "Aftertouch"
-        case .midiCC74:         return "CC74 Slide"
-        case .midiCC1:          return "CC1 Modwheel"
-        case .midiCC11:         return "CC11 Expression"
-        case .midiCC71:         return "CC71 Resonance"
-        case .midiCC73:         return "CC73 Attack"
-        case .midiCC75:         return "CC75 Decay"
+        switch kind {
+        case .composite(let slot): return "Composite \(slot + 1)"
+        case .param(let key): return ParamRegistry.spec(key)?.label ?? key
         }
     }
 
-    /// Short label for matrix headers.
-    public var shortLabel: String {
-        switch self {
-        case .velocity:         return "Vel"
-        case .glideSpeed:       return "Gld"
-        case .glideCompression: return "Cmp"
-        case .amplitude:        return "Amp"
-        case .dragSmoothing:    return "DrS"
-        case .glideCurve:       return "GlC"
-        case .aftertouch:       return "AT"
-        case .midiCC74:         return "C74"
-        case .midiCC1:          return "C1"
-        case .midiCC11:         return "C11"
-        case .midiCC71:         return "C71"
-        case .midiCC73:         return "C73"
-        case .midiCC75:         return "C75"
-        }
-    }
-
-    public var detail: String? {
-        switch self {
-        case .velocity:         return "MIDI note-on velocity, set once when the note fires"
-        case .glideSpeed:       return "How long pitch takes to glide between notes"
-        case .glideCompression: return "How quickly queued notes interrupt the current glide"
-        case .amplitude:        return "Volume multiplier applied to each note"
-        case .dragSmoothing:    return "How tightly pitch follows your finger during drag"
-        case .glideCurve:       return "Shape of the glide: low = linear, high = sharp S-curve"
-        case .aftertouch:       return "MIDI channel pressure, continuous per voice"
-        case .midiCC74:         return "MPE Slide — mapped to filter cutoff in most synths"
-        case .midiCC1:          return nil
-        case .midiCC11:         return "Secondary volume/dynamics control"
-        case .midiCC71:         return nil
-        case .midiCC73:         return nil
-        case .midiCC75:         return nil
-        }
-    }
-
-    public var unit: String {
-        switch self {
-        case .glideSpeed:       return "ms/st"
-        case .glideCompression: return "ms"
-        case .amplitude:        return "x"
-        default:                return ""
-        }
-    }
-
-    public var midiCC: UInt8? {
-        switch self {
-        case .midiCC74: return 74
-        case .midiCC1:  return 1
-        case .midiCC11: return 11
-        case .midiCC71: return 71
-        case .midiCC73: return 73
-        case .midiCC75: return 75
-        default:        return nil
-        }
-    }
-
-    public var isMIDI: Bool { midiCC != nil || self == .aftertouch }
-
-    /// True if this parameter's value is always used even when no dimension is bound.
-    /// MIDI parameters (CCs and aftertouch) are only sent when bound; all others always have an active value.
-    public var defaultAlwaysActive: Bool { !isMIDI }
-
+    /// Binding endpoints live in these units.
     public var defaultRange: (Double, Double) {
-        switch self {
-        case .velocity:         return (1, 127)
-        case .glideSpeed:       return (20, 200)
-        case .glideCompression: return (15, 40)
-        case .amplitude:        return (0.3, 1.5)
-        case .dragSmoothing:    return (0.1, 0.5)
-        case .glideCurve:       return (3, 12)
-        case .aftertouch, .midiCC74, .midiCC1, .midiCC11, .midiCC71, .midiCC73, .midiCC75:
-            return (0, 127)
+        switch kind {
+        case .composite: return (0, 1)
+        case .param(let key):
+            guard let s = ParamRegistry.spec(key) else { return (0, 1) }
+            return (s.lo, s.hi)
         }
     }
 
-    /// Default value when no dimension is bound. Geometric midpoint of
-    /// `defaultRange` for every surviving param.
     public var midpointValue: Double {
         let r = defaultRange
         return (r.0 + r.1) / 2.0
+    }
+
+    /// Every composite slot, then every parameter — the Add-binding menu's
+    /// full candidate list.
+    public static func allTargets(compositeSlots: Int = CompositeParam.maxSlots)
+        -> [MapTarget] {
+        (0..<compositeSlots).map { MapTarget(compositeSlot: $0) }
+            + ParamRegistry.all.map { MapTarget(paramKey: $0.key) }
     }
 }
 
@@ -299,11 +247,16 @@ public struct DimensionBinding: Codable, Equatable {
     }
 }
 
-/// All bindings for a single parameter (many:many support).
+/// All bindings for a single target (many:many support).
 public struct ParameterMapping: Codable, Equatable {
     public var bindings: [DimensionBinding]
     /// Value used when no dimension is bound (or all are at midpoint).
     public var defaultValue: Double
+
+    public init(bindings: [DimensionBinding], defaultValue: Double = 0) {
+        self.bindings = bindings
+        self.defaultValue = defaultValue
+    }
 
     public var isEmpty: Bool { bindings.isEmpty }
 
@@ -340,26 +293,38 @@ public struct DimensionMapping: Codable, Equatable {
 
     public static func makeDefault() -> DimensionMapping {
         var m: [String: ParameterMapping] = [:]
-        for param in MappableParameter.allCases {
-            let range = param.defaultRange
-            let dims: [InputDimension]
-            switch param {
-            case .glideSpeed, .glideCompression, .amplitude, .aftertouch:
-                dims = [.tilt1]
-            case .velocity:
-                dims = [.accelPressure]
-            default:
-                dims = []
-            }
-            let bindings = dims.map { DimensionBinding(dimension: $0, rangeMin: range.0, rangeMax: range.1) }
-            m[param.storageKey] = ParameterMapping(bindings: bindings, defaultValue: param.midpointValue)
+        // Default tilt→composite bindings (slots map to the shipped
+        // `CompositeParam.defaults()`): the resting device (tilt
+        // calibrated-neutral = 0.5 normalized) must keep the default
+        // sound. Purity/decay use a 3-point curve that stays 0 through
+        // neutral and sweeps past it; tone tilt is linear (neutral ≈ flat);
+        // Expression (slot 3) is linear full-throw so rest lands on the
+        // fitted median. Endpoints are the composite's native 0…1.
+        let restZeroCurve = [ControlPoint(x: 0, y: 0),
+                             ControlPoint(x: 0.5, y: 0),
+                             ControlPoint(x: 1, y: 1)]
+        let defaults: [Int: DimensionBinding] = [
+            0: DimensionBinding(dimension: .tilt1, controlPoints: restZeroCurve),
+            1: DimensionBinding(dimension: .tilt2, controlPoints: restZeroCurve),
+            2: DimensionBinding(dimension: .tilt3, rangeMin: 0, rangeMax: 1),
+            3: DimensionBinding(dimension: .tilt1, rangeMin: 0, rangeMax: 1),
+        ]
+        for slot in 0..<CompositeParam.maxSlots {
+            let target = MapTarget(compositeSlot: slot)
+            m[target.storageKey] = ParameterMapping(
+                bindings: defaults[slot].map { [$0] } ?? [],
+                defaultValue: target.midpointValue)
         }
         return DimensionMapping(mappings: m)
     }
 
     // MARK: - Persistence
 
-    private static let storageKey = "starpad_dimensionMapping_v5"
+    /// v6 = the 2026-07-24 unification: arbitrary targets (composites AND
+    /// single parameters) with endpoints in native units. v5 stored only
+    /// the 8 composite slots with 0…127 endpoints — migrated on first load.
+    private static let storageKey = "starpad_dimensionMapping_v6"
+    private static let legacyStorageKey = "starpad_dimensionMapping_v5"
 
     public func save() {
         guard let data = try? JSONEncoder().encode(self) else { return }
@@ -368,56 +333,85 @@ public struct DimensionMapping: Codable, Equatable {
 
     public static func load() -> DimensionMapping {
         if let data = UserDefaults.standard.data(forKey: storageKey),
+           let mapping = try? JSONDecoder().decode(DimensionMapping.self, from: data) {
+            return mapping.pruned()
+        }
+        // Migrate the v5 document: same composite slots, endpoints scaled
+        // from the old 0…127 transport units into the composite's 0…1.
+        if let data = UserDefaults.standard.data(forKey: legacyStorageKey),
            var mapping = try? JSONDecoder().decode(DimensionMapping.self, from: data) {
-            let defaults = makeDefault()
-            for param in MappableParameter.allCases {
-                if var existing = mapping.mappings[param.storageKey] {
-                    // Refresh defaultValue from code for any param the user has
-                    // not bound — catches changes like resonance midpoint moving
-                    // from the geometric midpoint to 0 (opt-in).
-                    if existing.bindings.isEmpty {
-                        existing.defaultValue = param.midpointValue
-                        mapping.mappings[param.storageKey] = existing
+            for (key, var pm) in mapping.mappings {
+                guard let target = MapTarget.from(storageKey: key),
+                      target.compositeSlot != nil else { continue }
+                for i in pm.bindings.indices {
+                    for j in pm.bindings[i].controlPoints.indices {
+                        pm.bindings[i].controlPoints[j].y /= 127.0
                     }
-                } else {
-                    mapping.mappings[param.storageKey] = defaults.mapping(for: param)
                 }
+                pm.defaultValue = target.midpointValue
+                mapping.mappings[key] = pm
             }
-            return mapping
+            let migrated = mapping.pruned()
+            migrated.save()
+            return migrated
         }
         return makeDefault()
     }
 
+    /// Drop entries whose storage key no longer resolves (a parameter that
+    /// was renamed or deleted) and fill in any composite slot the saved
+    /// document predates.
+    private func pruned() -> DimensionMapping {
+        var m = mappings.filter { MapTarget.from(storageKey: $0.key) != nil }
+        for slot in 0..<CompositeParam.maxSlots {
+            let key = MapTarget(compositeSlot: slot).storageKey
+            if m[key] == nil {
+                m[key] = ParameterMapping(bindings: [], defaultValue: 0.5)
+            }
+        }
+        return DimensionMapping(mappings: m)
+    }
+
     // MARK: - Lookup
 
-    public func mapping(for param: MappableParameter) -> ParameterMapping {
-        mappings[param.storageKey] ?? ParameterMapping(bindings: [], defaultValue: param.midpointValue)
+    public func mapping(for target: MapTarget) -> ParameterMapping {
+        mappings[target.storageKey]
+            ?? ParameterMapping(bindings: [], defaultValue: target.midpointValue)
     }
 
-    public func isConnected(_ param: MappableParameter, _ dim: InputDimension) -> Bool {
-        mapping(for: param).hasBinding(for: dim)
+    public func isConnected(_ target: MapTarget, _ dim: InputDimension) -> Bool {
+        mapping(for: target).hasBinding(for: dim)
     }
 
-    public mutating func toggleBinding(for param: MappableParameter, dimension dim: InputDimension) {
-        var m = mapping(for: param)
-        m.toggleBinding(for: dim, defaultRange: param.defaultRange)
-        mappings[param.storageKey] = m
-    }
-
-    public mutating func setBinding(for param: MappableParameter, dimension dim: InputDimension, to binding: DimensionBinding) {
-        var m = mapping(for: param)
+    public mutating func setBinding(for target: MapTarget,
+                                    dimension dim: InputDimension,
+                                    to binding: DimensionBinding) {
+        var m = mapping(for: target)
         m.setBinding(for: dim, to: binding)
-        mappings[param.storageKey] = m
+        mappings[target.storageKey] = m
     }
 
-    /// All dimensions connected to a given parameter.
-    public func dimensions(for param: MappableParameter) -> [InputDimension] {
-        mapping(for: param).bindings.map(\.dimension)
+    /// All dimensions connected to a given target.
+    public func dimensions(for target: MapTarget) -> [InputDimension] {
+        mapping(for: target).bindings.map(\.dimension)
     }
 
-    /// All parameters connected to a given dimension.
-    public func parameters(for dim: InputDimension) -> [MappableParameter] {
-        MappableParameter.allCases.filter { isConnected($0, dim) }
+    /// Every target that has at least one binding, resolved from the
+    /// stored keys (composites first, then parameters in registry order).
+    public var boundTargets: [MapTarget] {
+        let live = mappings.compactMap { (key, pm) -> MapTarget? in
+            pm.bindings.isEmpty ? nil : MapTarget.from(storageKey: key)
+        }
+        let order = Dictionary(uniqueKeysWithValues:
+            MapTarget.allTargets().enumerated().map { ($1.storageKey, $0) })
+        return live.sorted {
+            (order[$0.storageKey] ?? .max) < (order[$1.storageKey] ?? .max)
+        }
+    }
+
+    /// All targets driven by a given dimension.
+    public func targets(for dim: InputDimension) -> [MapTarget] {
+        boundTargets.filter { isConnected($0, dim) }
     }
 }
 

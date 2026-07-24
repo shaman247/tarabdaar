@@ -29,7 +29,7 @@ struct TarabView: View {
                 ManualTuningSection()
             }
             .padding(16)
-            .frame(maxWidth: 580, alignment: .leading)
+            .frame(maxWidth: 630, alignment: .leading)
         }
         .environmentObject(store)
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -112,6 +112,7 @@ private struct TarabTableHeader: View {
             Text("Note").frame(width: 42, alignment: .leading)
             Text("Freq (Hz)").frame(width: 74, alignment: .leading)
             Text("Gain").frame(width: 52, alignment: .leading)
+            Text("Wt").frame(width: 44, alignment: .leading)
             Text("t60").frame(width: 48, alignment: .leading)
             Text("Brt").frame(width: 36, alignment: .center)
             Text("On").frame(width: 30, alignment: .center)
@@ -125,6 +126,13 @@ private struct StringRow: View {
     @EnvironmentObject var store: SarangiStore
     let id: UUID
 
+    /// Loudness weight, clamped to [0, 1] on entry.
+    private var weightBinding: Binding<Double> {
+        let raw = store.stringBinding(id, \.weight)
+        return Binding(get: { raw.wrappedValue },
+                       set: { raw.wrappedValue = min(max($0, 0), 1) })
+    }
+
     var body: some View {
         if let s = store.state.strings.first(where: { $0.id == id }) {
             HStack(spacing: 6) {
@@ -134,6 +142,9 @@ private struct StringRow: View {
                     .frame(width: 74).textFieldStyle(.roundedBorder).font(.caption)
                 TextField("", value: store.stringBinding(id, \.gain), format: .number.precision(.fractionLength(0...2)))
                     .frame(width: 52).textFieldStyle(.roundedBorder).font(.caption)
+                TextField("", value: weightBinding, format: .number.precision(.fractionLength(0...2)))
+                    .frame(width: 44).textFieldStyle(.roundedBorder).font(.caption)
+                    .help("Loudness weight 0–1 (1 = full level)")
                 TextField("", value: store.stringBinding(id, \.t60), format: .number.precision(.fractionLength(0...2)))
                     .frame(width: 48).textFieldStyle(.roundedBorder).font(.caption)
                 Toggle("", isOn: store.stringBinding(id, \.bright)).labelsHidden().frame(width: 36)

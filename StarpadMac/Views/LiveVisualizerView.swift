@@ -118,22 +118,18 @@ struct LiveVisualizerView: View {
         .foregroundStyle(.secondary)
     }
 
-    /// Fixed y-bounds for the pitch graph, in log2(Hz): the lowest and
-    /// highest pitches playable on the **String Pad** (every base string plus
-    /// its octave-repeat ghosts), so the axis is a stable reference tied to
-    /// the instrument's compass rather than drifting with what's played.
-    /// Falls back to two octaves around the tonic when the pad has no notes.
+    /// Fixed y-bounds for the pitch graph, in log2(Hz): the span of the Fret
+    /// Pad scale's degrees around the tonic (plus an octave of headroom each
+    /// side for the octave-repeat ghost frets), so the axis is a stable
+    /// reference tied to the instrument's compass rather than drifting with
+    /// what's played. Falls back to two octaves around the tonic.
     private func pitchAxisRange() -> ClosedRange<Double> {
         let tonicHz = 440.0 * pow(2.0, (Double(controller.pitchPad.tonicMidi) - 69.0) / 12.0)
-        let degrees = scaleDegrees(from: controller.pitchPad.scale)
-        if let r = stringPadRatioRange(controller.stringArrangement, degrees: degrees),
-           r.min > 0, r.max > r.min {
-            var lo = log2(r.min * tonicHz)
-            var hi = log2(r.max * tonicHz)
-            if hi - lo < 0.5 {            // guard a degenerate single-pitch pad
-                let mid = (lo + hi) / 2
-                lo = mid - 0.25; hi = mid + 0.25
-            }
+        let ratios = scaleDegrees(from: controller.pitchPad.scale)
+            .map(\.ratio).filter { $0 > 0 }
+        if let mn = ratios.min(), let mx = ratios.max(), mx > mn {
+            let lo = log2(mn * tonicHz) - 1
+            let hi = log2(mx * tonicHz) + 1
             return lo...hi
         }
         return log2(tonicHz / 2)...log2(tonicHz * 2)

@@ -2,31 +2,27 @@
 
 ## Overview
 
-Starpad is a just-intonation instrument. There is **one configured scale** — the set of exact frequency ratios laid out on the **Pitch Pad** — and everything else follows it.
+Starpad is a just-intonation instrument. There is **one configured scale** — the set of exact frequency ratios the Fret Pad is laid out from — and the tarab can follow it.
 
-- **Playing scale**. A `PitchScale` of JI ratios (`num/den` over the tonic), one per Pitch Pad cell. **Edited on StarpadMac** (the Pitch Pad tab) and **synced to the iPad** over USB-MIDI SysEx, where it's performed — the iPad has no editor of its own. The scale spans the half-open octave `[1, 2)` and repeats up and down the pad. Persisted as JSON via `ScaleStore` on both sides. See [Pitch Pad](pitch-pad.md) and [MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad).
-- **Sympathetic-string scale** (Mac). **Not separately configured** — the sympathetic strings (the sarangi *tarab*) just track the configured Pitch Pad scale, tuned to the same tonic and extended **half an octave above and below** (so the played register always sits inside the tarab). The pool is re-derived automatically whenever the scale or tonic changes; there is no sym-string editor. See [Sound Design — Sympathetic strings](sound-design.md#sympathetic-strings) and [Sarangi — Sympathetic-string tuning](sarangi.md#sympathetic-string-tuning-tarab).
-
-So the tarab is always in tune with whatever raga is on the pad.
+- **Playing scale**. A `PitchScale` of JI ratios (`num/den` over the tonic). **Edited on StarpadMac** (the Fret Pad tab's scale list editor) and **synced to the iPad** over USB-MIDI SysEx, where it's performed — the iPad has no editor of its own. The scale spans the half-open octave `[1, 2)` and repeats up and down. Persisted as JSON via `ScaleStore` on both sides. See [Fret Pad](fret-pad.md) and [MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad).
+- **Sympathetic-string tuning** (Mac). The sarangi *tarab* is a separately editable `[StringSpec]` table (the **Tarab tab**), which **can** follow the playing scale but **auto-sync starts OFF** by default (the String-era default) so the fitted Pilu table sticks. Turn on "Follow the Pitch Pad scale" to have the tarab retune to the tonic + scale degrees. See [Sound Design — Sympathetic strings](sound-design.md#sympathetic-strings--the-editable-bank) and [Sarangi](sarangi.md).
 
 ## Scale Editors
 
-### Playing scale (StarpadMac Pitch Pad tab → iPad)
+### Playing scale (StarpadMac Fret Pad tab → iPad)
 
-The playing scale is the set of `PitchPoint` ratios on the Pitch Pad,
-**edited on the Mac** Pitch Pad tab: drag handles, shift-click to add/remove,
-snap-drag to "simple" fractions, scroll-wheel to retune, right-click to
-disable, and a sidebar with text fields. See [Pitch Pad — Sidebar editor](pitch-pad.md#sidebar-editor)
-and [Snap system](pitch-pad.md#snap-system).
+The playing scale is the set of `PitchPoint` ratios edited in the Fret Pad
+tab's scale list editor (`ScaleListEditor`): add/remove pitches, snap to
+"simple" fractions, retune, disable, and a sidebar with text fields.
 
 Edits are pushed to the connected iPad live (debounced) and on connect, so
 the performer always plays the current scale — see [MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad).
 The default scale is 12 just-intonation degrees (1/1 … 15/8). Disabled
-pitches drop their cell from the pad but stay listed to toggle back in.
+pitches drop from the fret layout but stay listed to toggle back in.
 
-### Sympathetic scale (Mac)
+### Sympathetic tuning (Mac)
 
-There is **no sympathetic-scale editor**. The sympathetic strings are derived from the playing scale: one string per enabled scale pitch, octave-replicated to fill `[tonic, tonic + 2 octaves)` (the **tonic is the lowest sympathetic string** — no sub-tonic strings, in the scale's own JI ratios over the same tonic). `AppController.sympatheticFrequencies()` computes this set, and a Combine sink rebuilds the resonator pool whenever `pitchPad.scale` or `pitchPad.tonicMidi` changes. Edit the scale on the Pitch Pad tab and the tarab follows.
+The sympathetic strings are the editable `[StringSpec]` tarab table (Tarab tab). By default it does **not** follow the playing scale (auto-sync off, so the fitted table stays exact); opting in retunes one string per enabled scale pitch, octave-replicated over the tonic. See [Sarangi](sarangi.md).
 
 ## Tuning Systems
 

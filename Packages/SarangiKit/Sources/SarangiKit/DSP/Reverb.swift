@@ -41,6 +41,26 @@ public struct Reverb: Sendable {
         return mix * wet
     }
 
+    /// Mono `x` → ADDITIVE stereo wet pair (Starpad stereo, 2026-07-23):
+    /// the `processMono` wet plus the decorrelated side tank scaled by
+    /// `width` — a real room's reverberant field differs at the two ears.
+    /// The side term cancels in L+R, so the mono fold-down is exactly
+    /// `processMono`'s output; `width` 0 returns an identical pair.
+    public mutating func processMonoStereo(_ x: Double) -> (Double, Double) {
+        let dRMS = rmsDry.process(x)
+        if mix <= 0 { return (0, 0) }
+        let pre = predelay.process(x)
+        var wet = lpM.process(hpM.process(mid.process(pre)))
+        let wRMS = rmsWet.process(wet)
+        wet *= (dRMS + 1e-12) / (wRMS + 1e-12)
+        if width <= 0 { let w = mix * wet; return (w, w) }
+        var s = lpS.process(hpS.process(side.process(pre)))
+        let sRMS = rmsSide.process(s)
+        // side scaled to width × the (dry-matched) wet level
+        s = s / (sRMS + 1e-12) * width * (dRMS + 1e-12)
+        return (mix * (wet + s), mix * (wet - s))
+    }
+
     /// Mono `x` → stereo (L, R).
     public mutating func process(_ x: Double) -> (Double, Double) {
         let dRMS = rmsDry.process(x)

@@ -12,6 +12,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Regenerate the parameter documentation from the LIVE definitions
+# (ParamRegistry / CompositeParam). The generator
+# compiles against the same types the apps use, so docs/parameters.md
+# stays in sync with the parameter set by construction — a definition
+# change that breaks the generator fails the build here.
+echo "→ regenerating docs/parameters.md"
+swift run -c release --package-path Packages/StarpadCore paramdoc \
+    docs/parameters.md
+
+# Render the whole docs/ tree to the HTML site (docs/html/, sidebar TOC).
+# Runs AFTER parameters.md so the generated parameter page is included.
+echo "→ regenerating docs/html"
+python3 tools/gen_docs_html.py
+
 OUTPUT=$(xcodebuild \
     -project Starpad/Starpad.xcodeproj \
     -scheme StarpadMac \

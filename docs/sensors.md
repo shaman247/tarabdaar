@@ -106,53 +106,120 @@ Parameters are driven by **dimensions** — configurable input sources. Each par
 
 Each binding uses a Catmull-Rom spline defined by 2–4 control points, replacing the previous linear interpolation. The spline output is clamped to the endpoint min/max. Tilt dimensions are normalized from -1..+1 to 0..1 via `(tilt + 1) / 2`. Per-note dimensions are already 0..1. Multiple dimensions can be bound to a single parameter (many:many mapping).
 
-The dimension matrix on the iPad covers only the iPad's responsibilities — MIDI emission and glide. iPad sensors **only ever drive MIDI** (pitch bend, channel pressure, CCs); the Mac's hosted AU and sym pool consume those MIDI bytes downstream, but no iPad sensor maps directly into Mac-side DSP. Voice timbre lives in the hosted AU (configured via its own UI); sym / FX live in StarpadMac's Voice tab.
+The dimension matrix on the iPad covers only the iPad's responsibilities — MIDI emission and glide. iPad sensors **only ever drive MIDI** (pitch bend, channel pressure, CCs); the Mac's String voice consumes those MIDI bytes downstream (the tilt axes map to the taraf purity/decay/tone CCs + expression), but no iPad sensor maps directly into Mac-side DSP state. Voice timbre lives in the one parameter list (Parameters tab) + the tarab (Tarab tab).
 
-**Internal parameters** (affect the iPad's glide engine and MIDI output shape):
-
-| Parameter | Default Min | Default Max | Unit | Default Dimension |
-|-----------|-----------|-----------|------|-------------------|
-| Velocity | 1 | 127 | (MIDI) | Pressure |
-| Glide Speed | 20 | 200 | ms/st | Tilt 1 |
-| Compression | 15 | 40 | ms | Tilt 1 |
-| Amplitude | 0.3 | 1.5 | x | Tilt 1 |
-| Drag Smooth | 0.1 | 0.5 | (coeff) | None |
-| Glide Curve | 3 | 12 | (k) | None |
+**Internal parameters — DELETED (2026-07-24).** Velocity, Glide Speed,
+Compression, Amplitude, Drag Smooth, and Glide Curve were consumed only by
+the legacy keyboard/glide pipeline (the Fret Pad tracks the finger
+directly), so they were removed along with the iPad's whole mapping
+machinery (`NoteManager` binding caches, the MAP editor, the accelerometer
+velocity capture). The legacy glide engine (audition `noteOn`/`glide`
+events) runs on fixed constants: 110 ms/st, 27.5 ms compression, curve
+k 7.5, drag smoothing 0.3, velocity 92.
 
 **MIDI output parameters** (sent to whichever MPE receiver is downstream — StarpadMac, Ableton, etc.):
 
 | Parameter | CC# | Default Range | Default Dimension | Description |
 |-----------|-----|--------------|-------------------|-------------|
-| Aftertouch | — | 0–127 | Tilt 1 | Channel pressure |
-| CC74 Bright | 74 | 0–127 | None | MPE slide / filter cutoff |
-| CC1 Mod | 1 | 0–127 | None | Mod wheel |
-| CC11 Expr | 11 | 0–127 | None | Expression / secondary dynamics |
-| CC71 Reso | 71 | 0–127 | None | Filter resonance |
-| CC73 Atk | 73 | 0–127 | None | Envelope attack |
-| CC75 Dec | 75 | 0–127 | None | Envelope decay |
+| Vibrato | — | 0–127 | Tilt 1 | Player vibrato depth (channel pressure) |
+| Brightness | (74) | 0–127 | None | Bow position: sul ponticello ↔ sul tasto |
+| Bow Pressure | (1) | 0–127 | None | Bow force inside the playable wedge |
+| Expression | (11) | 0–64 | Tilt 1 | Loudness: rest (0.5) sends the fitted median; tilt down fades toward silence, up ≈ +8 dB |
+| Taraf Purity | (71) | 0–127 | Tilt 1 | Composite slot 1 (default members: jawari buzz 1.3→0, jt tone LP 16 k→1.5 kHz) |
+| Taraf Decay | (73) | 0–127 | Tilt 2 | Composite slot 2 (default member: taraf damping 0→1) |
+| Tone Tilt | (72) | 0–127 | Tilt 3 | Composite slot 3 (default member: tone tilt −1→1) |
+| Composite 4–8 | (20–24) | 0–127 | None | Free composite-parameter slots, defined in the Mac's Controls tab |
+| Bow Tilt | (75) | 0–127 | None | Bow-stroke harmonic color (`BowControlMapper`) — don't rebind to a new meaning |
 
-MIDI CC parameters are only sent when their dimension is not "None". Each is sent per-voice on the voice's MPE channel at 60Hz.
+**Raw tilt wire (2026-07-24):** the iPad does NOT evaluate or send any of
+the MIDI parameters above — it streams only its three calibrated tilt
+values on fixed axis messages (`TiltAxisWire`, 0…127 normalized,
+change-gated at 60 Hz while playing), and the **Mac evaluates its own tilt
+bindings** (`AppController.applyTiltAxis`): composites via
+`applyComposite`, performance parameters as synthesized control-mapper
+messages. Tilt bindings to iPad-internal parameters (glide, amplitude, …)
+still evaluate on the iPad (they ride the tilt-mapping SysEx).
+
+**Tilt performance axes (2026-07-23):** the three tilts default-bind to the
+String voice's taraf/tone controls (CC71/73/72, consumed on the Mac in
+`AudioEngine.routeSarangiModelMIDI` — see [sarangi.md](sarangi.md)). The
+purity/decay default curves are 3-point (`(0,0) (0.5,0) (1,127)`): the
+resting device (calibrated-neutral tilt = 0.5 normalized) stays at 0 = the
+current default sound, and the axis sweeps only past neutral; tone tilt is
+linear so neutral lands on ~64 = flat. Existing installs adopt these
+bindings once (flag `starpad.tiltAxes.defaultBindings.v1`; the CC11
+expression default adopts under `.v2`); unbinding afterwards sticks.
+
+**Mac-side editor (2026-07-24):** the StarpadMac **Controls tab (⌘4,
+`TiltControlsView`)** edits, per tilt, an arbitrary set of **targets**
+with Lo/Hi endpoints and the "From center" rest-zero shape. A target
+(`MapTarget`) is a **composite parameter** or **any single parameter** —
+"Taraf Purity" and "vibrato depth (¢)" bind the same way — and endpoints
+are in the target's native units (0–1 for a composite). The same bindings
+can be made from the Parameters tab's per-row mapping button. Nothing
+syncs: the Mac evaluates every binding itself (`applyTiltAxis`), so edits
+take effect immediately. Bindings persist under
+`starpad_dimensionMapping_v6` (a v5 document migrates, rescaling its old
+0–127 composite endpoints to 0–1).
 
 When set to "None", the parameter uses 0.5 (midpoint of its range).
 
 ### ParameterMapping Model
 
-Each parameter's mapping is a `ParameterMapping` struct containing an array of `DimensionBinding` objects (many:many support). Each `DimensionBinding` holds a `Dimension` and 2–4 `ControlPoint` values defining a Catmull-Rom spline curve, with output clamped to the endpoint min/max. The `DimensionMapping` struct holds all mappings in a dictionary keyed by parameter `storageKey`, persisted to UserDefaults under `"starpad_dimensionMapping_v5"`.
+Each target's mapping is a `ParameterMapping` struct containing an array of `DimensionBinding` objects (many:many support). Each `DimensionBinding` holds an `InputDimension` and 2–4 `ControlPoint` values defining a Catmull-Rom spline curve, with output clamped to the endpoint min/max. The `DimensionMapping` struct holds all mappings in a dictionary keyed by the target's `storageKey`, persisted to UserDefaults under `"starpad_dimensionMapping_v6"`.
 
-`TiltMapping.swift` defines the `InputDimension` enum, `MappableParameter` enum (Int-backed for fast array indexing), `ControlPoint`, `DimensionBinding`, `ParameterMapping`, and `DimensionMapping` structs. `NoteManager` caches all binding arrays (`cachedBindings`) rebuilt only when the mapping changes, and reads values via `cachedParamValue(for: .amplitude, voiceIndex: i)` which resolves multiple bindings with priority (per-note > sliders when touched > tilts, highest deviation wins among same type).
+`TiltMapping.swift` defines the `InputDimension` enum, the **`MapTarget`** struct (`.composite(slot:)` or `.param(key:)` — it replaced the old `MappableParameter` enum, which could only name the 8 composite slots), `ControlPoint`, `DimensionBinding`, `ParameterMapping`, and `DimensionMapping`. Composite storage keys keep their legacy spellings (`midiCC71`, `midiCC73`, `midiCC72`, `composite4`…`composite8`) so saved bindings survive; parameter targets store as `param:<key>` and are dropped on load if the key no longer exists.
 
-The MAP button or a swipe-right gesture on the top half opens a matrix panel for editing mappings.
+The Mac keeps a lock-protected per-axis snapshot of the bound targets (`tiltEvalByAxis`) because raw tilt reports arrive on the CoreMIDI thread.
 
-### Pressure Optimization
+### Pressure — REMOVED
 
-When no parameter is mapped to the Pressure dimension (`pressureInUse == false`), the velocity capture delay is skipped entirely — notes fire immediately on touch with zero latency. The accelerometer peak detection logic is also skipped.
+The accelerometer velocity capture (and its `pressureInUse` fast-path) went
+with the 2026-07-24 dead-parameter deletion: the Fret Pad tracks the finger
+directly and never used it, so notes always fire immediately on touch. The
+`accelPressure` / `keyY` / slider dimensions still exist in
+`InputDimension` but nothing emits them — only the three tilts are wired.
 
 ## Vibrato
 
 There is **no automatic vibrato LFO**. The old sine-LFO-on-the-pitch-bend
 (the `vibratoDepth` / `vibratoRate` / `vibratoIntensity` dimension params)
-has been removed. Vibrato is now purely a **playing technique**: the pitch
-tracks your finger directly (see [Pitch Pad](pitch-pad.md)), so wiggling your
-finger left/right across a Pitch Pad cell bends the pitch with the motion.
-For an electronically generated vibrato, drive the hosted AU's own vibrato
-(e.g. map a tilt to a CC, or use SWAM's vibrato controls on the Mac).
+has been removed. Vibrato is primarily a **playing technique**: the pitch
+tracks your finger directly (see [Fret Pad](fret-pad.md)), so wiggling your
+finger left/right across the surface bends the pitch with the motion.
+
+The kernel also has its own finger-vibrato, exposed since the 2026-07-24
+unification as the single parameter **`bow_vib_cents`** ("vibrato depth
+(¢)", Articulation group) — bind a tilt to it to add vibrato depth by
+leaning. It is a `hybrid` parameter: the kernel scales its built depth by
+the aftertouch axis, which is what the deleted `bow_vibrato` parameter used
+to expose separately.
+
+**Parameter language (2026-07-24 unification):** CC numbers
+(parenthesized above) are a transport detail — no user-facing surface
+shows them. There is **one parameter list** (`ParamRegistry`, the
+Parameters tab ⌘5): every knob of the String instrument, in native units,
+each with an apply strategy — `live` (instant engine setter), `rebuild`
+(a `bowed_string.json` build scalar, applied as a persisted override with
+a debounced off-main rebuild), or `hybrid` (a build scalar that also has a
+live 0–1 scaler in the kernel: instant at or below its built value,
+rebuild above). **Composite parameters** are named 0–1 macros built from
+those parameters, edited in the Controls tab, occupying 8 transport slots.
+
+A tilt binds to a composite **or straight to a single parameter** — there
+is no "mappable" subset. `AppController.applyParamToVoice` is the one
+apply path for the Parameters tab, composite members, tilt bindings and
+audition scripts alike; whatever cannot apply instantly is funnelled into
+one debounced rebuild flush.
+
+**What the unification removed:** the same perceptual knob used to exist
+twice, in two tabs, under two names — `bow_jaw_gain` "web buzz amount"
+next to `bow_taraf_jawari` "jawari buzz", and `bow_vibrato` "vibrato
+depth" next to `bow_vib_cents` "vibrato depth (¢)". In both cases the
+Parameters-tab knob was literally the kernel's 0–1 **scaler** for the
+Sarangi-tab build scalar. They are now single `hybrid` parameters
+(`bow_taraf_jawari`, `bow_vib_cents`), and the scalers are an
+implementation detail. `bow_jt_damp` (the modal jawari rows' runtime
+damping) and `bow_taraf_damp` (the sympathetic web's f² HF damping) were
+never the same thing — they damp different string banks — and are now
+labelled and grouped so they can't be confused.

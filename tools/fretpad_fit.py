@@ -30,6 +30,12 @@ Loss = mean |pitch at dwell end - fret| (cents)
      + 15 * mean settle lag (s, capped 0.6)
      + 0.7 * mean |pitch at reversal - fret| (cents)
      + 2.0 * mean |out - raw| over fast transit (cents)   [transparency]
+
+Since the 2026-07-23 free-fret change the assist's magnet basin is **screen
+px** (radiusScale × Snap, distance to the fret line's x), not log-pitch, and
+each recorded ctx fret carries its pixel `x` (record v2). v1 recordings (made
+on the pitch-mapped ribbon) still load — the fret x is derived from the old
+x↔pitch mapping — but the live surface has changed; prefer fresh recordings.
 """
 
 import json
@@ -98,11 +104,22 @@ def load_strokes(paths, snap_px=None):
                 continue
             ctx = s["ctx"]
             span = 1.0 + 2.0 * max(0.0, ctx["ghostExtentOctaves"])
+            extent = max(0.0, ctx["ghostExtentOctaves"])
             snap = snap_px if snap_px is not None else ctx["snapDistance"]
-            radius = snap / max(1.0, ctx["width"]) * span
+            # Magnet basin in screen px (matches FretDragAssist.setContext).
+            radius = float(snap)
+
+            def fret_x(f):
+                # v2 records the fret's pixel x; v1 (pitch-mapped ribbon)
+                # derives it from the old log2 ↔ x mapping.
+                if "x" in f:
+                    return float(f["x"])
+                return (f["log2Ratio"] + extent) / span * ctx["width"]
+
             strokes.append(dict(
                 events=ev, moves=moves, endT=float(s["endT"]),
-                frets=[(f["log2Ratio"], f["topY"], f["bottomY"]) for f in ctx["frets"]],
+                frets=[(fret_x(f), f["log2Ratio"], f["topY"], f["bottomY"])
+                       for f in ctx["frets"]],
                 radius=radius, params=ctx.get("assistParams", {}) or {},
             ))
     return strokes
@@ -113,13 +130,13 @@ def smoothstep(v):
     return v * v * (3 - 2 * v)
 
 
-def candidate(frets, radius, u, y):
-    """Nearest fret in log-pitch within radius whose y-extent contains y."""
+def candidate(frets, radius, x, y):
+    """Nearest fret in screen px within radius whose y-extent contains y."""
     best, bd = None, float("inf")
-    for flog, top, bot in frets:
+    for fx, flog, top, bot in frets:
         if y < top or y > bot:
             continue
-        d = abs(flog - u)
+        d = abs(fx - x)
         if d <= radius and d < bd:
             best, bd = flog, d
     return best, bd
@@ -168,7 +185,7 @@ def replay(stroke, params):
         last_update = t
         w = smoothstep((ceil - speed) / (ceil - floor))
         gate = min(1.0, max(w, turn_gain * impulse))
-        cand, d = candidate(frets, radius, last_u, last_y)
+        cand, d = candidate(frets, radius, last_x, last_y)
         if cand is not None:
             prox = min(1.0, max(0.0, 2.0 * (1.0 - d / radius)))
             rate = (1 - math.exp(-dt / ctau)) * gate * prox
@@ -234,14 +251,14 @@ def labels_nearest(stroke, det):
     dwells, reversals, (tg, xg, yg, ug, speed) = det
     labeled_dwells, labeled_revs = [], []
     for lo_i, hi_i in dwells:
-        u_mid = float(np.mean(ug[lo_i:hi_i + 1]))
+        x_mid = float(np.mean(xg[lo_i:hi_i + 1]))
         y_mid = float(np.mean(yg[lo_i:hi_i + 1]))
-        cand, _ = candidate(stroke["frets"], stroke["radius"], u_mid, y_mid)
+        cand, _ = candidate(stroke["frets"], stroke["radius"], x_mid, y_mid)
         if cand is not None:
             labeled_dwells.append((tg[lo_i], tg[hi_i], cand))
     for i in reversals:
         cand, _ = candidate(stroke["frets"], stroke["radius"],
-                            float(ug[i]), float(yg[i]))
+                            float(xg[i]), float(yg[i]))
         if cand is not None:
             labeled_revs.append((tg[i], cand))
     return labeled_dwells, labeled_revs, (tg, ug, speed), {}
@@ -259,15 +276,16 @@ def labels_phrase(stroke, det, tokens):
     infl = [dict(kind="dwell", lo=lo, hi=hi,
                  t=float(tg[lo]),
                  u=float(np.mean(ug[lo:hi + 1])),
+                 x=float(np.mean(xg[lo:hi + 1])),
                  y=float(np.mean(yg[lo:hi + 1])))
             for lo, hi in dwells]
     infl += [dict(kind="rev", i=i, t=float(tg[i]), u=float(ug[i]),
-                  y=float(yg[i]))
+                  x=float(xg[i]), y=float(yg[i]))
              for i in reversals]
     infl.append(dict(kind="onset", t=float(tg[0]), u=float(ug[0]),
-                     y=float(yg[0])))
+                     x=float(xg[0]), y=float(yg[0])))
     infl.append(dict(kind="release", t=float(tg[-1]), u=float(ug[-1]),
-                     y=float(yg[-1])))
+                     x=float(xg[-1]), y=float(yg[-1])))
     infl.sort(key=lambda e: e["t"])
 
     # Candidate fret logs per token: every visible fret of that pitch class
@@ -277,7 +295,7 @@ def labels_phrase(stroke, det, tokens):
 
     reps = max(1, round(len(infl) / max(1, len(tokens)))) if infl else 1
     tiled = list(tokens) * reps
-    cands = [[flog for flog, _, _ in stroke["frets"] if pc(flog) in pcs]
+    cands = [[flog for _, flog, _, _ in stroke["frets"] if pc(flog) in pcs]
              for pcs in tiled]
 
     n, m = len(infl), len(tiled)
@@ -323,11 +341,12 @@ def labels_phrase(stroke, det, tokens):
     for i, fret in matches:
         e = infl[i]
         # Reachability diagnostic: could the CAUSAL assist even act here —
-        # fret within the magnet radius AND its y-extent containing the touch?
-        in_zone = any(abs(flog - e["u"]) <= stroke["radius"]
+        # fret within the magnet radius (px) AND its y-extent containing the
+        # touch?
+        in_zone = any(abs(fx - e["x"]) <= stroke["radius"]
                       and e["y"] >= top and e["y"] <= bot
                       and abs(flog - fret) < 1e-9
-                      for flog, top, bot in stroke["frets"])
+                      for fx, flog, top, bot in stroke["frets"])
         if e["kind"] != "onset":
             if in_zone:
                 reachable += 1
@@ -541,7 +560,8 @@ def cmd_selftest():
     including a connected 9-note phrase stroke through phrase alignment."""
     rng = np.random.default_rng(7)
     width, height = 1400.0, 900.0
-    frets = [dict(id=f"f{i}", log2Ratio=-0.5 + i / 12.0, topY=200.0,
+    frets = [dict(id=f"f{i}", log2Ratio=-0.5 + i / 12.0,
+                  x=(-0.5 + i / 12.0 + 0.5) / 2.0 * width, topY=200.0,
                   bottomY=700.0, ghost=False) for i in range(25)]
     ctx = dict(frets=frets, snapDistance=16.0, ghostExtentOctaves=0.5,
                width=width, height=height, assistParams=dict(DEFAULTS))

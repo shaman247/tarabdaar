@@ -8,13 +8,16 @@ import Foundation
 // offline (`tools/fretpad_fit.py`). Toggled from the Fret Pad toolbar's Rec
 // button; one JSONL line per stroke:
 //
-//   {"v":1, "date":…, "offset":<onset snapOffsetLog>, "ctx":{frets, snap,
+//   {"v":2, "date":…, "offset":<onset snapOffsetLog>, "ctx":{frets, snap,
 //    extent, width, height, assistParams}, "events":[[t,x,y,u,o,tick],…],
 //    "endT":t}
 //
+// (v2 since the 2026-07-23 free-fret change: each ctx fret carries its pixel
+// `x` and `u` is the fret-field pitch, not an x-mapping.)
+//
 //   t    seconds since the stroke began (CACurrentMediaTime-based)
 //   x,y  surface-local px (same space as the recorded fret extents)
-//   u    uncorrected log2 pitch (raw x-mapped + onset offset) — the assist's
+//   u    uncorrected log2 pitch (fret-field + onset offset) — the assist's
 //        INPUT, so the fitter never re-derives onset snapping
 //   o    the pitch actually played (post-assist), for verifying the fitter's
 //        causal replica against the live Swift behavior
@@ -34,14 +37,18 @@ public final class FretGestureRecorder: ObservableObject {
         public struct FretRef: Codable {
             public var id: String
             public var log2Ratio: Double
+            /// Pixel x of the fret line (frets are freely positioned — the
+            /// assist's magnet basin is screen-px, so the fitter needs it).
+            public var x: Double
             public var topY: Double
             public var bottomY: Double
             public var ghost: Bool
 
-            public init(id: String, log2Ratio: Double, topY: Double,
+            public init(id: String, log2Ratio: Double, x: Double, topY: Double,
                         bottomY: Double, ghost: Bool) {
                 self.id = id
                 self.log2Ratio = log2Ratio
+                self.x = x
                 self.topY = topY
                 self.bottomY = bottomY
                 self.ghost = ghost
@@ -174,7 +181,7 @@ public final class FretGestureRecorder: ObservableObject {
         guard var s = active.removeValue(forKey: touchId) else { return }
         guard isRecording, let handle else { return }
         s.events = s.events.map { $0.map { ($0 * 10000).rounded() / 10000 } }
-        let record = StrokeRecord(v: 1, date: Self.dateStamp.string(from: Date()),
+        let record = StrokeRecord(v: 2, date: Self.dateStamp.string(from: Date()),
                                   offset: s.offset, ctx: s.ctx,
                                   events: s.events, endT: time - s.start)
         guard let data = try? JSONEncoder().encode(record) else { return }

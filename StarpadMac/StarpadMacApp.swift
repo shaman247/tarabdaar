@@ -18,22 +18,6 @@ struct StarpadMacApp: App {
         .commands {
             // No "New Window" — single-window app.
             CommandGroup(replacing: .newItem) {}
-
-            CommandMenu("Preset") {
-                ForEach(Array(SoundPreset.allCases.enumerated()), id: \.element.rawValue) { i, preset in
-                    Button(preset.label) {
-                        controller.applyPreset(preset)
-                    }
-                    // ⌘1 .. ⌘8 quick-apply for the first eight presets.
-                    .keyboardShortcut(presetShortcut(for: i),
-                                      modifiers: i < 9 ? .command : [])
-                }
-            }
         }
-    }
-
-    private func presetShortcut(for index: Int) -> KeyEquivalent {
-        guard index < 9 else { return KeyEquivalent("0") }
-        return KeyEquivalent(Character("\(index + 1)"))
     }
 }

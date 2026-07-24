@@ -4,7 +4,7 @@
 
 1. Hold the iPad in landscape orientation (home button / USB-C on the right)
 2. Rest the iPad on your inner forearm, screen facing up
-3. The **Pitch Pad** fills the screen below the slim toolbar; your fingers play it from above
+3. The **Fret Pad** fills the screen below the slim toolbar; your fingers play it from above
 4. Tilting your arm controls whatever expression you've mapped (aftertouch, CCs)
 
 ## First Launch: Calibration
@@ -23,16 +23,16 @@ Each step shows live pitch/roll/yaw readings. Tap Capture at each position. Cali
 
 ## Playing Notes
 
-Touch a cell on the Pitch Pad to sound its pitch. Each cell is one degree
-of your JI scale; the cell's color and label identify it. The x-axis is
-log-frequency: the base octave (1/1 … 2/1) sits in the middle, and the pad
-extends half an octave past each end where the scale's notes repeat
-(read-only ghost cells), so you can reach a tritone below the tonic up to
-a tritone above the octave. The y-axis is layout-only — it doesn't change
-pitch, it just spreads the cells out vertically.
+Touch a fret on the Fret Pad to sound its pitch. Each fret is a vertical
+segment placed freely across the surface; a touch that starts within the
+Snap distance of a fret (and inside its vertical extent) snaps to that
+fret's exact pitch, while starting in open space approaches the pitch
+through the continuous fret field. The base layout sits in a central band
+and repeats up and down as read-only octave-ghost copies. Press-to-sound
+**drone buttons** live inside the right edge.
 
 Multiple fingers play polyphonically — each touch is an independent voice
-on its own MPE channel. See [Pitch Pad](pitch-pad.md) for the full surface.
+on its own MPE channel. See [Fret Pad](fret-pad.md) for the full surface.
 
 ## Gliding
 
@@ -62,14 +62,14 @@ have been removed.)
 
 Other expression comes from **tilt** (and the sliders / pressure if you map
 them). In the **MAP** matrix, bind a tilt axis to **Aftertouch** or a **CC**
-to drive SWAM's own expression — including its built-in vibrato. The pad's
-60 Hz loop overlays this on every held touch.
+to drive the String voice's expression axes (expression, taraf purity/decay,
+tone tilt). The pad's 60 Hz loop overlays this on every held touch.
 
 ## Expression Dimensions
 
 Parameters can have multiple **dimensions** bound to them simultaneously. Configure mappings via the **MAP** button in the toolbar. Each binding defines a Catmull-Rom spline curve (2–4 control points) that maps the dimension's input range to the parameter's output range. When multiple dimensions are bound, sliders (when touched) override tilts, and the dimension with the highest deviation from center wins among same-type inputs.
 
-On the Pitch Pad, expression is driven by the **global** dimensions — Tilt 1/2/3 and Slider 1/2. The per-note dimensions (Pressure, Key Y) are inherited from the old keyboard and currently read their idle value on the pad, so map aftertouch/CCs to a tilt or slider.
+On the Fret Pad, expression is driven by the **global** dimensions — Tilt 1/2/3 and Slider 1/2. The per-note dimensions (Pressure, Key Y) are inherited from the old keyboard and currently read their idle value on the pad, so map aftertouch/CCs to a tilt or slider.
 
 **Internal parameters**: Velocity, Glide Speed, Compression, Amplitude, Drag Smoothing, Glide Curve.
 
@@ -90,7 +90,7 @@ The tilt values are based on your calibration, so "neutral" is wherever you cali
 
 1. Connect the iPad to the Mac via USB.
 2. On the Mac: open **Audio MIDI Setup** > **Window > Show MIDI Studio** > Enable iPad.
-3. Launch StarpadMac. The top-bar pill turns green when it sees the iPad as a MIDI source. The first Note On from the iPad triggers SWAM Viola on the Mac immediately — no settings sync, just MPE on the wire.
+3. Launch StarpadMac. The top-bar pill turns green when it sees the iPad as a MIDI source. The first Note On from the iPad plays the sarangi String voice on the Mac immediately — no settings sync, just MPE on the wire.
 
 The iPad also appears as a standard MPE MIDI source to any other host on the Mac (Ableton, Logic, etc.). To route to those:
 
@@ -107,14 +107,14 @@ Starpad sends:
 ## Scale Editing (on the Mac)
 
 The iPad is **perform-only** — there's no scale editor on it. Scales are
-designed on **StarpadMac**'s Pitch Pad tab (drag handles, add/remove/disable
-pitches, snap to simple fractions) and **synced to the iPad over the USB
-cable** automatically: edit a pitch on the Mac and the iPad's pad re-lays-out
-within a moment. The iPad opens on the last scale it received (and on the
-built-in default if it has never been synced). See
+designed on **StarpadMac**'s Fret Pad tab (the scale list editor: add/remove/
+disable pitches, snap to simple fractions) and **synced to the iPad over the
+USB cable** automatically: edit a pitch on the Mac and the iPad's frets
+re-lay-out within a moment. The iPad opens on the last scale it received (and
+on the built-in default if it has never been synced). See
 [Scales & Tuning](scales-and-tuning.md) and
 [MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad). The
-Pitch Pad always plays exact ratios, so all tuning is just intonation.
+frets always play exact ratios, so all tuning is just intonation.
 
 ## Polyphony
 

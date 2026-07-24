@@ -20,6 +20,13 @@ public struct Biquad: Sendable {
         self.a1 = a1 / a0; self.a2 = a2 / a0
     }
 
+    /// STARPAD (2026-07-24): adopt another section's COEFFICIENTS while
+    /// keeping this one's delay state — the click-free way to retune a
+    /// filter that is already running (a live parameter edit).
+    public mutating func copyCoefficients(from o: Biquad) {
+        b0 = o.b0; b1 = o.b1; b2 = o.b2; a1 = o.a1; a2 = o.a2
+    }
+
     public mutating func process(_ x: Double) -> Double {
         let y = b0 * x + z1
         z1 = b1 * x - a1 * y + z2

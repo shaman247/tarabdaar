@@ -52,15 +52,23 @@ class TouchCaptureView: UIView {
     var onTouchMoved: ((TouchEvent) -> Void)?
     var onTouchEnded: ((Int) -> Void)?
     private var activeTouches: Set<UITouch> = []
+    // UIKit recycles UITouch instances, so `touch.hash` repeats across
+    // consecutive taps — a reused id breaks the legato takeover (the new tap
+    // looks like the previous voice's own touch, orphaning its channel with
+    // a stuck note). Mint a unique id per touch lifetime instead.
+    private var touchIds: [ObjectIdentifier: Int] = [:]
+    private var nextTouchId: Int = 0
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         activeTouches.formUnion(touches)
         for touch in touches {
+            nextTouchId &+= 1
+            touchIds[ObjectIdentifier(touch)] = nextTouchId
             let loc = touch.location(in: self)
             let xFrac = Double(loc.x / bounds.width)
             let yFrac = Double(loc.y / bounds.height)
             onTouchBegan?(TouchEvent(
-                touchId: touch.hash,
+                touchId: nextTouchId,
                 xFraction: xFrac,
                 yFraction: yFrac,
                 timestamp: touch.timestamp
@@ -71,11 +79,12 @@ class TouchCaptureView: UIView {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
+            guard let id = touchIds[ObjectIdentifier(touch)] else { continue }
             let loc = touch.location(in: self)
             let xFrac = Double(loc.x / bounds.width)
             let yFrac = Double(loc.y / bounds.height)
             onTouchMoved?(TouchEvent(
-                touchId: touch.hash,
+                touchId: id,
                 xFraction: xFrac,
                 yFraction: yFrac,
                 timestamp: touch.timestamp
@@ -86,7 +95,9 @@ class TouchCaptureView: UIView {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-            onTouchEnded?(touch.hash)
+            if let id = touchIds.removeValue(forKey: ObjectIdentifier(touch)) {
+                onTouchEnded?(id)
+            }
         }
         activeTouches.subtract(touches)
         reportTouches()
@@ -94,7 +105,9 @@ class TouchCaptureView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-            onTouchEnded?(touch.hash)
+            if let id = touchIds.removeValue(forKey: ObjectIdentifier(touch)) {
+                onTouchEnded?(id)
+            }
         }
         activeTouches.subtract(touches)
         reportTouches()
@@ -103,7 +116,7 @@ class TouchCaptureView: UIView {
     private func reportTouches() {
         let infos = activeTouches.map { touch in
             TouchInfo(
-                id: touch.hash,
+                id: touchIds[ObjectIdentifier(touch)] ?? touch.hash,
                 location: touch.location(in: self),
                 phase: touch.phase,
                 timestamp: touch.timestamp

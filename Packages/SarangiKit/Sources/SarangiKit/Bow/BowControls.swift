@@ -389,23 +389,23 @@ public struct BowControlFilter: Sendable {
     // baked mapping constants (bowstring.pair_controls)
     let aGate: Double            // 25 ms gate one-pole
     let aPitch: Double           // 9 Hz meend one-pole (applied twice)
-    let vLo: Double, vHi: Double
-    let betaLo: Double, betaHi: Double
-    let pressUnder: Double, pressOver: Double   // wedge-edge overshoot factors
-    let dynP: Double, fCap: Double
-    let exprLift: Double         // expression below which the bow lifts to silence
-    let schellengC: Double, schellengMargin: Double
-    let schellengZ: Double, schellengDmu: Double   // analytic fmax = 2Zv/(βΔμ)
-    let tiltBeta: Double, tiltForce: Double, tiltKnee: Double
-    let betaF0Gamma: Double
-    let fReg: Double, tonicHz: Double   // register force (f0/tonic)^k
+    var vLo: Double, vHi: Double
+    var betaLo: Double, betaHi: Double
+    var pressUnder: Double, pressOver: Double   // wedge-edge overshoot factors
+    var dynP: Double, fCap: Double
+    var exprLift: Double         // expression below which the bow lifts to silence
+    var schellengC: Double, schellengMargin: Double
+    var schellengZ: Double, schellengDmu: Double   // analytic fmax = 2Zv/(βΔμ)
+    var tiltBeta: Double, tiltForce: Double, tiltKnee: Double
+    var betaF0Gamma: Double
+    var fReg: Double, tonicHz: Double   // register force (f0/tonic)^k
     // PLACE-then-DRAW articulation (2026-07-16b): at a fresh attack the
     // force rides the gate ramp while VELOCITY holds ~0 for placeS (bow
     // set on the string — static stick, silence) then rises over drawS
     // (smoothstep) — the friction loop produces the authentic
     // pre-Helmholtz crunch with no injected noise. placeS 0 = off
     // (bit-null: the sarangi bow artifact carries no key).
-    let placeS: Double, drawS: Double
+    var placeS: Double, drawS: Double
     // ATTACK SHARPNESS (2026-07-17d): a sharp, accented onset is a FAST,
     // FORCEFUL bite. Sharpness = onset PRESS above attackThresh (the player
     // law: "a sharper sound from higher pressure"). A sharp attack DRAWS
@@ -414,11 +414,11 @@ public struct BowControlFilter: Sendable {
     // velocity onset drives the friction loop through a transient
     // MULTI-SLIP regime = a burst of upper-harmonic energy (the kernel's
     // own physics, no injected noise). attackBite 0 = off (legato draw).
-    let drawMinS: Double, attackBite: Double
-    let attackBiteTau: Double, attackThresh: Double
+    var drawMinS: Double, attackBite: Double
+    var attackBiteTau: Double, attackThresh: Double
     // player vibrato (aftertouch): depth vibCents at vibHz, applied to the
     // SOUNDING pitch post-smoother (finger motion). vibCents 0 = off.
-    let vibCents: Double, vibHz: Double
+    var vibCents: Double, vibHz: Double
     let pitchKnots: [Double], pitchCentsTab: [Double]
     let pitchRefLog2: Double
     let pitchKnotsA: [Double]?, pitchCentsA: [Double]?
@@ -427,7 +427,7 @@ public struct BowControlFilter: Sendable {
     // smoother state
     var lf0A = 0.0, lf0B = 0.0   // cascaded one-pole states on log2 f0
     var gateState = 0.0
-    let attackFms: Double
+    var attackFms: Double
     var placeClock = 1.0e9       // seconds since the current attack began
     var attackSharp = 0.0        // onset-press sharpness of the current attack
     var vibPhase = 0.0
@@ -494,6 +494,44 @@ public struct BowControlFilter: Sendable {
             pitchCentsPress = nil
         }
         wedge = bp.wedge
+    }
+
+    /// STARPAD LIVE PARAMETERS (2026-07-24): re-read the bp-derived
+    /// mapping constants on a filter that is already running. Only the
+    /// config above is touched — the smoother state (`lf0A`/`lf0B`,
+    /// `gateState`, `placeClock`, `attackSharp`, `vibPhase`, `prev`,
+    /// `primed`) is left exactly as it stands, so a parameter edit does
+    /// not re-articulate a sounding note. Keep in lockstep with `init`.
+    /// (Pitch tables/wedge are structural and stay put.)
+    public mutating func updateLiveParams(bp: BowParams) {
+        vLo = bp.v("bow_v_lo", 0.05)
+        vHi = bp.v("bow_v_hi", 0.35)
+        betaLo = bp.v("bow_live_beta_lo", 0.04)
+        betaHi = bp.v("bow_live_beta_hi", 0.22)
+        pressUnder = bp.v("bow_live_press_under", 0.55)
+        pressOver = bp.v("bow_live_press_over", 1.25)
+        dynP = bp.v("dyn_p", 0.0)
+        fCap = bp.v("bow_f_cap", 2.6)
+        exprLift = bp.v("bow_expr_lift", 0.0)
+        schellengC = bp.v("bow_schelleng_c", 0.055)
+        schellengMargin = bp.v("bow_schelleng_margin", 1.2)
+        schellengZ = bp.v("bow_Z", 1.0)
+        schellengDmu = max(bp.v("bow_mu_s", 0.8) - bp.v("bow_mu_d", 0.3), 1e-3)
+        tiltBeta = bp.v("bow_tilt_beta", 0.0)
+        tiltForce = bp.v("bow_tilt_force", 0.0)
+        tiltKnee = bp.v("bow_tilt_knee", 0.0)
+        betaF0Gamma = bp.v("bow_beta_f0", 0.0)
+        fReg = bp.v("bow_f_reg", 0.0)
+        placeS = bp.v("bow_place_ms", 0.0) / 1000.0
+        drawS = max(bp.v("bow_draw_ms", 1.0), 1.0) / 1000.0
+        drawMinS = max(bp.v("bow_draw_min_ms", bp.v("bow_draw_ms", 1.0)),
+                       1.0) / 1000.0
+        attackBite = bp.v("bow_attack_bite", 0.0)
+        attackBiteTau = max(bp.v("bow_attack_bite_ms", 60.0), 5.0) / 1000.0
+        attackFms = max(bp.v("bow_attack_fms", 15.0), 2.0) / 1000.0
+        attackThresh = bp.v("bow_attack_thresh", 0.5)
+        vibCents = bp.v("bow_vib_cents", 0.0)
+        vibHz = bp.v("bow_vib_hz", 5.5)
     }
 
     @inline(__always) func attackSharpOf(_ press: Double) -> Double {

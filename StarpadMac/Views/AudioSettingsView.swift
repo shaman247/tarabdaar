@@ -3,35 +3,23 @@ import SarangiKit
 import StarpadCore
 import SwiftUI
 
-/// Output device routing + reverb mix. The device picker enumerates
-/// CoreAudio output devices on appear; pick one to route AVAudioEngine
-/// through that HAL device. "System Default" routes via the
+/// Output device routing + the String voice's control axes. The device
+/// picker enumerates CoreAudio output devices on appear; pick one to route
+/// AVAudioEngine through that HAL device. "System Default" routes via the
 /// `kAudioHardwarePropertyDefaultOutputDevice` device, so changing the
 /// system default in System Settings follows automatically.
 struct AudioSettingsView: View {
     @ObservedObject var controller: AppController
-    // Observed so the coupled toggle + loop-stability readout refresh live.
-    @ObservedObject var store: SarangiStore
     @ObservedObject var audio: AudioEngine
 
     init(controller: AppController) {
         self.controller = controller
-        self.store = controller.sarangi
         self.audio = controller.audio
     }
 
     @State private var devices: [AudioOutputDevice] = []
     @State private var selectedID: AudioDeviceID = 0
-    /// Persisted across launches.
-    @AppStorage("starpad.reverbMix") private var reverbMix: Double = 25
     @State private var sampleRate: Double = 0
-    // Model-voice control axes (0..1 slider positions; defaults = the fitted
-    // operating point — pair-3 gated medians). Not persisted: the voice
-    // resets to the validated defaults each launch, like the upstream app.
-    @State private var modelExpr = BowControlMapper.defaultExpr
-    @State private var modelPress = BowControlMapper.defaultPress
-    @State private var modelPos = BowControlMapper.defaultPos
-    @State private var modelTilt = BowControlMapper.defaultTilt
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -40,15 +28,11 @@ struct AudioSettingsView: View {
                 .foregroundStyle(.secondary)
             instrumentPanel
             outputDevicePanel
-            reverbPanel
             infoPanel
         }
         .padding(20)
         .onAppear {
             refreshDevices()
-            // Apply persisted reverb mix on appear (engine starts at 25%
-            // by default; sync to whatever the user last picked).
-            controller.audio.setReverbMix(Float(reverbMix))
             sampleRate = controller.audio.outputSampleRate
         }
     }
@@ -56,56 +40,15 @@ struct AudioSettingsView: View {
     // MARK: - Panels
 
     private var instrumentPanel: some View {
-        Panel(title: "Base voice") {
+        Panel(title: "String voice") {
             VStack(alignment: .leading, spacing: 8) {
-                Picker("Base voice", selection: $controller.baseVoice) {
-                    ForEach(BaseVoice.allCases) { v in
-                        Text(v.label).tag(v)
-                    }
-                }
-                .pickerStyle(.menu)
-                Text(baseVoiceCaption)
+                Text("The String physics sarangi (bowed_string.json) — the pure-physics bowed gut string with the modal-jawari taraf in-kernel; poly gut strings on one bridge, per-finger MPE bend.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if controller.baseVoice.isSarangiModel {
-                    modelVoiceAxes
-                }
+                Text("Sound: Sarangi tab (physics) · Tarab tab (sympathetic strings) · Controls tab (tilt bindings + composites) · Parameters tab (resting defaults).")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
-        }
-    }
-
-    private var baseVoiceCaption: String {
-        if controller.baseVoice.isSarangiModel {
-            return "The String physics sarangi (bowed_string.json) — the pure-physics bowed gut string with the modal-jawari taraf in-kernel; poly gut strings on one bridge, per-finger MPE bend."
-        }
-        if controller.baseVoice.isSitar {
-            return "Our sitar model is the excitation the sarangi transforms — played by note (pluck) with pitch-bend glide."
-        }
-        return "The dry SWAM voice the sarangi model transforms. Bow timbre and DRY routing apply to all four."
-    }
-
-    /// The model voice's four control axes (the same CC map hardware/iPad
-    /// controllers use: CC11 expr · CC1 press · CC74 pos · CC2/75 tilt).
-    /// Defaults = the fitted operating point (pair-3 gated medians).
-    private var modelVoiceAxes: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            modelAxisSlider("Expression (CC11)", $modelExpr, cc: 11)
-            modelAxisSlider("Bow pressure (CC1)", $modelPress, cc: 1)
-            modelAxisSlider("Bow position (CC74)", $modelPos, cc: 74)
-            modelAxisSlider("Harmonic tilt (CC2/75)", $modelTilt, cc: 2)
-        }
-        .padding(.top, 4)
-    }
-
-    private func modelAxisSlider(_ label: String, _ value: Binding<Double>, cc: UInt8) -> some View {
-        HStack {
-            Text(label).font(.caption).frame(width: 150, alignment: .leading)
-            Slider(value: Binding(
-                get: { value.wrappedValue },
-                set: { v in
-                    value.wrappedValue = v
-                    controller.audio.setSarangiModelVoiceAxis(cc: cc, value01: v)
-                }), in: 0...1)
         }
     }
 
@@ -144,31 +87,6 @@ struct AudioSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-            }
-        }
-    }
-
-    private var reverbPanel: some View {
-        Panel(title: "Reverb") {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Mix")
-                        .font(.system(.body))
-                        .frame(width: 56, alignment: .leading)
-                    Slider(value: $reverbMix, in: 0...100) {
-                        EmptyView()
-                    }
-                    .onChange(of: reverbMix) { newValue in
-                        controller.audio.setReverbMix(Float(newValue))
-                    }
-                    Text(String(format: "%.0f%%", reverbMix))
-                        .font(.system(.caption))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 44, alignment: .trailing)
-                }
-                Text("Mac-only — does not affect the iPad's local audio.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
     }

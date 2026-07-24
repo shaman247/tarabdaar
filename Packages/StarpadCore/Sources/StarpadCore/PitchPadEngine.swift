@@ -636,6 +636,17 @@ public final class PitchPadEngine: ObservableObject {
         }
     }
 
+    /// Drone button `index` (0–3) press/release (Fret Pad). Emits CC
+    /// 102+index (value 127/0) on channel 0 — on the Mac this lands
+    /// in-process at `AudioEngine.sendHostedMIDI`, on the iPad it rides
+    /// the USB cable like every other message; the Mac intercepts the CC
+    /// and drives the String voice's jawari-taraf drone rows.
+    public func setDrone(_ index: Int, pressed: Bool) {
+        guard (0..<4).contains(index) else { return }
+        midi.sendControlChange(controller: UInt8(102 + index),
+                               value: pressed ? 127 : 0, channel: 0)
+    }
+
     public func panic() {
         for ch in 1...15 {
             midi.sendControlChange(controller: 123, value: 0, channel: UInt8(ch))
@@ -730,25 +741,27 @@ public final class PitchPadEngine: ObservableObject {
     }
 
     /// Per-tick expression update (iPad). For every held touch it re-sends a
-    /// pitch bend tracking the touch's position-derived ratio, plus channel
-    /// pressure (aftertouch) and any mapped CCs read from the bound
-    /// `DimensionMapping`. `noteOn` / `glide` set the per-touch ratio and
-    /// emit the base bend; this loop overlays tilt expression at ≤16 ms.
+    /// pitch bend tracking the touch's position-derived ratio, plus the RAW
+    /// TILT REPORT (2026-07-24): the iPad knows nothing about parameters or
+    /// mappings — it streams its three calibrated tilt values on the fixed
+    /// axis messages (`TiltAxisWire`) and the Mac evaluates its own tilt
+    /// bindings (composites, expression, vibrato, …). Values are sent only
+    /// when they change (7-bit) to keep the wire quiet.
+    private var lastTiltSent: [UInt8] = [255, 255, 255]
+
     private func expressionTick() {
         guard !touchChannels.isEmpty else { return }
 
-        // Pad expression is driven by the *global* dimensions (tilts +
-        // sliders); per-note dims (keyY/pressure) read their idle value
-        // since the pad never activates NoteManager voices.
-        func param(_ p: MappableParameter) -> Double {
-            expression?.cachedParamValue(for: p) ?? p.midpointValue
+        if let nm = expression {
+            for (i, cc) in TiltAxisWire.ccs.enumerated() {
+                let norm = nm.normalizedDimension(for: TiltAxisWire.dims[i])
+                let v = UInt8(max(0, min(127, Int((norm * 127).rounded()))))
+                if v != lastTiltSent[i] {
+                    lastTiltSent[i] = v
+                    midi.sendControlChange(controller: cc, value: v, channel: 0)
+                }
+            }
         }
-
-        let aftertouchActive = !(expression?.dimensionMapping
-            .mapping(for: .aftertouch).bindings.isEmpty ?? true)
-        let aftertouchVal: UInt8 = aftertouchActive
-            ? UInt8(max(0, min(127, Int(param(.aftertouch))))) : 0
-        let ccs = expression?.activeCCs ?? []
 
         for (touchId, channel) in touchChannels {
             guard let note = heldNote[channel],
@@ -756,14 +769,6 @@ public final class PitchPadEngine: ObservableObject {
             let base = (Double(tonicMidi) + 12.0 * log2(r)) - Double(note)
             let bend = bendValue(forSemisFromNote: base)
             midi.sendPitchBend(value: bend, channel: UInt8(channel))
-            if aftertouchActive {
-                midi.sendChannelPressure(value: aftertouchVal, channel: UInt8(channel))
-            }
-            for (cc, paramIdx) in ccs {
-                guard let p = MappableParameter(rawValue: paramIdx) else { continue }
-                let v = UInt8(max(0, min(127, Int(param(p)))))
-                midi.sendControlChange(controller: cc, value: v, channel: UInt8(channel))
-            }
         }
     }
 

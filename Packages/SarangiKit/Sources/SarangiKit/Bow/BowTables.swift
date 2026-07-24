@@ -61,6 +61,14 @@ public struct JtTables: Sendable {
     /// never waits — a dispatcher thread runs the pool and the wash
     /// rides a completed-sample FIFO (flat-fill under overload)
     public var async: Int32 = 0
+    /// Per-row fundamentals (Hz), in kernel row order — Swift-side only
+    /// (not passed to C). Lets the host map a requested drone pitch to
+    /// its nearest jawari-taraf row (`BowEngine.dronePress`).
+    public var rowFreqs: [Double] = []
+    /// One-pole tone-control coefficient on the radiated jt sum
+    /// (bow_jt_lp, Hz; ≥ 20 kHz ⇒ 0 = bypass, the byte-exact legacy
+    /// path). Applied via bow_jt_set_lp — NOT part of the load ABI.
+    public var lpA: Double = 0
     public init() {}
 }
 
@@ -544,10 +552,14 @@ public enum BowTables {
         let apex = bp.v("bow_jt_apex", 1.0e-5)
         let kc = 1.0e10
         let alpha = bp.v("bow_jt_alpha", 1.3)
-        let hcB = 8.0
+        // Starpad tone knobs (2026-07-23; defaults = the legacy hardcoded
+        // values, so untouched artifacts build byte-identical tables):
+        // hcb = contact hysteresis damping, fhf = HF damping corner of the
+        // per-mode t60 law, bst = stiffness inharmonicity coefficient.
+        let hcB = bp.v("bow_jt_hcb", 8.0)
         let gain = bp.v("bow_jt_gain", 1.0)
         let drive = bp.v("bow_jt_drive", 1.0)
-        let fmax = 18000.0, fHf = 4000.0
+        let fmax = 18000.0, fHf = bp.v("bow_jt_fhf", 4000.0)
         let mcap = Int(bp.v("bow_jt_mcap", 64.0) + 0.5)
         let div = max(1, Int(bp.v("bow_jt_div", 1.0) + 0.5))
         let norm = bp.v("bow_jt_norm", 0.0)
@@ -559,10 +571,11 @@ public enum BowTables {
         T.J = Int32(J)
         for row in rows {
             let f0s = row.f
+            T.rowFreqs.append(f0s)
             let L = min(0.30, max(0.08, 0.25 * 296.0 / f0s))
             let fx = min(fmax, 0.42 * srk / Double(div))
             let M = max(16, min(mcap, Int(fx / f0s)))
-            let bst = 2e-4
+            let bst = bp.v("bow_jt_bst", 2.0e-4)
             var w0 = [Double](repeating: 0, count: M)
             var wd = [Double](repeating: 0, count: M)
             for k in 0..<M {
@@ -654,6 +667,13 @@ public enum BowTables {
         T.phys = [kc, alpha, hcB, 2.5 * apex, gain, drive, Double(div)]
         T.threads = Int32(bp.v("bow_jt_threads", 0.0).rounded())
         T.async = bp.v("bow_jt_async", 0.0) > 0.5 ? 1 : 0
+        // Starpad jt tone LP (2026-07-23): one-pole on the radiated jt sum,
+        // at the KERNEL sample rate (the hold stream is written per kernel
+        // sample). ≥ 20 kHz = bypass (coefficient 0 → the kernel skips the
+        // filter entirely — bit-exact legacy output).
+        let lpHz = bp.v("bow_jt_lp", 20000.0)
+        T.lpA = lpHz < 19999.0
+            ? 1.0 - exp(-2.0 * Double.pi * lpHz / srk) : 0.0
         return T
     }
 

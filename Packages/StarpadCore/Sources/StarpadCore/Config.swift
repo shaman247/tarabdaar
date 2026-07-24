@@ -57,16 +57,6 @@ public enum Config {
     /// the modal renderer scales linearly to dozens of voices.
     public static let maxPolyVoices: Int = 16
 
-    /// Concurrent voices for a hosted Audio Unit preset (e.g. SWAM
-    /// Viola 3). The AU itself is monophonic, so each MPE channel
-    /// routes to its own AU instance — N instances = N polyphonic
-    /// voices. iPad channels modulo N collide (ch1 and ch9 both hit
-    /// slot 1 at N=8), but the iPad round-robins channels so chords
-    /// of N or fewer notes don't overlap. Each SWAM instance costs
-    /// ~5–10% CPU on Apple Silicon; 8 leaves room for chords plus
-    /// the modal sym pool without saturating a core.
-    public static let maxHostedPolyVoices: Int = 1
-
     // MARK: - Display
     public static let pitchHistoryLength: Int = 120  // ~2 seconds at 60Hz
     public static let peakDelayHistory: Int = 20     // rolling window for delay instrumentation

@@ -18,15 +18,10 @@ import StarpadCore
 ///     {"at": 0.0,  "kind": "tilt",    "axis": 0, "value": 0.4},
 ///     {"at": 0.0,  "kind": "noteOn",  "id": 1, "note": 60, "keyY": 0.5},
 ///     {"at": 1.0,  "kind": "glide",   "id": 1, "note": 64},
-///     {"at": 2.0,  "kind": "noteOff", "id": 1},
-///     {"at": 2.5,  "kind": "tanpuraPluck", "index": 3, "value": 0.8}
+///     {"at": 2.0,  "kind": "noteOff", "id": 1}
 ///   ]
 /// }
 /// ```
-///
-/// `tanpuraPluck` plucks tanpura-drone string `index` (0–3) at velocity
-/// `value`; tanpura model params are set via `voiceParam` with names
-/// `tanpura.<path>` (see `TanpuraParams.set(path:value:)`).
 ///
 /// `rawBend` sends a raw 14-bit pitch bend to the hosted AU on channel `id`
 /// (1–15); `value` = bend in SEMITONES, mapped assuming a ±2 st bend range
@@ -238,10 +233,6 @@ final class AuditionRunner: ObservableObject {
         simulator.setTilt(axis: 0, value: 0)
         simulator.setTilt(axis: 1, value: 0)
         simulator.setTilt(axis: 2, value: 0)
-        // Tanpura drone starts silent too: stop any running auto-cycle
-        // and zero the model so scores are reproducible.
-        simulator.controller?.tanpuraAutoDrone = false
-        audio.clearTanpuraState()
 
         do {
             try audio.startRecording(to: wavURL)
@@ -342,11 +333,6 @@ final class AuditionRunner: ObservableObject {
         case "noteOff":
             guard let id = event.id else { return }
             simulator.noteOff(id: id)
-        case "loadAU":
-            // Load a SWAM/AuMo hosted AU by subType ("Sva3" Viola / "Svl3"
-            // Violin) to A/B bases. Async — schedule notes a few seconds later.
-            guard let sub = event.param else { return }
-            simulator.controller?.loadHostedAU(subType: sub)
         case "glide":
             guard let id = event.id, let note = event.note else { return }
             simulator.glide(id: id, toNote: note, keyY: event.keyY ?? 0.5)
@@ -360,21 +346,7 @@ final class AuditionRunner: ObservableObject {
             guard let v = event.value else { return }
             simulator.motion.strikeForce = max(0.001, v)
         case "voiceParam":
-            guard let name = event.param else { return }
-            // "__auDump__": write the hosted AU's (SWAM Viola) full parameter
-            // list to <root>/swam_params.json so the matcher can discover the
-            // vibrato / resonance / bow identifiers to drive via "swam.<id>".
-            if name == "__auDump__" {
-                let dump = audio.hostedParameterDump()
-                let url = inboxURL.deletingLastPathComponent()
-                    .appendingPathComponent("swam_params.json")
-                if let data = try? JSONSerialization.data(
-                    withJSONObject: dump, options: [.prettyPrinted, .sortedKeys]) {
-                    try? data.write(to: url)
-                }
-                return
-            }
-            guard let v = event.value else { return }
+            guard let name = event.param, let v = event.value else { return }
             simulator.controller?.setVoiceParam(name: name, value: v)
         case "padOn":
             // Drive the actual Mac Pitch Pad (PitchPadEngine, the user's
@@ -390,25 +362,6 @@ final class AuditionRunner: ObservableObject {
         case "padOff":
             guard let id = event.id else { return }
             simulator.controller?.pitchPad.noteOff(touchId: id)
-        case "spadOn":
-            // Drive the String Pad engine (`controller.stringPad`) directly, the
-            // analogue of `padOn` for the String Pad. `value` = ratio vs tonic.
-            guard let id = event.id else { return }
-            simulator.controller?.stringPad.noteOn(touchId: id, ratio: event.value ?? 1.0)
-        case "spadGlide":
-            guard let id = event.id else { return }
-            simulator.controller?.stringPad.glide(touchId: id, ratio: event.value ?? 1.0)
-        case "spadOff":
-            guard let id = event.id else { return }
-            simulator.controller?.stringPad.noteOff(touchId: id)
-        case "tanpuraPluck":
-            // `index` = string 0–3, `value` = velocity 0–1.
-            guard let idx = event.index else { return }
-            audio.tanpuraPluck(index: idx, velocity: event.value ?? 0.8)
-        case "preset":
-            guard let name = event.param,
-                  let preset = SoundPreset(rawValue: name) else { return }
-            simulator.controller?.applyPreset(preset)
         default:
             NSLog("Starpad audition: unknown kind \(event.kind)")
         }

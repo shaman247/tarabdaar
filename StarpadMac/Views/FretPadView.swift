@@ -3,20 +3,23 @@ import QuartzCore
 import StarpadCore
 import SwiftUI
 
-/// The **Fret Pad** tab — a fourth 2D playing surface: the scale's pitches as
-/// vertical **frets** whose **x-position is their pitch** (`log2(ratio)` across
-/// the ribbon, like the Pitch Pad's x-axis). A touch that **starts** within the
-/// Snap distance of a fret *and* inside its vertical extent snaps to that
-/// fret's exact pitch; starting above/below it (or in open space) plays the raw
-/// x-mapped pitch — the approach path. After onset the drag is always
-/// continuous (raw pitch plus the constant offset captured at the snap), so a
-/// snapped note stays true while meend/vibrato move relative to it.
+/// The **Fret Pad** tab — the playing surface: the scale's pitches as vertical
+/// **frets** positioned **freely** (each fret's x is its own layout state,
+/// unrelated to its pitch). The playable pitch is a continuous **field**
+/// interpolated from the frets (`fretFieldLog` — exact on a fret,
+/// inverse-distance log-pitch blend between them). A touch that **starts**
+/// within the Snap distance of a fret *and* inside its vertical extent snaps
+/// to that fret's exact pitch; starting elsewhere plays the field pitch — the
+/// approach path. After onset the drag is always continuous (field pitch plus
+/// the constant offset captured at the snap), so a snapped note stays true
+/// while meend/vibrato move relative to it.
 ///
 /// Frets are editable: drag an endpoint to set a fret's vertical extent (its
-/// snap zone), drag the line to move it, shift-click to add a fret on the
-/// nearest degree, right-click to delete. The base octave sits in the centre;
-/// the ribbon extends `ghostExtentOctaves` past it each side (default 0.5 →
-/// a 2-octave ribbon) with read-only octave-repeat ghost copies. Reuses
+/// snap zone), drag the line to move it (horizontally and vertically),
+/// shift-click to add a fret on the nearest degree, right-click to delete.
+/// The base layout sits in the central band; the surface extends
+/// `ghostExtentOctaves` band-widths past it each side (default 0.5) with
+/// read-only octave-repeat ghost copies of the whole layout. Reuses
 /// `controller.fretPad` (a fourth `PitchPadEngine`) as the MPE emitter and
 /// reads the scale + tonic from `controller.pitchPad`. **Runs on the iPad
 /// too**: selecting this tab sets `ipadLayout = .fretPad`, and the arrangement
@@ -28,11 +31,15 @@ struct FretPadView: View {
     /// The MPE emitter (the `fretPad` engine). Owns velocity / snap distance
     /// (`marginPixels`) / `sounding`; its own `scale` is unused here.
     @ObservedObject var engine: PitchPadEngine
-    /// The shared scale + tonic source (read-only here; edit on the Pitch Pad).
+    /// The scale + tonic source, edited right here (the Fret Pad is the only
+    /// playing surface, so the scale selector + editor live on this tab).
     @ObservedObject var pitchPad: PitchPadEngine
     /// Records play strokes (raw events + context) for offline fitting of the
     /// drag-assist parameters (`tools/fretpad_fit.py`).
     @StateObject private var recorder = FretGestureRecorder()
+    /// Drives the "Save As…" name prompt for the scale menu.
+    @State private var showingSaveDialog = false
+    @State private var saveName = ""
 
     init(controller: AppController) {
         self.controller = controller
@@ -48,39 +55,129 @@ struct FretPadView: View {
     var body: some View {
         VStack(spacing: 8) {
             toolbar
-            FretPadSurface(engine: engine,
-                           arrangement: $controller.fretArrangement,
-                           degrees: degrees,
-                           recorder: recorder)
-                .aspectRatio(Config.iPadSurfaceAspect, contentMode: .fit)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            HStack(alignment: .top, spacing: 12) {
+                FretPadSurface(engine: engine,
+                               arrangement: $controller.fretArrangement,
+                               degrees: degrees,
+                               recorder: recorder)
+                    .aspectRatio(Config.iPadSurfaceAspect, contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The scale selector's list editor (moved here from the old
+                // Pitch Pad tab) — edits `pitchPad.scale`, which the frets and
+                // the whole app read from. (The drone buttons live INSIDE the
+                // surface — same placement as the iPad.)
+                if !engine.performanceMode {
+                    ScaleListEditor(engine: pitchPad)
+                        .frame(width: 280)
+                }
+            }
             footer
         }
         .padding(12)
+        .alert("Save Scale", isPresented: $showingSaveDialog) {
+            TextField("Name", text: $saveName)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                let trimmed = saveName.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty, trimmed != ScaleStore.defaultName else { return }
+                pitchPad.saveScale(name: trimmed)
+            }
+        } message: {
+            Text("Enter a name for this scale.")
+        }
     }
 
     private var toolbar: some View {
         HStack(spacing: 12) {
             Button("Panic") { engine.panic() }
+            scaleMenu
             Button("Reset to Scale") {
                 controller.fretArrangement = .defaultArrangement(degrees: degrees)
             }
-            .help("Rebuild the default fret layout: one fret per scale degree — S/P centered, natural degrees in the bottom half, komal/tivra in the top half.")
+            .help("Rebuild the default fret layout: 7 evenly-spaced columns (one per svara, like the String Pad) — S/P centered, natural degrees in the bottom half, komal/tivra in the top half.")
             octaveControl
             Toggle("Legato", isOn: $controller.fretArrangement.legato)
                 .toggleStyle(.button)
                 .help("Tap legato: consecutive taps become one continuous voice — a tap while the previous note sounds (or within ~120 ms of its release) glides to the new pitch instead of retriggering. Mono, last-note priority while on. For very fast phrases, tap the notes instead of dragging.")
             Toggle("Perform", isOn: $engine.performanceMode)
                 .toggleStyle(.button)
-                .help("Clean playing surface: editing off, octave gridlines + labels + endpoint handles hidden, octave-repeat frets shown identically to the editable ones.")
+                .help("Clean playing surface: editing off, octave gridlines + labels + endpoint handles hidden, octave-repeat frets shown identically to the editable ones, and the scale editor hidden.")
+            droneMenu
             recordControl
             Spacer()
             FretSoundingReadout(sounding: engine.sounding,
                                 tonicMidi: pitchPad.tonicMidi)
             snapControl
             velocityControl
-            tonicReadout
+            primeLimitControl
+            tonicControl
         }
+    }
+
+    /// Save / load / delete saved scales + built-in scale presets. Edits the
+    /// shared `pitchPad` scale, which the frets (and the tarab / iPad sync) read.
+    private var scaleMenu: some View {
+        Menu {
+            Button("Save As…") {
+                saveName = pitchPad.currentScaleName ?? ""
+                showingSaveDialog = true
+            }
+            if let name = pitchPad.currentScaleName {
+                Button("Save “\(name)”") { pitchPad.saveScale(name: name) }
+            }
+            Divider()
+            Button("Reset to Default") { pitchPad.resetToDefault() }
+            Menu("Scales") {
+                ForEach(ScalePreset.allCases) { preset in
+                    Button(preset.label) { pitchPad.loadPreset(preset) }
+                }
+            }
+
+            let saved = ScaleStore.savedScaleNames()
+            if !saved.isEmpty {
+                Divider()
+                Section("Load") {
+                    ForEach(saved, id: \.self) { name in
+                        Button {
+                            pitchPad.loadScale(name: name)
+                        } label: {
+                            if pitchPad.currentScaleName == name {
+                                Label(name, systemImage: "checkmark")
+                            } else {
+                                Text(name)
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Menu("Delete") {
+                    ForEach(saved, id: \.self) { name in
+                        Button(name, role: .destructive) { pitchPad.deleteScale(name: name) }
+                    }
+                }
+            }
+        } label: {
+            Label(pitchPad.currentScaleName ?? "Scale", systemImage: "music.note.list")
+                .lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    /// Prime-limit cap for the scale editor's scroll-stepping snap targets.
+    private var primeLimitControl: some View {
+        HStack(spacing: 4) {
+            Text("Prime ≤").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Picker("", selection: $pitchPad.primeLimit) {
+                ForEach([2, 3, 5, 7, 11, 13, 17, 19, 23], id: \.self) { p in
+                    Text("\(p)").tag(p)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(width: 56)
+        }
+        .help("Prime-limit cap for the scale editor's scroll-to-next-gridline snap targets.")
     }
 
     /// How far the ribbon extends past the base octave on each side, in
@@ -97,7 +194,7 @@ struct FretPadView: View {
             .controlSize(.small)
             .fixedSize()
         }
-        .help("How far the ribbon extends past the base octave on each side, in octaves (read-only octave-repeat fret copies). 0.5 = a 2-octave ribbon; 1 = 3 octaves.")
+        .help("How far the surface extends past the base fret layout on each side, in band-widths (read-only octave-repeat copies of the whole layout). 0.5 = half a band of flank each side.")
     }
 
     /// Record play strokes to a JSONL session file for offline fitting of the
@@ -148,26 +245,121 @@ struct FretPadView: View {
         }
     }
 
-    /// Tonic is owned by the Pitch Pad scale state, so it's read-only here.
-    private var tonicReadout: some View {
+    /// The scale's tonic (MIDI note), edited here.
+    private var tonicControl: some View {
         HStack(spacing: 6) {
             Text("Tonic").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            Text("\(pitchPad.tonicMidi) (\(Scale.noteName(for: pitchPad.tonicMidi)))")
-                .font(.system(.caption))
-                .lineLimit(1)
+            Stepper(value: Binding(
+                get: { pitchPad.tonicMidi },
+                set: { pitchPad.tonicMidi = max(24, min(96, $0)) }
+            ), in: 24...96) {
+                Text("\(pitchPad.tonicMidi) (\(Scale.noteName(for: pitchPad.tonicMidi)))")
+                    .font(.system(.caption))
+                    .lineLimit(1)
+            }
+            .controlSize(.small)
         }
-        .help("Set on the Pitch Pad tab.")
+    }
+
+    /// Configure the 4 drone buttons' pitches (chromatic JI svaras + S′).
+    /// The mapping to an actual taraf row happens at press time (nearest
+    /// jawari-taraf row of the String engine).
+    private var droneMenu: some View {
+        Menu {
+            ForEach(0..<4, id: \.self) { i in
+                Picker("Drone \(i + 1)",
+                       selection: Binding(
+                           get: { nearestDroneOption(controller.fretArrangement.droneRatios[i]) },
+                           set: { controller.fretArrangement.droneRatios[i] = droneOptions[$0].ratio }
+                       )) {
+                    ForEach(droneOptions.indices, id: \.self) { j in
+                        Text(droneOptions[j].label).tag(j)
+                    }
+                }
+            }
+        } label: {
+            Label("Drones", systemImage: "pin")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Pitches of the 4 drone buttons (right edge, top → center): while pressed, an existing jawari-taraf string of that svara (nearest octave) swells and sings. Default ,Sa · ,Ma · ,Pa · Sa — an octave below the tonic octave.")
+    }
+
+    private func nearestDroneOption(_ ratio: Double) -> Int {
+        droneOptions.indices.min {
+            abs(log2(droneOptions[$0].ratio / ratio))
+                < abs(log2(droneOptions[$1].ratio / ratio))
+        } ?? 0
     }
 
     private var footer: some View {
         HStack {
             Text(engine.performanceMode
-                 ? "Perform: start on a fret (inside its height) to snap to its pitch; start above/below it to approach the note freely. Drags always glide continuously."
-                 : "Edit: drag a fret = move  ·  drag an endpoint = set its extent  ·  drag empty space = play  ·  Shift-click = add a fret  ·  Right-click = delete  ·  Faint frets are octave repeats (read-only)")
+                 ? "Perform: start on a fret (inside its height) to snap to its pitch; start elsewhere to approach the note freely (pitch interpolates between frets). Drags always glide continuously."
+                 : "Edit: drag a fret = move (any direction)  ·  drag an endpoint = set its extent  ·  drag empty space = play  ·  Shift-click = add a fret  ·  Right-click = delete  ·  Faint frets are octave repeats (read-only)")
                 .font(.system(.caption2))
                 .foregroundStyle(.secondary)
             Spacer()
         }
+    }
+}
+
+// MARK: - Drone buttons
+
+/// The configurable drone-pitch choices: the 12 chromatic JI svaras across
+/// the lower octave (`,S` … `,N`) and the base octave, plus the upper tonic.
+/// (The press maps onto an EXISTING jawari-taraf row — pitch-class first,
+/// then nearest octave — so this list is a picker convenience, not a tuning
+/// authority.)
+private let droneOptions: [(label: String, ratio: Double)] = {
+    let ji: [(String, Double)] = [
+        ("S", 1.0), ("r", 16.0 / 15.0), ("R", 9.0 / 8.0), ("g", 6.0 / 5.0),
+        ("G", 5.0 / 4.0), ("m", 4.0 / 3.0), ("M", 45.0 / 32.0), ("P", 3.0 / 2.0),
+        ("d", 8.0 / 5.0), ("D", 5.0 / 3.0), ("n", 16.0 / 9.0), ("N", 15.0 / 8.0),
+    ]
+    var out: [(label: String, ratio: Double)] = []
+    for (name, r) in ji { out.append((",\(name)", r / 2.0)) }
+    for (name, r) in ji { out.append((name, r)) }
+    out.append(("S'", 2.0))
+    return out
+}()
+
+/// Visual layer for the drone buttons (display only — presses are
+/// hit-tested in the surface's mouse handlers via the shared
+/// `droneButtonRects`, so the surface keeps its full playing area and the
+/// placement matches the iPad exactly). Right edge, top → vertical center:
+/// press = the String voice's nearest jawari-taraf string swells and sings;
+/// release = it rings out.
+private struct DroneButtonsVisual: View {
+    let ratios: [Double]
+    let held: Set<Int>
+    let size: CGSize
+    let edgePad: CGFloat
+
+    var body: some View {
+        let rects = droneButtonRects(size: size)
+        ZStack(alignment: .topLeading) {
+            ForEach(0..<4, id: \.self) { i in
+                let ratio = i < ratios.count ? ratios[i] : 1.0
+                let hue = pitchColor(forRatio: ratio, lightness: 0.75,
+                                     chroma: 0.17)
+                let r = rects[i]
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(hue.opacity(held.contains(i) ? 0.9 : 0.25))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(hue.opacity(0.8), lineWidth: 1)
+                    )
+                    .overlay(
+                        Text(sargamName(forRatio: ratio))
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                    )
+                    .frame(width: r.width, height: r.height)
+                    .offset(x: edgePad + r.minX, y: edgePad + r.minY)
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -218,10 +410,11 @@ private struct FretPadSurface: View {
     @State private var touchCounter: Int = 0
     /// The segment being edited (moved or resized), and which endpoint.
     @State private var editGrab: FretGrab = .none
-    /// Pixel delta (segment mid-y − click) captured at mouse-down for a move.
+    /// Pixel delta (segment x/mid-y − click) captured at mouse-down for a move.
+    @State private var moveOffsetX: CGFloat = 0
     @State private var moveOffsetY: CGFloat = 0
     /// Constant log2 offset captured at a snapped onset: the drag plays
-    /// `2^(rawLog(x) + snapOffsetLog)`, so the snapped pitch is exact at the
+    /// `2^(fieldLog + snapOffsetLog)`, so the snapped pitch is exact at the
     /// onset point and finger movement glides relative to it.
     @State private var snapOffsetLog: Double = 0
     /// Drag assist ("magnetic" intonation at stops/turns — see
@@ -232,6 +425,10 @@ private struct FretPadSurface: View {
     /// Tap legato (see `FretLegato`): voice ownership, deferred releases,
     /// and the takeover glide ramp. The same timer drives release expiry.
     @State private var legato = FretLegato()
+    /// Drone button currently held by the mouse (hit-tested in
+    /// `handleDown` via the shared `droneButtonRects` — the buttons live
+    /// inside the surface, matching the iPad).
+    @State private var droneDown: Int? = nil
 
     private let edgePad: CGFloat = 16
     private let handleHitRadius: CGFloat = 9
@@ -260,15 +457,15 @@ private struct FretPadSurface: View {
                 Canvas { ctx, _ in
                     ctx.translateBy(x: edgePad, y: edgePad)
 
-                    // Octave boundaries — every integer log2 within the
-                    // visible ribbon (hidden in perform).
+                    // Octave-band boundaries — the edges between the base
+                    // layout and its octave-repeat copies (hidden in perform).
                     if !perform {
                         let lo = Int((-extent).rounded(.up))
                         let hi = Int((1 + extent).rounded(.down))
                         for k in lo...hi {
-                            let x = fretX(forLogRatio: Double(k),
-                                          ghostExtentOctaves: extent,
-                                          width: size.width)
+                            let x = fretPixelX(forBandX: Double(k),
+                                               ghostExtentOctaves: extent,
+                                               width: size.width)
                             var line = Path()
                             line.move(to: CGPoint(x: x, y: 0))
                             line.addLine(to: CGPoint(x: x, y: size.height))
@@ -308,6 +505,12 @@ private struct FretPadSurface: View {
                 CellFillsView(sounding: engine.sounding,
                               cells: fretFillCells(placements),
                               edgePad: edgePad)
+
+                // Drone buttons (display only — presses are hit-tested in
+                // handleDown): right edge, top → vertical center.
+                DroneButtonsVisual(ratios: arrangement.droneRatios,
+                                   held: droneDown.map { [$0] } ?? [],
+                                   size: size, edgePad: edgePad)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .clipped()
@@ -333,6 +536,13 @@ private struct FretPadSurface: View {
 
     private func handleDown(at pt: CGPoint, placements: [FretPlacement],
                             base: [FretPlacement], size: CGSize) {
+        // Drone buttons first (both modes): a click starting inside a button
+        // rect is a drone press, not a note or an edit.
+        if let d = droneButtonRects(size: size).firstIndex(where: { $0.contains(pt) }) {
+            droneDown = d
+            engine.setDrone(d, pressed: true)
+            return
+        }
         // Perform mode: play only (no editing). Anywhere on the surface.
         if engine.performanceMode {
             playAt(pt, placements: placements, size: size)
@@ -345,7 +555,7 @@ private struct FretPadSurface: View {
 
         // Shift on empty space → add a fret on the nearest degree.
         if shift, grab == .none {
-            addSegment(at: pt, size: size)
+            addSegment(at: pt, placements: placements, size: size)
             return
         }
 
@@ -354,6 +564,7 @@ private struct FretPadSurface: View {
             editGrab = grab
             if case .move(let id) = grab,
                let p = base.first(where: { $0.segmentID == id }) {
+                moveOffsetX = p.x - pt.x
                 moveOffsetY = (p.topY + p.bottomY) / 2 - pt.y
             }
             if let p = grabbedPlacement(grab, base: base) {
@@ -369,25 +580,24 @@ private struct FretPadSurface: View {
 
     /// Sound the pitch at `pt`: snapped to a fret when the onset lands within
     /// `snapDistance` of one **and** inside its vertical extent, otherwise the
-    /// raw x-mapped pitch (the approach path). With legato on, a tap while
+    /// fret-field pitch (the approach path). With legato on, a tap while
     /// the previous note sounds (or is in its release grace window) takes the
     /// voice over and glides instead of retriggering. Registers the touch
     /// with the drag assist and starts the settle/legato timer.
     private func playAt(_ pt: CGPoint, placements: [FretPlacement], size: CGSize) {
-        let rawLog = fretLogRatio(atX: pt.x,
-                                  ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                                  width: size.width)
+        guard let fieldLog = fretFieldLog(at: pt, placements: placements)
+        else { return }   // no frets — nothing to play
         let onsetLog: Double
         let weights: [String: Double]
         if snapDistance > 0,
            let hit = fretSnap(at: pt, placements: placements,
                               snapDistance: snapDistance) {
-            snapOffsetLog = log2(hit.ratio) - rawLog
+            snapOffsetLog = log2(hit.ratio) - fieldLog
             onsetLog = log2(hit.ratio)
             weights = [hit.id: 1.0]
         } else {
             snapOffsetLog = 0
-            onsetLog = rawLog
+            onsetLog = fieldLog
             weights = [:]
         }
 
@@ -410,16 +620,14 @@ private struct FretPadSurface: View {
         }
         legato.noteOutput(touch, log: sentLog)
 
-        assist.setContext(placements: placements, snapDistance: snapDistance,
-                          ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                          width: size.width)
+        assist.setContext(placements: placements, snapDistance: snapDistance)
         assist.begin(touchId: touch, x: pt.x, y: pt.y,
-                     uncorrectedLog: rawLog + snapOffsetLog, time: now)
+                     uncorrectedLog: fieldLog + snapOffsetLog, time: now)
         if recorder.isRecording {
             recorder.begin(touchId: touch,
                            context: strokeContext(placements: placements, size: size),
                            offset: snapOffsetLog, x: pt.x, y: pt.y,
-                           u: rawLog + snapOffsetLog,
+                           u: fieldLog + snapOffsetLog,
                            o: sentLog, time: now)
         }
         startAssistTimer()
@@ -430,7 +638,7 @@ private struct FretPadSurface: View {
                                size: CGSize) -> FretGestureRecorder.Context {
         FretGestureRecorder.Context(
             frets: placements.map {
-                .init(id: $0.id, log2Ratio: log2($0.ratio),
+                .init(id: $0.id, log2Ratio: log2($0.ratio), x: Double($0.x),
                       topY: Double($0.topY), bottomY: Double($0.bottomY),
                       ghost: $0.isGhost)
             },
@@ -476,6 +684,8 @@ private struct FretPadSurface: View {
 
     private func handleDrag(at pt: CGPoint, placements: [FretPlacement],
                             size: CGSize) {
+        // A press holding a drone button never glides or edits.
+        guard droneDown == nil else { return }
         switch editGrab {
         case .move(let id):
             guard let idx = segmentIndex(id) else { return }
@@ -484,6 +694,12 @@ private struct FretPadSurface: View {
             mid = min(max(h / 2, mid), 1 - h / 2)
             arrangement.segments[idx].topY = mid - h / 2
             arrangement.segments[idx].bottomY = mid + h / 2
+            // Frets are freely positioned — a move drags x too (clamped to
+            // the base band).
+            arrangement.segments[idx].x = clamp01(fretBandX(
+                atPixelX: pt.x + moveOffsetX,
+                ghostExtentOctaves: arrangement.ghostExtentOctaves,
+                width: size.width))
             return
         case .resizeTop(let id):
             guard let idx = segmentIndex(id) else { return }
@@ -500,29 +716,32 @@ private struct FretPadSurface: View {
         case .none:
             break
         }
-        // Playing: continuous glide — raw x-mapped pitch plus the constant
+        // Playing: continuous glide — the fret-field pitch plus the constant
         // offset captured at a snapped onset, then the drag assist's slewed
         // correction on top (magnetic at stops/turns, transparent while
-        // gliding). Never re-snaps mid-drag; the assist is continuous.
+        // gliding). Never re-snaps mid-drag; the field and assist are
+        // continuous.
         guard let touch = activeTouchId else { return }
-        let rawLog = fretLogRatio(atX: pt.x,
-                                  ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                                  width: size.width)
-        assist.setContext(placements: placements, snapDistance: snapDistance,
-                          ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                          width: size.width)
+        guard let fieldLog = fretFieldLog(at: pt, placements: placements)
+        else { return }
+        assist.setContext(placements: placements, snapDistance: snapDistance)
         let now = CACurrentMediaTime()
         let out = assist.move(touchId: touch, x: pt.x, y: pt.y,
-                              uncorrectedLog: rawLog + snapOffsetLog, time: now)
+                              uncorrectedLog: fieldLog + snapOffsetLog, time: now)
         let final = out.log2Pitch + legato.offset(touch, time: now)
         engine.glide(touchId: touch, ratio: pow(2.0, final),
                      weights: out.weights)
         legato.noteOutput(touch, log: final)
         recorder.sample(touchId: touch, x: pt.x, y: pt.y,
-                        u: rawLog + snapOffsetLog, o: final, time: now)
+                        u: fieldLog + snapOffsetLog, o: final, time: now)
     }
 
     private func handleUp() {
+        if let d = droneDown {
+            droneDown = nil
+            engine.setDrone(d, pressed: false)
+            return
+        }
         if let touch = activeTouchId {
             let now = CACurrentMediaTime()
             // Legato: defer the voice owner's release by the grace window so
@@ -542,6 +761,7 @@ private struct FretPadSurface: View {
         }
         activeTouchId = nil
         editGrab = .none
+        moveOffsetX = 0
         moveOffsetY = 0
         snapOffsetLog = 0
     }
@@ -559,15 +779,14 @@ private struct FretPadSurface: View {
         arrangement.segments.remove(at: idx)
     }
 
-    /// Shift-click: add a fret for the degree whose pitch is nearest the click
-    /// x (circular within the octave), with a default-height extent centered
-    /// on the click y.
-    private func addSegment(at pt: CGPoint, size: CGSize) {
+    /// Shift-click: add a fret at the click position, on the degree whose
+    /// pitch is nearest the field pitch there (circular within the octave),
+    /// with a default-height extent centered on the click y.
+    private func addSegment(at pt: CGPoint, placements: [FretPlacement],
+                            size: CGSize) {
         guard !degrees.isEmpty else { return }
-        let rawLog = fretLogRatio(atX: pt.x,
-                                  ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                                  width: size.width)
-        let folded = rawLog - rawLog.rounded(.down)
+        let fieldLog = fretFieldLog(at: pt, placements: placements) ?? 0
+        let folded = fieldLog - fieldLog.rounded(.down)
         var bestIndex = 0
         var bestDist = Double.infinity
         for (i, deg) in degrees.enumerated() {
@@ -575,9 +794,12 @@ private struct FretPadSurface: View {
             let d = min(d0, 1 - d0)
             if d < bestDist { bestDist = d; bestIndex = i }
         }
+        let x = clamp01(fretBandX(atPixelX: pt.x,
+                                  ghostExtentOctaves: arrangement.ghostExtentOctaves,
+                                  width: size.width))
         let cy = clamp01(Double(pt.y / size.height))
         let half = 0.075
-        arrangement.segments.append(FretSegment(degreeIndex: bestIndex,
+        arrangement.segments.append(FretSegment(degreeIndex: bestIndex, x: x,
                                                 topY: clamp01(cy - half),
                                                 bottomY: clamp01(cy + half)))
     }
@@ -671,3 +893,325 @@ private struct FretPadMouseCapture: NSViewRepresentable {
 // MARK: - Local helpers
 
 private func clamp01(_ x: Double) -> Double { min(max(0, x), 1) }
+
+// MARK: - Scale list editor (moved from the old Pitch Pad tab)
+
+/// The scale's notes as an editable list: per-row enable chip, custom name,
+/// `num/den` ratio, and y-position, plus add / sort. Edits `engine.scale`
+/// (the shared `pitchPad`), so a change re-renders the frets immediately and
+/// flows to the tarab + iPad sync.
+private struct ScaleListEditor: View {
+    @ObservedObject var engine: PitchPadEngine
+
+    var body: some View {
+        // Active scale = enabled notes; disabled ones are parked below.
+        let enabled = engine.scale.points.filter(\.enabled)
+        let disabled = engine.scale.points.filter { !$0.enabled }
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Scale (\(enabled.count))")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    engine.scale.points.sort { $0.xFraction < $1.xFraction }
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                }
+                .buttonStyle(.borderless)
+                .help("Sort scale by pitch (low → high)")
+                Button {
+                    addPitchInLargestGap()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .help("Add a pitch in the largest x-gap")
+            }
+            Divider()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(enabled) { p in
+                        ScaleEditorRow(engine: engine, pointID: p.id)
+                    }
+                    if !disabled.isEmpty {
+                        Divider().padding(.vertical, 2)
+                        Text("Disabled (\(disabled.count))")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.secondary)
+                        ForEach(disabled) { p in
+                            ScaleEditorRow(engine: engine, pointID: p.id)
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color(white: 0.08)))
+    }
+
+    private func addPitchInLargestGap() {
+        let xs = engine.scale.points
+            .filter(\.enabled)
+            .map(\.xFraction)
+            .sorted()
+        var sentinel = xs
+        if sentinel.first ?? 1 > 0 { sentinel.insert(0, at: 0) }
+        if sentinel.last ?? 0 < 1 { sentinel.append(1) }
+        var bestGap = 0.0
+        var bestMid = 0.5
+        for i in 1..<sentinel.count {
+            let gap = sentinel[i] - sentinel[i-1]
+            if gap > bestGap {
+                bestGap = gap
+                bestMid = (sentinel[i] + sentinel[i-1]) / 2
+            }
+        }
+        let ratio = pow(2.0, bestMid)
+        let (n, d) = bestFraction(ratio)
+        engine.scale.points.append(PitchPoint(num: n, den: d, y: 0.5))
+    }
+}
+
+private struct ScaleEditorRow: View {
+    @ObservedObject var engine: PitchPadEngine
+    let pointID: UUID
+
+    /// Resolve our point by id on each access — rows survive sort / remove.
+    private var currentIndex: Int? {
+        engine.scale.points.firstIndex(where: { $0.id == pointID })
+    }
+
+    var body: some View {
+        if let idx = currentIndex {
+            let p = engine.scale.points[idx]
+            row(point: p, index: idx)
+        } else {
+            EmptyView()
+        }
+    }
+
+    private func ratioBinding() -> Binding<String> {
+        Binding(
+            get: {
+                guard let i = currentIndex else { return "" }
+                let p = engine.scale.points[i]
+                return formatRatio(num: p.num, den: p.den)
+            },
+            set: { _ in }
+        )
+    }
+    private func yBinding() -> Binding<String> {
+        Binding(
+            get: {
+                guard let i = currentIndex else { return "" }
+                return formatY(engine.scale.points[i].y)
+            },
+            set: { _ in }
+        )
+    }
+    private func labelBinding() -> Binding<String> {
+        Binding(
+            get: {
+                guard let i = currentIndex else { return "" }
+                return engine.scale.points[i].label
+            },
+            set: { _ in }
+        )
+    }
+
+    @ViewBuilder
+    private func row(point p: PitchPoint, index idx: Int) -> some View {
+        HStack(spacing: 4) {
+            Button {
+                if let i = currentIndex { engine.scale.points[i].enabled.toggle() }
+            } label: {
+                let hue = pitchColor(forRatio: p.ratio, lightness: 0.68, chroma: 0.15)
+                Circle()
+                    .fill(p.enabled ? hue : .clear)
+                    .frame(width: 14, height: 14)
+                    .overlay(Circle().strokeBorder(
+                        p.enabled ? Color.black.opacity(0.7) : hue,
+                        lineWidth: p.enabled ? 1 : 2))
+            }
+            .buttonStyle(.plain)
+            .help(p.enabled ? "Disable (remove from the scale)"
+                            : "Enable (add to the scale)")
+
+            ScrollableField(
+                text: labelBinding(),
+                onScrollStep: { _ in },
+                onCommit: { txt in commitLabel(txt) }
+            )
+            .frame(width: 56, height: 20)
+
+            ScrollableField(
+                text: ratioBinding(),
+                onScrollStep: { dir in incrementPitch(by: dir) },
+                onCommit: { txt in commitRatio(txt) }
+            )
+            .frame(width: 56, height: 20)
+
+            ScrollableField(
+                text: yBinding(),
+                onScrollStep: { dir in incrementY(by: dir) },
+                onCommit: { txt in commitY(txt) }
+            )
+            .frame(width: 48, height: 20)
+
+            Spacer(minLength: 0)
+
+            Button {
+                if let i = currentIndex {
+                    engine.scale.points.remove(at: i)
+                }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+        }
+        .opacity(p.enabled ? 1 : 0.55)
+    }
+
+    // MARK: - Formatting helpers
+
+    private func formatRatio(num: Int, den: Int) -> String { "\(num)/\(den)" }
+    /// Internal y is [0, 1] with 0 at the top. User-facing y is [-3, 3] with 0
+    /// at the center; integers correspond to the command-snap gridlines.
+    private func formatY(_ y: Double) -> String {
+        let userY = 3 - 6 * y
+        return String(format: "%.1f", userY)
+    }
+
+    // MARK: - Scroll increments
+
+    private func incrementPitch(by direction: Int) {
+        guard let i = currentIndex else { return }
+        let curXF = engine.scale.points[i].xFraction
+        let sorted = engine.snapTargets().sorted {
+            log2(Double($0.num) / Double($0.den))
+                < log2(Double($1.num) / Double($1.den))
+        }
+        let pick: (num: Int, den: Int)?
+        if direction > 0 {
+            pick = sorted.first {
+                log2(Double($0.num) / Double($0.den)) > curXF + 1e-9
+            }
+        } else {
+            pick = sorted.last {
+                log2(Double($0.num) / Double($0.den)) < curXF - 1e-9
+            }
+        }
+        guard let n = pick else { return }
+        engine.scale.points[i].num = n.num
+        engine.scale.points[i].den = n.den
+    }
+
+    private func incrementY(by direction: Int) {
+        guard let i = currentIndex else { return }
+        let curUserY = 3 - 6 * engine.scale.points[i].y
+        let stepped = curUserY + Double(direction) * 0.2
+        let clamped = max(-3.0, min(3.0, stepped))
+        engine.scale.points[i].y = (3 - clamped) / 6
+    }
+
+    // MARK: - Commit handlers
+
+    private func commitRatio(_ txt: String) {
+        let parts = txt.split(separator: "/", maxSplits: 1)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        var nNew: Int? = nil
+        var dNew: Int? = nil
+        if parts.count == 2,
+           let n = Int(parts[0]), let d = Int(parts[1]), n > 0, d > 0 {
+            nNew = n; dNew = d
+        } else if let r = Double(txt), r > 0 {
+            let (n, d) = bestFraction(r)
+            nNew = n; dNew = d
+        }
+        if let n = nNew, let d = dNew, let i = currentIndex {
+            let ratio = Double(n) / Double(d)
+            let (fn, fd) = (ratio >= 1.0 && ratio < 2.0)
+                ? (n, d)
+                : octaveFolded(num: n, den: d)
+            engine.scale.points[i].num = fn
+            engine.scale.points[i].den = fd
+        }
+    }
+
+    private func commitY(_ txt: String) {
+        if let userY = Double(txt), let i = currentIndex {
+            let clamped = max(-3.0, min(3.0, userY))
+            engine.scale.points[i].y = (3 - clamped) / 6
+        }
+    }
+
+    private func commitLabel(_ txt: String) {
+        guard let i = currentIndex else { return }
+        engine.scale.points[i].label = txt.trimmingCharacters(in: .whitespaces)
+    }
+}
+
+// MARK: - Scrollable editable text field
+
+/// A small `NSTextField` wrapper that emits ±1 "step" events when the user
+/// scrolls the wheel over it, while still letting them click to edit as plain
+/// text. Scroll deltas accumulate so a trackpad's many small events emit one
+/// step per detent.
+private struct ScrollableField: NSViewRepresentable {
+    @Binding var text: String
+    let onScrollStep: (Int) -> Void
+    let onCommit: (String) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: ScrollableField
+        init(_ p: ScrollableField) { parent = p }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            if let f = obj.object as? NSTextField {
+                parent.onCommit(f.stringValue)
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> AccumField {
+        let f = AccumField()
+        f.delegate = context.coordinator
+        f.stringValue = text
+        f.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        f.alignment = .center
+        f.isBezeled = true
+        f.bezelStyle = .roundedBezel
+        f.usesSingleLineMode = true
+        f.lineBreakMode = .byClipping
+        f.onScrollStep = onScrollStep
+        return f
+    }
+
+    func updateNSView(_ f: AccumField, context: Context) {
+        if f.currentEditor() == nil && f.stringValue != text {
+            f.stringValue = text
+        }
+        f.onScrollStep = onScrollStep
+        context.coordinator.parent = self
+    }
+
+    final class AccumField: NSTextField {
+        var onScrollStep: ((Int) -> Void)?
+        private var accum: CGFloat = 0
+        private let threshold: CGFloat = 1.0
+
+        override func scrollWheel(with event: NSEvent) {
+            accum += event.scrollingDeltaY
+            while abs(accum) >= threshold {
+                let sign = accum > 0 ? 1 : -1
+                onScrollStep?(sign)
+                accum -= CGFloat(sign) * threshold
+            }
+        }
+    }
+}

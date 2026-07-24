@@ -3,64 +3,28 @@ import SarangiKit
 import StarpadCore
 import SwiftUI
 
-/// The Sarangi tab (⌘3): the played voice's **timbre**. Since the String era
-/// the primary surface is the **String instrument's physics parameters**
-/// (`StringParamsView` — the `bowed_string.json` scalars, ported from the
-/// upstream Sarangi Live editor). The 25 coupled-network params remain below
-/// in a collapsed section — they shape the SWAM / sitar base-voice chain
-/// only. The sympathetic strings (tarab) + tuning live in the **Tarab** tab
-/// (`TarabView`); the FX rack (also SWAM/sitar-path-only) in the FX tab.
-/// Backed by `controller.sarangi` (`SarangiStore`) + `controller.stringParams`
-/// (`StringParamStore`).
-struct SarangiEditorView: View {
+/// The preset header at the top of the **Parameters** tab.
+///
+/// 2026-07-24: saves and loads the **instrument** — the sarangi document
+/// (tarab table + tonic + model params, which is what the old `.sarangi`
+/// file held on its own), the physics overrides, and every parameter's
+/// resting value — as a `.starpad` file. The old separate `.sarangi` save
+/// is folded in here, and old `.sarangi` files still open.
+///
+/// The **controls** half (composites + tilt bindings) saves separately
+/// from the Controls tab, so loading a new sound never costs you your
+/// tilt setup. An older combined `.starpad` can be loaded from either
+/// place; each applies only its own half.
+struct InstrumentPresetToolbar: View {
     @ObservedObject var controller: AppController
     @ObservedObject var store: SarangiStore
-    @ObservedObject var stringStore: StringParamStore
-    @State private var networkExpanded = false
+
+    @State private var status: String?
 
     init(controller: AppController) {
         self.controller = controller
         self.store = controller.sarangi
-        self.stringStore = controller.stringParams
     }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                SarangiToolbar(controller: controller)
-                Divider()
-                StringParamsView()
-                Divider()
-                DisclosureGroup(isExpanded: $networkExpanded) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("These parameters drive the coupled bridge–body "
-                             + "network that colors the SWAM and sitar base "
-                             + "voices. The String instrument (the default "
-                             + "voice) does not read them — its sound is the "
-                             + "physics panel above + the Tarab tuning.")
-                            .font(.caption2).foregroundStyle(.secondary)
-                        ParamSlidersSection()
-                    }
-                    .padding(.top, 4)
-                } label: {
-                    Text("Coupled network (SWAM / sitar chain)")
-                        .font(.subheadline).bold()
-                }
-            }
-            .padding(16)
-            .frame(maxWidth: 560, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .environmentObject(store)
-        .environmentObject(stringStore)
-    }
-}
-
-// MARK: - Toolbar (presets, reset, save/load)
-
-private struct SarangiToolbar: View {
-    @ObservedObject var controller: AppController
-    @EnvironmentObject var store: SarangiStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -75,97 +39,68 @@ private struct SarangiToolbar: View {
                         // physics (every String override cleared).
                         Button(p.displayName) {
                             store.loadSarangiLiveDefault(p)
-                            controller.stringParams.resetToDefault()
+                            // Clears the physics overrides AND every
+                            // resting parameter value (Parameters tab).
+                            controller.resetAllParams()
+                            status = "Loaded \(p.displayName)"
                         }
                     }
                 } label: {
                     Label("Load preset", systemImage: "rectangle.stack")
                 }
                 .fixedSize()
-                Button("Reset network params") { store.resetParams() }
-                    .help("Reset the 25 coupled-network parameters (SWAM/sitar chain) to defaults — keeps tuning + strings; does not touch the String physics")
                 Spacer()
             }
             HStack(spacing: 8) {
-                Button { exportDoc() } label: { Label("Save…", systemImage: "square.and.arrow.down") }
-                Button { importDoc() } label: { Label("Load…", systemImage: "square.and.arrow.up") }
+                Button { savePreset() } label: {
+                    Label("Save instrument…", systemImage: "square.and.arrow.down")
+                }
+                .help("Save the sarangi instrument, the physics and every parameter value as a .starpad file. Tilt bindings and composites save separately, from the Controls tab.")
+                Button { loadPreset() } label: {
+                    Label("Load instrument…", systemImage: "square.and.arrow.up")
+                }
+                .help("Load a .starpad instrument (or an older .sarangi file). Only the instrument half is applied — your composites and tilt bindings are left alone.")
+                if let status {
+                    Text(status)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 Spacer()
             }
             .font(.caption)
         }
     }
 
-    private func exportDoc() {
+    // MARK: - Save / load
+
+    private func savePreset() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Sarangi.sarangi"
+        panel.nameFieldStringValue = "Instrument.starpad"
         panel.allowedContentTypes = []
-        if panel.runModal() == .OK, let url = panel.url {
-            try? store.save(to: url)
+        panel.message = "Saves the instrument: sarangi document, physics and parameter values."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let name = url.deletingPathExtension().lastPathComponent
+        do {
+            try controller.savePreset(to: url, name: name, scope: .instrument)
+            status = "Saved \(name)"
+        } catch {
+            status = "Save failed: \(error.localizedDescription)"
         }
     }
 
-    private func importDoc() {
+    private func loadPreset() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        if panel.runModal() == .OK, let url = panel.url {
-            try? store.load(from: url)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let p = try controller.loadPreset(from: url, scope: .instrument)
+            let what = p.sections(in: .instrument)
+            status = what.isEmpty
+                ? "No instrument in that file\(p.kind == .controls ? " — it is a controls preset" : "")"
+                : "Loaded \(what.joined(separator: ", "))"
+        } catch {
+            status = "Load failed: \(error.localizedDescription)"
         }
-    }
-}
-
-// MARK: - Model parameters (22, grouped)
-
-private struct ParamSlidersSection: View {
-    @EnvironmentObject var store: SarangiStore
-    @State private var expanded: Set<ParamGroup> = Set(ParamGroup.allCases)
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Model parameters").font(.headline)
-                Spacer()
-                HStack(spacing: 6) {
-                    Text("Output").font(.caption).foregroundStyle(.secondary)
-                    Slider(value: store.goutBinding, in: 0...2).frame(width: 120)
-                }
-            }
-            // Show every non-empty group. All 22 v57 params are live surface —
-            // the room (F_*) and drone ship 0 in the fitted preset but stay
-            // playable. (Empty groups hide.)
-            ForEach(ParamGroup.allCases.filter { !ParamSpec.grouped($0).isEmpty }, id: \.self) { group in
-                DisclosureGroup(isExpanded: Binding(
-                    get: { expanded.contains(group) },
-                    set: { if $0 { expanded.insert(group) } else { expanded.remove(group) } })) {
-                    VStack(spacing: 2) {
-                        ForEach(ParamSpec.grouped(group)) { desc in
-                            ParamSlider(desc: desc)
-                        }
-                    }
-                    .padding(.top, 2)
-                } label: {
-                    Text(group.rawValue).font(.subheadline).bold()
-                }
-            }
-        }
-    }
-}
-
-private struct ParamSlider: View {
-    @EnvironmentObject var store: SarangiStore
-    let desc: ParamDescriptor
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Text(desc.label).frame(width: 130, alignment: .leading).font(.caption)
-            Slider(value: store.binding(for: desc), in: desc.lo...desc.hi)
-            Text(format(store.state.params[desc.id]))
-                .frame(width: 52, alignment: .trailing)
-                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-        }
-    }
-
-    private func format(_ v: Double) -> String {
-        desc.hi >= 100 ? String(format: "%.0f", v) : String(format: "%.2f", v)
     }
 }

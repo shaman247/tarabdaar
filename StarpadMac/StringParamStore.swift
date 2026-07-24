@@ -26,12 +26,22 @@ final class StringParamStore: ObservableObject {
     private var artifact: [String: Double] = [:]
     private var overrides: [String: Double] = [:]
     private var pushWork: DispatchWorkItem?
+    /// Keys touched since the last engine push — lets `pushNow` try the
+    /// IN-PLACE path (no rebuild) when every one of them can be applied to
+    /// the running engine.
+    private var dirtyKeys: Set<String> = []
 
     private static let persistKey = "starpad.stringOverrides.v1"
 
     init(audio: AudioEngine) {
         self.audio = audio
         if let bp = Presets.bowedStringParams() { artifact = bp.num }
+        // Starpad live seeds (stereo image + room width): part of the
+        // BASELINE, not overrides — `buildEngine` seeds the same values
+        // into the engine, so the editor's default/reset semantics (and
+        // override-dropping on a value that lands back on the default)
+        // stay in agreement. An artifact that ever ships a key wins.
+        artifact.merge(StringVoiceSource.liveParamSeeds) { a, _ in a }
         if let data = UserDefaults.standard.data(forKey: Self.persistKey),
            let ov = try? JSONDecoder().decode([String: Double].self, from: data) {
             overrides = ov
@@ -57,6 +67,7 @@ final class StringParamStore: ObservableObject {
 
     func set(_ key: String, _ value: Double) {
         values[key] = value
+        dirtyKeys.insert(key)
         // An override that lands back ON the artifact value is dropped, so
         // `dirty` means "differs from the Sarangi Live default".
         if let base = artifact[key], base == value {
@@ -71,6 +82,7 @@ final class StringParamStore: ObservableObject {
 
     /// Reset ONE key to the Sarangi Live default (double-click a slider row).
     func reset(_ key: String) {
+        dirtyKeys.insert(key)
         overrides.removeValue(forKey: key)
         values = artifact.merging(overrides) { _, o in o }
         dirty = !overrides.isEmpty
@@ -80,9 +92,25 @@ final class StringParamStore: ObservableObject {
 
     /// Reset the whole surface to the Sarangi Live default (the artifact).
     func resetToDefault() {
+        dirtyKeys.removeAll()          // a full reset always rebuilds
         overrides.removeAll()
         values = artifact
         dirty = false
+        persist()
+        pushNow()
+    }
+
+    /// The override dict as saved into a `.starpad` preset.
+    var overridesSnapshot: [String: Double] { overrides }
+
+    /// Replace every override at once (preset load). Rebuilds rather than
+    /// pushing in place: a preset can move anything, including the keys
+    /// that resize tables.
+    func replaceOverrides(_ new: [String: Double]) {
+        overrides = new.filter { $0.value != artifact[$0.key] }
+        values = artifact.merging(overrides) { _, o in o }
+        dirty = !overrides.isEmpty
+        dirtyKeys.removeAll()          // force the rebuild path
         persist()
         pushNow()
     }
@@ -106,6 +134,15 @@ final class StringParamStore: ObservableObject {
 
     private func pushNow() {
         pushWork?.cancel()
+        // IN-PLACE FAST PATH (2026-07-24): most parameters can be pushed
+        // onto the RUNNING engine — no rebuild, no ~0.2 s latency, no
+        // crossfade, and a sounding note/ring is untouched. Falls back to
+        // the rebuild when any touched key needs fresh tables.
+        let changed = dirtyKeys
+        dirtyKeys.removeAll()
+        if audio.applyStringVoiceOverridesInPlace(overrides, changed: changed) {
+            return
+        }
         audio.setStringVoiceOverrides(overrides)
     }
 

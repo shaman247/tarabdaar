@@ -34,6 +34,11 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
     public var id: UUID
     public var freq: Double
     public var gain: Double
+    /// STARPAD DIVERGENCE: per-string loudness weight in [0, 1], multiplied
+    /// onto `gain` at resolve time (1 = the fitted/generated level — the
+    /// pre-weight behaviour). Lets a string be turned down without touching
+    /// the fitted `gain` value itself.
+    public var weight: Double
     public var t60: Double
     public var bright: Bool
     public var enabled: Bool
@@ -46,10 +51,11 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
 
     public init(id: UUID = UUID(), freq: Double, gain: Double, t60: Double,
                 bright: Bool, enabled: Bool = true, group: StringGroup = .scale,
-                raga: Bool? = nil) {
+                raga: Bool? = nil, weight: Double = 1.0) {
         self.id = id; self.freq = freq; self.gain = gain; self.t60 = t60
         self.bright = bright; self.enabled = enabled; self.group = group
         self.raga = raga ?? (group != .chromatic)
+        self.weight = weight
     }
 
     public init(_ r: ResolvedString, group: StringGroup = .scale) {
@@ -59,12 +65,13 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
 
     // Tolerant decode: `group`/`raga` (and `enabled`) default when absent, so
     // older `.sarangi` documents still load.
-    private enum CodingKeys: String, CodingKey { case id, freq, gain, t60, bright, enabled, group, raga }
+    private enum CodingKeys: String, CodingKey { case id, freq, gain, weight, t60, bright, enabled, group, raga }
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
         freq = try c.decode(Double.self, forKey: .freq)
         gain = try c.decode(Double.self, forKey: .gain)
+        weight = (try? c.decode(Double.self, forKey: .weight)) ?? 1.0
         t60 = try c.decode(Double.self, forKey: .t60)
         bright = try c.decode(Bool.self, forKey: .bright)
         enabled = (try? c.decode(Bool.self, forKey: .enabled)) ?? true
@@ -73,7 +80,8 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
     }
 
     public var resolved: ResolvedString {
-        ResolvedString(freq: freq, gain: gain, t60: t60, bright: bright,
+        ResolvedString(freq: freq, gain: gain * min(max(weight, 0), 1),
+                       t60: t60, bright: bright,
                        enabled: enabled, raga: raga)
     }
 

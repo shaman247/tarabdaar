@@ -3,13 +3,12 @@
 > **Note.** The waypoint-queue / sigmoid system below is the **legacy
 > keyboard** glide, which is no longer on the playing path (`NoteManager`
 > runs only as the tilt/mapping host — see [Architecture](architecture.md)).
-> The active playing surface, the **Pitch Pad**, glides **directly**: the
-> touch position resolves to a ratio (`pitchAt`, soft-Voronoi) and
-> `PitchPadEngine` bends the held note to it — so dragging across cells
-> glides smoothly without retriggering, and the pitch always tracks the
-> finger. On the iPad a 60 Hz loop re-sends that bend plus tilt-driven
-> aftertouch / CC; on the Mac `glide` sends the bend immediately. See
-> [Pitch Pad](pitch-pad.md).
+> The active playing surface, the **Fret Pad**, glides **directly**: the
+> touch position resolves to a pitch (the fret field / onset snap) and
+> `PitchPadEngine` bends the held note to it — so dragging glides smoothly
+> without retriggering, and the pitch always tracks the finger. On the iPad
+> a 60 Hz loop re-sends that bend plus tilt-driven expression; on the Mac
+> `glide` sends the bend immediately. See [Fret Pad](fret-pad.md).
 
 The glide system below controls pitch transitions on the **legacy
 keyboard**. It operated in two modes: **tap glides** (waypoint queue with

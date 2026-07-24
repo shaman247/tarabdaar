@@ -3,27 +3,30 @@ import Foundation
 // MARK: - Codable conformance
 
 /// A `FretSegment` round-trips through JSON by its musical/layout fields only —
-/// `degreeIndex`, `topY`, `bottomY`, `enabled`. The `id` is **not** persisted
-/// (per-process identity for SwiftUI diffing / gesture targeting), so a fresh
-/// one is minted on decode — same rule `ScaleStore` uses for `PitchPoint.id`.
+/// `degreeIndex`, `x`, `topY`, `bottomY`, `enabled`. The `id` is **not**
+/// persisted (per-process identity for SwiftUI diffing / gesture targeting), so
+/// a fresh one is minted on decode — same rule `ScaleStore` uses for
+/// `PitchPoint.id`.
 extension FretSegment: Codable {
     private enum CodingKeys: String, CodingKey {
-        case degreeIndex, topY, bottomY, enabled
+        case degreeIndex, x, topY, bottomY, enabled
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let degreeIndex = try c.decode(Int.self, forKey: .degreeIndex)
+        let x = try c.decodeIfPresent(Double.self, forKey: .x) ?? 0.5
         let topY = try c.decode(Double.self, forKey: .topY)
         let bottomY = try c.decode(Double.self, forKey: .bottomY)
         let enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        self.init(degreeIndex: degreeIndex, topY: topY, bottomY: bottomY,
+        self.init(degreeIndex: degreeIndex, x: x, topY: topY, bottomY: bottomY,
                   enabled: enabled)
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(degreeIndex, forKey: .degreeIndex)
+        try c.encode(x, forKey: .x)
         try c.encode(topY, forKey: .topY)
         try c.encode(bottomY, forKey: .bottomY)
         try c.encode(enabled, forKey: .enabled)
@@ -34,12 +37,18 @@ extension FretSegment: Codable {
 /// format change can be migrated on load rather than failing to decode.
 /// v2 replaced the integer `ghostOctavesPerSide` with the fractional
 /// `ghostExtentOctaves` (a v1 file just gets the 0.5 default); v3 added
-/// `legato` (older files default to true).
+/// `legato` (older files default to true); v4 added the free per-segment `x`
+/// — pre-v4 files carry pitch-derived positions that no longer exist, so
+/// they're **rejected** on load (the caller rebuilds the new default).
+/// (`droneRatios` — the 4 drone-button pitches — is optional: older files
+/// fall back to the ,Sa·,Ma·,Pa·Sa default, no version bump; the first
+/// revision's Sa·Ma·Pa·Sa′ default migrates to it on read.)
 struct FretArrangementDocument: Codable {
-    var version: Int = 3
+    var version: Int = 4
     var segments: [FretSegment]
     var ghostExtentOctaves: Double?
     var legato: Bool?
+    var droneRatios: [Double]?
 }
 
 // MARK: - FretArrangementStore
@@ -47,7 +56,7 @@ struct FretArrangementDocument: Codable {
 /// Saves and loads the Fret-Pad arrangement as JSON. Mac-only persistence with
 /// no iPad coupling. Writes are atomic (`*.json.tmp` → move) so a reader never
 /// observes a partial file. The live arrangement is auto-saved to a reserved
-/// `_Current.json` — same pattern as `StringArrangementStore`.
+/// `_Current.json` — the same store pattern the deleted String Pad used.
 public enum FretArrangementStore {
     private static let currentName = "_Current"
 
@@ -88,7 +97,8 @@ public enum FretArrangementStore {
         let doc = FretArrangementDocument(
             segments: arrangement.segments,
             ghostExtentOctaves: arrangement.ghostExtentOctaves,
-            legato: arrangement.legato)
+            legato: arrangement.legato,
+            droneRatios: arrangement.droneRatios)
         let data = try encoder.encode(doc)
         let tmp = dest.appendingPathExtension("tmp")
         try data.write(to: tmp)
@@ -99,8 +109,21 @@ public enum FretArrangementStore {
     private static func read(_ url: URL) throws -> FretArrangement {
         let data = try Data(contentsOf: url)
         let doc = try JSONDecoder().decode(FretArrangementDocument.self, from: data)
-        return FretArrangement(segments: doc.segments,
-                               ghostExtentOctaves: doc.ghostExtentOctaves ?? 0.5,
-                               legato: doc.legato ?? true)
+        // Pre-v4 layouts had no per-segment x (positions were pitch-derived);
+        // treat them as absent so the caller rebuilds the new default.
+        guard doc.version >= 4 else { throw CocoaError(.coderReadCorrupt) }
+        var drones = doc.droneRatios ?? FretArrangement.defaultDroneRatios
+        // 2026-07-23 octave-lowering migration: files saved by the first
+        // drone revision carry its Sa·Ma·Pa·Sa′ default — replace with the
+        // current ,Sa·,Ma·,Pa·Sa default (hand-picked sets are kept).
+        let firstRevDefault = [1.0, 4.0 / 3.0, 3.0 / 2.0, 2.0]
+        if zip(drones, firstRevDefault).allSatisfy({ abs($0 - $1) < 1e-6 }) {
+            drones = FretArrangement.defaultDroneRatios
+        }
+        return FretArrangement(
+            segments: doc.segments,
+            ghostExtentOctaves: doc.ghostExtentOctaves ?? 0.5,
+            legato: doc.legato ?? true,
+            droneRatios: drones)
     }
 }

@@ -3,36 +3,25 @@ import Combine
 import CoreAudioKit
 import Foundation
 import StarpadCore
-import StarpadDSP
 
 /// Mac-side wiring. The Mac is a MIDI sound module that receives MPE
-/// input over USB-MIDI and owns every Mac-side knob: sympathetic-string
-/// pool config, FX, hosted-AU selection, and preset state. The played
-/// voice is supplied by a hosted Audio Unit (SWAM Viola). The iPad is
+/// input over USB-MIDI and owns every Mac-side knob: the sarangi model
+/// (String voice) tuning + physics, the sympathetic-string table, and
+/// the Fret Pad layout. The played voice is the sarangi **String model**
+/// (`StringVoiceSource` / `BowEngine`) — the only voice. The iPad is
 /// purely a MIDI controller; the one thing this side pushes to it is the
-/// Pitch Pad scale, sent as SysEx over USB (see `startScaleSync`).
+/// Pitch Pad scale + Fret Pad layout, sent as SysEx over USB (see
+/// `startScaleSync`); tilts come back as a raw report the Mac interprets.
 ///
 /// Architecture:
-///   `MIDIInput`  →  `AudioEngine` (hosted AU + sym pool)  →  speakers
+///   `MIDIInput`  →  `AudioEngine` (String voice)  →  speakers
 ///   `AppController` holds settings and pushes them into `AudioEngine`
 ///   on change. No `NoteManager` on the Mac — that class is iPad-only.
-
-/// Notifies AppController when its hosted-AU window closes so the
-/// reference can be released and a fresh window can be opened next time.
-private final class HostedAUWindowDelegate: NSObject, NSWindowDelegate {
-    let onClose: () -> Void
-    init(onClose: @escaping () -> Void) { self.onClose = onClose }
-    func windowWillClose(_ notification: Notification) { onClose() }
-}
 
 final class AppController: ObservableObject {
     let audio: AudioEngine
     let midi: MIDIEngine
     let midiIn: MIDIInput
-
-    /// Live FX-stage spectra for the graphical EQ (FX tab). Polls the audio
-    /// engine at 30 Hz while an EQ is visible; views read its published frames.
-    let spectrum: SpectrumProvider
 
     /// Mac-side iPad simulator (Simulator tab). Owns its own
     /// `NoteManager` + `MockMotionSource`. Constructed lazily here so
@@ -40,74 +29,24 @@ final class AppController: ObservableObject {
     /// Public so the tab's view can grab `.simulator.noteManager` etc.
     let simulator: IPadSimulator
     let audition: AuditionRunner
-    /// Alternative-to-keyboard interface (Pitch Pad tab). Owns its own
-    /// MPE-style MIDIEngine — sends notes in-process directly to the
-    /// hosted AU, completely independent of `simulator`.
+    /// The scale/tonic model, no longer shown as its own surface — the Fret
+    /// Pad reads from it. Owns its own MPE-style MIDIEngine.
     let pitchPad: PitchPadEngine
-    /// Chord Pad tab — a second hex-grid playing surface. Reuses a
-    /// `PitchPadEngine` purely as the MPE emitter (fed `2^(semis/12)` per
-    /// cell); reads the scale + tonic from `pitchPad` (Mac-only, no sync).
-    let chordPad: PitchPadEngine
-    /// String Pad tab — a third box-plot / abacus playing surface. Reuses a
-    /// `PitchPadEngine` as the MPE emitter (fed the resolved ratio per shape);
-    /// pitches derive from `pitchPad`'s scale + tonic (Mac-only, no sync).
-    let stringPad: PitchPadEngine
-    /// Fret Pad tab — a fourth playing surface: vertical fret segments whose
+    /// Fret Pad tab — the sole playing surface: vertical fret segments whose
     /// x-position is their pitch, with onset-only snapping. Reuses a
-    /// `PitchPadEngine` as the MPE emitter; pitches derive from `pitchPad`'s
-    /// scale + tonic (Mac-only, no sync).
+    /// `PitchPadEngine` as the MPE emitter. `pitchPad` (no longer shown) is kept
+    /// as the underlying scale/tonic model that the Fret Pad reads from.
     let fretPad: PitchPadEngine
     /// Computer-keyboard note input. App-wide while enabled; plays the
-    /// Pitch Pad scale through `pitchPad`. See `KeyboardNotePlayer`.
+    /// active scale through `pitchPad`. See `KeyboardNotePlayer`.
     let keyboard: KeyboardNotePlayer
-
-    /// The String Pad's arrangement of pitch shapes (Mac-only). Auto-saved to
-    /// disk (debounced) by a sink in `start()`; edited live from the tab.
-    @Published var stringArrangement = StringArrangement(notes: [], stringCount: 0)
 
     /// The Fret Pad's fret segments (Mac-only). Auto-saved to disk (debounced)
     /// by a sink in `start()`; edited live from the tab.
     @Published var fretArrangement = FretArrangement(segments: [])
 
-    /// Active preset, or nil if none has been applied this session.
-    @Published private(set) var currentPreset: SoundPreset?
-
-    /// Which base voice feeds the sarangi model (Setup tab): one of the four
-    /// dry SWAM Solo Strings, or our own **sitar model**. For SWAM, all four
-    /// share the dry bow `hostedAUParams` + CC blob, so switching only swaps the
-    /// component subType. For the sitar, the SWAM AU is unloaded and the sitar
-    /// model becomes the excitation (note→pluck+glide, rendered inside the
-    /// sarangi effect). Persisted; applies on change. (`applyPreset` applies it
-    /// too, so a preset switch keeps the chosen voice.)
-    @Published var baseVoice: BaseVoice = AppController.loadBaseVoice() {
-        didSet {
-            guard baseVoice != oldValue else { return }
-            UserDefaults.standard.set(baseVoice.rawValue, forKey: "starpad.baseVoice")
-            applyBaseVoice()
-        }
-    }
-
-    /// Restore the persisted base voice, migrating the older
-    /// `starpad.hostedInstrument` (SWAM-only) key if present. Fresh installs
-    /// default to the fitted sarangi model — the shipped instrument.
-    private static func loadBaseVoice() -> BaseVoice {
-        let d = UserDefaults.standard
-        if let raw = d.string(forKey: "starpad.baseVoice"),
-           let v = BaseVoice(rawValue: raw) { return v }
-        switch d.string(forKey: "starpad.hostedInstrument") {
-        case "viola":      return .swamViola
-        case "cello":      return .swamCello
-        case "doubleBass": return .swamDoubleBass
-        case "violin":     return .swamViolin
-        default:           return .sarangiModel
-        }
-    }
-
-    /// Transient feedback for the "Capture SWAM State" dev action.
-    @Published var swamCaptureStatus: String = ""
-
-    /// Which playing surface the iPad shows (Pitch Pad or Chord Pad). The Mac
-    /// drives it; it rides the synced SysEx state to the iPad. Persisted.
+    /// Which playing surface the iPad shows. The Mac drives it; it rides the
+    /// synced SysEx state to the iPad. Persisted.
     @Published var ipadLayout: PadLayout =
         PadLayout(rawValue: UserDefaults.standard
             .integer(forKey: "starpad.ipadLayout")) ?? .pitchPad {
@@ -116,259 +55,316 @@ final class AppController: ObservableObject {
         }
     }
 
-    // MARK: - Tanpura drone
-
-    /// Versioned by the baked matched-parameter set: when a new match is
-    /// baked into `TanpuraParams` defaults, the key changes and any stale
-    /// persisted copy is ignored.
-    private static let tanpuraParamsKey =
-        "starpad.tanpuraParams.v\(TanpuraParams.matchedVersion)"
-
-    /// Full tanpura model parameter set (tuning, per-harmonic bloom laws +
-    /// trims, body, modulation). Persisted to UserDefaults as JSON and
-    /// pushed straight to the engine on every change. Deliberately NOT
-    /// part of `applyPreset` — the drone keeps its own state across
-    /// preset switches.
-    @Published var tanpuraParams: TanpuraParams = {
-        if let data = UserDefaults.standard.data(forKey: AppController.tanpuraParamsKey),
-           let p = try? JSONDecoder().decode(TanpuraParams.self, from: data) {
-            return p
-        }
-        return TanpuraParams()
-    }() {
+    /// TILT CONTROL bindings (2026-07-24), Mac-owned and Mac-EVALUATED
+    /// (`applyTiltAxis`): per tilt 1/2/3 an arbitrary set of mapped
+    /// parameters with configurable endpoints, edited in the Controls
+    /// tab. Nothing syncs to the iPad — the controller streams only its
+    /// raw tilt report (`TiltAxisWire`), and edits here take effect
+    /// immediately. Persisted via the `DimensionMapping` store.
+    @Published var tiltMapping: DimensionMapping = DimensionMapping.load() {
         didSet {
-            audio.setTanpuraParams(tanpuraParams)
-            if let data = try? JSONEncoder().encode(tanpuraParams) {
-                UserDefaults.standard.set(data, forKey: Self.tanpuraParamsKey)
+            tiltMapping.save()
+            rebuildTiltEvalSnapshot()
+        }
+    }
+
+    /// Raw-tilt evaluation (2026-07-24): the controller streams only its
+    /// three calibrated tilt values (`TiltAxisWire`); the Mac evaluates
+    /// its own tilt bindings here. Per axis: the bound targets + transfer
+    /// curves, in a MIDI-thread-readable snapshot (delivery arrives on the
+    /// CoreMIDI thread). A target is a composite parameter OR any single
+    /// registry parameter.
+    private var tiltEvalByAxis: [[(target: MapTarget,
+                                   binding: DimensionBinding)]] = [[], [], []]
+
+    private func rebuildTiltEvalSnapshot() {
+        var byAxis: [[(MapTarget, DimensionBinding)]] = [[], [], []]
+        for target in tiltMapping.boundTargets {
+            for (axis, dim) in TiltAxisWire.dims.enumerated() {
+                if let b = tiltMapping.mapping(for: target).binding(for: dim) {
+                    byAxis[axis].append((target, b))
+                }
             }
         }
+        compositeLock.lock()
+        tiltEvalByAxis = byAxis
+        compositeLock.unlock()
     }
 
-    /// Output gain (dB) for the drone, applied in the engine after the
-    /// model's peak-normalized `masterGain`. Lives outside
-    /// `tanpuraParams` so volume tweaks never touch the matched bake.
-    @Published var tanpuraGainDB: Double = 12.0 {
-        didSet { audio.setTanpuraGainDB(Float(tanpuraGainDB)) }
+    /// Apply one raw tilt value (axis 0…2, 0…1 normalized): evaluate each
+    /// bound target's transfer curve in the target's native units and
+    /// drive it — a composite through `applyComposite`, a single parameter
+    /// through the unified apply. Called on the MIDI thread (all
+    /// downstream paths are thread-safe).
+    private func applyTiltAxis(_ axis: Int, _ value01: Double) {
+        guard axis >= 0, axis < 3 else { return }
+        compositeLock.lock()
+        let bindings = tiltEvalByAxis[axis]
+        compositeLock.unlock()
+        var rebuild: [String: Double] = [:]
+        for (target, binding) in bindings {
+            let out = binding.evaluate(value01)          // native units
+            switch target.kind {
+            case .composite(let slot):
+                applyComposite(slot: slot, value: out)
+            case .param(let key):
+                if let pending = applyParamToVoice(key, out) {
+                    rebuild[key] = pending
+                }
+            }
+        }
+        queueRebuildValues(rebuild)
     }
 
-    /// Velocity used by the string buttons and the auto-drone.
-    @Published var tanpuraVelocity: Double = 0.8
-
-    /// Continuous strum cycle. Controller-owned timer, so the drone keeps
-    /// going when the user switches tabs.
-    @Published var tanpuraAutoDrone = false {
-        didSet { updateDroneTimer() }
+    /// COMPOSITE PARAMETERS (2026-07-24): named 0…1 controls built from
+    /// BASE parameters (the Sarangi-tab physics scalars + the runtime
+    /// pseudo-keys) — each member sweeps its own lo→hi range as the
+    /// composite goes 0→1. Edited in the Controls tab; tilts bind to them
+    /// by name. Ships with Taraf Purity / Taraf Decay / Tone Tilt as
+    /// editable defaults. Persisted as JSON.
+    @Published var composites: [CompositeParam] = AppController.loadComposites() {
+        didSet {
+            AppController.saveComposites(composites)
+            rebuildCompositeSnapshot()
+        }
     }
 
-    /// Seconds between auto-drone steps (the reference plays ≈ 0.9 s).
-    @Published var tanpuraStepSeconds: Double = 0.9
+    private static let compositesKey = "starpad.compositeParams.v1"
 
-    /// Auto-drone pattern: space-separated string numbers 1–4; anything
-    /// else (e.g. "-") is a rest step. "1 2 3 4" = Pa sa sa SA.
-    @Published var tanpuraPattern: String = "1 2 3 4" {
-        didSet { dronePatternIndex = 0 }
+    private static func loadComposites() -> [CompositeParam] {
+        if let data = UserDefaults.standard.data(forKey: compositesKey),
+           let c = try? JSONDecoder().decode([CompositeParam].self, from: data) {
+            return c
+        }
+        return CompositeParam.defaults()
     }
 
-    private var droneTimer: Timer?
+    private static func saveComposites(_ c: [CompositeParam]) {
+        if let data = try? JSONEncoder().encode(c) {
+            UserDefaults.standard.set(data, forKey: compositesKey)
+        }
+    }
+
+    /// MIDI-thread-readable snapshot of the composite member sets, keyed
+    /// by slot CC (the delivery from `AudioEngine.onCompositeCC` arrives
+    /// on the CoreMIDI thread).
+    private let compositeLock = NSLock()
+    private var compositeMembersByCC: [UInt8: [CompositeMember]] = [:]
+    /// Rebuild-path member values pending a (debounced) main-thread apply.
+    private var pendingRebuildMembers: [String: Double] = [:]
+    private var rebuildFlushScheduled = false
+
+    /// RESTING PARAMETER VALUES (2026-07-24 unification) for every `.live`
+    /// and `.hybrid` registry parameter — the ones whose value does NOT
+    /// live in the `bowed_string.json` override dict (`.rebuild`
+    /// parameters are stored by `StringParamStore`). Edited in the
+    /// Parameters tab, applied instantly to the String voice. Composites
+    /// and direct tilt bindings modulate ON TOP of these; a parameter
+    /// nothing is driving sits at its resting value. Persisted as JSON
+    /// (key inherited from the old control-defaults dict).
+    @Published var paramValues: [String: Double] = AppController.loadParamValues() {
+        didSet {
+            AppController.saveParamValues(paramValues)
+            applyRestingParams()
+        }
+    }
+
+    private static let paramValuesKey = "starpad.controlDefaults.v1"
+
+    private static func loadParamValues() -> [String: Double] {
+        var d: [String: Double] = [:]
+        if let data = UserDefaults.standard.data(forKey: paramValuesKey),
+           let saved = try? JSONDecoder().decode([String: Double].self, from: data) {
+            // Only keys the registry still knows; the pre-unification
+            // scaler keys (`bow_jaw_gain`, `bow_vibrato`) drop out here —
+            // their behavior now belongs to `bow_taraf_jawari` /
+            // `bow_vib_cents`, whose resting values come from
+            // `restFraction × headroom`.
+            for (k, v) in saved where ParamRegistry.spec(k)?.apply != .rebuild {
+                if ParamRegistry.spec(k) != nil { d[k] = v }
+            }
+        }
+        return d
+    }
+
+    private static func saveParamValues(_ d: [String: Double]) {
+        if let data = try? JSONEncoder().encode(d) {
+            UserDefaults.standard.set(data, forKey: paramValuesKey)
+        }
+    }
+
+    // MARK: - Unified parameter access (Parameters tab / composites / tilts)
+
+    /// The build-time headroom of a `.hybrid` parameter: the value its
+    /// tables were built with (override, else artifact, else the authored
+    /// default). Cached under `compositeLock` so the MIDI thread can read
+    /// it without touching the `@Published` store.
+    private var hybridHeadroom: [String: Double] = [:]
+
+    /// Re-read the headroom cache. `values` defaults to the store's current
+    /// dict; pass one explicitly from a `@Published` sink (which fires
+    /// before the store's own property is updated).
+    private func refreshHybridHeadroom(from values: [String: Double]? = nil) {
+        let v = values ?? stringParams.values
+        var h: [String: Double] = [:]
+        for spec in ParamRegistry.all where spec.apply == .hybrid {
+            h[spec.key] = v[spec.key]
+                ?? stringParams.artifactValue(spec.key) ?? spec.def
+        }
+        compositeLock.lock()
+        hybridHeadroom = h
+        compositeLock.unlock()
+    }
+
+    private func headroom(_ key: String) -> Double {
+        compositeLock.lock()
+        let h = hybridHeadroom[key]
+        compositeLock.unlock()
+        return h ?? ParamRegistry.spec(key)?.def ?? 0
+    }
+
+    /// The resting value of any parameter, in native units: `.rebuild`
+    /// parameters read the physics store (artifact + overrides), `.live`
+    /// and `.hybrid` read `paramValues` — a hybrid with no stored value
+    /// rests at `restFraction × headroom` (full fitted buzz, no vibrato).
+    func paramValue(_ key: String) -> Double {
+        guard let spec = ParamRegistry.spec(key) else { return 0 }
+        switch spec.apply {
+        case .rebuild:
+            return stringParams.values[key] ?? spec.def
+        case .live:
+            return paramValues[key] ?? spec.def
+        case .hybrid:
+            if let v = paramValues[key] { return v }
+            return (spec.restFraction ?? 0) * headroom(key)
+        }
+    }
+
+    /// The value `paramValue` falls back to — what a reset restores.
+    func paramDefault(_ key: String) -> Double {
+        guard let spec = ParamRegistry.spec(key) else { return 0 }
+        switch spec.apply {
+        case .rebuild: return stringParams.artifactValue(key) ?? spec.def
+        case .live:    return spec.def
+        case .hybrid:  return (spec.restFraction ?? 0) * headroom(key)
+        }
+    }
+
+    func paramIsDefault(_ key: String) -> Bool {
+        abs(paramValue(key) - paramDefault(key)) <= 1e-9
+    }
+
+    /// Set a parameter's resting value (Parameters tab / audition script).
+    /// Routes to whichever store owns it and applies to the voice.
+    func setParamValue(_ key: String, _ value: Double) {
+        guard let spec = ParamRegistry.spec(key) else { return }
+        switch spec.apply {
+        case .rebuild:
+            stringParams.set(key, value)
+        case .live:
+            paramValues[key] = value           // didSet applies
+        case .hybrid:
+            // Above the built headroom the build scalar has to move (that
+            // rebuilds); at or below it the kernel's scaler covers it.
+            if value > headroom(key) + 1e-12 {
+                stringParams.set(key, value)   // raises the headroom
+                refreshHybridHeadroom()
+            }
+            paramValues[key] = value
+        }
+    }
+
+    /// Restore a parameter to its default and re-apply.
+    func resetParam(_ key: String) {
+        guard let spec = ParamRegistry.spec(key) else { return }
+        switch spec.apply {
+        case .rebuild:
+            stringParams.reset(key)
+        case .live:
+            paramValues.removeValue(forKey: key)
+        case .hybrid:
+            // Drop any RAISED headroom first, then the resting value —
+            // back to `restFraction × artifact`. Only touch the physics
+            // store if the headroom actually moved: resetting a hybrid
+            // that never went above its built value (the common case —
+            // double-clicking "vibrato depth") must not cost a rebuild.
+            if stringParams.values[key] != stringParams.artifactValue(key) {
+                stringParams.reset(key)
+                refreshHybridHeadroom()
+            }
+            paramValues.removeValue(forKey: key)
+        }
+    }
+
+    /// Reset every parameter to the shipped default: clears the physics
+    /// overrides (the Sarangi Live artifact) and every resting value.
+    func resetAllParams() {
+        stringParams.resetToDefault()
+        refreshHybridHeadroom()
+        paramValues.removeAll()
+    }
+
+    /// Push every `.live`/`.hybrid` resting value to the String voice.
+    /// Called at startup, after a Parameters-tab edit, and after a rebuild
+    /// that could have moved a hybrid's headroom. (Composites and tilts
+    /// re-assert their own values on the next event, so this is the
+    /// baseline.)
+    func applyRestingParams() {
+        for spec in ParamRegistry.storedKeys {
+            _ = applyParamToVoice(spec.key, paramValue(spec.key))
+        }
+    }
+
+    /// THE unified apply: push `value` (native units) for `key` into the
+    /// voice. Returns nil when it took effect immediately, or the value
+    /// the caller must funnel through the debounced rebuild path (a
+    /// `.rebuild` parameter, or a `.hybrid` pushed above its headroom).
+    /// Thread-safe — callable from the MIDI thread.
+    @discardableResult
+    func applyParamToVoice(_ key: String, _ value: Double) -> Double? {
+        guard let spec = ParamRegistry.spec(key) else { return nil }
+        switch spec.apply {
+        case .live:
+            audio.setStringControlParam(key, value)
+            return nil
+        case .rebuild:
+            return value
+        case .hybrid:
+            guard let scaler = ParamRegistry.hybridScaler(key) else { return value }
+            let h = headroom(key)
+            guard h > 1e-12 else { return value > 1e-12 ? value : nil }
+            if value > h + 1e-12 {
+                audio.setStringHybridScaler(scaler, 1.0)
+                return value                    // needs a taller headroom
+            }
+            audio.setStringHybridScaler(scaler, value / h)
+            return nil
+        }
+    }
+
     // jt overload watchdog (see start())
     private var jtStatsTimer: Timer?
     private var lastJtDrops = 0.0
     private var lastJtFlat = 0.0
     private var lastRenderOverruns: UInt64 = 0
-    private var dronePatternIndex = 0
-
-    /// Pluck a tanpura string from the UI.
-    func tanpuraPluck(_ index: Int) {
-        audio.tanpuraPluck(index: index, velocity: tanpuraVelocity)
-    }
-
-    private func updateDroneTimer() {
-        droneTimer?.invalidate()
-        droneTimer = nil
-        if tanpuraAutoDrone { scheduleNextDroneStep() }
-    }
-
-    private func scheduleNextDroneStep() {
-        guard tanpuraAutoDrone else { return }
-        // ±20 ms humanization so the cycle never sounds quantized.
-        let interval = max(0.12, tanpuraStepSeconds + Double.random(in: -0.02...0.02))
-        droneTimer = Timer.scheduledTimer(withTimeInterval: interval,
-                                          repeats: false) { [weak self] _ in
-            self?.fireDroneStep()
-        }
-    }
-
-    private func fireDroneStep() {
-        guard tanpuraAutoDrone else { return }
-        let tokens = tanpuraPattern.split(separator: " ")
-        if !tokens.isEmpty {
-            let tok = tokens[dronePatternIndex % tokens.count]
-            dronePatternIndex += 1
-            if let n = Int(tok), (1...4).contains(n) {
-                let vel = max(0.05, min(1.0, tanpuraVelocity + Double.random(in: -0.05...0.05)))
-                audio.tanpuraPluck(index: n - 1, velocity: vel)
-            }
-        }
-        scheduleNextDroneStep()
-    }
-
-    // MARK: - Sitar (plucked, same model as the tanpura)
-
-    /// Versioned by the baked sitar parameter set: a fresh bake bumps the
-    /// key so any stale persisted copy is ignored.
-    private static let sitarParamsKey =
-        "starpad.sitarParams.v\(TanpuraParams.sitarMatchedVersion)"
-
-    /// Full sitar model parameter set, fitted to `sitar1.wav`. Persisted to
-    /// UserDefaults as JSON and pushed straight to the engine on every
-    /// change. Like the tanpura, NOT part of `applyPreset`.
-    @Published var sitarParams: TanpuraParams = {
-        if let data = UserDefaults.standard.data(forKey: AppController.sitarParamsKey),
-           let p = try? JSONDecoder().decode(TanpuraParams.self, from: data) {
-            return p
-        }
-        return TanpuraParams.sitar
-    }() {
-        didSet {
-            audio.setSitarParams(sitarParams)
-            // Keep the base-voice sitar's timbre in step when it's the source.
-            if baseVoice.isSitar { audio.setSitarBaseVoiceParams(sitarParams) }
-            if let data = try? JSONEncoder().encode(sitarParams) {
-                UserDefaults.standard.set(data, forKey: Self.sitarParamsKey)
-            }
-        }
-    }
-
-    /// Output gain (dB) for the sitar, after the model's peak-normalized
-    /// `masterGain`. Lives outside `sitarParams` so it never touches the bake.
-    @Published var sitarGainDB: Double = 18.0 {
-        didSet { audio.setSitarGainDB(Float(sitarGainDB)) }
-    }
-
-    /// Velocity used by the sitar pluck pads.
-    @Published var sitarVelocity: Double = 0.85
-
-    /// Pluck a sitar string from the UI (optionally retuned to `f0` first so
-    /// the pitch-invariant timbre can play a melody).
-    func sitarPluck(_ index: Int, f0: Double? = nil) {
-        if let f0 {
-            var p = sitarParams
-            if p.strings.indices.contains(index), abs(p.strings[index].f0 - f0) > 0.01 {
-                p.strings[index].f0 = f0
-                sitarParams = p
-            }
-        }
-        audio.sitarPluck(index: index, velocity: sitarVelocity)
-    }
-
-    /// Reproduce the matched reference phrase: three C#4 plucks at the
-    /// measured onsets/velocities (for A/B against `sitar1.wav`).
-    func sitarPlayReferencePhrase() {
-        let onsets = [0.0, 1.365, 2.976]          // relative to first pluck
-        let vels = [0.82, 1.0, 0.94]
-        audio.clearSitarState()
-        for (t, v) in zip(onsets, vels) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + t) { [weak self] in
-                guard let self else { return }
-                self.audio.sitarPluck(index: 0, velocity: v * self.sitarVelocity)
-            }
-        }
-    }
 
     // MARK: - Sarangi model
     //
-    // The sarangi voice is the ported `SarangiKit` model, owned by `sarangi`
-    // (`SarangiStore`): raga + tonic, the editable sympathetic-string table, and
-    // the 27 model parameters all live there (fully independent of the played
-    // Pitch Pad scale). Edited in the Sarangi tab (⌘2). See `SarangiEditorView`.
+    // The played voice is the ported `SarangiKit` **String model** (`BowEngine`
+    // + `CBowKernel`), owned by `sarangi` (`SarangiStore`): raga + tonic and the
+    // editable sympathetic-string table live there (independent of the played
+    // Pitch Pad scale). The tarab rows tune the String voice's in-kernel taraf.
+    // Edited in the Tarab tab; the String physics scalars in the Sarangi tab.
 
-    /// The ported sarangi model's editable state + engine bridge.
+    /// The ported sarangi model's editable state + engine bridge (tarab tuning).
     let sarangi: SarangiStore
 
-    /// The String instrument's physics-parameter editor state (the
-    /// `bowed_string.json` scalars + persisted overrides). Edited in the
-    /// Sarangi tab (⌘3, `StringParamsView`); pushes into
-    /// `AudioEngine.stringVoiceOverrides` with a debounced engine rebuild.
+    /// Backing store for the `.rebuild` (and `.hybrid` headroom) half of
+    /// the parameter list: the `bowed_string.json` scalars + persisted
+    /// overrides. Reached through `setParamValue`/`paramValue` from the
+    /// Parameters tab; pushes into `AudioEngine.stringVoiceOverrides` with
+    /// a debounced engine rebuild.
     let stringParams: StringParamStore
-
-    // MARK: - Viola body formants (hosted-AU path)
-
-    @Published var violaBodyEnabled: Bool = false {
-        didSet { audio.setViolaBodyEnabled(violaBodyEnabled) }
-    }
-    @Published var violaBody: [ViolaBodyBand] = [
-        ViolaBodyBand(freq: 300, gainDB: 4.0, widthOct: 0.6),
-        ViolaBodyBand(freq: 650, gainDB: -3.5, widthOct: 0.8),
-        ViolaBodyBand(freq: 1050, gainDB: 5.0, widthOct: 0.5),
-        ViolaBodyBand(freq: 3200, gainDB: 3.5, widthOct: 0.7),
-    ] {
-        didSet { pushViolaBody() }
-    }
-
-    /// Makeup gain (dB) applied to the hosted AU (SWAM Violin) drive. Range
-    /// [-24, +24] dB; default +6. (The model has its own `gin`/`gout` levels;
-    /// this trims the SWAM instrument's own output.)
-    @Published var hostedMakeupGainDB: Double = 6.0 {
-        didSet { audio.setHostedMakeupGainDB(Float(hostedMakeupGainDB)) }
-    }
-
-    /// Calibration gain lifting SWAM's raw output (~0.02 peak) up to the level the
-    /// SWAM → model drive gain. **Default 1× = unity**, matching the standalone
-    /// "Sarangi Live" app (which feeds SWAM straight into the model). The old 10×
-    /// suited the previous quiet recipe; the re-vendored shared recipe is ~15 dB
-    /// hotter, so 10× over-drove the model (saturated jawari → buzzy distortion).
-    /// Key bumped to `.v2` so a stale persisted `10` doesn't shadow the new default.
-    /// Persisted; pushed to the engine's drive stage.
-    @Published var sarangiDriveGain: Double =
-        UserDefaults.standard.object(forKey: "starpad.sarangiDriveGain.v2") as? Double ?? 1.0 {
-        didSet {
-            audio.setSarangiDriveGain(sarangiDriveGain)
-            UserDefaults.standard.set(sarangiDriveGain, forKey: "starpad.sarangiDriveGain.v2")
-        }
-    }
-
-    // MARK: - FX
-
-    @Published var reverbMix: Double = 25 {
-        didSet { audio.setReverbMix(Float(reverbMix)) }
-    }
-    @Published var filterCutoff: Double = 18000 {
-        didSet { audio.setMasterFilter(cutoff: filterCutoff, resonance: filterResonance) }
-    }
-    @Published var filterResonance: Double = 0 {
-        didSet { audio.setMasterFilter(cutoff: filterCutoff, resonance: filterResonance) }
-    }
-
-    // MARK: - Post-reverb shaper (final spectral envelope)
-
-    /// Final 3-band parametric EQ AFTER the master reverb. With SWAM run dry
-    /// and body/room handled downstream, this tames the reverb tail's low-mid
-    /// bloom and restores air so the combined (SWAM + halo) spectrum reads as a
-    /// sharp sarangi, not a smeared violin. Reuses `ViolaBodyBand`.
-    @Published var postReverbEnabled: Bool = false {
-        didSet { audio.setPostReverbEnabled(postReverbEnabled) }
-    }
-    @Published var postReverb: [ViolaBodyBand] = [
-        ViolaBodyBand(freq: 350, gainDB: 0, widthOct: 1.0),   // low-mid bloom
-        ViolaBodyBand(freq: 2500, gainDB: 0, widthOct: 1.0),  // presence
-        ViolaBodyBand(freq: 7000, gainDB: 0, widthOct: 1.2),  // air
-    ] {
-        didSet { pushPostReverb() }
-    }
-
-    // MARK: - MIDI CC mappings (per-preset)
-
-    /// Active CC → parameter table for the current preset. Bijective by
-    /// construction: assigning a CC to a param that already has one
-    /// frees the old CC, and assigning a CC that's already in use frees
-    /// the param it pointed to. See `setMapping(cc:param:)`.
-    @Published var ccMappings: [Int: MappableMacParam] = [:] {
-        didSet { persistActiveCCMappings() }
-    }
-
-    /// Persistent per-preset table, keyed by `SoundPreset.rawValue`.
-    private var ccMappingLibrary: [String: [Int: MappableMacParam]] = [:]
-    private let ccMappingDefaultsKey = "starpad.ccMappingLibrary"
 
     // MARK: - Init / lifecycle
 
@@ -380,23 +376,16 @@ final class AppController: ObservableObject {
         self.midi = midi
         self.midiIn = midiIn
         midiIn.audioEngine = audio
-        self.spectrum = SpectrumProvider(audio: audio)
         // Simulator + audition runner. The simulator's back-ref to
         // `self` is wired below after all stored properties are set,
         // since Swift forbids referencing `self` until init completes.
         let sim = IPadSimulator(audio: audio)
         self.simulator = sim
         self.audition = AuditionRunner(simulator: sim, audio: audio)
+        // The scale/tonic model, no longer shown as its own surface — the Fret
+        // Pad reads from it. Kept alive so scale edits + the keyboard still work.
         self.pitchPad = PitchPadEngine(audio: audio)
-        self.chordPad = PitchPadEngine(audio: audio)
-        // The Chord Pad plays against the Pitch Pad's tonic. Seed it now so
-        // the first frame is correct; a Combine sink in `start()` keeps it in
-        // step with later changes.
-        self.chordPad.tonicMidi = self.pitchPad.tonicMidi
-        // The String Pad is a third MPE emitter, same as the Chord Pad.
-        self.stringPad = PitchPadEngine(audio: audio)
-        self.stringPad.tonicMidi = self.pitchPad.tonicMidi
-        // The Fret Pad is a fourth MPE emitter, same pattern.
+        // The Fret Pad is the sole playing surface, driven off `pitchPad`'s scale.
         self.fretPad = PitchPadEngine(audio: audio)
         self.fretPad.tonicMidi = self.pitchPad.tonicMidi
         // Fret Pad Snap default: 24 px (not the shared 16) — fitted to real
@@ -404,67 +393,50 @@ final class AppController: ObservableObject {
         // 16 left zero headroom; 24 ≈ 43¢ stays under the 40 px minimum fret
         // gap). Syncs to the iPad while the Fret Pad layout is active.
         self.fretPad.marginPixels = 24
-        // Computer-keyboard player drives the Pitch Pad engine directly.
+        // Computer-keyboard player drives the scale engine directly.
         self.keyboard = KeyboardNotePlayer(engine: self.pitchPad)
         // Restore the last-edited arrangement, or build a starter from the
-        // current scale's degree count. (Assigning here doesn't fire the
-        // autosave sink — that's wired in `start()`.)
-        self.stringArrangement = StringArrangementStore.loadCurrent()
-            ?? StringArrangement.defaultArrangement(
-                degreeCount: scaleDegrees(from: self.pitchPad.scale).count)
+        // current scale's degrees. (Assigning here doesn't fire the autosave
+        // sink — that's wired in `start()`.)
         self.fretArrangement = FretArrangementStore.loadCurrent()
             ?? FretArrangement.defaultArrangement(
                 degrees: scaleDegrees(from: self.pitchPad.scale))
         // The sarangi model owns its own tuning + strings (independent of the
         // Pitch Pad). Constructing the store loads the persisted/default state
-        // and builds the initial `SarangiEngine`.
+        // and builds the initial tarab tuning.
         self.sarangi = SarangiStore(audio: audio)
         // The String voice's physics overrides (seeds the engine's override
-        // dict before `applyBaseVoice` builds the first BowEngine).
+        // dict before the first BowEngine is built below).
         self.stringParams = StringParamStore(audio: audio)
 
-        self.ccMappingLibrary = Self.loadCCMappingLibrary(
-            defaultsKey: ccMappingDefaultsKey)
-
-        midiIn.onCC = { [weak self] cc, value in
-            DispatchQueue.main.async {
-                self?.handleIncomingCC(cc: Int(cc), value: Int(value))
-            }
-        }
-
-        // Hosted AUs (SWAM in particular) acquire license/session
-        // tokens via the Audio Modeling Core Assistant daemon when they
-        // instantiate. The daemon expects an explicit release on
-        // teardown; without it the next launch sees a stuck token and
-        // refuses to render. Only fires on a clean quit (⌘Q / menu
-        // Quit); SIGKILL from Xcode's Stop button skips this.
+        // Restore the output device rate on a clean quit (⌘Q / menu Quit); the
+        // engine forced it to 44.1 kHz to drop the output resampler. SIGKILL
+        // from Xcode's Stop button skips this.
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.audio.unloadHostedInstrument()
-            // Put the output device back to the rate it had before we forced it
-            // to 44.1 kHz (the engine/model rate) to drop the output resampler.
             self?.audio.restoreOutputDeviceRate()
         }
 
-        // Default preset — only SWAM Violin ships at the moment.
-        applyPreset(.swamViola)
-        // Stored-property init skips the didSet — push the hosted makeup gain.
-        audio.setHostedMakeupGainDB(Float(hostedMakeupGainDB))
-        audio.setSarangiDriveGain(sarangiDriveGain)
-        // And the persisted tanpura params (stored-property init skips
-        // the didSet that normally pushes them).
-        audio.setTanpuraParams(tanpuraParams)
-        audio.setTanpuraGainDB(Float(tanpuraGainDB))
-        audio.setSitarParams(sitarParams)
-        audio.setSitarGainDB(Float(sitarGainDB))
+        // The String model is the only voice — arm it. It builds off the tarab
+        // tuning + tonic that `SarangiStore` just pushed. The Mac pads hold a
+        // flat CC11 per note (no tilt source); 32 ≈ the fitted expr median
+        // (the surfaces span ~16 dB around it).
+        audio.setSarangiModelVoiceEnabled(true)
+        pitchPad.macExpressionLevel = 32
+        fretPad.macExpressionLevel = 32
 
         // Now that all stored properties are set, wire the simulator's
         // CC route back to this controller so its in-process MIDI hits
-        // the same preset CC mappings as a real iPad-over-USB note.
+        // the same handling as a real iPad-over-USB note.
         simulator.controller = self
+
+        // The Fret Pad is the only playing surface, so the iPad always performs
+        // it. Force the synced layout (a stale persisted value could be another
+        // pad that no longer exists on either side).
+        ipadLayout = .fretPad
     }
 
     /// Combine subscriptions that push the Pitch Pad scale to the iPad.
@@ -475,11 +447,30 @@ final class AppController: ObservableObject {
         midiIn.start()
         simulator.start()
         pitchPad.start()
-        chordPad.start()
-        stringPad.start()
         fretPad.start()
         audition.start()
         startScaleSync()
+        // Composite parameters + raw-tilt evaluation: snapshots for the
+        // MIDI-thread deliveries, then accept the controller's raw tilt
+        // report (the Mac evaluates its own tilt bindings) and direct
+        // slot-CC drives (auditions / external hardware).
+        rebuildCompositeSnapshot()
+        rebuildTiltEvalSnapshot()
+        refreshHybridHeadroom()      // build depths behind the hybrid knobs
+        applyRestingParams()         // resting values for every live param
+        // A physics edit (Parameters tab, preset load, audition script)
+        // can move a hybrid parameter's build headroom — keep the cache in
+        // step. `@Published` fires before the store's own property is
+        // updated, so read the value the sink carries.
+        stringParams.$values
+            .sink { [weak self] v in self?.refreshHybridHeadroom(from: v) }
+            .store(in: &cancellables)
+        audio.onTiltAxis = { [weak self] axis, value in
+            self?.applyTiltAxis(axis, value)
+        }
+        audio.onCompositeCC = { [weak self] cc, value in
+            self?.applyComposite(slotCC: cc, value: value)
+        }
         // jt overload watchdog: the String voice's async jawari web drops
         // drive blocks / flat-fills when it misses its realtime budget —
         // audible clicking. Log only when the counters GROW.
@@ -510,29 +501,39 @@ final class AppController: ObservableObject {
                 self.lastRenderOverruns = r.overruns
             }
         }
-        // Keep the Chord/String/Fret Pads' tonic locked to the Pitch Pad's.
-        // Independent of `startScaleSync` (which only pushes Pitch Pad
-        // state to the iPad).
+        // Keep the Fret Pad's tonic locked to the scale engine's. Independent
+        // of `startScaleSync` (which pushes scale state to the iPad).
         pitchPad.$tonicMidi
-            .sink { [weak self] in
-                self?.chordPad.tonicMidi = $0
-                self?.stringPad.tonicMidi = $0
-                self?.fretPad.tonicMidi = $0
-            }
+            .sink { [weak self] in self?.fretPad.tonicMidi = $0 }
             .store(in: &cancellables)
 
-        // Auto-save the String Pad arrangement. Debounced so a drag-edit
+        // Auto-save the Fret Pad arrangement. Debounced so a drag-edit
         // doesn't write to disk every frame.
-        $stringArrangement
-            .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
-            .sink { StringArrangementStore.saveCurrent($0) }
-            .store(in: &cancellables)
-
-        // Auto-save the Fret Pad arrangement, same pattern.
         $fretArrangement
             .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
             .sink { FretArrangementStore.saveCurrent($0) }
             .store(in: &cancellables)
+
+        // Drone-button config: the 4 ratios ride the arrangement; the tonic
+        // is the PLAYED (Fret Pad) tonic, so the drones harmonize with the
+        // melody regardless of the tarab tuning. A real change rebuilds the
+        // String engine (the jt web gets a row at every configured pitch),
+        // so this is debounced and deduplicated.
+        let droneTonicHz = { (midi: Int) -> Double in
+            440.0 * pow(2.0, (Double(midi) - 69.0) / 12.0)
+        }
+        audio.setDroneConfig(ratios: fretArrangement.droneRatios,
+                             tonicHz: droneTonicHz(pitchPad.tonicMidi))
+        Publishers.CombineLatest(
+            $fretArrangement.map(\.droneRatios).removeDuplicates(),
+            pitchPad.$tonicMidi.removeDuplicates()
+        )
+        .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
+        .sink { [weak self] ratios, tonicMidi in
+            self?.audio.setDroneConfig(ratios: ratios,
+                                       tonicHz: droneTonicHz(tonicMidi))
+        }
+        .store(in: &cancellables)
 
         // Auto-sync the sarangi's sympathetic strings (tarab) to the Pitch Pad
         // scale: when the scale or tonic changes, retune the bank (if the user
@@ -579,10 +580,7 @@ final class AppController: ObservableObject {
             pitchPad.$scale.map { _ in () }.eraseToAnyPublisher(),
             pitchPad.$tonicMidi.map { _ in () }.eraseToAnyPublisher(),
             pitchPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
-            chordPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
-            stringPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             fretPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
-            $stringArrangement.map { _ in () }.eraseToAnyPublisher(),
             $fretArrangement.map { _ in () }.eraseToAnyPublisher(),
             $ipadLayout.map { _ in () }.eraseToAnyPublisher(),
             midi.$destinationCount.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
@@ -596,13 +594,9 @@ final class AppController: ObservableObject {
     private func pushCurrentState() {
         // The iPad shows one surface at a time, so push the margin of the
         // surface that's active — each pad owns its own margin slider.
-        let margin: Double
-        switch ipadLayout {
-        case .chordPad:  margin = chordPad.marginPixels
-        case .stringPad: margin = stringPad.marginPixels
-        case .fretPad:   margin = fretPad.marginPixels
-        case .pitchPad:  margin = pitchPad.marginPixels
-        }
+        // The Fret Pad is the only surface now; its Snap slider is the margin.
+        let margin = ipadLayout == .fretPad ? fretPad.marginPixels
+                                            : pitchPad.marginPixels
         let state = SyncedScaleState(points: pitchPad.scale.points,
                                      tonicMidi: pitchPad.tonicMidi,
                                      marginPixels: margin,
@@ -612,424 +606,352 @@ final class AppController: ObservableObject {
         // device name. `sendSysEx` falls back to all destinations if even
         // this matches nothing, so a renamed endpoint can't block sync.
         midi.sendSysEx(PitchScaleSysEx.encode(state), toDestinationsMatching: "Starpad")
-        // The String Pad's note layout is its own state (not derivable from the
-        // scale), so push it as a second SysEx message while it's active.
-        if ipadLayout == .stringPad {
-            midi.sendSysEx(StringArrangementSysEx.encode(stringArrangement),
-                           toDestinationsMatching: "Starpad")
-        }
-        // Likewise the Fret Pad's segment layout (third SysEx message).
+        // The Fret Pad's segment layout is its own state (not derivable from
+        // the scale), so push it as a second SysEx message while it's active.
         if ipadLayout == .fretPad {
             midi.sendSysEx(FretArrangementSysEx.encode(fretArrangement),
                            toDestinationsMatching: "Starpad")
         }
     }
 
-    /// Public entry for the iPad-simulator's in-process CC delivery.
-    /// Mirrors `MIDIInput.onCC` → `handleIncomingCC`.
-    func handleSimulatorCC(cc: Int, value: Int) {
-        handleIncomingCC(cc: cc, value: value)
+    // MARK: - Composite parameters (2026-07-24)
+
+    private func rebuildCompositeSnapshot() {
+        compositeLock.lock()
+        compositeMembersByCC = Dictionary(
+            uniqueKeysWithValues: composites.map { ($0.slotCC, $0.members) })
+        compositeLock.unlock()
     }
 
+    /// Apply a composite's value 0-1: every member sweeps its lo-hi range
+    /// through the unified apply. Live (and hybrid-downward) members take
+    /// effect immediately — thread-safe engine setters, chunk-rate
+    /// smoothed downstream; members that need a rebuild go through the
+    /// String-override path on main, debounced (that path persists +
+    /// rebuilds the engine — too heavy per-CC). Called on the MIDI thread
+    /// for tilt-driven values and on main for UI/audition drives.
+    func applyComposite(slotCC: UInt8, value: Double) {
+        compositeLock.lock()
+        let members = compositeMembersByCC[slotCC] ?? []
+        compositeLock.unlock()
+        guard !members.isEmpty else { return }
+        var rebuild: [String: Double] = [:]
+        for m in members {
+            if let pending = applyParamToVoice(m.key, m.value(at: value)) {
+                rebuild[m.key] = pending
+            }
+        }
+        queueRebuildValues(rebuild)
+    }
+
+    /// Funnel rebuild-path values (from a composite or a direct tilt
+    /// binding) into one debounced main-thread flush. Thread-safe.
+    private func queueRebuildValues(_ values: [String: Double]) {
+        guard !values.isEmpty else { return }
+        compositeLock.lock()
+        pendingRebuildMembers.merge(values) { _, new in new }
+        let schedule = !rebuildFlushScheduled
+        rebuildFlushScheduled = true
+        compositeLock.unlock()
+        guard schedule else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
+            self.compositeLock.lock()
+            let flush = self.pendingRebuildMembers
+            self.pendingRebuildMembers.removeAll()
+            self.rebuildFlushScheduled = false
+            self.compositeLock.unlock()
+            for (key, v) in flush {
+                self.stringParams.setAuditionParam(key, v)
+            }
+            self.refreshHybridHeadroom()
+        }
+    }
+
+    /// Convenience: apply by slot index.
+    func applyComposite(slot: Int, value: Double) {
+        guard slot >= 0, slot < CompositeParam.slotCCs.count else { return }
+        applyComposite(slotCC: CompositeParam.slotCCs[slot], value: value)
+    }
+
+    /// The user-facing name for a tilt target: a composite slot shows its
+    /// composite's name (an empty slot shows "Composite N (empty)"), a
+    /// parameter shows its registry label. No CC numbers.
+    func targetDisplayName(_ t: MapTarget) -> String {
+        guard let slot = t.compositeSlot else { return t.label }
+        if let c = composites.first(where: { $0.slot == slot }) {
+            return c.name
+        }
+        return "Composite \(slot + 1) (empty)"
+    }
+
+    /// Parameter catalog for the composite editor + tilt Add menus: every
+    /// registry parameter, grouped, with its native range.
+    static let paramCatalog: [(key: String, label: String,
+                               lo: Double, hi: Double)] =
+        ParamRegistry.all.map {
+            (key: $0.key, label: $0.label, lo: $0.lo, hi: $0.hi)
+        }
+
+    static func paramInfo(_ key: String)
+        -> (key: String, label: String, lo: Double, hi: Double) {
+        paramCatalog.first { $0.key == key }
+            ?? (key: key, label: key, lo: 0, hi: 1)
+    }
+
+    // MARK: - Composite editing (Controls tab)
+
+    /// Create a composite on the next free slot (nil when all 8 in use).
+    @discardableResult
+    func addComposite() -> CompositeParam? {
+        let used = Set(composites.map(\.slot))
+        guard let slot = (0..<CompositeParam.maxSlots).first(where: { !used.contains($0) })
+        else { return nil }
+        let c = CompositeParam(name: "Composite \(slot + 1)", slot: slot,
+                               members: [])
+        composites.append(c)
+        return c
+    }
+
+    func removeComposite(_ id: CompositeParam.ID) {
+        composites.removeAll { $0.id == id }
+    }
+
+    func renameComposite(_ id: CompositeParam.ID, to name: String) {
+        guard let i = composites.firstIndex(where: { $0.id == id }) else { return }
+        composites[i].name = name
+    }
+
+    func addCompositeMember(_ id: CompositeParam.ID, key: String) {
+        guard let i = composites.firstIndex(where: { $0.id == id }),
+              !composites[i].members.contains(where: { $0.key == key })
+        else { return }
+        let info = AppController.paramInfo(key)
+        composites[i].members.append(
+            CompositeMember(key: key, lo: info.lo, hi: info.hi))
+    }
+
+    func removeCompositeMember(_ id: CompositeParam.ID, key: String) {
+        guard let i = composites.firstIndex(where: { $0.id == id }) else { return }
+        composites[i].members.removeAll { $0.key == key }
+    }
+
+    func setCompositeMemberRange(_ id: CompositeParam.ID, key: String,
+                                 lo: Double, hi: Double) {
+        guard let i = composites.firstIndex(where: { $0.id == id }),
+              let j = composites[i].members.firstIndex(where: { $0.key == key })
+        else { return }
+        composites[i].members[j].lo = lo
+        composites[i].members[j].hi = hi
+    }
+
+    // MARK: - Tilt-control binding edits (Controls tab / Parameters tab)
+
+    /// The targets bound to one tilt (composites first, then parameters).
+    func tiltBindings(for dim: InputDimension) -> [MapTarget] {
+        tiltMapping.targets(for: dim)
+    }
+
+    /// Every tilt a given target is bound to — the Parameters tab's
+    /// per-row mapping badge reads this.
+    func tiltDimensions(for target: MapTarget) -> [InputDimension] {
+        TiltAxisWire.dims.filter { tiltMapping.isConnected(target, $0) }
+    }
+
+    /// Bind a target to a tilt over its full native range. For a parameter
+    /// whose resting value sits at one end (vibrato depth 0, jawari buzz
+    /// full) that reads naturally; endpoints are draggable afterwards.
+    func addTiltBinding(_ target: MapTarget, dim: InputDimension) {
+        var m = tiltMapping
+        let r = target.defaultRange
+        var pm = m.mapping(for: target)
+        pm.bindings.removeAll { $0.dimension == dim }
+        pm.bindings.append(DimensionBinding(dimension: dim,
+                                            rangeMin: r.0, rangeMax: r.1))
+        m.mappings[target.storageKey] = pm
+        tiltMapping = m
+    }
+
+    func removeTiltBinding(_ target: MapTarget, dim: InputDimension) {
+        var m = tiltMapping
+        var pm = m.mapping(for: target)
+        pm.bindings.removeAll { $0.dimension == dim }
+        m.mappings[target.storageKey] = pm
+        tiltMapping = m
+        // A parameter that is no longer driven must fall back to its
+        // resting value — nothing else will push it.
+        if let key = target.paramKey, pm.bindings.isEmpty {
+            _ = applyParamToVoice(key, paramValue(key))
+        }
+    }
+
+    func toggleTiltBinding(_ target: MapTarget, dim: InputDimension) {
+        if tiltMapping.isConnected(target, dim) {
+            removeTiltBinding(target, dim: dim)
+        } else {
+            addTiltBinding(target, dim: dim)
+        }
+    }
+
+    /// Set a binding's endpoints. `fromCenter` = the rest-zero shape used
+    /// by the taraf axes: flat at `lo` through the resting half of the
+    /// throw, sweeping to `hi` past neutral — `(0,lo) (0.5,lo) (1,hi)`.
+    /// Off = plain linear `(0,lo) (1,hi)`.
+    func setTiltBinding(_ target: MapTarget, dim: InputDimension,
+                        lo: Double, hi: Double, fromCenter: Bool) {
+        var m = tiltMapping
+        var pm = m.mapping(for: target)
+        pm.bindings.removeAll { $0.dimension == dim }
+        let pts = fromCenter
+            ? [ControlPoint(x: 0, y: lo), ControlPoint(x: 0.5, y: lo),
+               ControlPoint(x: 1, y: hi)]
+            : [ControlPoint(x: 0, y: lo), ControlPoint(x: 1, y: hi)]
+        pm.bindings.append(DimensionBinding(dimension: dim, controlPoints: pts))
+        m.mappings[target.storageKey] = pm
+        tiltMapping = m
+    }
+
+    /// Composites a parameter is a member of (the Parameters tab's
+    /// mapping menu ticks these).
+    func compositesContaining(_ key: String) -> [CompositeParam] {
+        composites.filter { $0.members.contains { $0.key == key } }
+    }
+
+    func toggleCompositeMember(_ id: CompositeParam.ID, key: String) {
+        guard let i = composites.firstIndex(where: { $0.id == id }) else { return }
+        if composites[i].members.contains(where: { $0.key == key }) {
+            removeCompositeMember(id, key: key)
+        } else {
+            addCompositeMember(id, key: key)
+        }
+    }
+
+    // MARK: - Presets
+
+    /// Capture one half of the rig (or both). The **instrument** scope is
+    /// the sound — the sarangi document, the physics overrides and every
+    /// parameter's resting value; the **controls** scope is the mapping —
+    /// composites and tilt bindings. They are saved separately because
+    /// swapping a sound should not cost you your tilt setup, and vice
+    /// versa.
+    func capturePreset(name: String, scope: PresetScope) -> StarpadPreset {
+        var p = StarpadPreset()
+        p.name = name
+        p.kind = scope
+        p.savedAt = ISO8601DateFormatter().string(from: Date())
+        if scope.covers(.instrument) {
+            p.instrument = sarangi.state
+            p.stringOverrides = stringParams.overridesSnapshot
+            p.paramValues = paramValues
+        }
+        if scope.covers(.controls) {
+            p.composites = composites
+            p.tiltMapping = tiltMapping
+        }
+        return p
+    }
+
+    /// Apply the parts of `p` that fall inside `scope`. Sections the file
+    /// lacks are skipped, so a controls preset never disturbs the
+    /// instrument — and an older combined `.starpad` can be loaded as
+    /// either half.
+    func applyPreset(_ p: StarpadPreset, scope: PresetScope = .all) {
+        if scope.covers(.instrument) {
+            if let inst = p.instrument {
+                sarangi.replaceState(inst)
+            }
+            if let ov = p.stringOverrides {
+                stringParams.replaceOverrides(ov)
+                refreshHybridHeadroom()
+            }
+            if let pv = p.paramValues {
+                // Keep only keys this build still knows; `didSet` re-applies.
+                paramValues = pv.filter {
+                    guard let spec = ParamRegistry.spec($0.key) else { return false }
+                    return spec.apply != .rebuild
+                }
+            }
+        }
+        if scope.covers(.controls) {
+            if let c = p.composites { composites = c }
+            if let t = p.tiltMapping { tiltMapping = t }
+        }
+    }
+
+    func savePreset(to url: URL, name: String, scope: PresetScope) throws {
+        try capturePreset(name: name, scope: scope).encoded().write(to: url)
+    }
+
+    /// Load and apply, returning the decoded document so the caller can
+    /// report what landed (`sections(in:)`) — or that nothing did.
+    @discardableResult
+    func loadPreset(from url: URL, scope: PresetScope) throws -> StarpadPreset {
+        let p = try StarpadPreset.decode(Data(contentsOf: url))
+        applyPreset(p, scope: scope)
+        return p
+    }
+
+    /// Public entry for the iPad-simulator's in-process CC delivery. CC → Mac
+    /// param mappings were removed with the master-FX bus; expression and the
+    /// tilt axes reach the String voice through the MIDI path directly, so this
+    /// is now a no-op kept for the simulator's call site.
+    func handleSimulatorCC(cc: Int, value: Int) {}
+
     /// Programmatic entry point used by audition scores' `voiceParam`
-    /// events. Names match the `@Published` properties above; values
-    /// are passed through in each parameter's natural units (cents,
-    /// Hz, 0..1 fraction, 0..100 mix). Unknown names log and noop so a
-    /// typo in a score doesn't take down the runner. Values are
-    /// clamped onto the same ranges enforced by the UI sliders, since
-    /// the engine setters trust their callers.
+    /// events. Names match the parameters below; values are passed through
+    /// in each parameter's natural units. Unknown names log and noop so a
+    /// typo in a score doesn't take down the runner.
     func setVoiceParam(name: String, value: Double) {
         switch name {
-        case "violaBodyEnabled":  violaBodyEnabled  = value > 0.5
-        case "postReverbEnabled": postReverbEnabled = value > 0.5
-        case "reverbMix":         reverbMix         = clamp(value, 0, 100)
-        case "filterCutoff":      filterCutoff      = clamp(value, 20, 20000)
-        case "filterResonance":   filterResonance   = clamp(value, 0, 1)
-        case "tanpuraGainDB":     tanpuraGainDB     = clamp(value, -24, 24)
-        case "sitarGainDB":       sitarGainDB       = clamp(value, -24, 24)
-        case "driveGain", "sarangiDriveGain": sarangiDriveGain = clamp(value, 0, 64)
-        // Base voice: 0 = SWAM Violin, 1 = Viola, 2 = Cello, 3 = Double Bass,
-        // 4 = sitar model. Lets a score A/B the excitation source.
-        case "baseVoice":
-            let all = BaseVoice.allCases
-            baseVoice = all[max(0, min(all.count - 1, Int(value.rounded())))]
+        // Drone buttons: "drone1".."drone4", value > 0.5 = press, else
+        // release — lets a score audition the jawari-taraf drones.
+        case "drone1", "drone2", "drone3", "drone4":
+            let i = Int(String(name.dropFirst(5)))! - 1
+            audio.setDronePressed(i, value > 0.5)
+        // Tilt performance axes (the iPad tilts' CC71/73/72 targets):
+        // purity/decay 0..1, tone tilt -1..1. Runtime playing state —
+        // NOT `string.<key>` build scalars (no engine rebuild).
+        // Composite parameters (drive the same member sweeps the tilts
+        // do; the legacy names map onto the default slots — stringToneTilt
+        // keeps its historical -1…1 range):
+        case "stringPurity":     applyComposite(slot: 0, value: clamp(value, 0, 1))
+        case "stringTarafDecay": applyComposite(slot: 1, value: clamp(value, 0, 1))
+        case "stringToneTilt":   applyComposite(slot: 2, value: (clamp(value, -1, 1) + 1) / 2)
+        // Generic form: "composite1".."composite8" with value 0…1.
+        case let n where n.hasPrefix("composite") && Int(n.dropFirst(9)) != nil:
+            applyComposite(slot: Int(n.dropFirst(9))! - 1,
+                           value: clamp(value, 0, 1))
         default:
-            // Sarangi model params: "sarangi.<paramId>" — the 22 ParamSpec ids
-            // (e.g. "sarangi.B_gain", "sarangi.mix_drone", "sarangi.F_mix"),
-            // plus FX-rack paths ("sarangi.fx.<violinPre|global>.<field>").
+            // Sarangi model params: "sarangi.<paramId>" (the tarab / model
+            // document that `SarangiStore` owns — the tarab rows tune the
+            // String voice's taraf).
             if name.hasPrefix("sarangi.") {
                 if sarangi.setAuditionParam(String(name.dropFirst(8)), value) { return }
                 NSLog("Starpad: no sarangi param '\(name.dropFirst(8))'")
                 return
             }
-            // String-voice artifact overrides: "string.<key>" — any
-            // bowed_string.json scalar (e.g. "string.bow_jt_gain",
-            // "string.bow_rev_mix", "string.bow_live_trim"). Routed through
-            // the editor store (same path as the Sarangi-tab sliders), so
-            // scripted sweeps show in the UI and persist like hand edits.
-            if name.hasPrefix("string.") {
-                stringParams.setAuditionParam(String(name.dropFirst(7)), value)
-                return
-            }
-            // Sitar params route by path: "sitar.<path>" (same paths as
-            // tanpura — see TanpuraParams.set(path:value:)).
-            if name.hasPrefix("sitar.") {
-                var p = sitarParams
-                if p.set(path: String(name.dropFirst(6)), value: value) {
-                    sitarParams = p
-                    return
+            // Any registry parameter: "string.<key>" (historical) or
+            // "param.<key>". Routed through the unified setter — the same
+            // path the Parameters-tab sliders take — so a scripted sweep
+            // shows in the UI, persists like a hand edit, and applies
+            // live when the parameter can (`.live` / `.hybrid`).
+            for prefix in ["string.", "param."] where name.hasPrefix(prefix) {
+                let key = String(name.dropFirst(prefix.count))
+                if ParamRegistry.spec(key) != nil {
+                    setParamValue(key, value)
+                } else {
+                    // Unknown to the registry but possibly a real artifact
+                    // scalar (the fit can carry keys the editor doesn't
+                    // list) — keep the raw override path for those.
+                    stringParams.setAuditionParam(key, value)
                 }
-            }
-            // Tanpura params route by path: "tanpura.<path>" with paths
-            // like "jivaDepth", "body0.freq", "string2.decay",
-            // "string1.gainTrimDB13" (see TanpuraParams.set(path:value:)).
-            if name.hasPrefix("tanpura.") {
-                var p = tanpuraParams
-                if p.set(path: String(name.dropFirst(8)), value: value) {
-                    tanpuraParams = p
-                    return
-                }
-            }
-            // Viola body bands: "violaBody{0-3}.freq|gainDB|widthOct".
-            if setViolaBodyBandParam(name: name, value: value) { return }
-            // Post-reverb bands: "postEQ{0-2}.freq|gainDB|widthOct".
-            if setPostReverbBandParam(name: name, value: value) { return }
-            // Hosted-AU (SWAM Violin) params by identifier: "swam.<identifier>"
-            // — e.g. "swam.Vibrato" to disable auto-vibrato. Discover the
-            // identifiers with the "__auDump__" audition event.
-            if name.hasPrefix("swam.") {
-                if audio.setHostedParameter(identifier: String(name.dropFirst(5)),
-                                            value: Float(value)) { return }
-                NSLog("Starpad: no hosted-AU param '\(name.dropFirst(5))'")
                 return
             }
             NSLog("Starpad: setVoiceParam unknown name '\(name)'")
         }
     }
 
-    /// Route "violaBody{i}.{field}" audition params onto `violaBody`.
-    private func setViolaBodyBandParam(name: String, value: Double) -> Bool {
-        guard name.hasPrefix("violaBody") else { return false }
-        let rest = name.dropFirst("violaBody".count)
-        let parts = rest.split(separator: ".", maxSplits: 1)
-        guard parts.count == 2, let i = Int(parts[0]),
-              i >= 0 && i < violaBody.count else { return false }
-        var bands = violaBody
-        switch parts[1] {
-        case "freq":     bands[i].freq = clamp(value, 20, 20000)
-        case "gainDB":   bands[i].gainDB = clamp(value, -24, 24)
-        case "widthOct": bands[i].widthOct = clamp(value, 0.05, 5)
-        default: return false
-        }
-        violaBody = bands
-        return true
-    }
-
-    /// Route "postEQ{i}.{field}" audition params onto `postReverb`.
-    private func setPostReverbBandParam(name: String, value: Double) -> Bool {
-        guard name.hasPrefix("postEQ") else { return false }
-        let rest = name.dropFirst("postEQ".count)
-        let parts = rest.split(separator: ".", maxSplits: 1)
-        guard parts.count == 2, let i = Int(parts[0]),
-              i >= 0 && i < postReverb.count else { return false }
-        var bands = postReverb
-        switch parts[1] {
-        case "freq":     bands[i].freq = clamp(value, 20, 20000)
-        case "gainDB":   bands[i].gainDB = clamp(value, -24, 24)
-        case "widthOct": bands[i].widthOct = clamp(value, 0.05, 5)
-        default: return false
-        }
-        postReverb = bands
-        return true
-    }
-
     private func clamp(_ x: Double, _ lo: Double, _ hi: Double) -> Double {
         max(lo, min(hi, x))
-    }
-
-    // MARK: - Preset application
-
-    func applyPreset(_ preset: SoundPreset) {
-        let state = preset.state()
-        currentPreset = preset
-        // Load this preset's saved CC mapping table first so a quick
-        // mapping change during the same frame saves under the correct
-        // preset key.
-        ccMappings = ccMappingLibrary[preset.rawValue] ?? [:]
-
-        // Copy the master-FX preset values into the @Published mirrors; each
-        // setter's `didSet` pushes to the engine. (The sarangi voice itself is
-        // owned by `sarangi`/SarangiStore, not by the preset.)
-        violaBody = state.violaBody
-        violaBodyEnabled = state.violaBodyEnabled
-        postReverb = state.postReverb
-        postReverbEnabled = state.postReverbEnabled
-        reverbMix = state.reverbMix
-        filterCutoff = state.filterCutoff
-        filterResonance = state.filterResonance
-
-        // Hosted AU lifecycle. Install the preset's full document state (SWAM's
-        // opaque encoded state, incl. the MIDI CC assignments) and AU parameter
-        // defaults (SWAM bow timbre + vibrato off, run DRY) BEFORE loading so
-        // each slot picks them up on attach, then load the new one (or unload
-        // the old). The model expects dry SWAM input, so these stay.
-        audio.setHostedAUFullState(state.hostedAUState)
-        audio.setHostedAUParameterDefaults(state.hostedAUParams)
-        // The preset supplies the dry params/state + whether a hosted AU is used
-        // at all; the *which* base voice (SWAM instrument or the sitar model) is
-        // the user's Setup-tab choice, applied here.
-        if state.hostedAudioUnit != nil {
-            applyBaseVoice()
-        } else {
-            audio.setSitarBaseVoiceEnabled(false)
-            audio.setSarangiModelVoiceEnabled(false)
-            audio.unloadHostedInstrument()
-        }
-    }
-
-    /// Apply the selected base voice to the engine: a SWAM instrument loads the
-    /// hosted AU (model voices off); the sitar model or the fitted sarangi
-    /// model unloads SWAM and turns its own excitation on.
-    func applyBaseVoice() {
-        if let inst = baseVoice.swamInstrument {
-            audio.setSitarBaseVoiceEnabled(false)
-            audio.setSarangiModelVoiceEnabled(false)
-            audio.loadHostedInstrument(inst.descriptor)
-        } else if baseVoice.isSarangiModel {
-            audio.setSitarBaseVoiceEnabled(false)
-            audio.setSarangiModelVoiceEnabled(true)
-            audio.unloadHostedInstrument()
-        } else {
-            audio.setSarangiModelVoiceEnabled(false)
-            audio.setSitarBaseVoiceParams(sitarParams)
-            audio.setSitarBaseVoiceEnabled(true)
-            audio.unloadHostedInstrument()
-        }
-        // The Mac pads hold a flat CC11 per note (no tilt source). 100 ≈ a firm
-        // bow was tuned for the quiet SWAM; the fitted model's calibrated
-        // operating point is expr 0.251 (pair-3 gated median) — CC ≈ 32.
-        // Higher CC11 = deliberately loud bowing (the surfaces span ~16 dB).
-        let exprLevel: UInt8 = baseVoice.isSarangiModel ? 32 : 100
-        pitchPad.macExpressionLevel = exprLevel
-        chordPad.macExpressionLevel = exprLevel
-        stringPad.macExpressionLevel = exprLevel
-        fretPad.macExpressionLevel = exprLevel
-    }
-
-    // MARK: - Audio-engine pushes
-
-    /// Push every viola body band to the shared sarangi-body EQ.
-    private func pushViolaBody() {
-        for (i, band) in violaBody.enumerated() {
-            audio.setViolaBodyBand(i, freq: band.freq,
-                                   gainDB: band.gainDB,
-                                   widthOct: band.widthOct)
-        }
-    }
-
-    /// Push every post-reverb band to the final spectral shaper.
-    private func pushPostReverb() {
-        for (i, band) in postReverb.enumerated() {
-            audio.setPostReverbBand(i, freq: band.freq,
-                                    gainDB: band.gainDB,
-                                    widthOct: band.widthOct)
-        }
-    }
-
-    // MARK: - CC routing
-
-    private func handleIncomingCC(cc: Int, value: Int) {
-        guard let param = ccMappings[cc] else { return }
-        let normalized = Double(value) / 127.0
-        applyMappedCC(param: param, normalized: normalized)
-    }
-
-    /// Set or clear the CC bound to a parameter. Pass `cc: nil` to
-    /// unmap. Enforces one-to-one in both directions.
-    func setMapping(for param: MappableMacParam, cc: Int?) {
-        var table = ccMappings
-        if let oldCC = table.first(where: { $0.value == param })?.key {
-            table.removeValue(forKey: oldCC)
-        }
-        if let cc, (0...127).contains(cc) {
-            table.removeValue(forKey: cc) // free whatever this CC pointed to
-            table[cc] = param
-        }
-        ccMappings = table
-    }
-
-    func ccForParam(_ param: MappableMacParam) -> Int? {
-        ccMappings.first(where: { $0.value == param })?.key
-    }
-
-    private func applyMappedCC(param: MappableMacParam, normalized: Double) {
-        let r = param.range
-        let v = r.lowerBound + (r.upperBound - r.lowerBound) * normalized
-        switch param {
-        case .reverbMix:            reverbMix = v
-        case .filterCutoff:         filterCutoff = v
-        case .filterResonance:      filterResonance = v
-        }
-    }
-
-    // MARK: - CC mapping persistence
-
-    private func persistActiveCCMappings() {
-        guard let preset = currentPreset else { return }
-        if ccMappings.isEmpty {
-            ccMappingLibrary.removeValue(forKey: preset.rawValue)
-        } else {
-            ccMappingLibrary[preset.rawValue] = ccMappings
-        }
-        Self.saveCCMappingLibrary(ccMappingLibrary, defaultsKey: ccMappingDefaultsKey)
-    }
-
-    private static func loadCCMappingLibrary(
-        defaultsKey: String
-    ) -> [String: [Int: MappableMacParam]] {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
-              let raw = try? JSONDecoder().decode(
-                [String: [String: String]].self, from: data)
-        else { return [:] }
-        var out: [String: [Int: MappableMacParam]] = [:]
-        for (presetKey, table) in raw {
-            var converted: [Int: MappableMacParam] = [:]
-            for (ccStr, paramStr) in table {
-                if let cc = Int(ccStr),
-                   let param = MappableMacParam(rawValue: paramStr) {
-                    converted[cc] = param
-                }
-            }
-            if !converted.isEmpty { out[presetKey] = converted }
-        }
-        return out
-    }
-
-    private static func saveCCMappingLibrary(
-        _ library: [String: [Int: MappableMacParam]],
-        defaultsKey: String
-    ) {
-        var raw: [String: [String: String]] = [:]
-        for (presetKey, table) in library {
-            var stringTable: [String: String] = [:]
-            for (cc, param) in table {
-                stringTable[String(cc)] = param.rawValue
-            }
-            raw[presetKey] = stringTable
-        }
-        if let data = try? JSONEncoder().encode(raw) {
-            UserDefaults.standard.set(data, forKey: defaultsKey)
-        }
-    }
-
-    /// Unload + reload the currently-hosted AU. Useful when a load
-    /// happens to land in a silent state and a fresh instantiation is
-    /// the cheapest recovery.
-    func reloadHostedInstrument() {
-        guard currentPreset?.state().hostedAudioUnit != nil,
-              let inst = baseVoice.swamInstrument else { return }
-        audio.loadHostedInstrument(inst.descriptor)
-    }
-
-    /// Load a SWAM/AuMo hosted AU by 4-char subType (e.g. "Sva3" Viola,
-    /// "Svl3" Violin) — used by the audition `loadAU` event to A/B bases.
-    /// The current `hostedAUParams` (bow timbre) re-apply to the new slots.
-    func loadHostedAU(subType: String) {
-        audio.loadHostedInstrument(
-            AudioEngine.HostedAUDescriptor(type: "aumu", subType: subType,
-                                           manufacturer: "AuMo"))
-    }
-
-    // MARK: - Hosted AU UI
-
-    /// Holds the AU view window open after `openHostedInstrumentWindow()`.
-    private var hostedAUWindow: NSWindow?
-    private var hostedAUWindowDelegate: HostedAUWindowDelegate?
-
-    func openHostedInstrumentWindow() {
-        if let win = hostedAUWindow {
-            win.makeKeyAndOrderFront(nil)
-            return
-        }
-        guard let au = audio.hostedAUAudioUnit else { return }
-        let titleHint = currentPreset?.label ?? "Hosted AU"
-        au.requestViewController { [weak self] vc in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                let content: NSViewController
-                if let vc {
-                    content = vc
-                } else {
-                    let label = NSTextField(labelWithString:
-                        "This Audio Unit does not expose a view controller.")
-                    label.alignment = .center
-                    let placeholder = NSViewController()
-                    placeholder.view = label
-                    content = placeholder
-                }
-                let window = NSWindow(contentViewController: content)
-                window.title = titleHint
-                window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
-                window.isReleasedWhenClosed = false
-                let delegate = HostedAUWindowDelegate { [weak self] in
-                    self?.hostedAUWindow = nil
-                    self?.hostedAUWindowDelegate = nil
-                }
-                window.delegate = delegate
-                self.hostedAUWindowDelegate = delegate
-                self.hostedAUWindow = window
-                window.makeKeyAndOrderFront(nil)
-            }
-        }
-    }
-
-    /// Snapshot the running SWAM's configured `fullStateForDocument` (after
-    /// assigning the MIDI CCs in its own UI) and bake it into
-    /// `SwamDefaultState.swift`, so `.swamViola` restores it on every launch.
-    ///
-    /// DEV-ONLY: this writes into the source tree, resolved from `#filePath`, so
-    /// it only works from a source/debug build (release builds strip the path).
-    /// Rebuild after capturing to compile the new blob in.
-    func captureSwamState() {
-        guard let data = audio.captureHostedAUFullState() else {
-            swamCaptureStatus = "Capture failed — no SWAM AU loaded."
-            return
-        }
-        let b64 = data.base64EncodedString()
-        let source = """
-        import Foundation
-
-        /// Captured SWAM Violin AU `fullStateForDocument` (binary plist, base64).
-        ///
-        /// This carries SWAM's OPAQUE encoded state — notably the per-control MIDI
-        /// CC assignments (Expression / Vibrato Depth / Bow Pressure / Bow/Pizz
-        /// Position), which SWAM does NOT expose as AU parameters and so can't be
-        /// set via the `hostedAUParams` dictionary. Regenerated by
-        /// `AppController.captureSwamState()` (the "Capture SWAM State" button).
-        ///
-        /// DO NOT hand-edit the base64; regenerate it via the capture button.
-        enum SwamDefaultState {
-            /// base64 of the binary-plist `fullStateForDocument`. Empty until captured.
-            static let violinBase64 = "\(b64)"
-
-            /// Decoded state ready for `AudioEngine.setHostedAUFullState`, or nil.
-            static var violin: Data? {
-                violinBase64.isEmpty ? nil : Data(base64Encoded: violinBase64)
-            }
-        }
-
-        """
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("SwamDefaultState.swift")
-        do {
-            try source.write(to: url, atomically: true, encoding: .utf8)
-            swamCaptureStatus =
-                "Captured \(data.count) bytes → SwamDefaultState.swift. Rebuild to bake it in."
-            NSLog("Starpad: \(swamCaptureStatus)")
-        } catch {
-            swamCaptureStatus = "Capture write failed: \(error.localizedDescription)"
-            NSLog("Starpad: \(swamCaptureStatus)")
-        }
     }
 }

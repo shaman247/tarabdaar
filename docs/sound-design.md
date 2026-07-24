@@ -1,147 +1,226 @@
 # Sound Design
 
-Sound design lives entirely on the Mac (StarpadMac). The iPad is a MIDI controller and produces no audio. The Mac receives MPE over USB and routes it to the selected **base voice** — by default the **fitted sarangi source** (`SarangiKit.ViolinSynth` playing `sarangi_model_v57.json`), alternatively a hosted **SWAM** Solo Strings AU (run **dry**) or the sitar model — whose audio feeds the **sarangi chain** (`SarangiKit.SarangiEngine`): a complete pure-Swift DSP package producing the full sarangi as one **passive coupled bridge–body network** — the played strings + the taraf web loading a shared bridge, a modal body with real interference antiresonances, the direct taraf-velocity tap, and the fitted radiation FIR — plus Starpad's 2-stage **FX rack** (default off). The model **is** the played voice. A separate **tanpura/sitar** layer (`StarpadDSP.TanpuraModel`) runs alongside through the shared master FX (their Room).
+Sound design lives entirely on the Mac (StarpadMac). The iPad is a MIDI controller and produces no audio. The Mac receives MPE over USB and renders the **sarangi String voice** — the only voice. It is `SarangiKit.BowEngine` driving the `CBowKernel` C friction kernel: a pure-physics bowed gut string that carries the **whole instrument** in-kernel — the played strings, the sympathetic (tarab) web with modal-jawari buzz, the formula body, radiation, and room. There is no hosted plugin, no base-voice selection, and no coupled bridge–body network in the signal path (the SWAM/sitar chain that used those was removed on 2026-07-24).
 
 ## Signal path
 
-The base voice feeds `hostedDriveTap`: the **sarangi model source** as its own
-48 kHz `AVAudioSourceNode` (default), or N × dry SWAM AU instances (SWAM's
-internal room/reverb/ambience/body off in `hostedAUParams` — the chain needs a
-clean input), or the sitar rendered in-block. The chain is rendered **inline**
-by the `SarangiProcessorAU` effect and owns its own body (the coupled
-network's modal body + radiation FIR), room, and FX rack, so its output goes
-**straight to `mainMixerNode`, bypassing** the shared master filter / reverb /
-`postReverbEQ` (those now process only the tanpura + sitar). See
-[sarangi.md](sarangi.md).
-
 ```
-MPE in ► base voice (model source 48k │ N × SWAM AU dry) ► hostedDriveTap ► SarangiProcessorAU ► symGain ───────────► mainMixerNode ► out
-                                                             (sums, SRC)     (beginBuffer + SarangiEngine.renderSample —        ▲
-                                                                              the passive coupled network + FX rack)            │
-                                                                                                                               │
-   tanpura/sitar ──► gains ──► preReverbMixer ► masterFilter ► reverb ► postReverbEQ ──────────────────────────────────────────┘
+MPE in ► routeSarangiModelMIDI ► StringVoiceSource (BowEngine + CBowKernel, 96 kHz → 48 kHz) ► symGain ► mainMixerNode ► out
 ```
 
-`SarangiProcessorAU` is a custom in-process AUv3 effect (`Packages/StarpadCore/.../SarangiProcessorAU.swift`) spliced right after `hostedDriveTap`. Its `internalRenderBlock` pulls the summed drive stereo synchronously into a private scratch buffer, forms a mono drive `0.5·(L+R)` (lifted by `sarangiDriveGain`), calls `engine.beginBuffer()` once, and runs `SarangiEngine.renderSample(input)` per sample — all in the **same engine pull**, so it adds **~0 ms latency**. (It replaced an earlier `installTap(4096)` → `SPSCAudioRing` → separate source-node transport that added ~140 ms.)
+The `StringVoiceSource` (`Packages/StarpadCore/.../StringVoiceSource.swift`) wraps the `BowEngine` as a 48 kHz `AVAudioSourceNode` connected **directly** to `symGain → mainMixerNode`. The kernel runs at 96 kHz internally and half-band-decimates to 48 kHz; the mixer input converts to the engine rate (44.1 kHz). There is no master filter/reverb bus — the kernel owns its own body and room. See [sarangi.md](sarangi.md) for the full physics treatment.
 
-- **Played voice.** The sarangi chain, fed by the selected base voice. The **model source** is monophonic (held-note stack with fitted legato glides — the sarangi is a bowed single line); SWAM polyphony comes from `N = Config.maxHostedPolyVoices` parallel instances round-robining MPE channels. See [MIDI & Audio — Polyphonic hosted-AU model](midi-and-audio.md#polyphonic-hosted-au-model).
-- **Sarangi model.** `Packages/SarangiKit/Sources/SarangiKit/DSP/SarangiEngine.swift` (+ the source in `Violin/`). The passive coupled network (see below) takes the dry source and produces the full stereo sarangi. Editable Mac-side via `SarangiStore` (raga + tonic + the sympathetic-string table + the 22 model parameters + the FX rack). See [sarangi.md](sarangi.md) for the full treatment.
-- **Tanpura + sitar.** `StarpadDSP.TanpuraModel` runs on its own source nodes (`tanpuraSource`/`sitarSource → preReverbMixer`), riding the shared master FX and the audition recording tap. Unchanged by the sarangi rework. See [tanpura.md](tanpura.md) / [sitar.md](sitar.md).
-- **Master FX (tanpura/sitar Room).** `AVAudioUnitEQ` (one band, resonant low-pass) → `AVAudioUnitReverb` (`.mediumHall`) → a 3-band `postReverbEQ`. The sarangi bypasses this whole chain (it has its own per-voice FX rack), so the master FX now shape only the tanpura/sitar tail (and the controls moved to the Tanpura tab's "Room" section).
+## The played voice — the String kernel
 
-## The sarangi model — the passive coupled network
+The kernel is the byte-exact twin of the offline reference in `~/Desktop/sarangi` (`bow_kernel.c` mono + `bow_kernel_poly.c` poly, always `-O3`). Fed by **`bowed_string.json`** (`Presets.bowedStringParams()`), it produces:
 
-`SarangiEngine.renderSample(input)` (after `beginBuffer()` once per buffer) is
-the live twin of the offline v57 coupled model (`coupled.junction_solve`,
-parity ≤ 1e-9). `input` is the dry mono voice (`0.5·(L+R)`); there is no
-separate amplitude envelope — the network is driven purely by the audio. The
-pieces:
+- **Played strings.** `bow_live_poly` gut strings on ONE shared delay-free bridge (poly-as-physics); a single held line is mono meend through the 9 Hz pitch smoother. Analytic Schelleng press envelope, place-then-draw + attack-bite articulation, aftertouch vibrato, self-calibrated intonation tables.
+- **The modal-jawari taraf, fused in-kernel** (`bow_jt_*`, armed by default). The sympathetic web + the steel-lattice jawari subset, driven one block late on its own worker pool (the callback never waits). Tuned from the **Tarab tab** rows.
+- **The formula body** — modal resonators derived from physical scalars (no FIR/fingerprint/coupled artifacts).
+- **Stereo** — the poly kernel renders a side stream of the direct radiation (taraf tap + jawari rows + bow noise), panned per pitch class around the tonic; `L/R = mid ± side`, mono fold-down bit-identical, plus the width-decorrelated room (`Reverb.processMonoStereo`).
 
-- **The junction.** Every string loads ONE shared bridge with impedance `Z_in = Z(1+G)/(1−G)`; the bridge velocity is solved **delay-free per sample** (`V = (Vst + y0·F0)/(1 + y0·ΣZ)` — structurally stable, no guard). Per-string impedances follow the live bank gains (`B_gain` cancels within a choir — the offline law).
-- **Played strings.** The drive excites the bridge directly (`pGain`·LP) plus **3 open-tuned played combs** (Sa / Pa / low Sa at the engine tonic).
-- **The taraf web.** ~39 strings → **polarization doublets** (`B_pol_*`, each string's two transverse modes a few cents apart), fractional-delay **web combs** with stiff-wire dispersion (`B_inharm`), in-loop f² damping (`B_damp`), and the in-loop HF roll-off `B_lp`.
-- **The modal body** (`BodyAdmittance`). One modal bank with two residue taps: the bridge **admittance** (what loads and re-excites the strings) and the **radiation** (what you hear; signed residues ⇒ real antiresonances). **`WModalBank`** radiates the stereo **side** channel from the per-string pans (`B_spread`) — mono-sum-invariant.
-- **The direct taraf tap** (`N_taraf_dir`/`N_taraf_dir_lp`). The taraf strings' own weighted velocity reaching the ear past the body's W — the string-Q-sharp ring the Q≤12 modal radiation can't carry.
-- **Radiation FIR + `E_lp`.** The fitted radiation FIR ships inside `sarangi_coupled.json` at both 44.1 kHz and 48 kHz (no Starpad-side bakes), followed by the `E_lp` radiation low-pass.
-- **Drone + room.** Both playable but **fitted to 0** (`mix_drone` 0, `F_mix` 0 — "the ringing taraf is the room").
-- **Output user EQ** (`VoiceEQBand`) — default **FLAT** (the fitted W valley superseded the old de-horn cuts). Starpad's **FX rack** (2 stages: `violinPre` pre-drive + `global` mid/side output, each filter + EQ + reverb) sits on top — **both OFF by default**.
+## Editing the sound
 
-The engine **requires** the bundled `sarangi_coupled.json` (`N_junction
-"passive"`); unarmed it renders silence. Stereo comes from the per-string pans
-(the mono sum equals the mono chain). There are **22 model parameters**
-(`ParamSpec.all`, grouped Bank / Drone / Body / Reverb / Mix — see
-[Config Reference](config-reference.md#sarangi-model-mac)); each is either
-**structural** (rebuilds the engine's filter coefficients off-thread) or a **live
-scalar** (a gain/mix the render thread reads lock-free). The FX rack is separate
-state (`FXRack` on `InstrumentState.fx`, edited in the FX tab). **One fitted
-preset** ships — **sarangi_pilu** (the v57 Pilu-session fit; pair with the
-model base voice) — a params JSON plus the **exact offline string table**
-(`Presets`, bundled resources).
+- **The parameter list (Parameters tab, ⌘5).** `ParametersView` over `ParamRegistry` — eight groups (Bow stroke / Body / Bow & string / Playing ranges / Jawari taraf / Taraf / Articulation / Radiation & output) covering **every** parameter, physics and live alike, in native units with a filter box and a per-row mapping button. No row is tagged by apply strategy: `rebuild` rows re-apply through a **crossfaded** off-main `BowEngine` rebuild ~0.2 s after the value settles (see below) and persist as an override dict (`starpad.stringOverrides.v1`); `live` and `hybrid` rows apply instantly and persist in `starpad.controlDefaults.v1`. "Default (Sarangi Live)" / "Reset all" clears both, double-clicking a row label resets one. Audition path: `string.<key>` or `param.<key>`.
+- **Sympathetic strings (Tarab tab, ⌘2).** The editable `[StringSpec]` tarab table (see below) tunes the kernel's in-kernel taraf.
+- **Tilt / composite parameters (Controls tab, ⌘4).** Named 0–1 composite macros built from any parameters, plus direct tilt→parameter bindings — driven live from tilts or audition scores, without a rebuild wherever the parameter allows it.
 
 ## Sympathetic strings — the editable bank
 
-The sympathetic taraf bank is a **fully editable `[StringSpec]` table** — each
-row a `(freq, gain, t60, bright, enabled, group)` web-comb string — owned Mac-side
-by `SarangiStore` in `InstrumentState` and edited in the **Tarab tab (⌘4)**. **By
-default it auto-tunes to the Pitch Pad scale** (`autoSyncToScale`); a hand edit /
-choir toggle / raga pick detaches it for manual tuning. See
-[sarangi.md](sarangi.md#sympathetic-strings-the-tarab-tab-4).
+The sympathetic taraf bank is a **fully editable `[StringSpec]` table** — each row a `(freq, gain, weight, t60, bright, enabled, group)` string — owned Mac-side by `SarangiStore` in `InstrumentState` and edited in the **Tarab tab (⌘2)**. The rows tune the String voice's in-kernel taraf (linear web + the modal-jawari subset).
 
-The bank is generated for a chosen **raga + tonic** by `RagaTuning.buildStrings`
-(JI ratios, a four-choir layout: 15 chromatic, the scale degrees with Sa/Pa
-doubling, a low choir, and 6 upper-octave strings, all with seeded ±cents
-detune). Three ragas ship — **E♭ harmonic minor**, **Bhairav**, and **Pilu**
-(the fitted 9-note thumri scale) — and the table is open to extend. Picking a
-raga resets the tonic to its hint and regenerates the bank; the tonic can be set
-by Hz or note name (e.g. `Eb4`). Editing any row, adding/removing strings, or
-changing raga/tonic triggers a (debounced) structural rebuild of the engine.
-`regenerate()` rebuilds from raga + tonic (discarding manual edits); `transpose`
-scales every string frequency to a new tonic while keeping manual edits.
-**Caveat:** any regeneration (including the default scale auto-sync) REPLACES
-the fitted preset's exact string table — the offline detunes are PCG64-seeded
-and cannot be reproduced by the Swift RNG, and the exact table audibly matters
-(the string-table law) — so turn auto-sync off to keep the fit exact. Full
-detail: [sarangi.md](sarangi.md).
+Since the String-era default, **auto-sync to the scale starts OFF** — the default preset is the Sarangi Live default and its EXACT fitted Pilu table must stick (a scale re-sync REPLACES it with Swift-RNG-regenerated detunes, ~5 c/string off the fit; the exact table audibly matters — the string-table law). The tab's "Follow the Pitch Pad scale" switch / "Re-sync" button opt in; a hand edit / choir toggle / raga pick flips it back off. Strings are tagged by `StringGroup` (chromatic / scale-tuned / low octave / upper octave — the four choirs `RagaTuning.buildChoirs` constructs) and shown one section per choir. Full detail: [sarangi.md](sarangi.md).
 
-### The preset
+## The preset
 
-The single fitted preset (`sarangi_pilu`) reproduces the complete offline v57
-match: raga Pilu + Sa 328.9 Hz, the **exact offline string table**
-(`sarangi_pilu_strings.json`), and the fitted parameter values — so the live
-model matches the offline render out of the box. Pair it with the **Sarangi
-(model)** base voice. The whole `InstrumentState` persists to UserDefaults and
-can be exported/imported as a `.sarangi` JSON file.
+One preset ships — **"Default (Sarangi Live) — Pilu, fitted"** (`SarangiStore.loadSarangiLiveDefault` + `StringParamStore.resetToDefault`), also the fresh-install default: untouched artifact physics, the exact fitted Pilu string table (`sarangi_pilu_strings.json`), Sa 328.9 Hz, auto-sync OFF. The whole `InstrumentState` persists to UserDefaults (`starpad.sarangiState.v8`) and can be exported/imported as a `.sarangi` JSON file.
 
-## Tanpura drone (the actual instrument)
+## Drones
 
-StarpadMac also has a **playable tanpura** — four harmonic-resolved modeled strings on the Tanpura tab, matched against a real recording by an autonomous measurement/optimization loop. Each harmonic of each string (up to 64) is synthesized individually with its own bloom envelope (gain, peak time, decay — per-harmonic editable in the UI), which is what produces the signature jawari cascade where harmonics peak at different times; a per-string half-integer sub-bank (`subLevelDB`) adds the bridge's period-2 partials at `(k+0.5)·f0`, which the reference recording carries at surprisingly high level. Full model, parameter, and matching-pipeline documentation: [tanpura.md](tanpura.md).
+Four press-to-sound drone buttons inside the Fret Pad's right edge drive the kernel's jawari-taraf rows (pitches on `FretArrangement.droneRatios`, relative to the played tonic). Every configured pitch gets a jawari row at engine build. See [Fret Pad](fret-pad.md) for the full drone treatment and the calibrated levels.
 
-## Liveness
+## Levels
 
-Sympathetic strings without movement sound static. The sarangi model's life is structural, not LFO-driven: the **taraf web's strings beating against each other** (seeded ±cents detune **plus** each string's polarization doublet), **true bridge coupling** (every string loads and re-excites every other through the shared passive junction — physics, not a mixed-in effect), and — on the model source — the fitted **voice↔taraf coupling** (`SympatheticWeb`/`SourceFMBank`: the wash the voice excites interferes with and modulates the voice itself). The Bank parameters (see [Config Reference](config-reference.md#sarangi-model-mac)) shape all of it.
+Calibration is inside the fitted preset (`bow_live_trim` / `bow_rev_*` set the output level). The Mac pads hold a flat per-note CC11 = 32 (the fitted expr median — CC11 is a real ±16 dB loudness axis). Loud peaks are backstopped inside the kernel.
 
-## Master FX (the tanpura/sitar Room)
+## Re-fitting
 
-The master filter + reverb + `postReverbEQ` now shape **only the tanpura/sitar tail** — the sarangi owns its own body (the coupled network's modal body + radiation FIR) + FX rack and bypasses this chain entirely. The controls live on the **Tanpura tab** (the "Room (tanpura + sitar)" section).
+To change the model's DSP or re-fit, work in `~/Desktop/sarangi`, then re-vendor `Packages/SarangiKit/Sources/SarangiKit/{DSP,Model,Violin,Bow}` + `Sources/CBowKernel` + the resources. Starpad vendors the fitted package and does not re-fit in-tree. See CLAUDE.md's "Sound Design Iteration" section and [sarangi.md](sarangi.md).
 
-| Parameter | Range | Description |
+## What a rebuild costs (measured 2026-07-24)
+
+Parameters that are engine-build values (`rebuild`, and `hybrid` pushed
+above its built value) cannot be poked into a running kernel — they
+require constructing a fresh `BowEngine`. Numbers from
+`Packages/StarpadCore/Tests/StarpadCoreTests/RebuildCostTests.swift`,
+which is checked in so these stay honest:
+
+| | |
+|---|---|
+| Full rebuild | **~218 ms** (off-thread — latency, never a dropout) |
+| …of which tables + kernel + worker pool | **~4.5 ms** |
+| …of which the **settle pre-roll** | **~214 ms (98%)** |
+
+The pre-roll is the whole cost. A fresh kernel's jawari web relaxes off
+the builder's `q0` with an audible chime, so `buildEngine` renders and
+discards audio until it dies down. Measured idle peak per 85 ms block:
+−33, −45, −48, −49, −49, −50, −53 dBFS — it asymptotes near −50, so the
+old 6-block pre-roll bought ~1 dB over 4 blocks for ~110 ms of extra
+latency. It is now **4 blocks** (324 → 218 ms), guarded by an A/B test
+that publishes with both lengths and fails if the short one is more than
+2 dB louder. Lengthening the crossfade does *not* substitute: 180 → 450 ms
+of fade bought only 1 dB, because what remains is the web's steady idle
+floor, not a decaying transient. Fixing it properly means an upstream `q0`
+that does not leave the web charged at t = 0.
+
+**Continuity.** A fresh engine has zero string/taraf/room state, so an
+abrupt swap is very different depending on what is sounding:
+
+| | hard swap | crossfaded |
 |---|---|---|
-| `reverbMix` | 0–100 % | Wet/dry mix of `AVAudioUnitReverb(.mediumHall)`. Wraps the tanpura/sitar bus. |
-| `filterCutoff` | 20–20000 Hz | `AVAudioUnitEQ` band, type `.resonantLowPass`. Default 18 kHz keeps the filter open; lower values darken the tanpura/sitar. |
-| `filterResonance` | 0–1 | Maps onto the EQ band's bandwidth (0 → 4 octaves wide, 1 → 0.1 octaves wide, i.e. sharp resonant peak). |
+| Note **held** across the rebuild | 96% of level within 43 ms — a step, not a dropout | seamless |
+| Swap **during the ring** (after note-off) | **4.9% of the tail survives** — the ring is cut | **69%** — it decays naturally |
 
-## Hosted-AU integration
+So `StringVoiceSource.setEngine` keeps the outgoing engine rendering and
+equal-power crossfades into the new one over
+`StringVoiceSource.engineCrossfadeMs` (300 ms). That costs 2× voice CPU
+for the fade window only: measured at the app's 128-frame buffer,
+**11% of realtime for one engine, 19% for two**.
 
-The hosted instrument is identified by a 3-tuple `(type, subType, manufacturer)` on `SoundPreset.State.hostedAudioUnit`, run **dry** (its internal room/reverb/ambience/body off in `hostedAUParams`, since the sarangi model needs a clean bowed input).
+**Why the distinction still exists internally.** At ~218 ms per build
+plus a 300 ms fade, build-time parameters are fine under a slider but
+cannot be swept at tilt rate (60 Hz). `ParamRegistry`'s `apply` field is
+therefore a routing hint, not a user-facing category — nothing in the UI
+labels it, and the tooltip mentions it only for anyone chasing latency.
 
-- **Base-voice selection (Setup tab).** Which voice feeds the model is the user's choice, surfaced as the "Base voice" picker in the Setup tab's Audio section (`AppController.baseVoice`, the flat `BaseVoice` enum in `StarpadMac/SoundPreset.swift`, persisted to `starpad.baseVoice`; migrates the older `starpad.hostedInstrument` key; fresh installs default to the sarangi model). Six options:
-  - **Four SWAM Solo Strings 3 voices** — Violin `Svl3`, Viola `Sva3`, Cello `Sce3`, Double Bass `Sdb3` (all `("aumu", …, "AuMo")`; subTypes verified with `auval -a`). **The four share the AU parameter layout**, so the preset's dry `hostedAUParams` (bow timbre + room/body off) and the captured CC-assignment blob apply unchanged — switching only swaps the component subType, and the params/state already installed in the engine re-apply to the new slots on attach. Default is Violin (the voice the model was fitted against).
-  - **Our sitar model** (`.sitar`) — instead of a SWAM AU, the plucked sitar (`TanpuraParams.sitar`) becomes the excitation. `AudioEngine` owns a dedicated `voiceSitar` (`TanpuraModel`, separate from the Sitar tab's `sitar`) that is rendered **inside the sarangi process block** and drives `renderSample` in SWAM's place (SWAM is unloaded); the coupled bridge / taraf web / modal body / FX then color the plucked sitar. Incoming notes drive it through `routeSitarBaseVoiceMIDI` (a note→pluck bridge on the shared MIDI choke point `sendHostedMIDI`): each Note On plucks a pooled string (4 strings, round-robin/steal) tuned to the note, **pitch bend glides** the string continuously (cheap `TanpuraModel.retuneString`), and Note Off frees the string to ring out. The sitar timbre stays in step with the Sitar tab (`AppController.sitarParams` pushes to `voiceSitar` when it's the base voice). **Level:** the sitar model's raw output is far quieter than SWAM's, and `sarangiDriveGain` (default 1.0) is calibrated for SWAM — so the base-voice sitar gets its own **+18 dB makeup** (`AudioEngine.sitarBaseVoiceMakeup`, matching the Sitar tab's `sitarGainDB`) applied to its drive, or it under-drives the model to near-silence at the default drive. This is why it plays through any pad (Pitch / Chord / **String**) — all three emit through the same `sendHostedMIDI` bridge.
-  - **The fitted sarangi source** (`.sarangiModel`, the default) — the `SarangiKit.ViolinSynth` playing `sarangi_model_v57.json` as its own 48 kHz source node feeding `hostedDriveTap` (SWAM is unloaded). Monophonic with fitted legato glides + MPE bend tracking (`routeSarangiModelMIDI` → `SarangiModelVoiceControl`); expr/press/pos/tilt ride CC11/CC1/CC74/CC2-or-75 (Setup-tab sliders idle at the fitted operating point, and the Mac pads' flat per-note CC11 drops to 32 ≈ the fitted expr median for this voice). See [sarangi.md](sarangi.md#the-source-model-violin-the-sarangi-model-base-voice).
-  The preset's `State.hostedAudioUnit` only gates *whether* a hosted AU is used at all (`nil` ⇒ unload); the *which* comes from `baseVoice`, applied by `AppController.applyBaseVoice` (called from `applyPreset` and the picker's `didSet`). Scriptable from an audition score via `voiceParam` `baseVoice` (0=Violin, 1=Viola, 2=Cello, 3=Double Bass, 4=sitar, 5=sarangi model).
+## In-place parameters (2026-07-24, stages 1+2)
 
-- `AudioEngine.loadHostedInstrument` instantiates `Config.maxHostedPolyVoices` copies in parallel and wires each into the graph at the `hostedDriveTap` mixer (whose summed output is pulled inline by the `SarangiProcessorAU` effect — no tap, no ring).
-- Every MIDI byte arrives via `MIDIInput` and is forwarded verbatim to the AU's `scheduleMIDIEventBlock`. Per-voice messages route to the channel's bound slot; master-channel and channel-state CCs (CC 121, CC 123, RPN 101/100/6/38) broadcast.
-- Edits made via the AU's UI on the primary slot mirror onto every other instance via an `AUParameterTree` observer, so the user only configures one SWAM and polyphonic voices stay consistent.
-- **Programmatic AU-parameter control.** `AudioEngine.hostedParameterDump()` enumerates SWAM's full parameter tree (identifier, name, range, value) and `setHostedParameter(identifier:value:)` sets one on every slot. A preset carries its own defaults in `SoundPreset.State.hostedAUParams` (identifier → value), pushed by `AudioEngine.setHostedAUParameterDefaults` and re-applied to each slot on instantiate. This is how the sarangi match drives SWAM's **bow timbre** (Bow Position/Pressure) and zeroes its auto-vibrato. From an audition score: `voiceParam` `swam.<identifier>` sets a value; `voiceParam` `__auDump__` writes `swam_params.json` for discovery. The **Strings Model** default (set to *Virtual Adaptive Resizing (Mono)*) rides this same dictionary (`"960866759": 1.0`).
-- **Full-state restore (opaque settings, incl. MIDI CC assignments).** Some SWAM settings are NOT AU parameters and so can't be reached via `hostedAUParams` — most importantly the **per-control MIDI CC mappings** (which incoming CC drives Expression / Vibrato Depth / Bow Pressure / Bow/Pizz Position). These live inside SWAM's opaque encoded `fullStateForDocument` blob. A preset carries that blob in `SoundPreset.State.hostedAUState` (a serialized binary plist), pushed by `AudioEngine.setHostedAUFullState` and restored to each slot in `attachHostedInstance` **before** the `hostedAUParams` pass (so the params we tune in code still win; the blob supplies only the opaque routing). The blob can't be authored from code — it must be **captured** from a hand-configured SWAM: assign the CCs in SWAM's MIDI-mapping UI (open it from the AU-status popover → *Open AU view*), then click **Capture SWAM State** (same popover) → `AppController.captureSwamState()` writes `StarpadMac/SwamDefaultState.swift` (base64 of the blob); rebuild to bake it in. Empty base64 ⇒ restore is a no-op. Dev/source builds only (the capture writes into the source tree via `#filePath`).
-- Clean quit (`⌘Q`) unloads every AU instance; SWAM's licensing daemon needs the explicit release or the next launch sees a stuck token.
+Most parameters no longer rebuild at all. `BowEngine.setLiveParams` pushes
+an edit onto the **running** kernel: the 61 per-sample scalars are
+overwritten (`bow_[poly_]set_scalars`, a new Starpad divergence in the
+vendored C alongside the existing `bow_set_jaw_gain` / `bow_jt_set_lp`)
+and the Swift-side mapping constants are re-read. Nothing is reset — the
+string histories, taraf ring, jawari web, room tail and note articulation
+all carry straight through.
 
-See [MIDI & Audio — Hosted AU + sarangi drive](midi-and-audio.md#hosted-au--sarangi-drive) for the full per-slot allocation table and reset sequence.
+**How far it goes.** `ParamLivenessTests` classifies every parameter
+empirically (perturb it, rebuild the tables, diff what actually moved):
 
-## Next steps
+| Tier | Count | Status |
+|---|---|---|
+| kernel scalars | 22 | **in place** (stage 2) |
+| no table movement (mapping constants, output/room/radiation) | 31 | **in place** (stage 1) |
+| coefficient arrays — body modal bank + jawari tables | 13 | **in place** (stage 3) |
+| coefficient arrays — sympathetic web | 7 | rebuilds |
+| array **sizes** change (`bow_body_modes`) | 1 | genuine rebuild |
 
-Candidate additions, ordered by estimated impact-per-effort.
+Stage 3 reloads the body bank (`bow_set_body`) and the jawari tables
+(`bow_jt_set_coeffs`) onto the running kernel. Histories are kept on both:
+the body resonators keep their state (so retuning the body under a note is
+click-free, the same trick as swapping biquad coefficients), and the
+jawari web keeps its settled wrap, so it relaxes into the new bone
+geometry the way a real jawari adjustment does.
 
-### Quick wins
+The sympathetic web is the one group left out, for two concrete reasons
+rather than caution: `bow_taraf_damp`, `bow_taraf_inharm` and
+`bow_taraf_pol_cents` move the **delay-line lengths**, which cannot be
+swapped under a running ring; and `bow_taraf_Z` / `bow_taraf_bright` /
+`bow_taraf_gain` ride the per-voice arrays including the charge window,
+which `bow_init` consumes rather than stores. (`bow_taraf_jawari` is
+already live downward through its hybrid scaler — the direction that
+matters musically.)
 
-1. **More fitted ragas** — extend `RagaTuning.ragas` and ship additional fitted presets (params + exact string tables) for more ragas/tonics; only Pilu has a fitted table today.
-2. **More hosted-AU presets** — drop additional `SoundPreset` cases pointing at other AU instruments (SWAM French Horn, Pianoteq, etc.).
+`ParamRegistry.inPlaceKeys` is the shipped set (58 keys);
+`StringParamStore` tries the fast path and falls back to a rebuild when a
+touched key needs fresh tables. Verified: a pushed value settles within
+**0.03 dB** of an engine built with it baked in, a held note keeps 100% of
+its level, and a decaying ring keeps 76% (a hard swap kept 4.9%).
 
-### Production polish
+### Zipper
 
-3. **String-table editing UX** — bulk operations (transpose a selection, mute a choir, copy a string) in the Sarangi tab's string table.
+The push writes coefficients directly, so it was measured for zipper
+(`ZipperTests`) rather than assumed safe:
 
-### Bigger changes
+| Case | Excess HF vs a smooth sweep |
+|---|---|
+| `bow_mu_s` swept over 2 s at 60 Hz | −2.0 dB |
+| gain-like parameters (`bow_w`, `bow_body_c0`, `bow_taraf_dir`, `bow_live_trim`, `bow_rev_mix`), full range in 150 ms | −0.4 … +0.1 dB |
 
-4. **Live param sweeps via audition** — the autonomous loop can already sweep the 22 model params (`sarangi.<paramId>` voiceParams) and the FX rack (`sarangi.fx.<stage>.<field>`). Wire a CMA-ES match against bowed refs through the running app, the way the tanpura/sitar are matched.
+No zipper at tilt rate. Friction coefficients cannot click by
+construction — they change how the string *evolves*, not the current
+sample. The parameters that CAN click are the ones that multiply the
+signal, and only on a large instantaneous jump. Measured worst case, a
++17 dB `bow_live_trim` jump mid-note:
+
+| | seam step vs the signal's own largest sample-to-sample motion |
+|---|---|
+| no ramp | **17.9×** — an audible click |
+| 25 ms chunk-rate ramp | 3.4× |
+| + per-sample `outGain` interpolation | **0.0×** (5.2e-6 vs 3.9e-3) |
+
+Both were needed. The chunk ramp alone leaves a ~20% step at the first
+boundary because a 7× gain ratio in ~19 steps still starts coarse, so
+`postChain` interpolates the output gain **across** the chunk. The ramp
+also caps the render chunk to 256 frames while it runs — otherwise the
+offline/audition path (4096 frames at a time) resolves the whole glide in
+one step, which is exactly the click being prevented.
+
+### The chunk cap is not neutral
+
+The zipper ramp caps `render`'s chunk to 256 frames while it runs. Chunk
+size is **not** a neutral choice: it sets the control-interpolation grid
+and the jawari web's block boundaries, so splitting a 4096-frame offline
+render moves a chaotic friction loop onto a different (valid, but
+different) trajectory. A push that changed *nothing* was measured
+deviating **41% of peak** for exactly this reason.
+
+The ramp is therefore armed only when a ramped quantity actually moved —
+a no-op push is now bit-identical (`testNoOpPushIsBitIdentical`), and a
+coefficient-only reload does not arm it at all, since swapping filter
+coefficients while keeping state is click-free without one. For a real
+edit the chunk still splits, which is why a pushed value settles within
+~0.4 dB of a rebuilt engine rather than exactly on it.
+
+## Real-time validation (2026-07-24)
+
+Two layers, both clean.
+
+**Headless, buffer-accurate** (`RealtimePerformanceTests`): the voice at
+the device's 128-frame buffer, notes through `BowControlMapper`, a tilt
+evaluated through `DimensionBinding` into the same apply paths
+`AppController` uses. Five scenarios, 1500–1875 buffers each:
+
+| Scenario | render p50 | p99 | over budget | dropouts | worst step |
+|---|---|---|---|---|---|
+| Composite (Taraf Purity) swept by tilt | 9% | 23% | 0 | 0 | 2.3× |
+| Direct params (`bow_mu_s` + `bow_body_q`) | 10% | 15% | 0 | 0 | 1.8× |
+| 5 Hz full-range flicks | 19% | 53% | 0 | 0 | 3.6× |
+| Polyphonic, everything moving | 15% | 22% | 0 | 0 | 1.9× |
+| Rebuild-tier sweep (crossfaded) | 19% | 68% | 0 | 0 | 2.8× |
+
+(Percentages are of the 2.67 ms realtime budget; "worst step" is the
+largest sample-to-sample jump against the signal's own 99.9th-percentile
+step.) A first version of this harness reported 13 overruns and 243% —
+both were artifacts of the harness itself: a `[Float]` allocation per
+buffer and wall-clock timing in a normal-priority test process. Judge
+realtime behavior on p99 with preallocated buffers.
+
+**In the app**: 19 audition runs through the running StarpadMac, which
+renders in realtime through the device path. Held-note tilt sweeps, 5 Hz
+and 20 Hz flicks, all three tilt axes, 60 Hz in-place parameter sweeps,
+polyphony, drones + notes + tilts + parameters together, a 30-second
+continuous phrase, and a **rebuild storm** (a rebuild-tier parameter swept
+at 60 Hz, queueing fresh engine builds continuously — the worst thing a
+tilt could be mapped to). Every render: worst step **1.0–1.9×**, **zero**
+dropout windows, zero NaN, and the app's own watchdog logged **zero
+render overruns and zero jawari-web overloads**. Repeats of the four
+hardest scores were equally clean.
+
+The control matters as much as the result: an identical score with the
+parameter motion removed differs from the swept one by 128% of signal
+RMS, so the clean numbers are not measuring an inert path.
+
+**Not covered**: in-app the tilts drove composites (the shipped default
+bindings) — a tilt bound *directly* to a single parameter was exercised
+only in the headless harness. And a real iPad over USB-MIDI adds
+MIDI-thread jitter the in-process simulator does not have.

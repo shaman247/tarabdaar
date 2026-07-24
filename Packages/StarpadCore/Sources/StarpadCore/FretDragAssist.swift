@@ -15,9 +15,10 @@ import Foundation
 //
 //     played = uncorrectedLog + correction
 //
-// where `uncorrectedLog` is the raw x-mapped pitch plus the constant onset
-// offset. `correction` is *slewed* toward the nearest qualifying fret with a
-// rate that is the product of three continuous factors:
+// where `uncorrectedLog` is the fret-field pitch at the cursor plus the
+// constant onset offset. `correction` is *slewed* toward the nearest
+// qualifying fret with a rate that is the product of three continuous
+// factors:
 //
 //   • **stationarity OR turn impulse** — the gate. Stationarity is smoothed
 //     horizontal speed through a smoothstep (1 below `speedFloor` px/s, 0
@@ -28,12 +29,13 @@ import Foundation
 //     decays (`turnGain`, `turnTau`). Gate = min(1, max(speedGate,
 //     turnGain·impulse)).
 //   • **proximity** — the fret must be within the assist basin
-//     (`radiusScale` × the Snap radius, in log-pitch — fast landings are far
-//     sloppier than onsets) of the *uncorrected* pitch AND the touch's y
-//     must be inside the fret's vertical extent (above/below a segment stays
-//     free, and Snap = 0 disables assist entirely). The pull is full inside
-//     half the radius and fades linearly to 0 at the edge, so the field is
-//     continuous in space as well as time.
+//     (`radiusScale` × the Snap radius, in **screen px** — frets are freely
+//     positioned, so screen distance to the fret line is the natural metric,
+//     matching the onset snap; fast landings are far sloppier than onsets)
+//     of the touch AND the touch's y must be inside the fret's vertical
+//     extent (above/below a segment stays free, and Snap = 0 disables assist
+//     entirely). The pull is full inside half the radius and fades linearly
+//     to 0 at the edge, so the field is continuous in space as well as time.
 //   • a **settle time constant** (`settleTau`) with a hard **slew cap**
 //     (~1500 cents/s) on the correction — smoothness is guaranteed by
 //     construction, whatever the fitted constants say.
@@ -77,12 +79,15 @@ public final class FretDragAssist {
 
     private var touches: [Int: TouchState] = [:]
     private var placements: [FretPlacement] = []
-    private var radiusLog: Double = 0
+    private var radiusPx: Double = 0
 
     // Constants fitted to real iPad playing (2026-07-16: 8 repetitions of the
     // connected phrase p n d n p d m p g, `tools/fretpad_fit.py fit --phrase`;
     // landing error 39.7c → 29.3c, transit warping 2.3c). The recording was
-    // fast connected playing — refit as more styles are recorded.
+    // fast connected playing — refit as more styles are recorded. Fitted
+    // under the pitch-mapped ribbon (basin was ≈75¢ in log-pitch); since the
+    // 2026-07-23 free-fret change the basin is the same 42 px in screen
+    // space — re-record and refit on the new surface to re-verify.
 
     /// px/s below which the touch counts as fully stationary.
     public var speedFloor: Double = 59
@@ -94,9 +99,10 @@ public final class FretDragAssist {
     /// hard `slewCap` below is what actually bounds the correction rate,
     /// guaranteeing smoothness regardless of the fitted taus.
     public var settleTau: Double = 0.005
-    /// The assist's magnet basin = `radiusScale` × the Snap radius (the
-    /// onset snap stays at 1× — fast landings are far sloppier than onsets).
-    /// Fitted together with the Fret Pad's 24 px default Snap (basin ≈ 75¢).
+    /// The assist's magnet basin = `radiusScale` × the Snap radius, in px
+    /// (the onset snap stays at 1× — fast landings are far sloppier than
+    /// onsets). Fitted together with the Fret Pad's 24 px default Snap
+    /// (basin = 42 px).
     public var radiusScale: Double = 1.75
     /// Direction-flip impulse strength: a causally-detected turn (dx sign
     /// flip) sets `impulse = 1`, and the gate is `max(speedGate, turnGain ×
@@ -125,11 +131,9 @@ public final class FretDragAssist {
     /// Refresh the geometry the assist resolves against. Call from the
     /// surface whenever it has fresh placements (every down/drag event); the
     /// timer reuses the last context between events.
-    public func setContext(placements: [FretPlacement], snapDistance: CGFloat,
-                           ghostExtentOctaves: Double, width: CGFloat) {
+    public func setContext(placements: [FretPlacement], snapDistance: CGFloat) {
         self.placements = placements
-        let span = 1.0 + 2.0 * max(0, ghostExtentOctaves)
-        self.radiusLog = Double(snapDistance / max(1, width)) * span * radiusScale
+        self.radiusPx = Double(max(0, snapDistance)) * radiusScale
     }
 
     /// Register a play touch at note-on. The touch starts at `speedCeiling`
@@ -214,16 +218,16 @@ public final class FretDragAssist {
         let w = v * v * (3 - 2 * v)
         let gate = min(1.0, max(w, turnGain * s.impulse))
 
-        // Candidate: nearest fret (in log-pitch, from the *uncorrected*
-        // pitch) within the assist basin (radiusScale × Snap) whose vertical
-        // extent contains the touch.
+        // Candidate: nearest fret (in screen px — frets are freely
+        // positioned) within the assist basin (radiusScale × Snap) whose
+        // vertical extent contains the touch.
         var cand: FretPlacement? = nil
         var candD = Double.infinity
-        if radiusLog > 0 {
+        if radiusPx > 0 {
             for p in placements {
                 guard s.y >= p.topY, s.y <= p.bottomY else { continue }
-                let d = abs(log2(p.ratio) - s.uncorrectedLog)
-                if d <= radiusLog, d < candD {
+                let d = Double(abs(p.x - s.x))
+                if d <= radiusPx, d < candD {
                     cand = p
                     candD = d
                 }
@@ -234,14 +238,14 @@ public final class FretDragAssist {
         if let cand {
             // Full pull inside half the radius, fading to 0 at the edge —
             // continuous in space.
-            let prox = max(0.0, min(1.0, 2.0 * (1.0 - candD / radiusLog)))
+            let prox = max(0.0, min(1.0, 2.0 * (1.0 - candD / radiusPx)))
             let rate = (1 - exp(-dt / settleTau)) * gate * prox
             let target = log2(cand.ratio) - s.uncorrectedLog
             let cap = slewCap * dt
             let step = (target - s.correction) * rate
             s.correction += min(cap, max(-cap, step))
             // Glow: proximity-shaped, brightening as the gate opens.
-            let glow = (1.0 - candD / radiusLog) * (0.3 + 0.7 * gate)
+            let glow = (1.0 - candD / radiusPx) * (0.3 + 0.7 * gate)
             if glow > 0.05 { weights[cand.id] = min(1.0, glow) }
         }
         // No candidate → correction frozen (the carried tuning anchor).

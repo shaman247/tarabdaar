@@ -67,3 +67,7 @@ auditions/
 *.flac
 *.npz
 !**/*.xcassets/**/*.png
+
+# Generated documentation site (rendered from docs/*.md by
+# tools/gen_docs_html.py on every build; regenerate, don't commit).
+docs/html/

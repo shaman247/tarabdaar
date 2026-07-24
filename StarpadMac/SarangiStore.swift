@@ -249,6 +249,13 @@ final class SarangiStore: ObservableObject {
         rebuildNow()
     }
 
+    /// Adopt a whole instrument document (preset load). Auto-sync stays
+    /// as the document specifies — a saved rig should come back exactly.
+    func replaceState(_ s: InstrumentState) {
+        state = s
+        rebuildNow()
+    }
+
     func resetParams() { state.params = .defaults; rebuildNow() }
 
     func save(to url: URL) throws {
