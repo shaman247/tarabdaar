@@ -51,67 +51,7 @@ final class BowPolyTests: XCTestCase {
         return BowParams(num: num)
     }
 
-    /// The full sarangi bow config carried by the table-parity golden
-    /// (tuning + merged network params + bow params) — same loader as
-    /// BowEngineTests.
-    private func sarangiConfig() throws -> (BowTuning, BowNetParams, BowParams) {
-        guard let url = Bundle.module.url(forResource: "bow_tables_default",
-                                          withExtension: "json",
-                                          subdirectory: "Goldens"),
-              let obj = try? JSONSerialization.jsonObject(
-                  with: Data(contentsOf: url)) as? [String: Any],
-              let tj = obj["tuning"] as? [String: Any],
-              let qj = obj["q"] as? [String: Any],
-              let bpj = obj["bp"] as? [String: Any],
-              let tonic = (tj["tonic"] as? NSNumber)?.doubleValue,
-              let rows = tj["strings"] as? [[Any]],
-              var bp = BowParams(json: bpj) else {
-            throw XCTSkip("bow_tables_default golden not found")
-        }
-        let strings = rows.compactMap {
-            row -> (f: Double, gain: Double, t60: Double, bright: Bool)? in
-            guard row.count >= 4,
-                  let f = (row[0] as? NSNumber)?.doubleValue,
-                  let g = (row[1] as? NSNumber)?.doubleValue,
-                  let t = (row[2] as? NSNumber)?.doubleValue,
-                  let b = row[3] as? NSNumber else { return nil }
-            return (f, g, t, b.boolValue)
-        }
-        let cls = (tj["string_class"] as? [Any])?.compactMap { $0 as? String }
-        let absIdx = Set(((tj["t60_abs_idx"] as? [Any]) ?? [])
-            .compactMap { ($0 as? NSNumber)?.intValue })
-        var q = BowNetParams()
-        q.merge(json: qj)
-        bp.num["bow_precharge"] = 0.0            // live policy
-        return (BowTuning(tonic: tonic, strings: strings, stringClass: cls,
-                          t60AbsIdx: absIdx),
-                q, bp)
-    }
-
-    private func initPoly(_ nb: Int, tables t: BowKernelTables)
-        -> UnsafeMutableRawPointer {
-        let s = t.scalars
-        return bow_poly_init(
-            Int32(nb), t.sr,
-            Int32(t.L.count), t.L,
-            t.cs, t.cp, t.w0, t.w1, t.w2, t.w3, t.w4, t.g, t.lpA, t.wout,
-            t.kap, t.alphaw, t.jw, t.jl, t.jn, t.chg, t.zdrv, t.zi, t.twt,
-            Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC,
-            s[0], s[1], s[2],
-            s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11],
-            s[12], s[13], s[14],
-            s[15], s[16], s[17], s[18], s[19], s[20], s[21],
-            s[22], s[23], s[24], s[25],
-            s[26], s[27], s[28], s[29],
-            s[30], s[31], s[32],
-            s[33], s[34], s[35], s[36], s[37],
-            s[38], s[39], s[40],
-            s[41], s[42], s[43], s[44], s[45], s[46],
-            s[47], s[48], s[49], s[50], s[51], s[52], s[53], s[54], s[55],
-            s[56], s[57], s[58], s[59], s[60])!
-    }
-
-    /// Overlays swept by the rigid-bridge poly/mono parity checks.
+    /// Overlays swept by the rigid-bridge mount checks.
     /// DEFAULT-VALUE LAW (2026-07-17h): the shipped artifacts null both of
     /// these, and the poly kernel shipped a round mounting its strings in
     /// the WRONG friction state (full static grip instead of fresh contact)
@@ -145,28 +85,27 @@ final class BowPolyTests: XCTestCase {
          [Double](repeating: 1.0, count: n))
     }
 
-    private func monoRender(tables t: BowKernelTables, _ d: Drive) -> [Double] {
-        let n = d.f0.count
+    private func initPoly(_ nb: Int, tables t: BowKernelTables)
+        -> UnsafeMutableRawPointer {
         let s = t.scalars
-        let st = bow_init(
-            t.sr, 0, [Int32](), t.cs, t.cp, t.w0, t.w1, t.w2, t.w3, t.w4,
-            t.g, t.lpA, t.wout, t.kap, t.alphaw, t.jw, t.jl, t.jn, t.chg,
-            t.zdrv, t.zi, t.twt, 0, t.ba1, t.ba2, t.bn0, t.bA, t.bC,
-            s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9],
-            s[10], s[11], s[12], s[13], s[14], s[15], s[16], s[17], s[18],
-            s[19], s[20], s[21], s[22], s[23], s[24], s[25], s[26], s[27],
-            s[28], s[29], s[30], s[31], s[32], s[33], s[34], s[35], s[36],
-            s[37], s[38], s[39], s[40], s[41], s[42], s[43], s[44], s[45],
-            s[46], s[47], s[48], s[49], s[50], s[51], s[52], s[53], s[54],
-            s[55], s[56], s[57], s[58], s[59], s[60])!
-        defer { bow_free(st) }
-        var out = [Double](repeating: 0, count: n)
-        let xv = [Double](repeating: 0, count: n)
-        out.withUnsafeMutableBufferPointer { ob in
-            bow_process(st, Int32(n), d.f0, d.vb, d.fb, d.be, d.ga, xv,
-                        ob.baseAddress!)
-        }
-        return out
+        return bow_poly_init(
+            Int32(nb), t.sr,
+            Int32(t.L.count), t.L,
+            t.cs, t.cp, t.w0, t.w1, t.w2, t.w3, t.w4, t.g, t.lpA, t.wout,
+            t.kap, t.alphaw, t.jw, t.jl, t.jn, t.chg, t.zdrv, t.zi, t.twt,
+            Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC,
+            s[0], s[1], s[2],
+            s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11],
+            s[12], s[13], s[14],
+            s[15], s[16], s[17], s[18], s[19], s[20], s[21],
+            s[22], s[23], s[24], s[25],
+            s[26], s[27], s[28], s[29],
+            s[30], s[31], s[32],
+            s[33], s[34], s[35], s[36], s[37],
+            s[38], s[39], s[40],
+            s[41], s[42], s[43], s[44], s[45], s[46],
+            s[47], s[48], s[49], s[50], s[51], s[52], s[53], s[54], s[55],
+            s[56], s[57], s[58], s[59], s[60])!
     }
 
     /// Render `d` on slot 0 of an `nb`-slot poly kernel. With `prelude`, the
@@ -205,10 +144,10 @@ final class BowPolyTests: XCTestCase {
         return run(d)
     }
 
-    private func assertPolyMonoParity(_ poly: [Double], _ mono: [Double],
-                                      _ label: String,
-                                      file: StaticString = #filePath,
-                                      line: UInt = #line) {
+    private func assertRenderParity(_ poly: [Double], _ mono: [Double],
+                                    _ label: String,
+                                    file: StaticString = #filePath,
+                                    line: UInt = #line) {
         // rad = c0 * bridge FORCE, so a rigid bridge still radiates — but a
         // c0 of 0 renders silence and scores a false 0.0 parity everywhere.
         let peak = mono.reduce(0.0) { max($0, abs($1)) }
@@ -219,14 +158,14 @@ final class BowPolyTests: XCTestCase {
             head = max(head, abs(poly[i] - mono[i]))
         }
         XCTAssertLessThan(head, 1e-9,
-                          "\(label): poly/mono early divergence (head \(head))",
+                          "\(label): early divergence (head \(head))",
                           file: file, line: line)
         func rms(_ x: [Double]) -> Double {
             (x.reduce(0) { $0 + $1 * $1 } / Double(x.count)).squareRoot()
         }
         let dDB = 20.0 * log10(rms(poly) / max(rms(mono), 1e-30))
         XCTAssertEqual(dDB, 0.0, accuracy: 0.2,
-                       "\(label): poly/mono level drift \(dDB) dB",
+                       "\(label): level drift \(dDB) dB",
                        file: file, line: line)
     }
 
@@ -413,33 +352,17 @@ final class BowPolyTests: XCTestCase {
     /// only difference is compilation — early samples must null near
     /// bit-level, and the chaotic divergence beyond must not move energy.
     ///
-    /// Swept over `nullSweep`: at the shipped artifact values `bow_age_a`
-    /// and `bow_tors_c` are 0 and the state they own is unreachable, which
-    /// is exactly how the poly kernel's wrong string mount (bare memset =
-    /// full static grip, vs mono's fresh-contact ageA seed) survived a
-    /// round — rms_rel 2.2e-02 at `bow_age_a` 0.5, first divergent sample 0.
-    func testPolySingleStringMatchesMonoOnRigidBridge() {
-        let srk = 96000.0
-        let n = 96000
-        for (name, over) in Self.nullSweep {
-            var bp = stringBP(noise: false)
-            for (k, v) in over { bp.num[k] = v }
-            let t = BowTables.buildOpenString(sr: srk, tonic: 261.63, bp: bp)
-            let d = rigidDrive(n: n, f0: 261.63)
-            assertPolyMonoParity(
-                polySlot0Render(tables: t, nb: 4, d),
-                monoRender(tables: t, d), "init mount / \(name)")
-        }
-    }
-
     /// The SLOT-STEAL mount path (`bow_poly_reset_string`, taken by
     /// BowEngine on every serial bump) must land in the same fresh-contact
-    /// state as a first allocation: a slot that has been bowed on other
-    /// controls, then remounted, must render what a virgin mono kernel
-    /// renders. A bare memset lands the aging deficit at 0 (full static
-    /// grip) instead of ageA, which only the unloaded friction branch would
-    /// ever correct — so this is asserted with a gate that never releases.
-    func testPolyRemountedStringMatchesFreshMono() {
+    /// state as a first allocation: a slot bowed on other controls, then
+    /// remounted, must render exactly what a virgin slot renders. A bare
+    /// memset lands the aging deficit at 0 (full static grip) instead of
+    /// ageA, which only the unloaded friction branch would ever correct —
+    /// so this is asserted with a gate that never releases. (The reference
+    /// used to be the MONO kernel, which existed only for upstream
+    /// byte-parity and was deleted 2026-07-24; poly-vs-poly states the same
+    /// property more directly.)
+    func testPolyRemountedStringMatchesFreshSlot() {
         let srk = 96000.0
         let n = 48000
         for (name, over) in Self.nullSweep {
@@ -449,99 +372,40 @@ final class BowPolyTests: XCTestCase {
             // prelude ages the contact well away from its mount value
             let prelude = rigidDrive(n: 24000, f0: 174.61, vb: 0.35)
             let d = rigidDrive(n: n, f0: 261.63)
-            assertPolyMonoParity(
+            assertRenderParity(
                 polySlot0Render(tables: t, nb: 4, prelude: prelude, d),
-                monoRender(tables: t, d), "slot-steal mount / \(name)")
+                polySlot0Render(tables: t, nb: 4, d),
+                "slot-steal mount / \(name)")
         }
     }
 
-    /// Full sarangi config (passive junction, taraf web, body): one note
-    /// through the poly path vs the mono kernel. The poly junction folds
-    /// the string loading delay-free where mono uses Vprev — a deliberate
-    /// small physics change; the bar is band-level (same instrument), not a
-    /// sample null.
-    func testPolySarangiSingleNoteLevelMatchesMono() throws {
-        let (tuning, q, bp) = try sarangiConfig()
-        let sr = 48000.0
-        let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
-        let tables = BowTables.build(sr: sr * Double(osf), tuning: tuning,
-                                     q: q, bp: bp, nBow: 1.0)
-
-        func render(maxPoly: Int) -> [Double] {
-            let engine = BowEngine(tables: tables, mapper: BowControlMapper(),
-                                   bp: bp, sr: sr, rfir: q.rfir48,
-                                   eLp: q.v("E_lp", 20000.0),
-                                   reverbRT60: q.v("F_rt60", 1.2),
-                                   reverbPredelayMs: q.v("F_predelay", 20.0),
-                                   reverbMix: q.v("F_mix", 0.12),
-                                   reverbWidth: 0.0, maxPoly: maxPoly)
-            let secs = 2.0
-            let n48 = Int(secs * sr)
-            let chunk = 2048
-            var out = [Double](repeating: 0, count: n48)
-            var l = [Double](repeating: 0, count: chunk)
-            var r = [Double](repeating: 0, count: chunk)
-            var f0 = [Double](repeating: 0, count: chunk * osf)
-            var vb = f0, fb = f0, be = f0, ga = f0
-            var done = 0
-            var k = 0
-            while done < n48 {
-                let m = min(chunk, n48 - done)
-                let nk = m * osf
-                for i in 0..<nk {
-                    f0[i] = tuning.tonic * 1.5
-                    vb[i] = 0.2
-                    fb[i] = 1.2
-                    be[i] = 0.1
-                    ga[i] = min(Double(k + i) / (0.02 * sr * Double(osf)), 1.0)
-                }
-                l.withUnsafeMutableBufferPointer { lp in
-                    r.withUnsafeMutableBufferPointer { rp in
-                        engine.renderFixture(
-                            f0: Array(f0[0..<nk]), vb: Array(vb[0..<nk]),
-                            fb: Array(fb[0..<nk]), beta: Array(be[0..<nk]),
-                            gate: Array(ga[0..<nk]),
-                            outL: lp.baseAddress!, outR: rp.baseAddress!)
-                    }
-                }
-                for i in 0..<m { out[done + i] = l[i] + r[i] }
-                done += m
-                k += nk
-            }
-            return out
-        }
-
-        let mono = render(maxPoly: 1)
-        let poly = render(maxPoly: 8)
-        func rms(_ x: ArraySlice<Double>) -> Double {
-            (x.reduce(0) { $0 + $1 * $1 } / Double(x.count)).squareRoot()
-        }
-        // compare the settled second (skip the speak transient)
-        let a = mono.count / 2
-        let dDB = 20.0 * log10(rms(poly[a...]) / max(rms(mono[a...]), 1e-12))
-        print(String(format: "poly-vs-mono sarangi single-note level: %+.3f dB",
-                     dDB))
-        XCTAssertEqual(dDB, 0.0, accuracy: 0.75,
-                       "poly path is not the same instrument (Δ \(dDB) dB)")
-        for v in poly { XCTAssertTrue(v.isFinite) }
-    }
-
-    /// Structural stability at full polyphony: 8 simultaneous max-force
-    /// notes on the fitted sarangi config stay bounded and release cleanly.
+    /// Driven from the SHIPPING artifact + the fitted tarab, so this is the
+    /// instrument the app actually plays under a maximum-force chord. (It
+    /// used to be configured from the coupled network's table-export golden,
+    /// which went with the vendored machinery, 2026-07-24.)
     func testPolyEightNoteChordStaysBoundedAndReleases() throws {
-        let (tuning, q, bp) = try sarangiConfig()
+        guard let bp = Presets.bowedStringParams() else {
+            throw XCTSkip("bowed_string.json not available in this bundle")
+        }
         let sr = 48000.0
+        let tonic = 328.9
         let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
-        let tables = BowTables.build(sr: sr * Double(osf), tuning: tuning,
-                                     q: q, bp: bp, nBow: 1.0)
+        var tables = BowTables.buildOpenString(sr: sr * Double(osf),
+                                               tonic: tonic, bp: bp)
+        let taraf = Presets.state(.sarangiPilu).resolvedStrings
+            .filter(\.enabled)
+            .map { (f: $0.freq, gain: $0.gain, t60: $0.t60) }
+        tables.jt = BowTables.buildJawariTables(
+            rows: taraf.filter { BowTables.jtSteelRow($0.f, tonic: tonic) },
+            srk: sr * Double(osf), bp: bp)
         let mapper = BowControlMapper()
         let engine = BowEngine(tables: tables, mapper: mapper, bp: bp, sr: sr,
-                               rfir: q.rfir48, eLp: q.v("E_lp", 20000.0),
-                               reverbRT60: q.v("F_rt60", 1.2),
-                               reverbPredelayMs: q.v("F_predelay", 20.0),
-                               reverbMix: q.v("F_mix", 0.12),
+                               rfir: [], eLp: bp.v("bow_rad_lp", 8000.0),
+                               reverbRT60: bp.v("bow_rev_rt60", 1.0),
+                               reverbPredelayMs: 15.0,
+                               reverbMix: bp.v("bow_rev_mix", 0.08),
                                reverbWidth: 0.0, maxPoly: 8)
-        engine.outGain = BowEngine.liveLevelTrim
+        engine.outGain = bp.v("bow_live_trim", 0.175)
 
         var l = [Double](repeating: 0, count: 1024)
         var r = [Double](repeating: 0, count: 1024)

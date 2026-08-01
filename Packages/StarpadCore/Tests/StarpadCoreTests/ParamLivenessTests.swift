@@ -27,8 +27,7 @@ final class ParamLivenessTests: XCTestCase {
 
     private func tables(_ bp: BowParams, taraf: [(f: Double, gain: Double, t60: Double)])
         -> BowKernelTables {
-        var t = BowTables.buildOpenString(sr: 96000, tonic: 328.9, bp: bp,
-                                          taraf: taraf)
+        var t = BowTables.buildOpenString(sr: 96000, tonic: 328.9, bp: bp)
         t.jt = BowTables.buildJawariTables(rows: taraf, srk: 96000, bp: bp)
         return t
     }

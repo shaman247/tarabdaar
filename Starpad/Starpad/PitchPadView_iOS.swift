@@ -36,14 +36,16 @@ struct PadToolbarIOS: View {
             Spacer(minLength: 12)
             TiltBars(tilts: noteManager.currentTilt)
             Spacer(minLength: 12)
-            PadSoundingReadout(sounding: engine.sounding, tonicMidi: engine.tonicMidi)
-            // Tonic is set on the Mac and synced over, so it's read-only here.
+            PadSoundingReadout(sounding: engine.sounding,
+                               tonicFractionalMidi: engine.tonicFractionalMidi)
+            // Tonic is set on the Mac (in Hz) and synced over, so it's
+            // read-only here.
             Text("Tonic \(Scale.noteName(for: engine.tonicMidi))")
-                .font(.caption2).foregroundColor(.gray)
+                .font(.padCaption2).foregroundColor(.gray)
                 .fixedSize()
             Button(action: onRecalibrate) {
                 Image(systemName: "arrow.counterclockwise")
-                    .font(.caption).foregroundColor(.blue)
+                    .font(.padCaption).foregroundColor(.blue)
             }
         }
         .padding(.horizontal, 12)
@@ -55,7 +57,7 @@ struct PadToolbarIOS: View {
                         action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.caption).fontWeight(.bold)
+                .font(.padCaption).fontWeight(.bold)
                 .foregroundColor(.white)
                 .padding(.horizontal, 10).padding(.vertical, 4)
                 .background(color.opacity(0.7))
@@ -71,12 +73,12 @@ struct PadToolbarIOS: View {
 /// updates re-render just this label.
 private struct PadSoundingReadout: View {
     @ObservedObject var sounding: SoundingState
-    let tonicMidi: Int
+    let tonicFractionalMidi: Double
 
     var body: some View {
         let ratio = sounding.ratio
         let text: String = ratio.map { r in
-            let fractionalMidi = Double(tonicMidi) + 12.0 * log2(r)
+            let fractionalMidi = tonicFractionalMidi + 12.0 * log2(r)
             let freq = 440.0 * pow(2.0, (fractionalMidi - 69.0) / 12.0)
             let nearest = Int(fractionalMidi.rounded())
             let cents = Int(((fractionalMidi - Double(nearest)) * 100.0).rounded())
@@ -89,7 +91,7 @@ private struct PadSoundingReadout: View {
             pitchColor(forRatio: $0, lightness: 0.85, chroma: 0.18)
         } ?? .clear
         return Text(text)
-            .font(.system(size: 11).monospacedDigit())
+            .font(.padSmall(11).monospacedDigit())
             .foregroundStyle(color)
             .frame(width: 150, alignment: .trailing)
     }
@@ -113,7 +115,7 @@ private struct RecToggleIOS: View {
                     .fill(recorder.isRecording ? Color.red : Color.gray.opacity(0.6))
                     .frame(width: 7, height: 7)
                 Text(recorder.isRecording ? "REC \(recorder.strokeCount)" : "REC")
-                    .font(.caption).fontWeight(.bold).monospacedDigit()
+                    .font(.padCaption).fontWeight(.bold).monospacedDigit()
                     .foregroundColor(.white)
             }
             .padding(.horizontal, 10).padding(.vertical, 4)
@@ -137,7 +139,7 @@ struct ScaleSyncIndicator: View {
                 .fill(scaleSync.syncCount > 0 ? Color.green : Color.gray.opacity(0.4))
                 .frame(width: 7, height: 7)
             Text(scaleSync.syncCount > 0 ? "synced" : "no sync")
-                .font(.system(size: 9))
+                .font(.padSmall(9))
                 .foregroundColor(.gray)
         }
     }
@@ -221,6 +223,12 @@ struct FretPadViewIOS: View {
             // the surface keeps its full width — a separate side column
             // made the whole right edge dead space and swallowed touches
             // aimed at the rightmost fret.
+            //
+            // The surface view spans the whole area below the toolbar; the
+            // playable fret band (`fretPadBandRect`) is the centered
+            // half-height strip inside it, marked by a hairline border —
+            // the space above/below it is dead, except the drone buttons,
+            // which keep their full-surface position.
             FretPadSurfaceIOS(engine: engine, arrangement: arrangement,
                               recorder: recorder)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -235,6 +243,10 @@ struct FretPadViewIOS: View {
 /// gestures, so button touches and melody multitouch can't interfere).
 private struct DroneButtonsVisualIOS: View {
     let ratios: [Double]
+    /// The synced scale's degrees — the buttons are named from the scale
+    /// like every other pitch in the app (`scaleLabel(forRatio:)`); the
+    /// labels ride the scale blob, so the iPad names them the Mac's way.
+    let degrees: [(ratio: Double, label: String)]
     let held: Set<Int>
     let size: CGSize
     let edgePad: CGFloat
@@ -242,7 +254,7 @@ private struct DroneButtonsVisualIOS: View {
     var body: some View {
         let rects = droneButtonRects(size: size)
         ZStack(alignment: .topLeading) {
-            ForEach(0..<4, id: \.self) { i in
+            ForEach(rects.indices, id: \.self) { i in
                 let ratio = i < ratios.count ? ratios[i] : 1.0
                 let hue = pitchColor(forRatio: ratio, lightness: 0.75,
                                      chroma: 0.17)
@@ -254,8 +266,8 @@ private struct DroneButtonsVisualIOS: View {
                             .stroke(hue.opacity(0.8), lineWidth: 1)
                     )
                     .overlay(
-                        Text(sargamName(forRatio: ratio))
-                            .font(.system(size: 15, weight: .bold))
+                        Text(scaleLabel(forRatio: ratio, degrees: degrees))
+                            .font(.padSmall(15, weight: .bold))
                             .foregroundColor(.white)
                     )
                     .frame(width: r.width, height: r.height)
@@ -301,9 +313,13 @@ private struct FretPadSurfaceIOS: View {
         GeometryReader { geo in
             let size = CGSize(width: max(1, geo.size.width - 2 * edgePad),
                               height: max(1, geo.size.height - 2 * edgePad))
+            // The playable band — the frets' coordinate space. Touches
+            // outside it are dead (except the drone buttons, hit-tested in
+            // full-surface space).
+            let band = fretPadBandRect(in: size)
             let degrees = scaleDegrees(from: engine.scale)
             let placements = fretPlacements(arrangement: arrangement,
-                                            degrees: degrees, size: size)
+                                            degrees: degrees, size: band.size)
 
             ZStack(alignment: .topLeading) {
                 Color.black
@@ -313,6 +329,10 @@ private struct FretPadSurfaceIOS: View {
                 // octave-repeat ghosts styled identically to the base frets.
                 Canvas { ctx, _ in
                     ctx.translateBy(x: edgePad, y: edgePad)
+                    // Band border — the playable strip against the dead space.
+                    ctx.stroke(Path(band),
+                               with: .color(.white.opacity(0.12)), lineWidth: 1)
+                    ctx.translateBy(x: band.minX, y: band.minY)
                     for p in placements {
                         let hue = pitchColor(forRatio: p.ratio,
                                              lightness: 0.82, chroma: 0.20)
@@ -326,17 +346,21 @@ private struct FretPadSurfaceIOS: View {
                 // Dynamic layer: live sounding glow (observes SoundingState).
                 CellFillsView(sounding: engine.sounding,
                               cells: fretFillCells(placements), edgePad: edgePad)
+                    .offset(x: band.minX, y: band.minY)
 
                 // Drone buttons (display only — presses are hit-tested in
                 // `began` below): right edge, top → vertical center.
                 DroneButtonsVisualIOS(ratios: arrangement.droneRatios,
+                                      degrees: degrees,
                                       held: Set(droneTouches.values),
                                       size: size, edgePad: edgePad)
 
                 TouchOverlayView(
                     touches: $touchInfos,
-                    onTouchBegan: { ev in began(ev, placements: placements, size: size) },
-                    onTouchMoved: { ev in moved(ev, placements: placements, size: size) },
+                    onTouchBegan: { ev in began(ev, placements: placements,
+                                                size: size, band: band) },
+                    onTouchMoved: { ev in moved(ev, placements: placements,
+                                                size: size, band: band) },
                     onTouchEnded: { id in
                         let now = CACurrentMediaTime()
                         // Drone touch: release the button (unless another
@@ -374,17 +398,22 @@ private struct FretPadSurfaceIOS: View {
     /// Onset: snap when within the Snap distance of a fret AND inside its
     /// vertical extent, else play the fret-field pitch (the approach path).
     /// Registers the touch with the drag assist and starts its settle timer.
-    private func began(_ ev: TouchEvent, placements: [FretPlacement], size: CGSize) {
-        let pt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
-        // Drone buttons first: a touch starting inside a button rect is a
-        // drone press, not a note. (Melody drags that WANDER into a button
-        // keep playing — only onsets are claimed.)
-        if let d = droneButtonRects(size: size).firstIndex(where: { $0.contains(pt) }) {
+    private func began(_ ev: TouchEvent, placements: [FretPlacement],
+                       size: CGSize, band: CGRect) {
+        let spt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
+        // Drone buttons first (full-surface coords): a touch starting inside
+        // a button rect is a drone press, not a note. (Melody drags that
+        // WANDER into a button keep playing — only onsets are claimed.)
+        if let d = droneButtonRects(size: size).firstIndex(where: { $0.contains(spt) }) {
             let alreadyHeld = droneTouches.values.contains(d)
             droneTouches[ev.touchId] = d
             if !alreadyHeld { engine.setDrone(d, pressed: true) }
             return
         }
+        // Notes live in the band only — the space above/below is dead.
+        guard band.contains(spt) else { return }
+        // Band-local coordinates from here on — the frets' space.
+        let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
         guard let fieldLog = fretFieldLog(at: pt, placements: placements)
         else { return }   // no frets — nothing to play
         let offset: Double
@@ -427,7 +456,8 @@ private struct FretPadSurfaceIOS: View {
                      uncorrectedLog: fieldLog + offset, time: now)
         if recorder.isRecording {
             recorder.begin(touchId: ev.touchId,
-                           context: strokeContext(placements: placements, size: size),
+                           context: strokeContext(placements: placements,
+                                                  size: band.size),
                            offset: offset, x: pt.x, y: pt.y,
                            u: fieldLog + offset, o: sentLog, time: now)
         }
@@ -459,13 +489,17 @@ private struct FretPadSurfaceIOS: View {
     /// constant onset offset, then the drag assist's slewed correction on top
     /// (magnetic at stops/turns, transparent while gliding). Never re-snaps
     /// mid-drag; the field and assist are continuous.
-    private func moved(_ ev: TouchEvent, placements: [FretPlacement], size: CGSize) {
+    private func moved(_ ev: TouchEvent, placements: [FretPlacement],
+                       size: CGSize, band: CGRect) {
         // A finger holding a drone button never glides.
         guard droneTouches[ev.touchId] == nil else { return }
-        let pt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
+        // Only touches that began in the band play (they registered a snap
+        // offset at onset); a drag may then wander out — the field clamps.
+        guard let offset = snapOffsets[ev.touchId] else { return }
+        let spt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
+        let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
         guard let fieldLog = fretFieldLog(at: pt, placements: placements)
         else { return }
-        let offset = snapOffsets[ev.touchId] ?? 0
         assist.setContext(placements: placements, snapDistance: snapDistance)
         let now = CACurrentMediaTime()
         let out = assist.move(touchId: ev.touchId, x: pt.x, y: pt.y,

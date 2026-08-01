@@ -78,13 +78,24 @@ public struct CompositeParam: Codable, Equatable, Identifiable {
     /// editable member sets over registry parameters.
     public static func defaults() -> [CompositeParam] {
         [
-            // Purity sweeps the jawari buzz DEPTH itself (`bow_taraf_jawari`,
-            // 1.3 = the fitted depth → 0 = clean). Below the built depth
-            // that rides the kernel's buzz scaler, so it is instant — the
-            // same path the deleted `bow_jaw_gain` parameter used.
+            // Purity has two members (2026-07-26). TONE: the radiated
+            // jawari sum darkens, open (16 kHz — all the contact
+            // sparkle) → 1.5 kHz, where only the rows' tonal ring is
+            // left. (The original second member swept the LINEAR web's
+            // buzz depth, `bow_taraf_jawari`; that web was deleted
+            // 2026-07-24.) RECRUITMENT: `bow_jt_sel` falls 0.5 → 0 —
+            // rest (purity 0) is the FITTED taraf and purity 1 strips
+            // it to the played note's harmonic kin (unison / faint
+            // octaves / fainter fifth). The lo used to be 1.0 (the
+            // full bipolar span), which with the default rest-zero
+            // tilt curve parked the RESTING instrument at the ×2 lush
+            // boosted chorus — a wash that decoupled from the playing
+            // and read as a backing ensemble (2026-08-01 coherence
+            // rev). Set lo back above 0.5 to make rest lusher than
+            // fitted again.
             CompositeParam(name: "Taraf Purity", slot: 0, members: [
-                CompositeMember(key: "bow_taraf_jawari", lo: 1.3, hi: 0.0),
                 CompositeMember(key: "bow_jt_lp", lo: 16000.0, hi: 1500.0),
+                CompositeMember(key: "bow_jt_sel", lo: 0.5, hi: 0.0),
             ]),
             CompositeParam(name: "Taraf Decay", slot: 1, members: [
                 CompositeMember(key: "bow_jt_damp", lo: 0.0, hi: 1.0),

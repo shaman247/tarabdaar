@@ -49,13 +49,10 @@ import Foundation
 ///             the bridge via bow_tilt_beta through the soft deadband knee,
 ///             and brightens force via bow_tilt_force; optional
 ///             absolute-distance correction (bow_beta_f0).
-///   * wedge — the MEASURED playable region (per-(f0, β, v) trilinear force
-///             bounds) is the press axis' ENVELOPE, not a clamp; β beyond
-///             the measured grid (0.06–0.13) extrapolates by the Schelleng
-///             laws fmin ∝ 1/β², fmax ∝ 1/β until calibrate_wedge is re-run
-///             on the wider grid. With NO wedge (the generic pure-physics
-///             bowed string) the envelope is fully ANALYTIC: fmin = M·C·v/β²,
-///             fmax = 2Zv/(β·Δμ) from the friction params. A final bow_f_cap
+///   * force — the ANALYTIC Schelleng region is the press axis' ENVELOPE,
+///             not a clamp: fmin = M·C·v/β² (the minimum force to sustain
+///             Helmholtz), fmax = 2Zv/(β·Δμ) (the maximum before raucous),
+///             both straight from the friction params. A final bow_f_cap
 ///             guards tilt/register pushes. The offline sul-tasto β projection, note-onset
 ///             articulation, technique overlays and glide bow-lightening
 ///             are OMITTED live: they are lookahead/zero-phase passes over
@@ -423,7 +420,6 @@ public struct BowControlFilter: Sendable {
     let pitchRefLog2: Double
     let pitchKnotsA: [Double]?, pitchCentsA: [Double]?
     let pitchCentsPress: [Double]?
-    let wedge: BowWedge?
     // smoother state
     var lf0A = 0.0, lf0B = 0.0   // cascaded one-pole states on log2 f0
     var gateState = 0.0
@@ -493,7 +489,6 @@ public struct BowControlFilter: Sendable {
             pitchCentsA = nil
             pitchCentsPress = nil
         }
-        wedge = bp.wedge
     }
 
     /// STARPAD LIVE PARAMETERS (2026-07-24): re-read the bp-derived
@@ -703,24 +698,17 @@ public struct BowControlFilter: Sendable {
             // authority where the floor exceeded the whole range (247/415 Hz)
             // — force timbre lives at the wedge edges. Velocity co-drive
             // rides the bounds (fmin ∝ v), replacing the old (v/vRef)^0.7.
-            var lo: Double, hi: Double
-            if let w = wedge {
-                // Schelleng extrapolation beyond the measured β grid
-                // (fmin ∝ 1/β², fmax ∝ 1/β) until the wedge is re-measured
-                let bg = min(max(beta, w.beta[0]), w.beta[w.beta.count - 1])
-                let b = w.bounds(f0: f0, beta: bg, v: vb)
-                let r = bg / beta
-                lo = b.lo * r * r
-                hi = max(b.hi * r, lo * 1.05)
-            } else {
-                // ANALYTIC Schelleng wedge (no measured table — the generic
-                // pure-physics string): fmin = M·C·v/β² (minimum force to
-                // sustain Helmholtz), fmax = 2Zv/(β·Δμ) (maximum before
-                // raucous). Pure formulas from the friction params.
-                lo = schellengMargin * schellengC * vb / max(beta * beta, 1e-6)
-                hi = max(2.0 * schellengZ * vb / (max(beta, 1e-3) * schellengDmu),
+            // ANALYTIC Schelleng wedge, from the friction params:
+            // fmin = M·C·v/β² (minimum force to sustain Helmholtz),
+            // fmax = 2Zv/(β·Δμ) (maximum before raucous). There used to be a
+            // MEASURED alternative here (`BowWedge`, a per-(f0, β, v)
+            // trilinear force table from the sarangi-era `calibrate_wedge`);
+            // the pure-physics artifact Starpad ships has never carried one,
+            // so only this branch ever ran, and the table went with the rest
+            // of the upstream machinery (2026-07-24).
+            let lo = schellengMargin * schellengC * vb / max(beta * beta, 1e-6)
+            let hi = max(2.0 * schellengZ * vb / (max(beta, 1e-3) * schellengDmu),
                          lo * 1.05)
-            }
             let fMin = pressUnder * lo
             let fMax = max(pressOver * hi, fMin * 1.0001)
             var fb = fMin * pow(fMax / fMin, press)

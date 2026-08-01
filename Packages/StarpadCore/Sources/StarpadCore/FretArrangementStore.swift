@@ -40,9 +40,10 @@ extension FretSegment: Codable {
 /// `legato` (older files default to true); v4 added the free per-segment `x`
 /// — pre-v4 files carry pitch-derived positions that no longer exist, so
 /// they're **rejected** on load (the caller rebuilds the new default).
-/// (`droneRatios` — the 4 drone-button pitches — is optional: older files
-/// fall back to the ,Sa·,Ma·,Pa·Sa default, no version bump; the first
-/// revision's Sa·Ma·Pa·Sa′ default migrates to it on read.)
+/// (`droneRatios` — the drone-button pitches — is optional: older files
+/// fall back to the default, no version bump; both historical 4-slot
+/// defaults migrate to the current 3-slot ,Sa·,Pa·Sa default on read, and
+/// a hand-picked 4-slot set drops its second (,Ma-era) slot.)
 struct FretArrangementDocument: Codable {
     var version: Int = 4
     var segments: [FretSegment]
@@ -113,12 +114,20 @@ public enum FretArrangementStore {
         // treat them as absent so the caller rebuilds the new default.
         guard doc.version >= 4 else { throw CocoaError(.coderReadCorrupt) }
         var drones = doc.droneRatios ?? FretArrangement.defaultDroneRatios
-        // 2026-07-23 octave-lowering migration: files saved by the first
-        // drone revision carry its Sa·Ma·Pa·Sa′ default — replace with the
-        // current ,Sa·,Ma·,Pa·Sa default (hand-picked sets are kept).
-        let firstRevDefault = [1.0, 4.0 / 3.0, 3.0 / 2.0, 2.0]
-        if zip(drones, firstRevDefault).allSatisfy({ abs($0 - $1) < 1e-6 }) {
-            drones = FretArrangement.defaultDroneRatios
+        // 4-slot-era migrations (2026-07-25): both historical defaults —
+        // the first revision's Sa·Ma·Pa·Sa′ and the octave-lowered
+        // ,Sa·,Ma·,Pa·Sa — become the current 3-slot default; a
+        // hand-picked 4-slot set keeps its choices minus the second
+        // (,Ma-era) slot. Any other count falls back in the initializer.
+        if drones.count == 4 {
+            let oldDefaults = [[1.0, 4.0 / 3.0, 3.0 / 2.0, 2.0],
+                               [0.5, 2.0 / 3.0, 3.0 / 4.0, 1.0]]
+            if oldDefaults.contains(where: {
+                zip(drones, $0).allSatisfy { abs($0 - $1) < 1e-6 } }) {
+                drones = FretArrangement.defaultDroneRatios
+            } else {
+                drones.remove(at: 1)
+            }
         }
         return FretArrangement(
             segments: doc.segments,

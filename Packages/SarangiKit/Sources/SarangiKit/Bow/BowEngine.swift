@@ -1,12 +1,10 @@
 import Foundation
 import CBowKernel
 
-/// The LIVE bow-physics instrument: one streaming C friction kernel
-/// (CBowKernel `bow_init`/`bow_process` — the SAME source as the offline
-/// render, so the physics is byte-identical) at 96 kHz, decimated to the
-/// 48 kHz engine rate and radiated through the offline post-chain order
-/// (`render_bow_pair`): radiation FIR (N_rfir_48k, the 48 kHz redesign of the
-/// pooled transfer) → E_lp radiation low-pass → room reverb. The kernel
+/// The LIVE bow-physics instrument: the streaming C friction kernel
+/// (CBowKernel `bow_poly_init`/`bow_poly_process`) at 96 kHz, decimated to
+/// the 48 kHz engine rate and radiated through the post-chain: radiation FIR
+/// → E_lp radiation low-pass → room reverb. The kernel
 /// output is ONE mono stream (taraf direct radiation is fused in-kernel);
 /// by default stereo is an equal split so the L+R sum is pan-invariant like
 /// every other mode. With `bow_st_spread`/`bow_st_played` armed (Starpad
@@ -16,14 +14,15 @@ import CBowKernel
 /// (live is its own neutral capture) and no pre-roll/pre-charge (start
 /// from silence).
 ///
-/// POLYPHONY (2026-07-16): `maxPoly` > 1 renders through the POLY kernel
-/// (`bow_poly_*`, bow_kernel_poly.c): every mapper slot is its own gut
-/// string with its own friction/delay-line state, all connected to the SAME
-/// bridge — one taraf web, one modal body, one radiation/post chain; in the
-/// passive junction each string's -Z·V loading is folded delay-free into
-/// the bridge solve (structural stability at any polyphony). `maxPoly` 1
-/// keeps the byte-parity MONO kernel and the exact legacy path — the
-/// fixture/e2e confirm and all offline-parity goldens run there.
+/// POLYPHONY (2026-07-16): every mapper slot is its own gut string with its
+/// own friction/delay-line state, all connected to the SAME bridge — one
+/// jawari web, one modal body, one radiation/post chain; each string's -Z·V
+/// loading is folded delay-free into the bridge solve, so stability is
+/// structural at any polyphony. There used to be a second, MONO kernel
+/// (`bow_kernel.c`) taken at `maxPoly` 1: it existed only as the byte-parity
+/// twin of the offline Python render's C source, and went with the rest of
+/// the upstream-parity machinery (2026-07-24). `maxPoly` 1 is now simply the
+/// poly kernel with one string.
 ///
 /// RT-safe: every buffer (control arrays, kernel scratch, decimator history,
 /// FIR ring) is preallocated at init; `render` allocates nothing and takes
@@ -37,9 +36,8 @@ public final class BowEngine {
     public let osFactor: Int              // kernel oversampling (bow_os)
     public let srk: Double                // kernel rate
     public let tables: BowKernelTables
-    /// Polyphony: number of gut strings on the shared bridge (1 = the
-    /// byte-parity mono kernel; > 1 = the poly kernel, one string per
-    /// mapper slot).
+    /// Polyphony: number of gut strings on the shared bridge, one per
+    /// mapper slot.
     public let maxPoly: Int
 
     /// Long-lived control mapper (owned by the host, shared across rebuilds).
@@ -62,8 +60,7 @@ public final class BowEngine {
     private var gainPrev = 1.0
     private var gainPrimed = false
 
-    private var kernel: UnsafeMutableRawPointer?      // mono (maxPoly == 1)
-    private var pkernel: UnsafeMutableRawPointer?     // poly (maxPoly > 1)
+    private var pkernel: UnsafeMutableRawPointer?     // bow_kernel_poly.c
     private var dec: HalfBandDecimator
     private var radFIR: FIRFilter?
     private var radLp: Biquad?
@@ -99,11 +96,23 @@ public final class BowEngine {
     var fpMask: BowFpMask?
     var reverb: Reverb
 
+    // ---- STARPAD FX RACK (2026-08-01): four insert points, all off by
+    // default (byte-null). drive/voice/taraf run at the KERNEL rate
+    // (pre-decimation — summing the split buses there keeps the no-FX
+    // path bit-exact); global runs at the engine rate after the whole
+    // fitted post-chain. Settings are staged under `tiltLock` and picked
+    // up at chunk boundaries (the tone-tilt pattern). ----
+    private var fxUnits: [FXChainUnit]
+    private var fxPending: [FXSettings]
+    private var fxDirty = false
+
     // ---- Tilt performance axes (2026-07-23 evening) ----
     // Three iPad-tilt-driven runtime controls (CC71/73/72 through the
-    // host): taraf PURITY (jawari bone lift — kernel), taraf DECAY
-    // (extra momentum damping — kernel), and TONE TILT (complementary
-    // shelf pair on the whole voice output — here). The kernel axes are
+    // host): taraf PURITY (the radiated-jt tone LP — kernel; the web-buzz
+    // half of this axis went away with the linear taraf on 2026-07-24),
+    // taraf DECAY (extra momentum damping — kernel), and TONE TILT
+    // (complementary shelf pair on the whole voice output — here). The
+    // kernel axes are
     // plain control-thread scalar writes (the drone-setter contract);
     // the tone tilt smooths per render chunk and swaps shelf
     // coefficients IN PLACE (state kept — the VoiceFX click-free
@@ -121,16 +130,39 @@ public final class BowEngine {
     // kernel-axis smoothers (2026-07-23 night, the mid-tilt click fix):
     // targets are control-thread writes; the render thread smooths at
     // chunk rate and pushes the kernel scalars only when they move
-    private var jawGainTarget = 1.0         // bow_jaw_gain (1 = fitted buzz)
-    private var jawGainCur = 1.0
-    private var jawGainPushed = 1.0
     private var jtLpHzTarget = 0.0          // bow_jt_lp runtime (0 = build)
     private var jtLpHzCur = 16000.0         // synced to tiltPureLpHiHz at load
     private var jtLpHzPushed = 16000.0
     private var jtLpEngaged = false
+    private var jtHpHzTarget = 0.0          // bow_jt_hp runtime (0 = off)
+    private var jtHpHzCur = 0.0
+    private var jtHpHzPushed = 0.0
     private var dampAmtTarget = 0.0         // bow_jt_damp (0 = natural ring)
     private var dampAmtCur = 0.0
     private var dampAmtPushed = 0.0
+    // MELODY FOLLOWER (2026-07-25): true when the jt tables carry a
+    // tracked row; the render thread pushes the highest gated note's
+    // pitch as its target once per chunk (plain kernel scalar write).
+    private var trackArmed = false
+    private var trackHzPushed = 0.0
+    // RECRUITMENT / taraf selectivity (2026-07-26): `bow_jt_sel` scales
+    // each jawari row's BRIDGE drive by its harmonic kinship to the
+    // gated pitches. The target is a control-thread write; the render
+    // thread rescores the rows per chunk and pushes per-row weights the
+    // kernel slews (~30 ms). Kin falloff width / strength law are bp
+    // scalars (`bow_jt_sel_width`, `bow_jt_sel_kin`).
+    private var selTarget = 0.5               // bow_jt_sel runtime (0.5 = fitted)
+    private var selEngaged = false            // render thread: axis in effect
+    private var selWidthCents = 30.0          // bow_jt_sel_width
+    private var selLush = 2.0                 // bow_jt_sel_lush (boost at 1)
+    private var selGMulPushed = 1.0           // last pushed radiated-gain mul
+    private var selKinCents: [Double] = []    // kin offsets (cents)
+    private var selKinStrength: [Double] = [] // (p·q)^-kinExp per kin
+    private var selRowFreqs: [Double] = []     // row f0s (builder)
+    private var jtTrackRowIdx = -1            // follower row: always weight 1
+    private var jtDwTargets: [Double] = []    // scratch: weights to push
+    private var jtDwPushed: [Double] = []     // last pushed (skip no-ops)
+    private var selPitches: [Double] = []     // scratch: gated pitches
     private var toneTiltTarget = 0.0        // control-thread write
     private var toneTiltCur = 0.0           // render-thread smoother
     private var toneTiltApplied = 0.0       // shelves built for this value
@@ -154,6 +186,7 @@ public final class BowEngine {
     private var cF0Snd: [Double]      // sounding pitch (pre-correction) — mask
     private var y96: [Double], y48: [Double]
     private var y96S: [Double], y48S: [Double]   // stereo side scratch
+    private var y96Jt: [Double], y96JtS: [Double] // FX split taraf bus
     // poly per-slot state
     private var filters: [BowControlFilter] = []
     private var lastSerial: [UInt32] = []
@@ -230,6 +263,13 @@ public final class BowEngine {
         y48 = [Double](repeating: 0, count: maxFrames)
         y96S = [Double](repeating: 0, count: nk)
         y48S = [Double](repeating: 0, count: maxFrames)
+        y96Jt = [Double](repeating: 0, count: nk)
+        y96JtS = [Double](repeating: 0, count: nk)
+        fxUnits = [FXChainUnit(sr: sr * Double(osFactor)),  // drive
+                   FXChainUnit(sr: sr * Double(osFactor)),  // voice
+                   FXChainUnit(sr: sr * Double(osFactor)),  // taraf
+                   FXChainUnit(sr: sr)]                     // global
+        fxPending = [FXSettings(), FXSettings(), FXSettings(), FXSettings()]
         polySnap = BowControlMapper.PolySnapshot(count: nPoly)
         filters = [BowControlFilter](repeating: filter, count: nPoly)
         lastSerial = [UInt32](repeating: 0, count: nPoly)
@@ -242,61 +282,41 @@ public final class BowEngine {
         // Starting point for the live-parameter ramp (see applyPendingLive).
         liveScalarsCur = s
         liveScalarsTarget = s
-        if nPoly > 1 {
-            pkernel = bow_poly_init(
-                Int32(nPoly), t.sr,
-                Int32(t.L.count), t.L,
-                t.cs, t.cp, t.w0, t.w1, t.w2, t.w3, t.w4, t.g, t.lpA, t.wout,
-                t.kap, t.alphaw, t.jw, t.jl, t.jn, t.chg, t.zdrv, t.zi, t.twt,
-                Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC,
-                s[0], s[1], s[2],
-                s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11],
-                s[12], s[13], s[14],
-                s[15], s[16], s[17], s[18], s[19], s[20], s[21],
-                s[22], s[23], s[24], s[25],
-                s[26], s[27], s[28], s[29],
-                s[30], s[31], s[32],
-                s[33], s[34], s[35], s[36], s[37],
-                s[38], s[39], s[40],
-                s[41], s[42], s[43], s[44], s[45], s[46],
-                s[47], s[48], s[49],
-                s[50], s[51],
-                s[52], s[53],
-                s[54], s[55],
-                s[56], s[57],
-                s[58], s[59], s[60])
-        } else {
-            kernel = bow_init(
-                t.sr,
-                Int32(t.L.count), t.L,
-                t.cs, t.cp, t.w0, t.w1, t.w2, t.w3, t.w4, t.g, t.lpA, t.wout,
-                t.kap, t.alphaw, t.jw, t.jl, t.jn, t.chg, t.zdrv, t.zi, t.twt,
-                Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC,
-                s[0], s[1], s[2],
-                s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11],
-                s[12], s[13], s[14],
-                s[15], s[16], s[17], s[18], s[19], s[20], s[21],
-                s[22], s[23], s[24], s[25],
-                s[26], s[27], s[28], s[29],
-                s[30], s[31], s[32],
-                s[33], s[34], s[35], s[36], s[37],
-                s[38], s[39], s[40],
-                s[41], s[42], s[43], s[44], s[45], s[46],
-                s[47], s[48], s[49],
-                s[50], s[51],
-                s[52], s[53],
-                s[54], s[55],
-                s[56], s[57],
-                s[58], s[59], s[60])
-        }
+        pkernel = bow_poly_init(
+            Int32(nPoly), t.sr,
+            Int32(t.L.count), t.L,
+            t.cs, t.cp, t.w0, t.w1, t.w2, t.w3, t.w4, t.g, t.lpA, t.wout,
+            t.kap, t.alphaw, t.jw, t.jl, t.jn, t.chg, t.zdrv, t.zi, t.twt,
+            Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC,
+            s[0], s[1], s[2],
+            s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11],
+            s[12], s[13], s[14],
+            s[15], s[16], s[17], s[18], s[19], s[20], s[21],
+            s[22], s[23], s[24], s[25],
+            s[26], s[27], s[28], s[29],
+            s[30], s[31], s[32],
+            s[33], s[34], s[35], s[36], s[37],
+            s[38], s[39], s[40],
+            s[41], s[42], s[43], s[44], s[45], s[46],
+            s[47], s[48], s[49],
+            s[50], s[51],
+            s[52], s[53],
+            s[54], s[55],
+            s[56], s[57],
+            s[58], s[59], s[60])
         // Drone-row excitation scalars (Starpad drone buttons; not in
         // the artifact — bp defaults, overridable via `string.<key>`).
-        droneLevel = bp.v("bow_drone_level", 0.08)
-        droneOnset = bp.v("bow_drone_onset", 0.3)
-        droneAttackSec = bp.v("bow_drone_attack_ms", 40.0) / 1000.0
-        droneReleaseSec = bp.v("bow_drone_release_ms", 60.0) / 1000.0
-        droneOnsetDecaySec = bp.v("bow_drone_onset_decay_ms", 200.0) / 1000.0
-        droneCompCents = bp.v("bow_drone_comp_cents", 15.5)
+        droneLevel = bp.v("bow_drone_level", 0.026)
+        droneOnset = bp.v("bow_drone_onset", 0.052)
+        droneAttackSec = bp.v("bow_drone_attack_ms", 150.0) / 1000.0
+        droneReleaseSec = bp.v("bow_drone_release_ms", 350.0) / 1000.0
+        droneOnsetDecaySec = bp.v("bow_drone_onset_decay_ms", 500.0) / 1000.0
+        droneLpHz = bp.v("bow_drone_lp_hz", 1600.0)
+        droneHpHz = bp.v("bow_drone_hp_hz", 25.0)
+        droneToneMix = bp.v("bow_drone_tone_mix", 0.5)
+        droneSpread = bp.v("bow_drone_spread", 1.0)
+        // (bow_drone_comp_cents is retired: the buttons pluck existing
+        // rows by identity, so there is no requested-pitch compensation.)
         // Tilt-axis ranges (not in the artifact — bp defaults,
         // overridable via `string.<key>` like the drone scalars).
         tiltPureLiftMax = bp.v("bow_tilt_pure_lift", 8.0)
@@ -315,6 +335,20 @@ public final class BowEngine {
         // loading it keeps the kernel byte-null. ONE jt web at the
         // poly level (the hand-ported twin), the mono twin for tests.
         if let jt = t.jt, !jt.M.isEmpty {
+            // RECRUITMENT tables + buffers: precompute the kin lattice
+            // once (per-chunk scoring does no transcendental setup) and
+            // size the per-row scratch. Separate allocations — sharing
+            // storage would COW-copy on the render thread's first write.
+            selWidthCents = bp.v("bow_jt_sel_width", 30.0)
+            selLush = max(1.0, bp.v("bow_jt_sel_lush", 2.0))
+            let kinExp = bp.v("bow_jt_sel_kin", 0.7)
+            selKinCents = Self.recruitKin.map { 1200.0 * log2($0.ratio) }
+            selKinStrength = Self.recruitKin.map { pow($0.pq, -kinExp) }
+            selRowFreqs = jt.rowFreqs
+            jtTrackRowIdx = Int(jt.trackRow)
+            jtDwTargets = [Double](repeating: 1.0, count: jt.rowFreqs.count)
+            jtDwPushed = [Double](repeating: 1.0, count: jt.rowFreqs.count)
+            selPitches = [Double](repeating: 0.0, count: self.maxPoly)
             if let pk = pkernel {
                 bow_poly_jt_load(pk, Int32(jt.M.count), jt.J, jt.M,
                                  jt.ca, jt.cb, jt.ca4, jt.cb4, jt.wd,
@@ -336,23 +370,37 @@ public final class BowEngine {
                     bow_poly_jt_set_lp(pk, jt.lpA)
                 }
                 // drone-row envelope times (gradual attack — the whole
-                // excitation is a slewed noise drive, no impulse)
+                // excitation is a slewed noise drive, no impulse) + the
+                // drive band-pass corners (mellow-drone rev)
                 bow_poly_jt_drone_env(pk, droneAttackSec, droneReleaseSec,
                                       droneOnsetDecaySec)
-            } else if let k = kernel {
-                bow_jt_load(k, Int32(jt.M.count), jt.J, jt.M,
-                            jt.ca, jt.cb, jt.ca4, jt.cb4, jt.wd,
-                            jt.phiO, jt.phiD, jt.phiU, jt.phiF,
-                            jt.b, jt.G, jt.G4, jt.gd, jt.gd4,
-                            jt.phys, jt.q0)
-                if jt.threads >= 2 {
-                    bow_jt_set_threads(k, jt.threads)
+                bow_poly_jt_drone_tone(pk, droneLpHz, droneHpHz,
+                                       droneToneMix)
+                // HARMONIC EVOLUTION (2026-07-26): the graze-margin
+                // reference for the 0…1 → meters map; a non-neutral
+                // resting value is pushed here so the slew (~40 ms)
+                // completes inside the settle pre-roll.
+                jtApexRef = bp.v("bow_jt_apex", 1.0e-5)
+                let ev = min(max(bp.v("bow_jt_evolve", 0.5), 0.0), 1.0)
+                if ev != 0.5 {
+                    bow_poly_jt_set_evolve(
+                        pk, jtApexRef * (1.0 - pow(4.0, 1.0 - 2.0 * ev)))
                 }
-                if jt.lpA > 0 {
-                    bow_jt_set_lp(k, jt.lpA)
+                // MELODY FOLLOWER (2026-07-25): arm the tracked row and
+                // send it to the tonic; renderPolyChunk retargets it to
+                // the highest gated note every chunk. The glide from the
+                // build pitch is absorbed by the settle pre-roll.
+                if jt.trackRow >= 0 {
+                    let row = Int(jt.trackRow)
+                    bow_poly_jt_track_config(pk, jt.trackRow,
+                                             jt.rowFreqs[row], jt.trackT60,
+                                             jt.trackFhf, jt.trackBst)
+                    let tonic = tables.scalars.count > 44
+                        ? tables.scalars[44] : 261.63
+                    bow_poly_jt_track_target(pk, tonic)
+                    trackHzPushed = tonic
+                    trackArmed = true
                 }
-                bow_jt_drone_env(k, droneAttackSec, droneReleaseSec,
-                                 droneOnsetDecaySec)
             }
             // purity LP-sweep references (2026-07-23 night): the axis
             // sweeps the radiated-jt tone LP corner from the build
@@ -360,6 +408,22 @@ public final class BowEngine {
             let div = jt.phys.count > 6 ? max(1.0, jt.phys[6].rounded()) : 1.0
             jtTickRate = srk / div
             jtLpBaseA = jt.lpA
+            // jt tone HP (2026-07-26): a bp resting value arms it at
+            // build (the audition/test `string.bow_jt_hp` route; the
+            // app's live push arrives on top). 0 = byte-null.
+            let hpHz = bp.v("bow_jt_hp", 0.0)
+            if hpHz > 0, let pk = pkernel {
+                let hz = min(max(hpHz, 20.0), 8000.0)
+                bow_poly_jt_set_hp(
+                    pk, 1.0 - exp(-2.0 * Double.pi * hz / jtTickRate))
+            }
+            // jt body radiation (2026-08-01): a bp resting value arms it
+            // at build (the audition/test `string.bow_jt_body` route; the
+            // app's live push arrives on top). 0 = byte-null.
+            let bodyMix = bp.v("bow_jt_body", 0.0)
+            if bodyMix > 0, let pk = pkernel {
+                bow_poly_jt_set_body(pk, min(bodyMix, 1.0))
+            }
             tiltPureLpHiHz = jt.lpA > 0
                 ? -log(1.0 - min(jt.lpA, 0.999999)) * jtTickRate
                     / (2.0 * Double.pi)
@@ -396,8 +460,8 @@ public final class BowEngine {
                     return spread * sin(2.0 * Double.pi * pc)
                 }
             }
-            let webPan = pcPans(t.L.map { srk / Double(max(Int($0), 2)) },
-                                spread: stSpread)
+            // The linear web is gone (2026-07-24), so its pan family is
+            // always empty — the kernel leaves that source centred.
             let jtPan = pcPans(t.jt?.rowFreqs ?? [], spread: stSpread)
             // played strings: small symmetric per-slot spread (a hand's
             // width on the bridge — the melody stays anchored near centre)
@@ -408,7 +472,7 @@ public final class BowEngine {
                         * (2.0 * Double(s) / Double(nPoly - 1) - 1.0)
                 }
             }
-            bow_poly_set_stereo(pk, webPan, Int32(webPan.count),
+            bow_poly_set_stereo(pk, nil, 0,
                                 jtPan.isEmpty ? nil : jtPan,
                                 Int32(jtPan.count),
                                 slotPan, Int32(nPoly))
@@ -433,6 +497,15 @@ public final class BowEngine {
                                           sr: sr)
             }
             stereoOn = true
+        }
+        // STARPAD FX (2026-08-01): install the voice→taraf drive hook.
+        // Installed unconditionally (init, off the audio thread); the
+        // unit's own `isEngaged` gate keeps it byte-null while the drive
+        // point is off. `passUnretained` is safe — deinit frees the
+        // kernel before self dies, so the kernel never outlives us.
+        if let pk = pkernel {
+            bow_poly_set_drive_fx(pk, bowEngineDriveFXHook,
+                                  Unmanaged.passUnretained(self).toOpaque())
         }
     }
 
@@ -462,89 +535,118 @@ public final class BowEngine {
     /// no impulse): the envelope swells toward `droneLevel + droneOnset`
     /// over `droneAttackSec`, the onset boost decays over
     /// `droneOnsetDecaySec`, and release falls over `droneReleaseSec`
-    /// (then the row rings out on its own t60). Level calibrated
-    /// 2026-07-23 (audition drone_cal3): sustain RMS ≈ 0.02, just under
-    /// the played voice's ≈ 0.03.
-    public var droneLevel = 0.08
+    /// (then the row rings out on its own t60). Mellow-drone rev
+    /// 2026-07-26: slower swell/fall, a ~700 Hz drive top, and the press
+    /// spreads to the held row's KIN rows (same lattice as `bow_jt_sel`)
+    /// so a drone tap wakes the taraf the way playing that note does.
+    public var droneLevel = 0.026
     /// Onset-boost drive amplitude (`bow_drone_onset`) — the swell peaks
     /// near level+onset before relaxing into the sustain.
-    public var droneOnset = 0.3
+    public var droneOnset = 0.052
     /// Envelope times (`bow_drone_attack_ms` / `_release_ms` /
     /// `_onset_decay_ms`); pushed to the kernel at build (jt load).
-    public var droneAttackSec = 0.04
-    public var droneReleaseSec = 0.06
-    public var droneOnsetDecaySec = 0.20
-    /// Jawari-contact detuning compensation (`bow_drone_comp_cents`): a jt
-    /// row RINGS ~15.5 c sharp of its nominal table frequency — the grazing
-    /// bone stiffens the termination (measured 2026-07-23: +13.5…+16.1 c,
-    /// uniform across rows). Drone rows are tuned nominal = requested ÷
-    /// this shift so the SOUNDING pitch lands on the request.
-    public var droneCompCents = 15.5
+    public var droneAttackSec = 0.15
+    public var droneReleaseSec = 0.35
+    public var droneOnsetDecaySec = 0.50
+    /// Drive band-pass corners (`bow_drone_lp_hz` / `bow_drone_hp_hz`,
+    /// pushed at build): the top corner is the drive's brightness — the
+    /// old fixed 2 kHz band was the harsh edge of the first rev.
+    public var droneLpHz = 1600.0
+    public var droneHpHz = 25.0
+    /// Pitched fraction of the drive 0..1 (`bow_drone_tone_mix`): each
+    /// row is driven by a sine at its own mode-1 frequency mixed with
+    /// the band-passed noise. Pure noise (0) rings the row's high modes
+    /// far above their played-note balance (measured H4 ≈ H1 vs the
+    /// played tap's H4 −29 dB) — the pitched drive is what makes a
+    /// drone ring like the taraf under a played note.
+    public var droneToneMix = 0.5
+    /// Kin-row drive scale 0..1 (`bow_drone_spread`): how strongly a
+    /// press recruits the held row's kin (octave/fifth/twelfth) rows
+    /// relative to the row itself. 0 = the old single-row behaviour.
+    public var droneSpread = 1.0
+    /// Held drone rows (button presses via `dronePress`/`droneRelease`);
+    /// guarded by `droneLock` — presses arrive on the MIDI thread while
+    /// remaps run on main.
+    private var droneHeldRows: Set<Int> = []
+    private var droneLock = os_unfair_lock()
 
-    /// The jt row for a requested SOUNDING pitch: the target nominal is
-    /// `hz` compensated for the jawari-contact sharpening, then matched
-    /// pitch-class first (see `droneRow(nearestToHz:)`). The engine build
-    /// guarantees a row exists at the target (`buildEngine(droneHz:)`).
-    public func droneRow(forRequestedHz hz: Double) -> Int? {
-        droneRow(nearestToHz: hz * pow(2.0, -droneCompCents / 1200.0))
+    /// Per-row drone drive weights for a set of held rows: a held row is
+    /// 1, every other row takes its best kin affinity to the held set
+    /// (soft-OR across drones, same lattice + width as the recruitment
+    /// axis) scaled by `droneSpread`. The melody-follower row never takes
+    /// SPREAD drive (it retunes under the drive to the played pitch) —
+    /// an explicit press of it is honored (test harnesses drone-excite
+    /// it; app presses only ever target tarab rows).
+    private func droneDriveWeights(rows: Set<Int>) -> [Double] {
+        var w = [Double](repeating: 0.0, count: selRowFreqs.count)
+        guard !rows.isEmpty else { return w }
+        for i in 0..<selRowFreqs.count {
+            if rows.contains(i) { w[i] = 1.0; continue }
+            if i == jtTrackRowIdx { continue }
+            guard droneSpread > 0.0, selRowFreqs[i] > 0.0 else { continue }
+            var miss = 1.0
+            for h in rows where selRowFreqs[h] > 0.0 {
+                let c = 1200.0 * log2(selRowFreqs[i] / selRowFreqs[h])
+                miss *= 1.0 - Self.recruitAffinity(
+                    centsFromPlayed: c, kinCents: selKinCents,
+                    kinStrength: selKinStrength,
+                    widthCents: selWidthCents)
+            }
+            w[i] = droneSpread * (1.0 - miss)
+        }
+        return w
+    }
+    /// The jt row holding EXACTLY this nominal frequency, or nil if the
+    /// jawari selection didn't pick the string up (the row is then inert —
+    /// same rule as any tarab row). The drone buttons reference tarab
+    /// strings directly (2026-07-25), so this is a plain identity lookup;
+    /// the old requested-pitch machinery (pitch-class-nearest match + the
+    /// `droneCompCents` sounding-pitch compensation, which existed for the
+    /// deleted dedicated drone rows) is gone.
+    public func droneRow(forExactHz hz: Double) -> Int? {
+        jtRowFreqs.firstIndex(of: hz)
     }
 
-    /// The jt row for a requested pitch — **always an existing modal-jawari
-    /// string**, matched PITCH-CLASS FIRST: rows within ±60 cents of the
-    /// requested pitch class (octave-folded) are preferred, and among them
-    /// the one nearest the requested octave wins; with no class match the
-    /// plain nearest row (log pitch) is used. So a drone set to ,m sounds
-    /// the Ma string even when the taraf carries no low-octave Ma row.
-    public func droneRow(nearestToHz hz: Double) -> Int? {
-        let freqs = jtRowFreqs
-        guard hz > 0, !freqs.isEmpty else { return nil }
-        func pcCents(_ f: Double) -> Double {
-            var c = (1200.0 * log2(f / hz)).truncatingRemainder(dividingBy: 1200.0)
-            if c < -600 { c += 1200 } else if c > 600 { c -= 1200 }
-            return abs(c)
-        }
-        let classMatch = freqs.indices.filter { pcCents(freqs[$0]) < 60 }
-        let pool = classMatch.isEmpty ? Array(freqs.indices) : classMatch
-        return pool.min {
-            abs(log2(freqs[$0] / hz)) < abs(log2(freqs[$1] / hz))
-        }
-    }
-
-    /// Press a drone: swell the row's sustain drive (attack slew + the
-    /// decaying onset boost). Safe from the control thread while the
-    /// audio/jt threads render.
+    /// Press a drone: swell the sustain drive of the row AND its kin
+    /// rows (weights from `droneDriveWeights` — the taraf responds like
+    /// it does to playing that note), plus the decaying onset boost on
+    /// the new press's own spread. Safe from the control thread while
+    /// the audio/jt threads render (kernel setters are plain per-row
+    /// scalar stores).
     public func dronePress(row: Int) {
-        if let pk = pkernel {
-            bow_poly_jt_pluck(pk, Int32(row), droneOnset)
-            bow_poly_jt_drone(pk, Int32(row), droneLevel)
-        } else if let k = kernel {
-            bow_jt_pluck(k, Int32(row), droneOnset)
-            bow_jt_drone(k, Int32(row), droneLevel)
+        guard let pk = pkernel, row >= 0, row < selRowFreqs.count
+        else { return }
+        os_unfair_lock_lock(&droneLock)
+        droneHeldRows.insert(row)
+        let w = droneDriveWeights(rows: droneHeldRows)
+        let wNew = droneDriveWeights(rows: [row])
+        for i in 0..<w.count {
+            // pluck only where THIS press lands — a zero write would
+            // cancel another drone's still-decaying onset
+            if wNew[i] > 1e-3 {
+                bow_poly_jt_pluck(pk, Int32(i), droneOnset * wNew[i])
+            }
+            bow_poly_jt_drone(pk, Int32(i), droneLevel * w[i])
         }
+        os_unfair_lock_unlock(&droneLock)
     }
 
-    /// Release a drone: drop the sustain drive; the row rings out on its
-    /// own t60.
+    /// Release a drone: recompute the drive profile from the remaining
+    /// held set (a shared kin row keeps the survivors' weight); every
+    /// row that loses its drive rings out on its own t60.
     public func droneRelease(row: Int) {
-        if let pk = pkernel {
-            bow_poly_jt_drone(pk, Int32(row), 0.0)
-        } else if let k = kernel {
-            bow_jt_drone(k, Int32(row), 0.0)
+        guard let pk = pkernel, row >= 0, row < selRowFreqs.count
+        else { return }
+        os_unfair_lock_lock(&droneLock)
+        droneHeldRows.remove(row)
+        let w = droneDriveWeights(rows: droneHeldRows)
+        for i in 0..<w.count {
+            bow_poly_jt_drone(pk, Int32(i), droneLevel * w[i])
         }
+        os_unfair_lock_unlock(&droneLock)
     }
 
     // MARK: - Runtime base parameters (2026-07-24 composite rework)
-
-    /// WEB BUZZ AMOUNT 0..1 (base parameter `bow_jaw_gain`): scales the
-    /// formula-taraf web's buzz sources (jn contact/fold + jw grazing).
-    /// 1 = the fitted buzz (byte-exact), 0 = none. The jl in-loop loss
-    /// stays full (self-limits hot rings). Smoothed at chunk rate on the
-    /// render thread; safe from the control thread while rendering.
-    public func setJawGain(_ g01: Double) {
-        os_unfair_lock_lock(&tiltLock)
-        jawGainTarget = min(max(g01, 0.0), 1.0)
-        os_unfair_lock_unlock(&tiltLock)
-    }
 
     /// RADIATED-JT TONE LP corner in Hz (base parameter `bow_jt_lp`,
     /// runtime path): brightness of the modal-jawari buzz. <= 0 restores
@@ -560,6 +662,45 @@ public final class BowEngine {
         os_unfair_lock_unlock(&tiltLock)
     }
 
+    /// RADIATED-JT TONE HP corner in Hz (base parameter `bow_jt_hp`):
+    /// the jawari-formant voicing — quiets the taraf's fundamental band
+    /// under the high-harmonic cluster (pairs with `bow_jt_tap`).
+    /// <= 0 = bypass (byte-exact legacy). Smoothed at chunk rate.
+    public func setJtToneHp(hz: Double) {
+        os_unfair_lock_lock(&tiltLock)
+        jtHpHzTarget = hz > 0 ? min(max(hz, 20.0), 8000.0) : 0.0
+        os_unfair_lock_unlock(&tiltLock)
+    }
+
+    /// JT BODY RADIATION mix 0…1 (base parameter `bow_jt_body`): blends
+    /// the radiated jawari sum through the SAME formula-body radiation
+    /// bank the played strings radiate through (shared coefficients, own
+    /// filter state) — the coherence lever: the taraf rings from the
+    /// instrument's body instead of beside it. 0 = bypass (byte-exact
+    /// legacy). Plain kernel scalar write (the drone-setter contract);
+    /// the kernel slews ~30 ms.
+    public func setJtBody(_ mix01: Double) {
+        guard let pk = pkernel else { return }
+        bow_poly_jt_set_body(pk, min(max(mix01, 0.0), 1.0))
+    }
+
+    /// HARMONIC EVOLUTION 0…1 (base parameter `bow_jt_evolve`): the
+    /// tanpura/sitar twang axis. Converted here to a SIGNED bone offset
+    /// (graze margin × 4 … × ¼: lift = apex · (1 − 4^(1−2e)), 0.5 → 0 =
+    /// byte-null) and slewed INSIDE the kernel (~40 ms per jt sample) —
+    /// the bone glides, so driving this from a tilt is a slow jawari
+    /// adjustment, not the strum a stepped bone move causes. This is the
+    /// ONE sanctioned runtime bone move; `bow_jt_set_lift` (the purity
+    /// experiments' step lift) stays offline-only.
+    public func setJtEvolve(_ e01: Double) {
+        guard let pk = pkernel else { return }
+        let e = min(max(e01, 0.0), 1.0)
+        bow_poly_jt_set_evolve(pk, jtApexRef * (1.0 - pow(4.0, 1.0 - 2.0 * e)))
+    }
+    /// Graze-margin reference (`bow_jt_apex` at build) for the evolution
+    /// map above.
+    private var jtApexRef = 1.0e-5
+
     /// TARAF DAMPING amount 0..1 (base parameter `bow_jt_damp`): 0 = the
     /// natural ring (off, byte-exact), rising = extra momentum damping,
     /// t60 log-interpolated `bow_tilt_damp_max_t60` (20 s) down to
@@ -569,6 +710,171 @@ public final class BowEngine {
         os_unfair_lock_lock(&tiltLock)
         dampAmtTarget = min(max(amt01, 0.0), 1.0)
         os_unfair_lock_unlock(&tiltLock)
+    }
+
+    /// TARAF RECRUITMENT 0..1 (base parameter `bow_jt_sel`), BIPOLAR
+    /// around the fitted sound (2026-07-26 rework — the first cut only
+    /// subtracted drive from the fitted point, which was near-inaudible
+    /// in normal play: a scale-tuned tarab is mostly KIN to every scale
+    /// note, and un-driven rows still ring out for seconds):
+    ///  * **0.5 = the fitted taraf** (all weights 1, bit-exact).
+    ///  * **below 0.5** rows lose bridge drive by harmonic DISTANCE from
+    ///    the played pitches until at 0 only kin rows ring — the kin
+    ///    score is SQUARED at the endpoint so octaves sit clearly below
+    ///    the unison and the fifth family is faint (the lattice itself
+    ///    stays `bow_jt_sel_kin`, shared with the drone spread).
+    ///  * **above 0.5** the chorus swells toward ×`bow_jt_sel_lush` (2)
+    ///    at 1, on TWO levers at once: every row's drive weight (the
+    ///    graze cascade wakes — character, worth only ~+8% ring on its
+    ///    own because the contact drains what it is fed) and the
+    ///    RADIATED jt gain (`bow_poly_jt_set_gain_mul` — the level, ~+6
+    ///    dB, which nothing drains), so the whole taraf joins the chorus
+    ///    prominently, an opened-jawari lushness.
+    /// Chords recruit additively on the selective half (soft-OR —
+    /// gentler than a max, still bounded). Weights gate the DRIVE only:
+    /// rings already sounding decay naturally, and a held drone's own
+    /// noise drive is never ducked. Per-row slew in the kernel (~30 ms);
+    /// rescored per chunk on the render thread.
+    public func setTarafSelectivity(_ s01: Double) {
+        os_unfair_lock_lock(&tiltLock)
+        selTarget = min(max(s01, 0.0), 1.0)
+        os_unfair_lock_unlock(&tiltLock)
+    }
+
+    /// The kin lattice of the recruitment axis: frequency ratios through
+    /// which a LINEARLY driven sympathetic string still resonates (shared
+    /// low-order partials), each with p·q — the order of the shared
+    /// partial (the row's q-th harmonic is the played note's p-th).
+    /// Kinship strength = (p·q)^-`bow_jt_sel_kin`, so one exponent sets
+    /// how fast octaves/fifths fade below the unison.
+    static let recruitKin: [(ratio: Double, pq: Double)] = [
+        (1.0, 1),                       // unison
+        (2.0, 2), (0.5, 2),             // octave
+        (4.0, 4), (0.25, 4),            // double octave
+        (3.0, 3), (1.0 / 3.0, 3),       // twelfth
+        (1.5, 6), (2.0 / 3.0, 6),       // fifth
+        (0.75, 12), (4.0 / 3.0, 12),    // fourth
+    ]
+
+    /// Kinship 0..1 of a row `c` cents away from a played pitch: the
+    /// best kin interval's strength through a Gaussian cents falloff.
+    /// The ONE scoring core — the render path and the public helper
+    /// both call it.
+    static func recruitAffinity(centsFromPlayed c: Double,
+                                kinCents: [Double], kinStrength: [Double],
+                                widthCents: Double) -> Double {
+        var best = 0.0
+        for j in 0..<kinCents.count {
+            let d = abs(c - kinCents[j])
+            guard d < 4.0 * widthCents else { continue }
+            let a = kinStrength[j]
+                * exp(-0.5 * (d / widthCents) * (d / widthCents))
+            if a > best { best = a }
+        }
+        return min(best, 1.0)
+    }
+
+    /// One row's bridge-drive weight for a set of played pitches at a
+    /// given recruitment value — the exact math the render thread pushes
+    /// into the kernel (minus the follower-row exemption). 0.5 = 1
+    /// everywhere (fitted); 0 = squared kin score; 1 = `lush`. Public
+    /// for tests and offline tuning; the render path uses precomputed
+    /// tables.
+    public static func recruitWeight(rowHz: Double, playedHz: [Double],
+                                     selectivity: Double,
+                                     widthCents: Double = 30.0,
+                                     kinExp: Double = 0.7,
+                                     lush: Double = 2.0) -> Double {
+        let s = min(max(selectivity, 0.0), 1.0)
+        // lush half: uniform boost, no pitch dependence
+        if s >= 0.5 { return 1.0 + (s - 0.5) * 2.0 * (lush - 1.0) }
+        let kc = recruitKin.map { 1200.0 * log2($0.ratio) }
+        let ks = recruitKin.map { pow($0.pq, -kinExp) }
+        // soft-OR across the chord: misses multiply, so two half-kin
+        // notes recruit more than either alone but never past 1
+        var miss = 1.0
+        for p in playedHz where p > 0 && rowHz > 0 {
+            let c = 1200.0 * log2(rowHz / p)
+            miss *= 1.0 - recruitAffinity(centsFromPlayed: c, kinCents: kc,
+                                          kinStrength: ks,
+                                          widthCents: widthCents)
+        }
+        let kin = 1.0 - miss
+        let t = s * 2.0            // 1 at neutral, 0 at kin-only
+        return t + (1.0 - t) * kin * kin
+    }
+
+    /// Per-chunk RECRUITMENT update (render thread), bipolar around 0.5:
+    /// the selective half scores every row's kinship to the gated
+    /// pitches (soft-OR across the chord, squared at the endpoint), the
+    /// lush half boosts every row uniformly toward ×`bow_jt_sel_lush`,
+    /// and the per-row weights are pushed for the kernel to slew
+    /// (~30 ms). On the selective half a chunk with no gated note holds
+    /// the last weights, so a ring keeps the recruit pattern of the note
+    /// that excited it; the lush half needs no pitches. Back at 0.5 one
+    /// all-ones push restores the fitted taraf and the path goes quiet.
+    /// No allocation.
+    private func updateRecruitment(_ pk: UnsafeMutableRawPointer) {
+        guard !selRowFreqs.isEmpty else { return }
+        os_unfair_lock_lock(&tiltLock)
+        let sel = selTarget
+        os_unfair_lock_unlock(&tiltLock)
+        let neutral = abs(sel - 0.5) <= 1e-4
+        if neutral, !selEngaged { return }
+        let selective = sel < 0.5 && !neutral
+        let lushU = max(0.0, (sel - 0.5) * 2.0)
+        // Lush prominence rides the RADIATED gain, not just drive: the
+        // graze contact drains a driven-harder string almost as fast as
+        // it is pushed (measured ×2 drive = +8% ring), but nothing
+        // drains output level. Same ×selLush at the top of the throw.
+        // Pushed before the selective half's hold-return so leaving the
+        // lush half never strands the boost on a silent pad.
+        let gMul = 1.0 + lushU * (selLush - 1.0)
+        if abs(gMul - selGMulPushed) > 1e-4 {
+            selGMulPushed = gMul
+            bow_poly_jt_set_gain_mul(pk, gMul)
+        }
+        var np = 0
+        if selective {
+            for s in 0..<maxPoly {
+                let slot = polySnap.slots[s]
+                if slot.gate > 0.0, slot.f0Target > 0.0 {
+                    selPitches[np] = slot.f0Target
+                    np += 1
+                }
+            }
+            if np == 0 { return }
+        }
+        var changed = false
+        for i in 0..<selRowFreqs.count {
+            var w = 1.0
+            if selective, i != jtTrackRowIdx {
+                let fr = selRowFreqs[i]
+                var miss = 1.0
+                for k in 0..<np {
+                    let c = 1200.0 * log2(fr / selPitches[k])
+                    miss *= 1.0 - Self.recruitAffinity(
+                        centsFromPlayed: c, kinCents: selKinCents,
+                        kinStrength: selKinStrength,
+                        widthCents: selWidthCents)
+                }
+                let kin = 1.0 - miss
+                let t = sel * 2.0
+                w = t + (1.0 - t) * kin * kin
+            } else if lushU > 0.0 {
+                w = 1.0 + lushU * (selLush - 1.0)
+            }
+            jtDwTargets[i] = w
+            if abs(w - jtDwPushed[i]) > 1e-4 { changed = true }
+        }
+        if changed {
+            jtDwTargets.withUnsafeBufferPointer {
+                bow_poly_jt_drive_weights(pk, $0.baseAddress!,
+                                          Int32($0.count))
+            }
+            for i in 0..<jtDwTargets.count { jtDwPushed[i] = jtDwTargets[i] }
+        }
+        selEngaged = !neutral
     }
 
     // MARK: - Live parameters (Starpad 2026-07-24)
@@ -641,24 +947,18 @@ public final class BowEngine {
     /// filter coefficients, not gains — the same reasoning as the
     /// radiation biquads.
     private func reloadCoefficients(_ t: BowKernelTables) {
-        let target: UnsafeMutableRawPointer? = pkernel ?? kernel
-        guard let st = target else { return }
-        let poly = pkernel != nil
+        guard let st = pkernel else { return }
         t.ba1.withUnsafeBufferPointer { a1 in
             t.ba2.withUnsafeBufferPointer { a2 in
                 t.bn0.withUnsafeBufferPointer { n0 in
                     t.bA.withUnsafeBufferPointer { bA in
                         t.bC.withUnsafeBufferPointer { bC in
                             let k = Int32(t.ba1.count)
-                            _ = poly
-                                ? bow_poly_set_body(st, k, a1.baseAddress,
-                                                    a2.baseAddress,
-                                                    n0.baseAddress,
-                                                    bA.baseAddress,
-                                                    bC.baseAddress)
-                                : bow_set_body(st, k, a1.baseAddress,
-                                               a2.baseAddress, n0.baseAddress,
-                                               bA.baseAddress, bC.baseAddress)
+                            _ = bow_poly_set_body(st, k, a1.baseAddress,
+                                                  a2.baseAddress,
+                                                  n0.baseAddress,
+                                                  bA.baseAddress,
+                                                  bC.baseAddress)
                         }
                     }
                 }
@@ -682,22 +982,21 @@ public final class BowEngine {
         jt.gd4.withUnsafeBufferPointer { gd4 in
         jt.phys.withUnsafeBufferPointer { phys in
             let n = Int32(jt.M.count), J = jt.J
-            if poly {
-                _ = bow_poly_jt_set_coeffs(st, n, J, M.baseAddress,
-                    ca.baseAddress, cb.baseAddress, ca4.baseAddress,
-                    cb4.baseAddress, wd.baseAddress, phiO.baseAddress,
-                    phiD.baseAddress, phiU.baseAddress, phiF.baseAddress,
-                    b.baseAddress, G.baseAddress, G4.baseAddress,
-                    gd.baseAddress, gd4.baseAddress, phys.baseAddress)
-            } else {
-                _ = bow_jt_set_coeffs(st, n, J, M.baseAddress,
-                    ca.baseAddress, cb.baseAddress, ca4.baseAddress,
-                    cb4.baseAddress, wd.baseAddress, phiO.baseAddress,
-                    phiD.baseAddress, phiU.baseAddress, phiF.baseAddress,
-                    b.baseAddress, G.baseAddress, G4.baseAddress,
-                    gd.baseAddress, gd4.baseAddress, phys.baseAddress)
-            }
+            _ = bow_poly_jt_set_coeffs(st, n, J, M.baseAddress,
+                ca.baseAddress, cb.baseAddress, ca4.baseAddress,
+                cb4.baseAddress, wd.baseAddress, phiO.baseAddress,
+                phiD.baseAddress, phiU.baseAddress, phiF.baseAddress,
+                b.baseAddress, G.baseAddress, G4.baseAddress,
+                gd.baseAddress, gd4.baseAddress, phys.baseAddress)
         }}}}}}}}}}}}}}}}
+        // Melody follower: refresh the retune-law constants (t60 / fhf /
+        // bst may have moved with the edit). Re-arming the SAME row keeps
+        // its current pitch — the kernel just recomputes at the next tick.
+        if jt.trackRow >= 0, Int(jt.trackRow) < jt.rowFreqs.count {
+            bow_poly_jt_track_config(st, jt.trackRow,
+                                     jt.rowFreqs[Int(jt.trackRow)],
+                                     jt.trackT60, jt.trackFhf, jt.trackBst)
+        }
     }
 
     /// Current / target kernel scalar vectors. The push is RAMPED rather
@@ -792,8 +1091,6 @@ public final class BowEngine {
         liveScalarsCur.withUnsafeBufferPointer { sp in
             if let pk = pkernel {
                 bow_poly_set_scalars(pk, sp.baseAddress!, Int32(sp.count))
-            } else if let k = kernel {
-                bow_set_scalars(k, sp.baseAddress!, Int32(sp.count))
             }
         }
         if settled {
@@ -809,21 +1106,13 @@ public final class BowEngine {
     /// the kernel setters are plain scalar writes, audio-thread safe.
     private func updateTarafAxes(n48: Int) {
         os_unfair_lock_lock(&tiltLock)
-        let gT = jawGainTarget
         let lT = jtLpHzTarget
+        let hT = jtHpHzTarget
         let dT = dampAmtTarget
         os_unfair_lock_unlock(&tiltLock)
-        if gT == 1.0, jawGainCur == 1.0, lT == 0.0, !jtLpEngaged,
-           dT == 0.0, dampAmtCur == 0.0 { return }
+        if lT == 0.0, !jtLpEngaged, dT == 0.0, dampAmtCur == 0.0,
+           hT == 0.0, jtHpHzCur == 0.0 { return }
         let a = 1.0 - exp(-Double(n48) / (0.04 * sr))
-        // web buzz
-        jawGainCur += a * (gT - jawGainCur)
-        if gT == 1.0, abs(jawGainCur - 1.0) < 1e-3 { jawGainCur = 1.0 }
-        if abs(jawGainCur - jawGainPushed) > 1e-3 {
-            jawGainPushed = jawGainCur
-            if let pk = pkernel { bow_poly_set_jaw_gain(pk, jawGainCur) }
-            else if let k = kernel { bow_set_jaw_gain(k, jawGainCur) }
-        }
         // jt tone LP (smoothed in Hz; target 0 eases back to the build
         // corner then restores the exact build coefficient)
         let lpGoal = lT > 0 ? lT : tiltPureLpHiHz
@@ -833,14 +1122,22 @@ public final class BowEngine {
             if jtLpEngaged {
                 jtLpEngaged = false
                 if let pk = pkernel { bow_poly_jt_set_lp(pk, jtLpBaseA) }
-                else if let k = kernel { bow_jt_set_lp(k, jtLpBaseA) }
             }
         } else if abs(jtLpHzCur - jtLpHzPushed) > 1.0 || (lT > 0 && !jtLpEngaged) {
             jtLpHzPushed = jtLpHzCur
             jtLpEngaged = true
             let lpA = 1.0 - exp(-2.0 * Double.pi * jtLpHzCur / jtTickRate)
             if let pk = pkernel { bow_poly_jt_set_lp(pk, lpA) }
-            else if let k = kernel { bow_jt_set_lp(k, lpA) }
+        }
+        // jt tone HP (the formant voicing; 0 eases the corner down to
+        // bypass — one-pole state kept warm in the kernel)
+        jtHpHzCur += a * (hT - jtHpHzCur)
+        if hT == 0.0, jtHpHzCur < 1.0 { jtHpHzCur = 0.0 }
+        if abs(jtHpHzCur - jtHpHzPushed) > 0.5 {
+            jtHpHzPushed = jtHpHzCur
+            let hpA = jtHpHzCur > 0
+                ? 1.0 - exp(-2.0 * Double.pi * jtHpHzCur / jtTickRate) : 0.0
+            if let pk = pkernel { bow_poly_jt_set_hp(pk, hpA) }
         }
         // taraf damping
         dampAmtCur += a * (dT - dampAmtCur)
@@ -851,7 +1148,6 @@ public final class BowEngine {
                 : tiltDampMaxT60
                     * pow(tiltDampMinT60 / tiltDampMaxT60, dampAmtCur)
             if let pk = pkernel { bow_poly_jt_set_damp_t60(pk, t60) }
-            else if let k = kernel { bow_jt_set_damp_t60(k, t60) }
         }
     }
 
@@ -906,8 +1202,42 @@ public final class BowEngine {
         }
     }
 
+    /// STARPAD FX (2026-08-01): stage one insert point's settings from
+    /// the control thread; the render thread adopts them at the next
+    /// chunk boundary (the tone-tilt pattern). All-off is byte-null.
+    public func setFX(_ point: FXPoint, _ settings: FXSettings) {
+        os_unfair_lock_lock(&tiltLock)
+        fxPending[point.rawValue] = settings
+        fxDirty = true
+        os_unfair_lock_unlock(&tiltLock)
+    }
+
+    /// Per-chunk FX update (render thread): adopt staged settings and
+    /// advance every unit's smoothers. `nk` = the chunk at kernel rate
+    /// (drive/voice/taraf), `n48` = at engine rate (global).
+    private func updateFX(nk: Int, n48: Int) {
+        os_unfair_lock_lock(&tiltLock)
+        let dirty = fxDirty
+        let staged = dirty ? fxPending : []
+        fxDirty = false
+        os_unfair_lock_unlock(&tiltLock)
+        if dirty {
+            for i in fxUnits.indices { fxUnits[i].retarget(staged[i]) }
+        }
+        fxUnits[FXPoint.drive.rawValue].tick(frames: nk)
+        fxUnits[FXPoint.voice.rawValue].tick(frames: nk)
+        fxUnits[FXPoint.taraf.rawValue].tick(frames: nk)
+        fxUnits[FXPoint.global.rawValue].tick(frames: n48)
+    }
+
+    /// Called by the kernel's drive hook with the recorded jt-drive block
+    /// (render thread, kernel rate) — the voice→taraf insert.
+    fileprivate func fxProcessDrive(_ buf: UnsafeMutablePointer<Double>,
+                                    _ n: Int) {
+        fxUnits[FXPoint.drive.rawValue].processMono(buf, n)
+    }
+
     deinit {
-        if let k = kernel { bow_free(k) }
         if let pk = pkernel { bow_poly_free(pk) }
     }
 
@@ -930,36 +1260,9 @@ public final class BowEngine {
             os_unfair_lock_unlock(&tiltLock)
             let cap = ramping ? min(maxFrames, 256) : maxFrames
             let n = min(cap, frames - done)
-            if maxPoly > 1 {
-                renderPolyChunk(n, outL: outL + done, outR: outR + done)
-            } else {
-                renderChunk(n, outL: outL + done, outR: outR + done)
-            }
+            renderPolyChunk(n, outL: outL + done, outR: outR + done)
             done += n
         }
-    }
-
-    private func renderChunk(_ n: Int, outL: UnsafeMutablePointer<Double>,
-                             outR: UnsafeMutablePointer<Double>) {
-        let nk = n * osFactor
-        cF0.withUnsafeMutableBufferPointer { f0 in
-            cVb.withUnsafeMutableBufferPointer { vb in
-                cFb.withUnsafeMutableBufferPointer { fb in
-                    cBeta.withUnsafeMutableBufferPointer { be in
-                        cGate.withUnsafeMutableBufferPointer { ga in
-                            cF0Snd.withUnsafeMutableBufferPointer { fs in
-                                filter.fill(from: mapper, n: nk,
-                                            f0: f0.baseAddress!, vb: vb.baseAddress!,
-                                            fb: fb.baseAddress!, beta: be.baseAddress!,
-                                            gate: ga.baseAddress!,
-                                            f0Snd: fs.baseAddress!)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        renderControlChunk(nk: nk, n48: n, outL: outL, outR: outR)
     }
 
     /// Poly chunk: one mapper snapshot → per-slot control fills (fresh
@@ -975,6 +1278,25 @@ public final class BowEngine {
         }
         mapper.snapshotPoly(into: &polySnap)
         let lead = polySnap.lead
+        // Melody follower: target = the HIGHEST gated note (the mapper's
+        // musical pitch, bend included — scale-exact, which is what a
+        // sympathetic resonance wants). No gated note = keep the last
+        // target, so the string rings out where the melody left it.
+        if trackArmed {
+            var hi = 0.0
+            for s in 0..<maxPoly {
+                let slot = polySnap.slots[s]
+                if slot.gate > 0.0, slot.f0Target > hi { hi = slot.f0Target }
+            }
+            if hi > 0.0, hi != trackHzPushed {
+                trackHzPushed = hi
+                bow_poly_jt_track_target(pk, hi)
+            }
+        }
+        // RECRUITMENT (bow_jt_sel): re-score the taraf's bridge-drive
+        // weights against the gated pitch set (no-op while the axis is
+        // off — the kernel stays byte-null)
+        updateRecruitment(pk)
         cF0.withUnsafeMutableBufferPointer { f0 in
             cVb.withUnsafeMutableBufferPointer { vb in
                 cFb.withUnsafeMutableBufferPointer { fb in
@@ -1025,12 +1347,40 @@ public final class BowEngine {
                 }
             }
         }
+        // FX rack: adopt staged settings + advance smoothers (chunk rate).
+        // The voice/taraf inserts split the kernel's buses (bit-exact when
+        // idle — each jt term lands exactly once, so bus + bus reproduces
+        // the fused rounding); the drive insert fires inside the kernel
+        // via the installed hook.
+        updateFX(nk: nk, n48: n)
+        let vIdx = FXPoint.voice.rawValue, tIdx = FXPoint.taraf.rawValue
+        let busFX = fxUnits[vIdx].isEngaged || fxUnits[tIdx].isEngaged
         if stereoOn {
             y96.withUnsafeMutableBufferPointer { yb in
                 y96S.withUnsafeMutableBufferPointer { sb in
-                    bow_poly_process2(pk, Int32(nk), Int32(slotStride),
-                                      cF0, cVb, cFb, cBeta, cGate, cXv,
-                                      yb.baseAddress!, sb.baseAddress!)
+                    if busFX {
+                        y96Jt.withUnsafeMutableBufferPointer { jb in
+                            y96JtS.withUnsafeMutableBufferPointer { jsb in
+                                bow_poly_process3(
+                                    pk, Int32(nk), Int32(slotStride),
+                                    cF0, cVb, cFb, cBeta, cGate, cXv,
+                                    yb.baseAddress!, sb.baseAddress!,
+                                    jb.baseAddress!, jsb.baseAddress!)
+                                fxUnits[vIdx].processMidSide(
+                                    yb.baseAddress!, sb.baseAddress!, nk)
+                                fxUnits[tIdx].processMidSide(
+                                    jb.baseAddress!, jsb.baseAddress!, nk)
+                                for i in 0..<nk {
+                                    yb[i] += jb[i]
+                                    sb[i] += jsb[i]
+                                }
+                            }
+                        }
+                    } else {
+                        bow_poly_process2(pk, Int32(nk), Int32(slotStride),
+                                          cF0, cVb, cFb, cBeta, cGate, cXv,
+                                          yb.baseAddress!, sb.baseAddress!)
+                    }
                     y48.withUnsafeMutableBufferPointer { ob in
                         dec.process(yb.baseAddress!, count: nk,
                                     into: ob.baseAddress!)
@@ -1044,35 +1394,27 @@ public final class BowEngine {
             postChainStereo(n48: n, outL: outL, outR: outR)
         } else {
             y96.withUnsafeMutableBufferPointer { yb in
-                bow_poly_process(pk, Int32(nk), Int32(slotStride),
-                                 cF0, cVb, cFb, cBeta, cGate, cXv,
-                                 yb.baseAddress!)
+                if busFX {
+                    y96Jt.withUnsafeMutableBufferPointer { jb in
+                        bow_poly_process3(pk, Int32(nk), Int32(slotStride),
+                                          cF0, cVb, cFb, cBeta, cGate, cXv,
+                                          yb.baseAddress!, nil,
+                                          jb.baseAddress!, nil)
+                        fxUnits[vIdx].processMono(yb.baseAddress!, nk)
+                        fxUnits[tIdx].processMono(jb.baseAddress!, nk)
+                        for i in 0..<nk { yb[i] += jb[i] }
+                    }
+                } else {
+                    bow_poly_process(pk, Int32(nk), Int32(slotStride),
+                                     cF0, cVb, cFb, cBeta, cGate, cXv,
+                                     yb.baseAddress!)
+                }
                 y48.withUnsafeMutableBufferPointer { ob in
                     dec.process(yb.baseAddress!, count: nk, into: ob.baseAddress!)
                 }
             }
             postChain(n48: n, outL: outL, outR: outR)
         }
-    }
-
-    /// Kernel + post-chain over already-filled control scratch (mono
-    /// kernel). Also the fixture entry (`renderFixture`) so the end-to-end
-    /// confirm exercises EXACTLY the live buffer path.
-    private func renderControlChunk(nk: Int, n48: Int,
-                                    outL: UnsafeMutablePointer<Double>,
-                                    outR: UnsafeMutablePointer<Double>) {
-        guard let k = kernel else {
-            for i in 0..<n48 { outL[i] = 0; outR[i] = 0 }
-            return
-        }
-        y96.withUnsafeMutableBufferPointer { yb in
-            bow_process(k, Int32(nk), cF0, cVb, cFb, cBeta, cGate, cXv,
-                        yb.baseAddress!)
-            y48.withUnsafeMutableBufferPointer { ob in
-                dec.process(yb.baseAddress!, count: nk, into: ob.baseAddress!)
-            }
-        }
-        postChain(n48: n48, outL: outL, outR: outR)
     }
 
     /// The shared 48 kHz post-chain over y48: radiation FIR → E_lp →
@@ -1120,6 +1462,9 @@ public final class BowEngine {
             outR[i] = half
         }
         gainPrev = outGain
+        // FX rack, global point: after the whole fitted chain. A stereo
+        // reverb here decorrelates the equal L/R split — deliberate.
+        fxUnits[FXPoint.global.rawValue].processLR(outL, outR, n48)
     }
 
     /// Stereo post-chain (Starpad 2026-07-23): the mid (y48) and side
@@ -1163,6 +1508,8 @@ public final class BowEngine {
             outR[i] = g * (m - s + wr)
         }
         gainPrev = outGain
+        // FX rack, global point (see postChain)
+        fxUnits[FXPoint.global.rawValue].processLR(outL, outR, n48)
     }
 
     /// Fixture/e2e entry: render EXPLICIT kernel-rate control arrays through
@@ -1182,19 +1529,16 @@ public final class BowEngine {
             cBeta[i] = beta[i]; cGate[i] = gate[i]
             cF0Snd[i] = f0[i]     // explicit controls: mask rides the input
         }
-        if let pk = pkernel {
-            y96.withUnsafeMutableBufferPointer { yb in
-                bow_poly_process(pk, Int32(nk), Int32(slotStride),
-                                 cF0, cVb, cFb, cBeta, cGate, cXv,
-                                 yb.baseAddress!)
-                y48.withUnsafeMutableBufferPointer { ob in
-                    dec.process(yb.baseAddress!, count: nk, into: ob.baseAddress!)
-                }
+        guard let pk = pkernel else { return }
+        y96.withUnsafeMutableBufferPointer { yb in
+            bow_poly_process(pk, Int32(nk), Int32(slotStride),
+                             cF0, cVb, cFb, cBeta, cGate, cXv,
+                             yb.baseAddress!)
+            y48.withUnsafeMutableBufferPointer { ob in
+                dec.process(yb.baseAddress!, count: nk, into: ob.baseAddress!)
             }
-            postChain(n48: nk / osFactor, outL: outL, outR: outR)
-        } else {
-            renderControlChunk(nk: nk, n48: nk / osFactor, outL: outL, outR: outR)
         }
+        postChain(n48: nk / osFactor, outL: outL, outR: outR)
     }
 
     public func reset() {
@@ -1219,5 +1563,16 @@ public final class BowEngine {
         filter.reset()
         for i in filters.indices { filters[i].reset() }
         for i in slotSilent.indices { slotSilent[i] = false }
+        for i in fxUnits.indices { fxUnits[i].reset() }
     }
+}
+
+/// C trampoline for the kernel's jt-drive FX hook (no captures — a plain
+/// @convention(c) pointer). ctx is the unretained BowEngine.
+private func bowEngineDriveFXHook(_ ctx: UnsafeMutableRawPointer?,
+                                  _ buf: UnsafeMutablePointer<Double>?,
+                                  _ n: Int32) {
+    guard let ctx, let buf, n > 0 else { return }
+    Unmanaged<BowEngine>.fromOpaque(ctx).takeUnretainedValue()
+        .fxProcessDrive(buf, Int(n))
 }

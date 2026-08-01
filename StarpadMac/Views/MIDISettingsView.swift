@@ -18,7 +18,7 @@ struct MIDISettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("MIDI")
-                .font(.caption.weight(.bold))
+                .font(.padCaption.weight(.bold))
                 .foregroundStyle(.secondary)
             statusPanel
             configPanel

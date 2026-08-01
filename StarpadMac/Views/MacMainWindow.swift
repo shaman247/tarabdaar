@@ -26,6 +26,7 @@ struct MacMainWindow: View {
         case fretPad = "Fret Pad"
         case tilt = "Controls"
         case parameters = "Parameters"
+        case fx = "FX"
         case setup = "Setup"
     }
 
@@ -81,7 +82,7 @@ struct MacMainWindow: View {
                 ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 580)
+            .frame(maxWidth: 640)
             Spacer(minLength: 12)
         }
     }
@@ -94,6 +95,7 @@ struct MacMainWindow: View {
         case .fretPad:    FretPadView(controller: controller)
         case .tilt:       TiltControlsView(controller: controller)
         case .parameters: ParametersView(controller: controller)
+        case .fx:         FXView(controller: controller)
         case .setup:      SetupView(controller: controller)
         }
     }
@@ -117,7 +119,7 @@ private struct ConnectionPill: View {
         } label: {
             HStack(spacing: 6) {
                 Circle().fill(color).frame(width: 8, height: 8)
-                Text(label).font(.system(.caption))
+                Text(label).font(.padCaption)
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(Capsule().fill(Color(white: 0.15)))
@@ -157,9 +159,9 @@ private struct KeyboardPlayPill: View {
             showDetails = true
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "keyboard").font(.caption)
+                Image(systemName: "keyboard").font(.padCaption)
                 Text(keyboard.enabled ? "Keys" : "Keys off")
-                    .font(.system(.caption))
+                    .font(.padCaption)
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(Capsule().fill(
@@ -194,7 +196,7 @@ private struct KeyboardPlayPill: View {
                     Text("Works on any tab; pauses while you type in a field.")
                         .foregroundStyle(.secondary)
                 }
-                .font(.caption)
+                .font(.padCaption)
             }
             .padding(16)
             .frame(width: 340, alignment: .leading)

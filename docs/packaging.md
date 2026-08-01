@@ -6,7 +6,7 @@ Quick reference for shipping Starpad (iOS) and StarpadMac outside of Xcode's run
 
 For distribution outside the Mac App Store (e.g. direct download, internal builds), notarize a Hardened-Runtime-enabled `.app` against Apple's notarization service.
 
-**No external dependencies**: StarpadMac renders its own String voice (`SarangiKit.BowEngine` + the `CBowKernel` C target, both vendored in-repo) — there is no hosted-AU or plugin dependency to install on the target Mac. The whole instrument ships inside the bundle.
+**No external dependencies**: StarpadMac renders its own String voice (`SarangiKit.BowEngine` + the `CBowKernel` C target, both in-repo) — there is no hosted-AU or plugin dependency to install on the target Mac. The whole instrument ships inside the bundle.
 
 ### One-time setup
 

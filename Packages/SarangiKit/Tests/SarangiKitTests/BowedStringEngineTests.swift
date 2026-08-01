@@ -2,8 +2,9 @@ import XCTest
 @testable import SarangiKit
 
 /// Generic pure-physics bowed string, live-shaped smoke: FORMULA tables
-/// (BowTables.buildOpenString — analytic modal body + polarization-doublet
-/// taraf, no fitted artifacts) → streaming kernel → decimate → formula
+/// (BowTables.buildOpenString — analytic modal body, no fitted artifacts;
+/// the sympathetics are the modal-jawari block) → streaming kernel →
+/// decimate → formula
 /// radiation (butter-2 HP sections + one-pole LP) → dry reverb, driven by
 /// the control mapper like the app. No artifact dependency: the
 /// BowParams are constructed inline with the seed values (physics constants
@@ -32,13 +33,6 @@ final class BowedStringEngineTests: XCTestCase {
             "bow_body_q": 25.0, "bow_body_q_air": 12.0,
             "bow_body_y": 0.9, "bow_body_rad": 1.0, "bow_body_c0": 0.3,
             "bow_brg_f": 700.0, "bow_brg_q": 0.55, "bow_loop_max": 0.5,
-            // formula taraf (2026-07-16d)
-            "bow_taraf_Z": 0.0033, "bow_taraf_gain": 1.0,
-            "bow_taraf_pol_cents": 3.0, "bow_taraf_pol_gain": 0.85,
-            "bow_taraf_pol_t60": 1.0, "bow_taraf_inharm": 0.1,
-            "bow_taraf_damp": 0.5, "bow_taraf_bright": 0.5,
-            "bow_taraf_t60": 1.0, "bow_taraf_t60_cap": 8.0,
-            "bow_taraf_dir": 0.5, "bow_taraf_jawari": 0.0,
             // mapping (formulas)
             "bow_v_lo": 0.065, "bow_v_hi": 0.23, "dyn_p": 1.0,
             "bow_expr_lift": 0.2,
@@ -55,7 +49,7 @@ final class BowedStringEngineTests: XCTestCase {
         ])
     }
 
-    /// The 3-row taraf tuning used by the lockstep spot values below.
+    /// A 3-row sympathetic tuning for the modal-jawari block.
     static let testTaraf: [(f: Double, gain: Double, t60: Double)] = [
         (261.63, 1.0, 6.0), (392.0, 0.8, 5.0), (523.25, 0.6, 4.0),
     ]
@@ -110,25 +104,22 @@ final class BowedStringEngineTests: XCTestCase {
 
     func testOpenStringTablesShape() {
         let bp = Self.stringBP()
-        let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp,
-                                          taraf: Self.testTaraf)
+        let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp)
         XCTAssertEqual(t.scalars.count, 61)
-        XCTAssertEqual(t.L.count, 6, "3 taraf rows × polarization doublets")
         XCTAssertEqual(t.ba1.count, 12, "formula body must arm 12 modes")
         XCTAssertEqual(t.scalars[0], 0.08)           // yinf: bridge mobility
         XCTAssertEqual(t.scalars[1], 0.3)            // c0: direct radiation
         XCTAssertEqual(t.scalars[3], 0.0)            // pgain: no voice force
         // kret LOOP-CAP PROJECTED (the mobile body raises max|Y·H_brg|) —
         // python reference from gutstring._string_scalars; tolerance covers
-        // numpy pairwise- vs Swift sequential-summation in the ymax scan
+        // numpy pairwise- vs Swift sequential-summation in the ymax scan.
+        // The cap scan reads the BODY bank only, so deleting the web left
+        // this value untouched.
         XCTAssertEqual(t.scalars[6], 0.16046955218688852, accuracy: 1e-11)
-        XCTAssertEqual(t.scalars[30], 0.5)           // tdirect: taraf tap
-        XCTAssertEqual(t.scalars[31], 1.0)           // tshape: body-shaped
-        XCTAssertEqual(t.scalars[40], 1.0)           // PASSIVE wave junction
         XCTAssertEqual(t.scalars[44], 261.63)        // f0Open = tonic
-        // LOCKSTEP with gutstring.formula_body/formula_taraf (python
-        // reference values at sr 96000 / tonic 261.63; regenerate via the
-        // one-liner in the doc comment if the recipe changes)
+        // LOCKSTEP with gutstring.formula_body (python reference values at
+        // sr 96000 / tonic 261.63; regenerate via the one-liner in the doc
+        // comment if the recipe changes)
         XCTAssertEqual(t.ba1[0], 1.9984787886291242, accuracy: 1e-14)
         XCTAssertEqual(t.bA[0], 1.0062305898749055, accuracy: 1e-14)
         XCTAssertEqual(t.bC[0], -0.7360679774997898, accuracy: 1e-14)
@@ -137,18 +128,44 @@ final class BowedStringEngineTests: XCTestCase {
         XCTAssertEqual(t.bC[1], -1.3541019662496847, accuracy: 1e-14)
         XCTAssertEqual(t.ba1[11], 1.9833506105945045, accuracy: 1e-14)
         XCTAssertEqual(t.bC[11], 0.5344418537486337, accuracy: 1e-14)
-        XCTAssertEqual(t.L[0], 365)
-        XCTAssertEqual(t.g[0], 0.9956404721089352, accuracy: 1e-14)
-        XCTAssertEqual(t.wout[0], 0.4082482904638631, accuracy: 1e-14)
-        XCTAssertEqual(t.zi[0], 0.00445945945945946, accuracy: 1e-16)
-        XCTAssertEqual(t.zdrv[0], 2.045845133184961, accuracy: 1e-13)
-        XCTAssertEqual(t.L[1], 364)
-        XCTAssertEqual(t.zi[5], 0.0022743243243243247, accuracy: 1e-16)
         // signed radiation residues: both signs present (the honk law)
         XCTAssertTrue(t.bC.contains { $0 > 0 } && t.bC.contains { $0 < 0 })
-        // admittance residues + junction impedances all positive (passivity)
+        // admittance residues all positive (passivity)
         XCTAssertTrue(t.bA.allSatisfy { $0 > 0 })
-        XCTAssertTrue(t.zi.allSatisfy { $0 > 0 })
+    }
+
+    /// THE TARAF SIMPLIFICATION (2026-07-24). The builder used to hang a
+    /// web of linear comb strings off the passive wave junction — the
+    /// sympathetic steel (`bow_taraf_*`, polarization doublets, flat-bridge
+    /// buzz) and the open gut pair (`bow_open_*`) — radiated through a
+    /// direct tap. All of it is gone; `buildJawariTables` is the taraf now.
+    /// Nothing may reintroduce a web voice: the kernel scalars that gate
+    /// the tap and the junction have to stay hard 0, or a rebuilt engine
+    /// would radiate a ring that no longer exists.
+    func testNoWebVoicesAreBuilt() {
+        var bp = Self.stringBP()
+        // the old keys at their most provocative values — all inert now
+        for (k, v) in ["bow_taraf_Z": 0.02, "bow_taraf_gain": 8.0,
+                       "bow_taraf_dir": 1.8, "bow_taraf_jawari": 1.3,
+                       "bow_open_Z": 0.02, "bow_open_gain": 1.0,
+                       "bow_taraf_duck": 0.2, "bow_taraf_tap_mix": 0.3] {
+            bp.num[k] = v
+        }
+        let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp)
+        XCTAssertTrue(t.L.isEmpty, "a web voice was built")
+        for arr in [t.cs, t.cp, t.w0, t.g, t.lpA, t.wout, t.kap, t.alphaw,
+                    t.jw, t.jl, t.jn, t.zi, t.zdrv, t.twt, t.chg] {
+            XCTAssertTrue(arr.isEmpty)
+        }
+        XCTAssertEqual(t.scalars[30], 0.0)           // tdirect: no ring tap
+        XCTAssertEqual(t.scalars[31], 0.0)           // tshape: tap path off
+        XCTAssertEqual(t.scalars[40], 0.0)           // no passive junction
+        XCTAssertEqual(t.scalars[46], 1.0)           // driven-tap duck: off
+        // and the whole table set is identical to a build that never saw
+        // the keys at all — the deleted parameters cannot leak back in
+        let clean = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63,
+                                              bp: Self.stringBP())
+        XCTAssertEqual(t.scalars, clean.scalars)
     }
 
     /// The SHIPPED body configuration (params/bowed_string.json after the
@@ -320,7 +337,7 @@ final class BowedStringEngineTests: XCTestCase {
             }
             let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
             var tables = BowTables.buildOpenString(
-                sr: sr * Double(osf), tonic: tonic, bp: bp, taraf: rows)
+                sr: sr * Double(osf), tonic: tonic, bp: bp)
             var jtRows = rows.filter {
                 BowTables.jtSteelRow($0.f, tonic: tonic)
             }
@@ -431,7 +448,7 @@ final class BowedStringEngineTests: XCTestCase {
                                               t60: Double)]) -> [Double] {
             let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
             var tables = BowTables.buildOpenString(
-                sr: sr * Double(osf), tonic: 261.63, bp: bp, taraf: taraf)
+                sr: sr * Double(osf), tonic: 261.63, bp: bp)
             let jtRows = taraf.filter {
                 BowTables.jtSteelRow($0.f, tonic: 261.63)
             }

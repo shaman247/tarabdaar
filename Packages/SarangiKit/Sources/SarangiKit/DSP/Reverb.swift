@@ -16,9 +16,10 @@ public struct Reverb: Sendable {
 
     public var mix: Double            // F_mix (live)
     public var width: Double          // F_width (live)
+    private let sr: Double
 
     public init(rt60: Double, predelayMs: Double, mix: Double, width: Double, sr: Double) {
-        self.mix = mix; self.width = width
+        self.mix = mix; self.width = width; self.sr = sr
         predelay = DelayLine(samples: max(1, Int(predelayMs / 1000.0 * sr)))
         mid = ReverbTank(rt60: rt60, sr: sr, spread: 0)
         side = ReverbTank(rt60: rt60 * 0.9, sr: sr, spread: 23)
@@ -87,6 +88,20 @@ public struct Reverb: Sendable {
         hpM.reset(); lpM.reset(); hpS.reset(); lpS.reset()
         rmsDry.reset(); rmsWet.reset(); rmsSide.reset(); rmsMid.reset()
     }
+
+    /// STARPAD FX (2026-08-01): retune the running room in place — comb
+    /// feedbacks re-derived for the new RT60 (buffers and state kept, so
+    /// the tail glides instead of clicking) and the band-limit low-passes
+    /// take new coefficients state-kept (`copyCoefficients`). The FX
+    /// rack's "Room" reverb drives this from its live size/cutoff knobs;
+    /// the fitted calibration room never calls it.
+    public mutating func setTone(rt60: Double, cutoffHz: Double) {
+        mid.setRT60(rt60, sr: sr)
+        side.setRT60(rt60 * 0.9, sr: sr)
+        let lp = Biquad.lowpass(fc: min(max(cutoffHz, 100), 0.45 * sr), sr: sr)
+        lpM.copyCoefficients(from: lp)
+        lpS.copyCoefficients(from: lp)
+    }
 }
 
 /// A simple fixed-delay line (predelay).
@@ -126,11 +141,21 @@ struct ReverbTank: Sendable {
     }
 
     mutating func reset() { for i in combs.indices { combs[i].reset() }; for i in allpasses.indices { allpasses[i].reset() } }
+
+    /// Re-derive each comb's feedback for a new RT60 (same −60 dB law as
+    /// init), keeping every buffer and state — a live, click-free move.
+    mutating func setRT60(_ rt60: Double, sr: Double) {
+        for i in combs.indices {
+            let size = combs[i].buf.count
+            let g = pow(10.0, -3.0 * Double(size) / (max(rt60, 0.05) * sr))
+            combs[i].feedback = min(0.98, g)
+        }
+    }
 }
 
 struct Comb: Sendable {
     var buf: [Double]; var idx = 0; var store = 0.0
-    let feedback: Double; let damp: Double
+    var feedback: Double; let damp: Double
     init(size: Int, feedback: Double, damp: Double) { buf = [Double](repeating: 0, count: size); self.feedback = feedback; self.damp = damp }
     mutating func process(_ x: Double) -> Double {
         let y = buf[idx]
@@ -153,4 +178,19 @@ struct Allpass: Sendable {
         return out
     }
     mutating func reset() { for i in buf.indices { buf[i] = 0 } }
+}
+
+/// Causal running RMS (one-pole on x²) — the wet/dry level tracker above is
+/// its only consumer, so it lives here since `DSP/Envelope.swift` (a grab-bag
+/// of offline-harness helpers) was deleted with the vendored machinery.
+/// Verbatim: the reverb's balance depends on these exact coefficients.
+public struct RunningRMS: Sendable {
+    public var a: Double
+    public var meanSq: Double = 0
+    public init(tauMs: Double, sr: Double) { a = exp(-1.0 / (sr * tauMs / 1000.0)) }
+    public mutating func process(_ x: Double) -> Double {
+        meanSq = (1 - a) * (x * x) + a * meanSq
+        return meanSq.squareRoot()
+    }
+    public mutating func reset() { meanSq = 0 }
 }

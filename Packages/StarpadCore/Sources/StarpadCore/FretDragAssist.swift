@@ -43,10 +43,16 @@ import Foundation
 // The constants are FITTED to recorded real playing (`FretGestureRecorder` +
 // `tools/fretpad_fit.py`); see the property comments for the fit provenance.
 //
-// When **no fret qualifies, the correction FREEZES** rather than decaying:
-// a deliberate microtonal hold doesn't drift, and each assisted landing
-// becomes the new tuning anchor (a relative frame, exactly like the onset
-// offset — bounded by the snap radius, re-anchored at the next inflection).
+// A candidate the touch is actively **receding** from (moving away, smoothed
+// speed above `speedFloor`) exerts NO pull — the magnet corrects approaches
+// and rests, never fights an escape from a fret. When **no pull qualifies**,
+// the correction's fate depends on motion: a **stationary** touch keeps it
+// FROZEN (a deliberate microtonal hold doesn't drift, and touch jitter stays
+// under the movement gate's floor), while a **moving** touch sheds it toward
+// zero with distance travelled (`correctionDecayPx`, under the same slew
+// cap) — so a glide away from an assisted landing converges on the raw
+// field pitch however slow the tempo, and the next approach lands true
+// instead of carrying the departed fret's anchor.
 //
 // Because the output is always the slew-filtered state, no input event —
 // candidate switch, zone entry/exit, speed spike — can produce a pitch
@@ -116,6 +122,13 @@ public final class FretDragAssist {
     /// px of movement below which direction is not re-evaluated (touch jitter
     /// must not fire flips).
     private let turnDeadband: CGFloat = 0.7
+    /// Distance constant (px) of the carried-correction shed: with no
+    /// qualifying pull, a moving touch's correction loses a 1/e step per
+    /// this many px of travel. Half the default 24 px snap radius — carried
+    /// anchors are basin-scale artifacts, so they fade on basin-scale
+    /// travel. Chosen analytically, not yet refit against recordings
+    /// (2026-08-01).
+    private let correctionDecayPx: Double = 12.0
     /// Hard cap on the correction's slew rate (log2 units/s ≈ 1500 cents/s,
     /// well inside natural meend speeds) — **smoothness by construction**:
     /// whatever the fitted constants, the output pitch can never step.
@@ -235,7 +248,18 @@ public final class FretDragAssist {
         }
 
         var weights: [String: Double] = [:]
-        if let cand {
+        // A fret the touch is actively RECEDING from (moving away from it,
+        // smoothed speed above the stationary floor) exerts no pull — the
+        // magnet corrects approaches and rests, never fights an escape.
+        // (It used to: a slow glide off a fret kept re-anchoring to it all
+        // the way across the basin, and the residue froze at the basin edge
+        // and carried the departed fret's pitch into the next landing.)
+        let receding: Bool = {
+            guard let cand, s.dxSign != 0, s.speed > speedFloor,
+                  cand.x != s.x else { return false }
+            return (cand.x > s.x ? 1 : -1) != s.dxSign
+        }()
+        if let cand, !receding {
             // Full pull inside half the radius, fading to 0 at the edge —
             // continuous in space.
             let prox = max(0.0, min(1.0, 2.0 * (1.0 - candD / radiusPx)))
@@ -247,8 +271,24 @@ public final class FretDragAssist {
             // Glow: proximity-shaped, brightening as the gate opens.
             let glow = (1.0 - candD / radiusPx) * (0.3 + 0.7 * gate)
             if glow > 0.05 { weights[cand.id] = min(1.0, glow) }
+        } else if s.correction != 0 {
+            // No qualifying pull: a MOVING touch sheds the carried
+            // correction with DISTANCE travelled (one 1/e step per
+            // `correctionDecayPx`), so a glide away from an assisted
+            // landing converges on the field's truth however slow the
+            // tempo, and the next landing starts true rather than
+            // sharp/flat by the old anchor. The movement gate (0 at the
+            // stationary floor, 1 at twice it) keeps rests — including
+            // touch jitter — frozen: a deliberate microtonal hold must
+            // not drift.
+            let mv = max(0.0, min(1.0, (s.speed - speedFloor) / speedFloor))
+            let moveGate = mv * mv * (3 - 2 * mv)
+            let travel = s.speed * dt
+            let rate = (1 - exp(-travel / correctionDecayPx)) * moveGate
+            let cap = slewCap * dt
+            let step = -s.correction * rate
+            s.correction += min(cap, max(-cap, step))
         }
-        // No candidate → correction frozen (the carried tuning anchor).
 
         return Output(log2Pitch: s.uncorrectedLog + s.correction,
                       weights: weights)

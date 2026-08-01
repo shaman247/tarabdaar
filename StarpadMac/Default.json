@@ -1,17 +1,17 @@
 {
   "version": 1,
   "points": [
-    { "num": 1,  "den": 1,  "y": 0.8333333333333334, "label": "1",  "enabled": true },
-    { "num": 16, "den": 15, "y": 0.3333333333333333, "label": "2-", "enabled": true },
-    { "num": 9,  "den": 8,  "y": 0.8333333333333334, "label": "2",  "enabled": true },
-    { "num": 6,  "den": 5,  "y": 0.3333333333333333, "label": "3-", "enabled": true },
-    { "num": 5,  "den": 4,  "y": 0.8333333333333334, "label": "3",  "enabled": true },
-    { "num": 4,  "den": 3,  "y": 0.8333333333333334, "label": "4",  "enabled": true },
-    { "num": 45, "den": 32, "y": 0.3333333333333333, "label": "4+", "enabled": true },
-    { "num": 3,  "den": 2,  "y": 0.8333333333333334, "label": "5",  "enabled": true },
-    { "num": 8,  "den": 5,  "y": 0.3333333333333333, "label": "6-", "enabled": true },
-    { "num": 5,  "den": 3,  "y": 0.8333333333333334, "label": "6",  "enabled": true },
-    { "num": 16, "den": 9,  "y": 0.3333333333333333, "label": "7-", "enabled": true },
-    { "num": 15, "den": 8,  "y": 0.8333333333333334, "label": "7",  "enabled": true }
+    { "num": 1,  "den": 1,  "y": 0.8333333333333334, "label": "S", "enabled": true },
+    { "num": 16, "den": 15, "y": 0.3333333333333333, "label": "r", "enabled": true },
+    { "num": 9,  "den": 8,  "y": 0.8333333333333334, "label": "R", "enabled": true },
+    { "num": 6,  "den": 5,  "y": 0.3333333333333333, "label": "g", "enabled": true },
+    { "num": 5,  "den": 4,  "y": 0.8333333333333334, "label": "G", "enabled": true },
+    { "num": 4,  "den": 3,  "y": 0.8333333333333334, "label": "m", "enabled": true },
+    { "num": 45, "den": 32, "y": 0.3333333333333333, "label": "M", "enabled": true },
+    { "num": 3,  "den": 2,  "y": 0.8333333333333334, "label": "P", "enabled": true },
+    { "num": 8,  "den": 5,  "y": 0.3333333333333333, "label": "d", "enabled": true },
+    { "num": 5,  "den": 3,  "y": 0.8333333333333334, "label": "D", "enabled": true },
+    { "num": 16, "den": 9,  "y": 0.3333333333333333, "label": "n", "enabled": true },
+    { "num": 15, "den": 8,  "y": 0.8333333333333334, "label": "N", "enabled": true }
   ]
 }

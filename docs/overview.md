@@ -25,7 +25,7 @@ Starpad is an expressive electronic music instrument, loosely inspired by the [O
 
 ### Mac (the sarangi String voice)
 - Renders the **String voice** (`BowEngine` + `CBowKernel`, 96 kHz → 48 kHz), the only voice — the audio graph is just `StringVoiceSource → symGain → mainMixerNode → output`
-- Sympathetic (tarab) strings + modal-jawari taraf fused into the kernel, tuned from the **Tarab tab** (auto-sync to the scale is opt-in)
+- Sympathetic (tarab) strings + modal-jawari taraf fused into the kernel, tuned from the **Tarab tab** (every string a degree of the centralized scale — the tarab always follows the scale)
 - **Parameters tab** — every parameter of the instrument in one grouped, searchable list (physics scalars and live axes alike), applied live
 - **Controls tab** — tilt bindings (to a composite or straight to a parameter) + composite parameters (named 0–1 macros)
 - **Autonomous audition pipeline** — `<repo>/auditions/inbox/` is a watched folder; drop a JSON score and `AuditionRunner` plays it through the headless simulator while recording to `<repo>/auditions/outputs/<name>.wav`. Events can drive notes, tilts, drones, and String-voice parameters (`voiceParam` / `string.<key>`), so a script can sweep sound-design space without a human in the loop. See [Simulator & Audition Loop](simulator.md).

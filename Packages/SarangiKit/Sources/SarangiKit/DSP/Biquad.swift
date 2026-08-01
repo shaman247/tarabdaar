@@ -175,30 +175,6 @@ public struct Biquad: Sendable {
         return Biquad(b0: R * R, b1: c, b2: 1, a0: 1, a1: c, a2: R * R)
     }
 
-    // MARK: - Graphical-EQ helpers (shared by the DSP chain and the UI curve)
-
-    /// Build the biquad for one graphical-EQ node, mapping `type` → RBJ design.
-    /// Single source of truth so the drawn curve (`magnitude`) is bit-faithful to
-    /// the running filter. Clamps `freq` to `[20, 0.49·sr]`. (Shelves use a fixed
-    /// slope; the node's `q` is ignored for them — see `EQBandType.usesQ`.)
-    public static func forBand(_ b: EQBand, sr: Double) -> Biquad {
-        let f = min(max(20, b.freq), 0.49 * sr)
-        switch b.type {
-        case .peaking:   return peaking(f0: f, gainDB: b.gainDB, q: max(0.05, b.q), sr: sr)
-        case .lowShelf:  return lowShelf(f0: f, gainDB: b.gainDB, sr: sr)
-        case .highShelf: return highShelf(f0: f, gainDB: b.gainDB, sr: sr)
-        case .highPass:  return highpass(fc: f, sr: sr, q: max(0.05, b.q))
-        case .lowPass:   return lowpass(fc: f, sr: sr, q: max(0.05, b.q))
-        }
-    }
-
-    /// The per-voice stage low-pass (the graphical EQ's right-edge node):
-    /// resonance 0..1 → Q 0.707 (Butterworth) .. 8 (resonant peak). Shared by
-    /// `VoiceFX.makeLP` and the UI so the curve matches the filter.
-    public static func stageLowpass(cutoff: Double, resonance: Double, sr: Double) -> Biquad {
-        let q = 0.70710678 + max(0, min(1, resonance)) * (8.0 - 0.70710678)
-        return lowpass(fc: min(max(20, cutoff), 0.49 * sr), sr: sr, q: q)
-    }
 
     /// |H(e^{jω})| of this (a0-normalised) biquad at `f` Hz — the linear magnitude
     /// response, exact for any design. Used to draw the EQ curve and to derive the

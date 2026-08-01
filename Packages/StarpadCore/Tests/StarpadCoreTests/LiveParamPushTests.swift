@@ -113,6 +113,17 @@ final class LiveParamPushTests: XCTestCase {
     /// A pushed edit must land on the same sound a rebuild would have
     /// produced. Compares the steady state of (a) push-then-settle against
     /// (b) an engine built with the value baked in from the start.
+    ///
+    /// SETTLE LENGTH MATTERS (2026-07-24, the taraf-web removal). This used
+    /// to render 10 blocks and measure the last 8192 samples, which caught
+    /// the bowed tone still on its way to steady state — the two engines
+    /// were compared mid-transient. The linear sympathetic web hid that:
+    /// its ring was a large, history-insensitive share of the total RMS.
+    /// With the web gone the pure string's transient is the whole signal
+    /// and the same window read 2.1 dB (2.3 dB on the pre-removal build
+    /// with the web merely silenced — i.e. the window, not the change).
+    /// Rendering to a genuine steady state instead puts push and rebuild
+    /// within 0.1 dB, which is the claim this test exists to make.
     func testPushedValueMatchesARebuiltEngine() throws {
         let key = "bow_mu_s", v = 1.1
         guard let (pushed, _) = makeSource() else {
@@ -123,7 +134,7 @@ final class LiveParamPushTests: XCTestCase {
         _ = pull(pushed, 8)
         _ = pushed.applyLiveParams(tonicHz: 328.9, strings: strings(),
                                    overrides: [key: v])
-        let pushedTail = pull(pushed, 10)
+        let pushedTail = pull(pushed, 30)
 
         // the control: same note, same value, but BUILT in
         let rebuilt = StringVoiceSource()
@@ -134,16 +145,18 @@ final class LiveParamPushTests: XCTestCase {
         rebuilt.mapper.midi(0xB0, 11, 64)
         rebuilt.mapper.midi(0x90, 60, 100)
         _ = pull(rebuilt, 8)
-        let rebuiltTail = pull(rebuilt, 10)
+        let rebuiltTail = pull(rebuilt, 30)
 
-        let p = rms(pushedTail[(pushedTail.count - 8192)...])
-        let r = rms(rebuiltTail[(rebuiltTail.count - 8192)...])
+        let p = rms(pushedTail[(pushedTail.count - 65536)...])
+        let r = rms(rebuiltTail[(rebuiltTail.count - 65536)...])
         let db = 20 * log10(max(p, 1e-12) / max(r, 1e-12))
         print(String(format:
             "PUSH vs REBUILD (%@ = %.2f): pushed %.5f, rebuilt %.5f (%+.2f dB)",
             key, v, p, r, db))
         // Same physics, different history — the friction loop is chaotic,
-        // so demand agreement in level rather than sample identity.
+        // so demand agreement in level rather than sample identity. The
+        // measured figure is ~0.1 dB; the bar is loose enough to survive a
+        // note landing on a slightly different limit cycle.
         XCTAssertLessThan(abs(db), 1.5,
                           "a pushed value settles somewhere a rebuild does not")
     }

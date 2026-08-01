@@ -134,12 +134,15 @@ public struct Scale: Codable, Equatable {
         return [1, 3, 6, 8, 10].contains(pc)
     }
 
+    /// The 12 chromatic pitch-class names, C first (standard 12-tone naming).
+    public static let pitchClassNames =
+        ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
     /// Note name for display (always uses standard 12-tone naming).
     public static func noteName(for midiNote: Int) -> String {
-        let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
         let pc = ((midiNote % 12) + 12) % 12
         let octave = (midiNote / 12) - 1
-        return "\(names[pc])\(octave)"
+        return "\(pitchClassNames[pc])\(octave)"
     }
 
     /// All enabled MIDI notes in the keyboard range.

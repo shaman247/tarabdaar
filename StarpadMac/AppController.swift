@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import CoreAudioKit
 import Foundation
+import SarangiKit
 import StarpadCore
 
 /// Mac-side wiring. The Mac is a MIDI sound module that receives MPE
@@ -175,11 +176,12 @@ final class AppController: ObservableObject {
         var d: [String: Double] = [:]
         if let data = UserDefaults.standard.data(forKey: paramValuesKey),
            let saved = try? JSONDecoder().decode([String: Double].self, from: data) {
-            // Only keys the registry still knows; the pre-unification
+            // Only keys the registry still knows. The pre-unification
             // scaler keys (`bow_jaw_gain`, `bow_vibrato`) drop out here —
-            // their behavior now belongs to `bow_taraf_jawari` /
-            // `bow_vib_cents`, whose resting values come from
-            // `restFraction × headroom`.
+            // `bow_vib_cents` owns the vibrato one now, its resting value
+            // coming from `restFraction × headroom` — and so do the
+            // sympathetic-web keys (`bow_taraf_*`/`bow_open_*`) left in a
+            // profile saved before the web was deleted.
             for (k, v) in saved where ParamRegistry.spec(k)?.apply != .rebuild {
                 if ParamRegistry.spec(k) != nil { d[k] = v }
             }
@@ -506,6 +508,16 @@ final class AppController: ObservableObject {
         pitchPad.$tonicMidi
             .sink { [weak self] in self?.fretPad.tonicMidi = $0 }
             .store(in: &cancellables)
+        pitchPad.$tonicCents
+            .sink { [weak self] in self?.fretPad.tonicCents = $0 }
+            .store(in: &cancellables)
+
+        // The tonic ALWAYS starts at D4 (`PitchPadEngine.defaultTonicMidi`),
+        // every launch. It is DELIBERATELY not persisted — the session tonic
+        // is a per-sitting decision, and a stale restored tonic silently
+        // retunes the whole instrument (frets, tarab, drones all resolve
+        // against it). Do not "restore" the `starpad.tonicHz` UserDefaults
+        // key that used to live here.
 
         // Auto-save the Fret Pad arrangement. Debounced so a drag-edit
         // doesn't write to disk every frame.
@@ -514,33 +526,42 @@ final class AppController: ObservableObject {
             .sink { FretArrangementStore.saveCurrent($0) }
             .store(in: &cancellables)
 
-        // Drone-button config: the 4 ratios ride the arrangement; the tonic
-        // is the PLAYED (Fret Pad) tonic, so the drones harmonize with the
-        // melody regardless of the tarab tuning. A real change rebuilds the
-        // String engine (the jt web gets a row at every configured pitch),
-        // so this is debounced and deduplicated.
-        let droneTonicHz = { (midi: Int) -> Double in
-            440.0 * pow(2.0, (Double(midi) - 69.0) / 12.0)
-        }
-        audio.setDroneConfig(ratios: fretArrangement.droneRatios,
-                             tonicHz: droneTonicHz(pitchPad.tonicMidi))
-        Publishers.CombineLatest(
-            $fretArrangement.map(\.droneRatios).removeDuplicates(),
-            pitchPad.$tonicMidi.removeDuplicates()
+        // Drone-button DISPLAY ratios (2026-07-25): each button plucks a
+        // MAPPED sympathetic string (Tarab tab; the audio path addresses
+        // the row directly), so the arrangement's `droneRatios` are now
+        // purely visual — the mapped strings' sounding pitches vs the
+        // PLAYED tonic, driving the scale labels/colors on both surfaces
+        // (and riding the existing autosave + iPad sync). An unmapped slot
+        // keeps its last ratio and is simply inert.
+        Publishers.CombineLatest3(
+            sarangi.$state.map(\.droneStringFreqs).removeDuplicates(),
+            pitchPad.$tonicMidi.removeDuplicates(),
+            pitchPad.$tonicCents.removeDuplicates()
         )
         .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
-        .sink { [weak self] ratios, tonicMidi in
-            self?.audio.setDroneConfig(ratios: ratios,
-                                       tonicHz: droneTonicHz(tonicMidi))
+        .sink { [weak self] freqs, _, _ in
+            guard let self else { return }
+            let tonic = self.pitchPad.tonicHz
+            var ratios = self.fretArrangement.droneRatios
+            for i in ratios.indices where freqs.indices.contains(i) {
+                if let f = freqs[i] {
+                    ratios[i] = max(0.25, min(4.0, f / tonic))
+                }
+            }
+            if ratios != self.fretArrangement.droneRatios {
+                self.fretArrangement.droneRatios = ratios
+            }
         }
         .store(in: &cancellables)
 
-        // Auto-sync the sarangi's sympathetic strings (tarab) to the Pitch Pad
-        // scale: when the scale or tonic changes, retune the bank (if the user
-        // hasn't detached it by hand-editing). Debounced to coalesce drag edits.
+        // Push the centralized scale into the tarab document whenever the
+        // scale or tonic changes. The pitches ALWAYS follow (strings are
+        // degree-defined); `autoSyncToScale` only governs whether the row
+        // LAYOUT regenerates too. Debounced to coalesce drag edits.
         Publishers.MergeMany([
             pitchPad.$scale.map { _ in () }.eraseToAnyPublisher(),
             pitchPad.$tonicMidi.map { _ in () }.eraseToAnyPublisher(),
+            pitchPad.$tonicCents.map { _ in () }.eraseToAnyPublisher(),
         ])
         .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
         .sink { [weak self] in self?.syncTarabFromScale() }
@@ -550,20 +571,13 @@ final class AppController: ObservableObject {
 
     // MARK: - Sarangi tarab ↔ Pitch Pad scale
 
-    /// Retune the sympathetic bank to the current Pitch Pad scale (tonic + degree
-    /// ratios). Respects `autoSyncToScale` unless `force` (the Tarab tab's
-    /// "Re-sync" / enabling the toggle).
+    /// Push the current Pitch Pad scale (tonic Hz + degree ratios) into the
+    /// tarab document. Pitches always follow; the row layout regenerates
+    /// when the degree count changed or under `force` (the Tarab tab's
+    /// "Regenerate" button).
     func syncTarabFromScale(force: Bool = false) {
-        let tonicHz = 440.0 * pow(2.0, Double(pitchPad.tonicMidi - 69) / 12.0)   // 12-TET tonic
         let ratios = scaleDegrees(from: pitchPad.scale).map(\.ratio)
-        sarangi.syncTarabToScale(tonicHz: tonicHz, ratios: ratios, force: force)
-    }
-
-    /// Toggle whether the tarab follows the Pitch Pad scale. Turning it on
-    /// immediately re-syncs to the current scale.
-    func setTarabAutoSync(_ on: Bool) {
-        sarangi.setAutoSync(on)
-        if on { syncTarabFromScale(force: true) }
+        sarangi.syncTarabToScale(tonicHz: pitchPad.tonicHz, ratios: ratios, force: force)
     }
 
     // MARK: - iPad scale sync (Mac → iPad over SysEx)
@@ -579,6 +593,7 @@ final class AppController: ObservableObject {
         let triggers: [AnyPublisher<Void, Never>] = [
             pitchPad.$scale.map { _ in () }.eraseToAnyPublisher(),
             pitchPad.$tonicMidi.map { _ in () }.eraseToAnyPublisher(),
+            pitchPad.$tonicCents.map { _ in () }.eraseToAnyPublisher(),
             pitchPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             fretPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             $fretArrangement.map { _ in () }.eraseToAnyPublisher(),
@@ -599,6 +614,7 @@ final class AppController: ObservableObject {
                                             : pitchPad.marginPixels
         let state = SyncedScaleState(points: pitchPad.scale.points,
                                      tonicMidi: pitchPad.tonicMidi,
+                                     tonicCents: pitchPad.tonicCents,
                                      marginPixels: margin,
                                      layout: ipadLayout)
         // Match the iPad's "Starpad Scale" virtual destination loosely on
@@ -828,67 +844,93 @@ final class AppController: ObservableObject {
 
     // MARK: - Presets
 
-    /// Capture one half of the rig (or both). The **instrument** scope is
-    /// the sound — the sarangi document, the physics overrides and every
-    /// parameter's resting value; the **controls** scope is the mapping —
-    /// composites and tilt bindings. They are saved separately because
-    /// swapping a sound should not cost you your tilt setup, and vice
-    /// versa.
-    func capturePreset(name: String, scope: PresetScope) -> StarpadPreset {
+    /// Capture the whole rig: the sarangi document, the physics overrides,
+    /// every parameter's resting value, the composites and the tilt
+    /// bindings. One preset is one rig (2026-07-30 — the instrument/
+    /// controls split was folded back together).
+    func capturePreset(name: String) -> StarpadPreset {
         var p = StarpadPreset()
         p.name = name
-        p.kind = scope
         p.savedAt = ISO8601DateFormatter().string(from: Date())
-        if scope.covers(.instrument) {
-            p.instrument = sarangi.state
-            p.stringOverrides = stringParams.overridesSnapshot
-            p.paramValues = paramValues
-        }
-        if scope.covers(.controls) {
-            p.composites = composites
-            p.tiltMapping = tiltMapping
-        }
+        p.instrument = sarangi.state
+        p.stringOverrides = stringParams.overridesSnapshot
+        p.paramValues = paramValues
+        p.composites = composites
+        p.tiltMapping = tiltMapping
         return p
     }
 
-    /// Apply the parts of `p` that fall inside `scope`. Sections the file
-    /// lacks are skipped, so a controls preset never disturbs the
-    /// instrument — and an older combined `.starpad` can be loaded as
-    /// either half.
-    func applyPreset(_ p: StarpadPreset, scope: PresetScope = .all) {
-        if scope.covers(.instrument) {
-            if let inst = p.instrument {
-                sarangi.replaceState(inst)
-            }
-            if let ov = p.stringOverrides {
-                stringParams.replaceOverrides(ov)
-                refreshHybridHeadroom()
-            }
-            if let pv = p.paramValues {
-                // Keep only keys this build still knows; `didSet` re-applies.
-                paramValues = pv.filter {
-                    guard let spec = ParamRegistry.spec($0.key) else { return false }
-                    return spec.apply != .rebuild
-                }
+    /// Apply whatever sections `p` carries. Sections the file lacks are
+    /// skipped, so a split-era `.starpadmap` (controls only) still loads
+    /// and never disturbs the instrument.
+    func applyPreset(_ p: StarpadPreset) {
+        if let inst = p.instrument {
+            sarangi.replaceState(inst)
+        }
+        if let ov = p.stringOverrides {
+            stringParams.replaceOverrides(ov)
+            refreshHybridHeadroom()
+        }
+        if let pv = p.paramValues {
+            // Keep only keys this build still knows; `didSet` re-applies.
+            paramValues = pv.filter {
+                guard let spec = ParamRegistry.spec($0.key) else { return false }
+                return spec.apply != .rebuild
             }
         }
-        if scope.covers(.controls) {
-            if let c = p.composites { composites = c }
-            if let t = p.tiltMapping { tiltMapping = t }
-        }
+        if let c = p.composites { composites = c }
+        if let t = p.tiltMapping { tiltMapping = t }
     }
 
-    func savePreset(to url: URL, name: String, scope: PresetScope) throws {
-        try capturePreset(name: name, scope: scope).encoded().write(to: url)
+    /// The shipped default, as a full rig: the generated sarangi bank,
+    /// untouched artifact physics (all overrides + resting values
+    /// cleared), the default composites and the default tilt bindings.
+    func loadFactoryPreset(_ preset: Preset) {
+        sarangi.loadSarangiLiveDefault(preset)
+        resetAllParams()
+        composites = CompositeParam.defaults()
+        tiltMapping = DimensionMapping.makeDefault()
     }
 
-    /// Load and apply, returning the decoded document so the caller can
-    /// report what landed (`sections(in:)`) — or that nothing did.
+    // MARK: The preset library — no file panels
+
+    /// Saved presets live in the app-managed library
+    /// (`Application Support/Starpad/Presets/`, one `.starpad` file per
+    /// preset) and appear in the Load-preset menu by name. Saving asks
+    /// for a name, never a location.
+    let presetLibrary = PresetLibrary.standard()
+
+    /// The library's preset names, for the Load-preset menu. Refreshed on
+    /// every save/delete and whenever the toolbar appears (so a file
+    /// dropped into the folder shows up too).
+    @Published private(set) var savedPresetNames: [String] = []
+
+    func refreshPresetLibrary() {
+        savedPresetNames = presetLibrary.names()
+    }
+
+    /// Save the current rig into the library under `name` (overwrites a
+    /// same-named preset). Returns the saved (sanitized) name.
     @discardableResult
-    func loadPreset(from url: URL, scope: PresetScope) throws -> StarpadPreset {
-        let p = try StarpadPreset.decode(Data(contentsOf: url))
-        applyPreset(p, scope: scope)
+    func savePresetToLibrary(name: String) throws -> String {
+        let clean = try PresetLibrary.sanitized(name)
+        try presetLibrary.save(capturePreset(name: clean), name: clean)
+        refreshPresetLibrary()
+        return clean
+    }
+
+    /// Load and apply a library preset, returning the decoded document so
+    /// the caller can report what landed (`sections()`).
+    @discardableResult
+    func loadPresetFromLibrary(name: String) throws -> StarpadPreset {
+        let p = try presetLibrary.load(name: name)
+        applyPreset(p)
         return p
+    }
+
+    func deletePresetFromLibrary(name: String) throws {
+        try presetLibrary.delete(name: name)
+        refreshPresetLibrary()
     }
 
     /// Public entry for the iPad-simulator's in-process CC delivery. CC → Mac
@@ -903,9 +945,9 @@ final class AppController: ObservableObject {
     /// typo in a score doesn't take down the runner.
     func setVoiceParam(name: String, value: Double) {
         switch name {
-        // Drone buttons: "drone1".."drone4", value > 0.5 = press, else
+        // Drone buttons: "drone1".."drone3", value > 0.5 = press, else
         // release — lets a score audition the jawari-taraf drones.
-        case "drone1", "drone2", "drone3", "drone4":
+        case "drone1", "drone2", "drone3":
             let i = Int(String(name.dropFirst(5)))! - 1
             audio.setDronePressed(i, value > 0.5)
         // Tilt performance axes (the iPad tilts' CC71/73/72 targets):
@@ -922,14 +964,12 @@ final class AppController: ObservableObject {
             applyComposite(slot: Int(n.dropFirst(9))! - 1,
                            value: clamp(value, 0, 1))
         default:
-            // Sarangi model params: "sarangi.<paramId>" (the tarab / model
-            // document that `SarangiStore` owns — the tarab rows tune the
-            // String voice's taraf).
-            if name.hasPrefix("sarangi.") {
-                if sarangi.setAuditionParam(String(name.dropFirst(8)), value) { return }
-                NSLog("Starpad: no sarangi param '\(name.dropFirst(8))'")
-                return
-            }
+            // The `sarangi.<paramId>` route was deleted 2026-07-24: it wrote
+            // the coupled network's scalars and the FX rack, neither of which
+            // exists any more, so every such event was silently inert. The
+            // tarab table has no audition path (it is a structural document,
+            // edited in the Tarab tab).
+            //
             // Any registry parameter: "string.<key>" (historical) or
             // "param.<key>". Routed through the unified setter — the same
             // path the Parameters-tab sliders take — so a scripted sweep

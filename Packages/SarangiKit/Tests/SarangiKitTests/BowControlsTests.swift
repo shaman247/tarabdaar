@@ -12,15 +12,13 @@ final class BowControlsTests: XCTestCase {
 
     let srk = 96000.0
 
+    /// The SHIPPING artifact, so the wedge/pitch tables under test are the
+    /// ones the app plays. (This used to read the `bp` section out of an
+    /// upstream table-export golden — that golden went with the rest of the
+    /// vendored parity machinery, 2026-07-24.)
     private func fittedBP() throws -> BowParams {
-        guard let url = Bundle.module.url(forResource: "bow_tables_default",
-                                          withExtension: "json",
-                                          subdirectory: "Goldens"),
-              let obj = try? JSONSerialization.jsonObject(
-                  with: Data(contentsOf: url)) as? [String: Any],
-              let bpj = obj["bp"] as? [String: Any],
-              let bp = BowParams(json: bpj) else {
-            throw XCTSkip("bow_tables_default golden not found")
+        guard let bp = Presets.bowedStringParams() else {
+            throw XCTSkip("bowed_string.json not available in this bundle")
         }
         return bp
     }
@@ -149,132 +147,13 @@ final class BowControlsTests: XCTestCase {
         }
     }
 
-    func testAllOutputsInsidePlayableBounds() throws {
-        let bp = try fittedBP()
-        try XCTSkipIf(bp.wedge == nil, "fitted artifact has no wedge")
-        let vLo = bp.v("bow_v_lo", 0.05), vHi = bp.v("bow_v_hi", 0.35)
-        let fCap = bp.v("bow_f_cap", 2.6)
-        let pU = bp.v("bow_live_press_under", 0.55)
-        let pO = bp.v("bow_live_press_over", 1.25)
-        let tiltForce = bp.v("bow_tilt_force", 0.0)
-        let mapper = BowControlMapper()
-        var filter = BowControlFilter(bp: bp, srk: srk)
-
-        // scripted sweep: notes across 2.5 octaves, axes to their extremes
-        let script: [(UInt8, UInt8, UInt8)] = [
-            (0x90, 57, 100),                    // A3
-            (0xB0, 11, 127), (0xB0, 1, 127),    // loud, heavy
-            (0x90, 69, 100), (0x80, 57, 0),
-            (0xB0, 74, 0), (0xB0, 2, 127),      // off the bridge, full tilt
-            (0x90, 81, 100), (0x80, 69, 0),
-            // quiet, light — but ABOVE the expr lift (CC 28 → expr ~0.22 >
-            // bow_expr_lift 0.2): below it the bow lifts to true silence,
-            // deliberately leaving the playable bounds (tested in the
-            // dynamics spot-value test)
-            (0xB0, 11, 28), (0xB0, 1, 0),
-            (0xB0, 74, 127), (0xB0, 2, 0),      // toward the bridge, dark
-            (0x90, 88, 100), (0x80, 81, 0),     // E6 — top of the melody range
-        ]
-        var all: [(f0: Double, vb: Double, fb: Double, beta: Double, gate: Double)] = []
-        for ev in script {
-            mapper.midi(ev.0, ev.1, ev.2)
-            let seg = run(mapper, &filter, seconds: 0.12)
-            for i in stride(from: 0, to: seg.f0.count, by: 7) {
-                all.append((seg.f0[i], seg.vb[i], seg.fb[i], seg.beta[i],
-                            seg.gate[i]))
-            }
-        }
-        let w = bp.wedge!
-        // 2026-07-16 wedge-relative remap: the wedge is the press axis'
-        // ENVELOPE (edges deliberately reachable with pressUnder/pressOver
-        // overshoot; β extrapolates by the Schelleng laws beyond the
-        // measured grid), no longer a clamp. Tilt/register multipliers may
-        // push past it; bow_f_cap is the hard guard.
-        let tiltMax = exp2(tiltForce * BowControlMapper.tiltMaxDb / 12.0)
-        let tiltMin = exp2(tiltForce * BowControlMapper.tiltMinDb / 12.0)
-        for s in all {
-            XCTAssertTrue(s.f0.isFinite && s.vb.isFinite && s.fb.isFinite
-                          && s.beta.isFinite)
-            XCTAssertGreaterThanOrEqual(s.vb, vLo - 1e-12)
-            XCTAssertLessThanOrEqual(s.vb, 1.3 * vHi + 1e-12)
-            XCTAssertGreaterThan(s.beta, 0.02)     // sane bow position
-            XCTAssertLessThan(s.beta, 0.30)
-            XCTAssertGreaterThanOrEqual(s.gate, 0.0)
-            XCTAssertLessThanOrEqual(s.gate, 1.0)
-            XCTAssertLessThanOrEqual(s.fb, fCap + 1e-9, "force over hard cap")
-            let bg = min(max(s.beta, w.beta[0]), w.beta[w.beta.count - 1])
-            let b = w.bounds(f0: s.f0, beta: bg, v: s.vb)
-            let r = bg / s.beta
-            let lo = b.lo * r * r, hi = max(b.hi * r, b.lo * r * r * 1.05)
-            // extreme ponticello + full tilt can push the Schelleng floor
-            // past the hard cap — the cap wins (the string may whistle
-            // there, which is what extreme ponticello does); negative tilt
-            // (hair away) deliberately lightens below the press floor
-            XCTAssertGreaterThanOrEqual(s.fb, min(pU * lo * tiltMin, fCap) - 1e-9,
-                                        "force under envelope floor @f0 \(s.f0)")
-            XCTAssertLessThanOrEqual(s.fb, pO * hi * tiltMax + 1e-9,
-                                     "force over envelope ceiling @f0 \(s.f0)")
-        }
-    }
-
-    /// THE POINT of the 2026-07-16 remap (reports/press_pos_authority.html):
-    /// press/pos must have real, register-uniform authority. The old
-    /// absolute-force law was a NO-OP at 247 Hz (wedge floor ×1.6 exceeded
-    /// the whole mapped range — press 0 and press 1 rendered identically).
-    func testPressPosAuthority() throws {
-        let bp = try fittedBP()
-        try XCTSkipIf(bp.wedge == nil, "fitted artifact has no wedge")
-        let w = bp.wedge!
-        let pU = bp.v("bow_live_press_under", 0.55)
-        let pO = bp.v("bow_live_press_over", 1.25)
-        let betaLo = bp.v("bow_live_beta_lo", 0.04)
-        let betaHi = bp.v("bow_live_beta_hi", 0.22)
-
-        func settled(note: UInt8, press: Double, pos: Double)
-            -> (f0: Double, vb: Double, fb: Double, beta: Double) {
-            let mapper = BowControlMapper()
-            var filter = BowControlFilter(bp: bp, srk: srk)
-            mapper.midi(0x90, note, 100)
-            mapper.setAxis(expr: 0.5, press: press, pos: pos)
-            _ = run(mapper, &filter, seconds: 0.6)          // settle glides
-            let s = run(mapper, &filter, seconds: 0.01)
-            return (s.f0.last!, s.vb.last!, s.fb.last!, s.beta.last!)
-        }
-
-        // B3 ≈ 247 Hz — the old law's DEAD register
-        for note: UInt8 in [59, 64, 71, 76] {               // B3 E4 B4 E5
-            let lo = settled(note: note, press: 0.0, pos: 0.45)
-            let hiP = settled(note: note, press: 1.0, pos: 0.45)
-            // ≥ 4× force span everywhere (old law: 1.0× at 247/415 Hz)
-            XCTAssertGreaterThan(hiP.fb / lo.fb, 4.0,
-                                 "press authority collapsed @note \(note)")
-            // press 0 reaches UNDER the lock floor, press 1 past the ceiling
-            let bnd = w.bounds(f0: lo.f0, beta: lo.beta, v: lo.vb)
-            XCTAssertLessThan(lo.fb, bnd.lo * 1.001,
-                              "press 0 cannot reach flautando @note \(note)")
-            XCTAssertGreaterThan(hiP.fb, bnd.hi * 0.999,
-                                 "press 1 cannot reach grit @note \(note)")
-            XCTAssertEqual(lo.fb, pU * bnd.lo, accuracy: pU * bnd.lo * 1e-6)
-            XCTAssertEqual(hiP.fb, pO * bnd.hi, accuracy: pO * bnd.hi * 1e-6)
-        }
-
-        // pos spans the full live β range (ponticello ↔ tasto)
-        let pont = settled(note: 64, press: 0.562, pos: 0.0)
-        let tasto = settled(note: 64, press: 0.562, pos: 1.0)
-        XCTAssertEqual(pont.beta, betaLo, accuracy: 1e-9)
-        XCTAssertEqual(tasto.beta, betaHi, accuracy: 1e-9)
-        // β beyond the measured grid still gets a HIGHER force floor near
-        // the bridge (Schelleng fmin ∝ 1/β²) — the extrapolation is live
-        XCTAssertGreaterThan(pont.fb, tasto.fb,
-                             "bridge-side force floor must exceed tasto's")
-    }
-
-    /// The ANALYTIC Schelleng envelope (wedge == nil — the generic
-    /// pure-physics bowed string): press spot values must land exactly on
-    /// the formulas fmin = M·C·v/β², fmax = 2Zv/(β·Δμ), capped at bow_f_cap.
+    /// The ANALYTIC Schelleng envelope — the ONLY force law now that the
+    /// measured `BowWedge` table is gone (the pure-physics artifact never
+    /// carried one, so this was always the branch that ran). Press spot
+    /// values must land exactly on fmin = M·C·v/β², fmax = 2Zv/(β·Δμ),
+    /// capped at bow_f_cap.
     func testAnalyticSchellengEnvelope() {
         let bp = BowedStringEngineTests.stringBP()
-        XCTAssertNil(bp.wedge)
         let srk = 96000.0
         let pU = bp.v("bow_live_press_under", 0.55)
         let pO = bp.v("bow_live_press_over", 1.25)

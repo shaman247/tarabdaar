@@ -76,7 +76,7 @@ final class PresetCodingTests: XCTestCase {
         p.name = "Test rig"
         p.savedAt = "2026-07-24T12:00:00Z"
         p.instrument = Presets.state(.sarangiPilu)
-        p.stringOverrides = ["bow_body_q": 33.0, "bow_taraf_bright": 0.7]
+        p.stringOverrides = ["bow_body_q": 33.0, "bow_jt_apex": 1.4e-5]
         p.paramValues = ["bow_expr": 0.4, "bow_vib_cents": 12.0]
         p.composites = CompositeParam.defaults()
         var m = DimensionMapping.makeDefault()
@@ -100,7 +100,7 @@ final class PresetCodingTests: XCTestCase {
         // the instrument section: spot-check the parts a player would notice
         XCTAssertEqual(b.instrument?.strings.count, a.instrument?.strings.count)
         XCTAssertEqual(b.instrument?.tonicHz, a.instrument?.tonicHz)
-        XCTAssertEqual(b.instrument?.autoSyncToScale, a.instrument?.autoSyncToScale)
+        XCTAssertEqual(b.instrument?.scaleRatios, a.instrument?.scaleRatios)
         // and the binding that only survives via its storage key
         let t = MapTarget(paramKey: "bow_mu_s")
         XCTAssertEqual(b.tiltMapping?.mapping(for: t).binding(for: .tilt2)?
@@ -148,74 +148,126 @@ final class PresetCodingTests: XCTestCase {
         XCTAssertEqual(p.sections(), ["instrument"])
     }
 
+    /// RETIRED FIELDS (2026-07-24). `StringSpec.bright`/`.raga` and
+    /// `InstrumentState`'s `fir`/`fx`/`params`/`eqBands` were deleted (the
+    /// last two with the coupled network itself), but every saved state
+    /// (`starpad.sarangiState.v8`) and every `.starpad`/`.sarangi` file on
+    /// disk still carries them. The persist key was deliberately NOT bumped —
+    /// a bump would throw the user's tarab edits away — so decoding MUST
+    /// ignore the dead keys rather than fail and silently reset the
+    /// instrument to the fresh-install default.
+    func testDocumentsWrittenBeforeTheFieldRemovalStillLoad() throws {
+        let live = Presets.state(.sarangiPilu)
+        var doc = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(live))
+                as? [String: Any])
+        // put the retired keys back exactly as an older build wrote them
+        doc["fir"] = [0.0, 1.0, 0.0]
+        doc["fx"] = ["violinPre": ["enabled": true, "reverbMix": 0.2]]
+        doc["params"] = ["gin": 2.6, "gout": 0.45, "N_taraf_dir": 0.02]
+        doc["eqBands"] = [["freq": 500.0, "gainDB": -3.0, "q": 1.0]]
+        var rows = try XCTUnwrap(doc["strings"] as? [[String: Any]])
+        for i in rows.indices {
+            rows[i]["bright"] = (i % 3 == 0)
+            rows[i]["raga"] = (i >= 15)
+        }
+        doc["strings"] = rows
+        let data = try JSONSerialization.data(withJSONObject: doc)
+
+        let decoded = try JSONDecoder().decode(InstrumentState.self, from: data)
+        XCTAssertEqual(decoded.strings.count, live.strings.count,
+                       "an old document lost strings")
+        XCTAssertEqual(decoded.tonicHz, live.tonicHz)
+        // the tuning itself
+        XCTAssertEqual(decoded.scaleRatios, live.scaleRatios)
+        for (a, b) in zip(decoded.strings, live.strings) {
+            XCTAssertEqual(a.degree, b.degree)
+            XCTAssertEqual(a.octave, b.octave)
+            XCTAssertEqual(a.gain, b.gain, accuracy: 1e-9)
+            XCTAssertEqual(a.t60, b.t60, accuracy: 1e-9)
+        }
+        // and it must arrive through the preset reader too
+        let p = try StarpadPreset.decode(data)
+        XCTAssertEqual(p.instrument?.strings.count, live.strings.count)
+    }
+
+    /// `resolved(tonic:scaleRatios:)` carries only what the taraf builder
+    /// reads. The retired `bright` / `raga` class flags went with the comb
+    /// bank that read them.
+    func testResolvedCarriesOnlyTheTuning() {
+        let s = StringSpec(degree: 1, octave: 0, gain: 0.5, t60: 2)
+        let r = s.resolved(tonic: 200, scaleRatios: [1.0, 1.5])
+        XCTAssertEqual(r.freq, 300)
+        XCTAssertEqual(r.gain, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(r.t60, 2)
+        XCTAssertTrue(r.enabled)
+    }
+
+    /// Retired per-string keys (`weight`, `ratio`, `freq`, `group`) are
+    /// ignored on decode — gain stands as written — and re-encoding never
+    /// writes them back.
+    func testRetiredStringKeysAreIgnored() throws {
+        let json = """
+        {"degree": 1, "gain": 0.5, "weight": 0.5, "ratio": 1.5, "group": "chromatic", "t60": 2.0}
+        """
+        let s = try JSONDecoder().decode(StringSpec.self, from: Data(json.utf8))
+        XCTAssertEqual(s.gain, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(s.degree, 1)
+        XCTAssertEqual(s.octave, 0)      // tolerant default
+        let redone = try JSONSerialization.jsonObject(with: JSONEncoder().encode(s)) as? [String: Any]
+        for retired in ["weight", "ratio", "freq", "group"] {
+            XCTAssertNil(redone?[retired])
+        }
+    }
+
     func testGarbageIsRejectedRatherThanSilentlyEmpty() {
         XCTAssertThrowsError(try StarpadPreset.decode(Data("{}".utf8)))
         XCTAssertThrowsError(try StarpadPreset.decode(Data("not json".utf8)))
     }
 
-    // MARK: - The instrument / controls split
+    // MARK: - Split-era files (2026-07-24 → 2026-07-30)
 
-    /// The two scopes must partition the document: everything the
-    /// instrument scope reports, the controls scope must not, and between
-    /// them they cover the whole file.
-    func testScopesPartitionTheDocument() throws {
-        let p = try StarpadPreset.decode(fullPreset().encoded())
-        let inst = Set(p.sections(in: .instrument))
-        let ctrl = Set(p.sections(in: .controls))
-        let all = Set(p.sections(in: .all))
-        XCTAssertTrue(inst.isDisjoint(with: ctrl), "scopes overlap")
-        XCTAssertEqual(inst.union(ctrl), all, "a section belongs to neither scope")
-        XCTAssertTrue(inst.contains("instrument"))
-        XCTAssertTrue(ctrl.contains { $0.contains("tilt bindings") })
-        XCTAssertTrue(ctrl.contains { $0.contains("composites") })
-    }
-
-    /// A controls preset must carry NO instrument sections, so loading one
-    /// can never disturb the sound (and vice versa).
-    func testEachScopeCarriesOnlyItsOwnHalf() {
+    /// While the instrument/controls split existed, saves carried a `kind`
+    /// tag and a `.starpadmap` file held only composites + tilt bindings.
+    /// Both must still open under the unified reader: the `kind` key
+    /// decodes away ignored, and the file simply carries only the
+    /// sections it has — so applying it never disturbs the instrument.
+    func testSplitEraControlsFileStillOpens() throws {
         var ctrl = StarpadPreset()
-        ctrl.kind = .controls
+        ctrl.name = "My tilts"
         ctrl.composites = CompositeParam.defaults()
         ctrl.tiltMapping = DimensionMapping.makeDefault()
-        XCTAssertTrue(ctrl.isEmpty(in: .instrument),
-                      "a controls preset would touch the instrument")
-        XCTAssertFalse(ctrl.isEmpty(in: .controls))
+        var doc = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: ctrl.encoded())
+                as? [String: Any])
+        doc["kind"] = "controls"     // exactly as a split-era build wrote it
+        let data = try JSONSerialization.data(withJSONObject: doc)
 
+        let p = try StarpadPreset.decode(data)
+        XCTAssertNil(p.instrument)
+        XCTAssertNil(p.stringOverrides)
+        XCTAssertNil(p.paramValues)
+        XCTAssertEqual(p.composites, ctrl.composites)
+        XCTAssertNotNil(p.tiltMapping)
+        XCTAssertFalse(p.isEmpty)
+        XCTAssertFalse(p.sections().contains("instrument"))
+    }
+
+    func testSplitEraInstrumentFileStillOpens() throws {
         var inst = StarpadPreset()
-        inst.kind = .instrument
+        inst.name = "My sound"
         inst.instrument = Presets.state(.sarangiPilu)
         inst.paramValues = ["bow_expr": 0.4]
-        XCTAssertTrue(inst.isEmpty(in: .controls),
-                      "an instrument preset would touch the mapping")
-        XCTAssertFalse(inst.isEmpty(in: .instrument))
-    }
+        var doc = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: inst.encoded())
+                as? [String: Any])
+        doc["kind"] = "instrument"
+        let data = try JSONSerialization.data(withJSONObject: doc)
 
-    /// An older COMBINED `.starpad` (written before the split, so it has
-    /// both halves and no `kind`) must still be loadable as either half.
-    func testCombinedPresetLoadsAsEitherHalf() throws {
-        var combined = fullPreset()
-        combined.kind = nil                       // pre-split file
-        let p = try StarpadPreset.decode(combined.encoded())
-        XCTAssertNil(p.kind)
-        XCTAssertFalse(p.isEmpty(in: .instrument))
-        XCTAssertFalse(p.isEmpty(in: .controls))
-    }
-
-    /// Opening a controls preset where an instrument is expected must be
-    /// detectable, so the UI can say so rather than silently doing nothing.
-    func testWrongKindIsDetectable() throws {
-        var ctrl = StarpadPreset()
-        ctrl.kind = .controls
-        ctrl.tiltMapping = DimensionMapping.makeDefault()
-        let p = try StarpadPreset.decode(ctrl.encoded())
-        XCTAssertTrue(p.isEmpty(in: .instrument))
-        XCTAssertEqual(p.kind, .controls)
-    }
-
-    func testScopeFileExtensionsAreDistinct() {
-        XCTAssertEqual(PresetScope.instrument.fileExtension, "starpad")
-        XCTAssertEqual(PresetScope.controls.fileExtension, "starpadmap")
-        XCTAssertNotEqual(PresetScope.instrument.fileExtension,
-                          PresetScope.controls.fileExtension)
+        let p = try StarpadPreset.decode(data)
+        XCTAssertNotNil(p.instrument)
+        XCTAssertEqual(p.paramValues, inst.paramValues)
+        XCTAssertNil(p.composites)
+        XCTAssertNil(p.tiltMapping)
     }
 }

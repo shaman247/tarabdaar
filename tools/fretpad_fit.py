@@ -53,6 +53,9 @@ DEFAULTS = dict(speedFloor=25.0, speedCeiling=180.0, speedTau=0.045,
 TURN_DEADBAND = 0.7         # px — dx smaller than this doesn't flip direction
 SLEW_CAP = 1500.0 / 1200.0  # log2/s — hard cap on correction slew (smoothness
                             # by construction, independent of fitted params)
+CORR_DECAY_PX = 12.0        # px of travel per 1/e step of the carried-
+                            # correction shed (no qualifying pull, moving
+                            # touch) — mirrors FretDragAssist.correctionDecayPx
 REV_WIN_BEFORE = 0.04       # scoring window around a turn (s)
 REV_WIN_AFTER = 0.10
 HELD_CENTS_PER_S = 200.0    # output pitch moving slower than this reads as held
@@ -131,15 +134,16 @@ def smoothstep(v):
 
 
 def candidate(frets, radius, x, y):
-    """Nearest fret in screen px within radius whose y-extent contains y."""
-    best, bd = None, float("inf")
+    """Nearest fret in screen px within radius whose y-extent contains y.
+    Returns (log2 pitch, distance, fret x)."""
+    best, bd, bx = None, float("inf"), None
     for fx, flog, top, bot in frets:
         if y < top or y > bot:
             continue
         d = abs(fx - x)
         if d <= radius and d < bd:
-            best, bd = flog, d
-    return best, bd
+            best, bd, bx = flog, d, fx
+    return best, bd, bx
 
 
 def replay(stroke, params):
@@ -185,11 +189,24 @@ def replay(stroke, params):
         last_update = t
         w = smoothstep((ceil - speed) / (ceil - floor))
         gate = min(1.0, max(w, turn_gain * impulse))
-        cand, d = candidate(frets, radius, last_x, last_y)
-        if cand is not None:
+        cand, d, cx = candidate(frets, radius, last_x, last_y)
+        # A receding candidate (moving away, speed above the stationary
+        # floor) exerts no pull; with no qualifying pull, a MOVING touch
+        # sheds the carried correction while a stationary one keeps it
+        # frozen. Mirrors FretDragAssist.integrate.
+        receding = (cand is not None and dx_sign != 0 and speed > floor
+                    and cx != last_x
+                    and (1 if cx > last_x else -1) != dx_sign)
+        if cand is not None and not receding:
             prox = min(1.0, max(0.0, 2.0 * (1.0 - d / radius)))
             rate = (1 - math.exp(-dt / ctau)) * gate * prox
             step = ((cand - last_u) - corr) * rate
+            cap = SLEW_CAP * dt
+            corr += min(cap, max(-cap, step))
+        elif corr != 0.0:
+            mv = smoothstep((speed - floor) / floor)
+            rate = (1 - math.exp(-speed * dt / CORR_DECAY_PX)) * mv
+            step = -corr * rate
             cap = SLEW_CAP * dt
             corr += min(cap, max(-cap, step))
         T.append(t)
@@ -253,12 +270,12 @@ def labels_nearest(stroke, det):
     for lo_i, hi_i in dwells:
         x_mid = float(np.mean(xg[lo_i:hi_i + 1]))
         y_mid = float(np.mean(yg[lo_i:hi_i + 1]))
-        cand, _ = candidate(stroke["frets"], stroke["radius"], x_mid, y_mid)
+        cand, _, _ = candidate(stroke["frets"], stroke["radius"], x_mid, y_mid)
         if cand is not None:
             labeled_dwells.append((tg[lo_i], tg[hi_i], cand))
     for i in reversals:
-        cand, _ = candidate(stroke["frets"], stroke["radius"],
-                            float(xg[i]), float(yg[i]))
+        cand, _, _ = candidate(stroke["frets"], stroke["radius"],
+                               float(xg[i]), float(yg[i]))
         if cand is not None:
             labeled_revs.append((tg[i], cand))
     return labeled_dwells, labeled_revs, (tg, ug, speed), {}
@@ -479,7 +496,11 @@ def fit(strokes, all_labels, fast=False):
 
 
 def parity(stroke):
-    """Replay under the RECORDED params and compare to what Swift played."""
+    """Replay under the RECORDED params and compare to what Swift played.
+    NOTE: recordings made before the 2026-08-01 escape/decay change (no pull
+    from a receding candidate; moving touches shed the carried correction)
+    replay under the NEW rules and will show elevated parity — re-record
+    before trusting a fit."""
     params = {**DEFAULTS, **stroke["params"]}
     T, U, O = replay(stroke, params)
     ev = stroke["events"]

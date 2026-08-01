@@ -28,12 +28,35 @@ final class ParamUnificationTests: XCTestCase {
     /// The duplicate pairs the unification removed. `bow_jaw_gain` and
     /// `bow_vibrato` were the LIVE SCALERS of `bow_taraf_jawari` and
     /// `bow_vib_cents`; exposing them as parameters is what put the same
-    /// knob in two tabs under two names.
+    /// knob in two tabs under two names. (`bow_taraf_jawari` itself is gone
+    /// too since the linear sympathetic web was deleted — see
+    /// `testTheLinearTarafWebIsGone`.)
     func testDeletedScalerKeysAreNotParameters() {
         for gone in ["bow_jaw_gain", "bow_vibrato"] {
             XCTAssertNil(ParamRegistry.spec(gone),
                          "\(gone) is a hybrid parameter's scaler, not a parameter")
         }
+    }
+
+    /// THE TARAF SIMPLIFICATION (2026-07-24): the linear comb web
+    /// (`bow_taraf_*`) and the open gut pair (`bow_open_*`) were removed —
+    /// the modal-jawari block (`bow_jt_*`) is the whole sympathetic
+    /// response now. Nothing may reintroduce a knob for them: the builder
+    /// no longer reads any of these keys, so a parameter row would be a
+    /// slider that silently does nothing.
+    func testTheLinearTarafWebIsGone() {
+        for p in ParamRegistry.all {
+            XCTAssertFalse(p.key.hasPrefix("bow_taraf_")
+                           || p.key.hasPrefix("bow_open_"),
+                           "\(p.key) belongs to the deleted sympathetic web")
+        }
+        XCTAssertFalse(ParamRegistry.groups.contains { $0.name == "Taraf (sympathetic)" })
+        XCTAssertFalse(ParamRegistry.inPlaceKeys.contains {
+            $0.hasPrefix("bow_taraf_") || $0.hasPrefix("bow_open_")
+        })
+        // the jawari block must still be there — it IS the taraf
+        XCTAssertNotNil(ParamRegistry.spec("bow_jt_gain"))
+        XCTAssertNotNil(ParamRegistry.spec("bow_jtaraf_on"))
     }
 
     func testEveryHybridResolvesToAScalerAndARestFraction() {
@@ -50,10 +73,9 @@ final class ParamUnificationTests: XCTestCase {
         }
     }
 
-    /// Resting behavior must match what the deleted scalers defaulted to:
-    /// full fitted buzz (jaw gain 1.0) and no vibrato (aftertouch 0).
+    /// Resting behavior must match what the deleted scaler defaulted to:
+    /// no vibrato (aftertouch 0).
     func testHybridRestFractionsPreserveTheShippedSound() {
-        XCTAssertEqual(ParamRegistry.spec("bow_taraf_jawari")?.restFraction, 1.0)
         XCTAssertEqual(ParamRegistry.spec("bow_vib_cents")?.restFraction, 0.0)
     }
 
@@ -89,17 +111,30 @@ final class ParamUnificationTests: XCTestCase {
         }
     }
 
-    /// Taraf Purity must sweep the buzz DEPTH itself now (down to clean),
-    /// which is the live-scaler path — the composite has to stay instant.
-    func testTarafPuritySweepsTheBuzzDepthLive() {
+    /// Taraf Purity's two members both move toward "clean" as the
+    /// composite rises: the tone LP sweeps DOWN (darker buzz) and the
+    /// recruitment amount sweeps DOWN its bipolar range (1 = lush
+    /// chorus → 0 = kin-only). Every member must stay on a LIVE path —
+    /// the whole point of a composite is that a tilt can sweep it.
+    func testTarafPuritySweepsTowardCleanAndStaysLive() {
         guard let purity = CompositeParam.defaults()
-            .first(where: { $0.name == "Taraf Purity" }),
-              let buzz = purity.members.first(where: {
-                  $0.key == "bow_taraf_jawari" })
-        else { return XCTFail("Taraf Purity no longer sweeps bow_taraf_jawari") }
-        XCTAssertGreaterThan(buzz.lo, buzz.hi, "purity should sweep DOWN to clean")
-        XCTAssertEqual(buzz.hi, 0.0)
-        XCTAssertTrue(ParamRegistry.liveKeys.contains(buzz.key))
+            .first(where: { $0.name == "Taraf Purity" })
+        else { return XCTFail("Taraf Purity composite is gone") }
+        let expected: Set<String> = ["bow_jt_lp", "bow_jt_sel"]
+        XCTAssertEqual(Set(purity.members.map(\.key)), expected,
+                       "Taraf Purity's member set changed — update this test")
+        for m in purity.members {
+            XCTAssertGreaterThan(m.lo, m.hi, "\(m.key) should sweep DOWN to clean")
+            XCTAssertTrue(ParamRegistry.liveKeys.contains(m.key),
+                          "\(m.key) is not on a live path")
+        }
+        // The recruitment member rests on the FITTED taraf (0.5) and
+        // sweeps down to the kin-only strip (2026-08-01 coherence rev:
+        // the old lo of 1.0 parked the resting instrument at the ×2
+        // lush chorus, which read as a backing ensemble).
+        let sel = purity.members.first { $0.key == "bow_jt_sel" }!
+        XCTAssertEqual(sel.lo, 0.5)
+        XCTAssertEqual(sel.hi, 0.0)
     }
 
     func testCompositeSlotsAreUniqueAndInRange() {

@@ -102,11 +102,10 @@ struct FretPadView: View {
             Toggle("Perform", isOn: $engine.performanceMode)
                 .toggleStyle(.button)
                 .help("Clean playing surface: editing off, octave gridlines + labels + endpoint handles hidden, octave-repeat frets shown identically to the editable ones, and the scale editor hidden.")
-            droneMenu
             recordControl
             Spacer()
             FretSoundingReadout(sounding: engine.sounding,
-                                tonicMidi: pitchPad.tonicMidi)
+                                tonicFractionalMidi: pitchPad.tonicFractionalMidi)
             snapControl
             velocityControl
             primeLimitControl
@@ -167,7 +166,7 @@ struct FretPadView: View {
     /// Prime-limit cap for the scale editor's scroll-stepping snap targets.
     private var primeLimitControl: some View {
         HStack(spacing: 4) {
-            Text("Prime ≤").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Text("Prime ≤").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
             Picker("", selection: $pitchPad.primeLimit) {
                 ForEach([2, 3, 5, 7, 11, 13, 17, 19, 23], id: \.self) { p in
                     Text("\(p)").tag(p)
@@ -184,12 +183,12 @@ struct FretPadView: View {
     /// octaves (fractional). 0.5 = a 2-octave ribbon.
     private var octaveControl: some View {
         HStack(spacing: 4) {
-            Text("Octave ±").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Text("Octave ±").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
             Stepper(value: $controller.fretArrangement.ghostExtentOctaves,
                     in: 0...2, step: 0.25) {
                 Text(String(format: "%.2f", controller.fretArrangement.ghostExtentOctaves))
-                    .font(.system(.caption).monospacedDigit())
-                    .frame(width: 30, alignment: .trailing)
+                    .font(.padCaption.monospacedDigit())
+                    .frame(width: Typography.scaledWidth(30), alignment: .trailing)
             }
             .controlSize(.small)
             .fixedSize()
@@ -207,7 +206,7 @@ struct FretPadView: View {
                     .fill(recorder.isRecording ? Color.red : Color.secondary)
                     .frame(width: 7, height: 7)
                 Text(recorder.isRecording ? "Rec \(recorder.strokeCount)" : "Rec")
-                    .font(.system(.caption).monospacedDigit())
+                    .font(.padCaption.monospacedDigit())
             }
         }
         .toggleStyle(.button)
@@ -218,19 +217,19 @@ struct FretPadView: View {
     /// (0–64). 0 = fretless (no onset snapping at all).
     private var snapControl: some View {
         HStack(spacing: 6) {
-            Text("Snap").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Text("Snap").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
             Slider(value: $engine.marginPixels, in: 0...64)
                 .frame(width: 80)
             Text("\(Int(engine.marginPixels.rounded())) px")
-                .font(.system(.caption).monospacedDigit())
-                .frame(width: 36, alignment: .trailing)
+                .font(.padCaption.monospacedDigit())
+                .frame(width: Typography.scaledWidth(36), alignment: .trailing)
         }
         .help("How close (horizontally) a touch must start to a fret to snap to its pitch. Only applies within the fret's vertical extent, and only at touch onset — drags glide continuously. 0 = fretless.")
     }
 
     private var velocityControl: some View {
         HStack(spacing: 6) {
-            Text("Velocity").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Text("Velocity").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
             Slider(
                 value: Binding(
                     get: { Double(engine.velocity) },
@@ -240,64 +239,91 @@ struct FretPadView: View {
             )
             .frame(width: 90)
             Text("\(engine.velocity)")
-                .font(.system(.caption))
-                .frame(width: 28, alignment: .trailing)
+                .font(.padCaption)
+                .frame(width: Typography.scaledWidth(28), alignment: .trailing)
         }
     }
 
-    /// The scale's tonic (MIDI note), edited here.
+    /// The scale's tonic, edited HERE and only here — two controls onto the
+    /// same value. **Hz**: the app's one absolute-frequency input, typed or
+    /// scrolled for cents-level micro-adjustment. **Note**: a menu of the
+    /// notes within half an octave of where the tonic sits (it re-centers on
+    /// each pick), keeping the cents offset. Every other pitch (frets, tarab
+    /// strings, drones) is a scale degree relative to this.
     private var tonicControl: some View {
         HStack(spacing: 6) {
-            Text("Tonic").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            Stepper(value: Binding(
-                get: { pitchPad.tonicMidi },
-                set: { pitchPad.tonicMidi = max(24, min(96, $0)) }
-            ), in: 24...96) {
-                Text("\(pitchPad.tonicMidi) (\(Scale.noteName(for: pitchPad.tonicMidi)))")
-                    .font(.system(.caption))
-                    .lineLimit(1)
-            }
-            .controlSize(.small)
-        }
-    }
+            Text("Tonic").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
 
-    /// Configure the 4 drone buttons' pitches (chromatic JI svaras + S′).
-    /// The mapping to an actual taraf row happens at press time (nearest
-    /// jawari-taraf row of the String engine).
-    private var droneMenu: some View {
-        Menu {
-            ForEach(0..<4, id: \.self) { i in
-                Picker("Drone \(i + 1)",
-                       selection: Binding(
-                           get: { nearestDroneOption(controller.fretArrangement.droneRatios[i]) },
-                           set: { controller.fretArrangement.droneRatios[i] = droneOptions[$0].ratio }
-                       )) {
-                    ForEach(droneOptions.indices, id: \.self) { j in
-                        Text(droneOptions[j].label).tag(j)
+            ScrollableField(
+                text: Binding(get: { String(format: "%.2f", pitchPad.tonicHz) },
+                              set: { _ in }),
+                onScrollStep: { dir in
+                    pitchPad.nudgeTonic(cents: Double(dir) * tonicScrollCents())
+                },
+                onCommit: { txt in
+                    if let hz = Double(txt.trimmingCharacters(in: .whitespaces)) {
+                        pitchPad.setTonic(hz: hz)
                     }
                 }
+            )
+            .frame(width: Typography.scaledWidth(64), height: 20)
+            .help("Tonic frequency in Hz — the app's one absolute pitch; everything else is relative to it. Scroll to micro-adjust: 1¢ per detent, ⌥ = 0.1¢, ⇧ = 10¢.")
+
+            Picker("", selection: Binding(
+                get: { pitchPad.tonicMidi },
+                set: { pitchPad.setTonic(midi: $0) }
+            )) {
+                ForEach(tonicNoteChoices, id: \.self) { m in
+                    Text(Scale.noteName(for: m)).tag(m)
+                }
             }
-        } label: {
-            Label("Drones", systemImage: "pin")
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(width: Typography.scaledWidth(64))
+            .help("Tonic note — the notes within half an octave of the current one, which re-centers on each pick. The cents offset is kept, so a fine tuning survives a change of note.")
+
+            Text(tonicCentsLabel)
+                .font(.padCaption.monospacedDigit()).foregroundStyle(.secondary)
+                .frame(width: Typography.scaledWidth(44), alignment: .leading)
+                .lineLimit(1)
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Pitches of the 4 drone buttons (right edge, top → center): while pressed, an existing jawari-taraf string of that svara (nearest octave) swells and sings. Default ,Sa · ,Ma · ,Pa · Sa — an octave below the tonic octave.")
     }
 
-    private func nearestDroneOption(_ ratio: Double) -> Int {
-        droneOptions.indices.min {
-            abs(log2(droneOptions[$0].ratio / ratio))
-                < abs(log2(droneOptions[$1].ratio / ratio))
-        } ?? 0
+    /// The note menu's contents: a tritone either side of the current tonic
+    /// (13 semitones), clipped to `tonicNoteRange`. A deliberately SHORT list
+    /// — retuning is a nudge to a neighbouring pitch, not a jump across the
+    /// keyboard; the Hz field covers anything further.
+    private var tonicNoteChoices: [Int] {
+        let lo = max(PitchPadEngine.tonicNoteRange.lowerBound, pitchPad.tonicMidi - 6)
+        let hi = min(PitchPadEngine.tonicNoteRange.upperBound, pitchPad.tonicMidi + 6)
+        return Array(lo...hi)
     }
+
+    /// Cents per scroll detent over the Hz field: 1¢, ⌥ = 0.1¢ fine,
+    /// ⇧ = 10¢ coarse. Read live off the current modifier state.
+    private func tonicScrollCents() -> Double {
+        let mods = NSEvent.modifierFlags
+        if mods.contains(.option) { return 0.1 }
+        if mods.contains(.shift) { return 10.0 }
+        return 1.0
+    }
+
+    /// "+12.0¢" — the tonic's offset from its note anchor, blank when exact.
+    private var tonicCentsLabel: String {
+        let c = pitchPad.tonicCents
+        return abs(c) < 0.05 ? "" : String(format: "%+.1f¢", c)
+    }
+
+    // (The Drones menu is gone, 2026-07-25: the drone buttons pluck
+    // sympathetic strings mapped in the Tarab tab; the button labels here
+    // just display the mapped pitches, synced via the arrangement.)
 
     private var footer: some View {
         HStack {
             Text(engine.performanceMode
                  ? "Perform: start on a fret (inside its height) to snap to its pitch; start elsewhere to approach the note freely (pitch interpolates between frets). Drags always glide continuously."
                  : "Edit: drag a fret = move (any direction)  ·  drag an endpoint = set its extent  ·  drag empty space = play  ·  Shift-click = add a fret  ·  Right-click = delete  ·  Faint frets are octave repeats (read-only)")
-                .font(.system(.caption2))
+                .font(.padCaption2)
                 .foregroundStyle(.secondary)
             Spacer()
         }
@@ -305,24 +331,6 @@ struct FretPadView: View {
 }
 
 // MARK: - Drone buttons
-
-/// The configurable drone-pitch choices: the 12 chromatic JI svaras across
-/// the lower octave (`,S` … `,N`) and the base octave, plus the upper tonic.
-/// (The press maps onto an EXISTING jawari-taraf row — pitch-class first,
-/// then nearest octave — so this list is a picker convenience, not a tuning
-/// authority.)
-private let droneOptions: [(label: String, ratio: Double)] = {
-    let ji: [(String, Double)] = [
-        ("S", 1.0), ("r", 16.0 / 15.0), ("R", 9.0 / 8.0), ("g", 6.0 / 5.0),
-        ("G", 5.0 / 4.0), ("m", 4.0 / 3.0), ("M", 45.0 / 32.0), ("P", 3.0 / 2.0),
-        ("d", 8.0 / 5.0), ("D", 5.0 / 3.0), ("n", 16.0 / 9.0), ("N", 15.0 / 8.0),
-    ]
-    var out: [(label: String, ratio: Double)] = []
-    for (name, r) in ji { out.append((",\(name)", r / 2.0)) }
-    for (name, r) in ji { out.append((name, r)) }
-    out.append(("S'", 2.0))
-    return out
-}()
 
 /// Visual layer for the drone buttons (display only — presses are
 /// hit-tested in the surface's mouse handlers via the shared
@@ -332,6 +340,9 @@ private let droneOptions: [(label: String, ratio: Double)] = {
 /// release = it rings out.
 private struct DroneButtonsVisual: View {
     let ratios: [Double]
+    /// The scale's degrees — the buttons are named from the scale like every
+    /// other pitch in the app (`scaleLabel(forRatio:)`).
+    let degrees: [(ratio: Double, label: String)]
     let held: Set<Int>
     let size: CGSize
     let edgePad: CGFloat
@@ -339,7 +350,7 @@ private struct DroneButtonsVisual: View {
     var body: some View {
         let rects = droneButtonRects(size: size)
         ZStack(alignment: .topLeading) {
-            ForEach(0..<4, id: \.self) { i in
+            ForEach(rects.indices, id: \.self) { i in
                 let ratio = i < ratios.count ? ratios[i] : 1.0
                 let hue = pitchColor(forRatio: ratio, lightness: 0.75,
                                      chroma: 0.17)
@@ -351,8 +362,8 @@ private struct DroneButtonsVisual: View {
                             .stroke(hue.opacity(0.8), lineWidth: 1)
                     )
                     .overlay(
-                        Text(sargamName(forRatio: ratio))
-                            .font(.system(size: 12, weight: .bold))
+                        Text(scaleLabel(forRatio: ratio, degrees: degrees))
+                            .font(.padSmall(12, weight: .bold))
                             .foregroundStyle(.white)
                     )
                     .frame(width: r.width, height: r.height)
@@ -370,12 +381,12 @@ private struct DroneButtonsVisual: View {
 /// updates re-render this capsule alone.
 private struct FretSoundingReadout: View {
     @ObservedObject var sounding: SoundingState
-    let tonicMidi: Int
+    let tonicFractionalMidi: Double
 
     var body: some View {
         let ratio = sounding.ratio
         let text: String = ratio.map { r in
-            let fractionalMidi = Double(tonicMidi) + 12.0 * log2(r)
+            let fractionalMidi = tonicFractionalMidi + 12.0 * log2(r)
             let freq = 440.0 * pow(2.0, (fractionalMidi - 69.0) / 12.0)
             let nearest = Int(fractionalMidi.rounded())
             let cents = Int(((fractionalMidi - Double(nearest)) * 100.0).rounded())
@@ -388,7 +399,7 @@ private struct FretSoundingReadout: View {
             pitchColor(forRatio: $0, lightness: 0.85, chroma: 0.18)
         } ?? .clear
         return Text(text)
-            .font(.system(size: 11).monospacedDigit())
+            .font(.padSmall(11).monospacedDigit())
             .foregroundStyle(color)
             .padding(.horizontal, 8).padding(.vertical, 1)
             .background(Capsule().fill(Color(white: 0.12).opacity(ratio == nil ? 0 : 1)))
@@ -441,10 +452,14 @@ private struct FretPadSurface: View {
         GeometryReader { geo in
             let size = CGSize(width: max(1, geo.size.width - 2 * edgePad),
                               height: max(1, geo.size.height - 2 * edgePad))
+            // The playable band — the frets' coordinate space, mirroring the
+            // iPad exactly: the bordered half-height strip, dead space
+            // above/below, drone buttons in full-surface coords.
+            let band = fretPadBandRect(in: size)
             // All placements (base + octave-repeat ghosts). `body` does NOT
             // re-run during a glide (fills live on the separate `SoundingState`).
             let placements = fretPlacements(arrangement: arrangement,
-                                            degrees: degrees, size: size)
+                                            degrees: degrees, size: band.size)
             let basePlacements = placements.filter { !$0.isGhost }
             // Perform mode: a clean playing surface — no gridlines, labels, or
             // handles, and the ghosts styled identically to the editable frets.
@@ -456,6 +471,10 @@ private struct FretPadSurface: View {
 
                 Canvas { ctx, _ in
                     ctx.translateBy(x: edgePad, y: edgePad)
+                    // Band border — the playable strip against the dead space.
+                    ctx.stroke(Path(band),
+                               with: .color(.white.opacity(0.12)), lineWidth: 1)
+                    ctx.translateBy(x: band.minX, y: band.minY)
 
                     // Octave-band boundaries — the edges between the base
                     // layout and its octave-repeat copies (hidden in perform).
@@ -465,10 +484,10 @@ private struct FretPadSurface: View {
                         for k in lo...hi {
                             let x = fretPixelX(forBandX: Double(k),
                                                ghostExtentOctaves: extent,
-                                               width: size.width)
+                                               width: band.width)
                             var line = Path()
                             line.move(to: CGPoint(x: x, y: 0))
-                            line.addLine(to: CGPoint(x: x, y: size.height))
+                            line.addLine(to: CGPoint(x: x, y: band.height))
                             ctx.stroke(line, with: .color(.white.opacity(0.10)),
                                        lineWidth: 1)
                         }
@@ -494,7 +513,7 @@ private struct FretPadSurface: View {
                             }
                             ctx.draw(
                                 Text(p.name)
-                                    .font(.system(size: 12, weight: .semibold))
+                                    .font(.padSmall(12, weight: .semibold))
                                     .foregroundColor(.white.opacity(p.isGhost ? 0.5 : 1.0)),
                                 at: CGPoint(x: p.x, y: max(8, p.topY - 12)))
                         }
@@ -505,10 +524,12 @@ private struct FretPadSurface: View {
                 CellFillsView(sounding: engine.sounding,
                               cells: fretFillCells(placements),
                               edgePad: edgePad)
+                    .offset(x: band.minX, y: band.minY)
 
                 // Drone buttons (display only — presses are hit-tested in
                 // handleDown): right edge, top → vertical center.
                 DroneButtonsVisual(ratios: arrangement.droneRatios,
+                                   degrees: degrees,
                                    held: droneDown.map { [$0] } ?? [],
                                    size: size, edgePad: edgePad)
             }
@@ -518,14 +539,16 @@ private struct FretPadSurface: View {
                 FretPadMouseCapture(
                     onMouseDown: { pt in
                         handleDown(at: toLocal(pt), placements: placements,
-                                   base: basePlacements, size: size)
+                                   base: basePlacements, size: size, band: band)
                     },
                     onMouseDragged: { pt in
-                        handleDrag(at: toLocal(pt), placements: placements, size: size)
+                        handleDrag(at: toLocal(pt), placements: placements,
+                                   band: band)
                     },
                     onMouseUp: { handleUp() },
                     onRightMouseDown: { pt in
-                        handleRightDown(at: toLocal(pt), base: basePlacements)
+                        handleRightDown(at: toLocal(pt), base: basePlacements,
+                                        band: band)
                     }
                 )
             )
@@ -534,18 +557,23 @@ private struct FretPadSurface: View {
 
     // MARK: Interactions
 
-    private func handleDown(at pt: CGPoint, placements: [FretPlacement],
-                            base: [FretPlacement], size: CGSize) {
-        // Drone buttons first (both modes): a click starting inside a button
-        // rect is a drone press, not a note or an edit.
-        if let d = droneButtonRects(size: size).firstIndex(where: { $0.contains(pt) }) {
+    private func handleDown(at spt: CGPoint, placements: [FretPlacement],
+                            base: [FretPlacement], size: CGSize, band: CGRect) {
+        // Drone buttons first (both modes, full-surface coords): a click
+        // starting inside a button rect is a drone press, not a note or an
+        // edit.
+        if let d = droneButtonRects(size: size).firstIndex(where: { $0.contains(spt) }) {
             droneDown = d
             engine.setDrone(d, pressed: true)
             return
         }
-        // Perform mode: play only (no editing). Anywhere on the surface.
+        // Notes and edits live in the band; the space above/below is dead.
+        guard band.contains(spt) else { return }
+        // Band-local coordinates from here on — the frets' space.
+        let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
+        // Perform mode: play only (no editing). Anywhere in the band.
         if engine.performanceMode {
-            playAt(pt, placements: placements, size: size)
+            playAt(pt, placements: placements, size: band.size)
             return
         }
 
@@ -555,7 +583,7 @@ private struct FretPadSurface: View {
 
         // Shift on empty space → add a fret on the nearest degree.
         if shift, grab == .none {
-            addSegment(at: pt, placements: placements, size: size)
+            addSegment(at: pt, placements: placements, size: band.size)
             return
         }
 
@@ -575,7 +603,7 @@ private struct FretPadSurface: View {
         }
 
         // Empty space → play (so you can hear while arranging).
-        playAt(pt, placements: placements, size: size)
+        playAt(pt, placements: placements, size: band.size)
     }
 
     /// Sound the pitch at `pt`: snapped to a fret when the onset lands within
@@ -682,10 +710,14 @@ private struct FretPadSurface: View {
         }
     }
 
-    private func handleDrag(at pt: CGPoint, placements: [FretPlacement],
-                            size: CGSize) {
+    private func handleDrag(at spt: CGPoint, placements: [FretPlacement],
+                            band: CGRect) {
         // A press holding a drone button never glides or edits.
         guard droneDown == nil else { return }
+        // Band-local coordinates — a drag may wander out of the band (the
+        // field clamps, edit positions clamp to 0..1).
+        let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
+        let size = band.size
         switch editGrab {
         case .move(let id):
             guard let idx = segmentIndex(id) else { return }
@@ -767,8 +799,10 @@ private struct FretPadSurface: View {
     }
 
     /// Right-click deletes a (base) fret. Disabled in perform mode.
-    private func handleRightDown(at pt: CGPoint, base: [FretPlacement]) {
+    private func handleRightDown(at spt: CGPoint, base: [FretPlacement],
+                                 band: CGRect) {
         if engine.performanceMode { return }
+        let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
         let grab = fretGrab(at: pt, placements: base, handleRadius: handleHitRadius)
         let id: UUID?
         switch grab {
@@ -910,7 +944,7 @@ private struct ScaleListEditor: View {
         return VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("Scale (\(enabled.count))")
-                    .font(.caption.weight(.bold))
+                    .font(.padCaption.weight(.bold))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -937,7 +971,7 @@ private struct ScaleListEditor: View {
                     if !disabled.isEmpty {
                         Divider().padding(.vertical, 2)
                         Text("Disabled (\(disabled.count))")
-                            .font(.caption2.weight(.bold))
+                            .font(.padCaption2.weight(.bold))
                             .foregroundStyle(.secondary)
                         ForEach(disabled) { p in
                             ScaleEditorRow(engine: engine, pointID: p.id)
@@ -1044,21 +1078,21 @@ private struct ScaleEditorRow: View {
                 onScrollStep: { _ in },
                 onCommit: { txt in commitLabel(txt) }
             )
-            .frame(width: 56, height: 20)
+            .frame(width: Typography.scaledWidth(56), height: 20)
 
             ScrollableField(
                 text: ratioBinding(),
                 onScrollStep: { dir in incrementPitch(by: dir) },
                 onCommit: { txt in commitRatio(txt) }
             )
-            .frame(width: 56, height: 20)
+            .frame(width: Typography.scaledWidth(56), height: 20)
 
             ScrollableField(
                 text: yBinding(),
                 onScrollStep: { dir in incrementY(by: dir) },
                 onCommit: { txt in commitY(txt) }
             )
-            .frame(width: 48, height: 20)
+            .frame(width: Typography.scaledWidth(48), height: 20)
 
             Spacer(minLength: 0)
 
@@ -1182,7 +1216,7 @@ private struct ScrollableField: NSViewRepresentable {
         let f = AccumField()
         f.delegate = context.coordinator
         f.stringValue = text
-        f.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        f.font = NSFont.monospacedDigitSystemFont(ofSize: Typography.scaled(11), weight: .regular)
         f.alignment = .center
         f.isBezeled = true
         f.bezelStyle = .roundedBezel

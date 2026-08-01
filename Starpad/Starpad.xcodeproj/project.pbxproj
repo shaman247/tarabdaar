@@ -24,6 +24,7 @@
 		C100000D /* Views/AudioSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000D /* Views/AudioSettingsView.swift */; };
 		C1000059 /* Views/TiltControlsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000059 /* Views/TiltControlsView.swift */; };
 		C100005A /* Views/ParametersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200005A /* Views/ParametersView.swift */; };
+		C100005B /* Views/FXView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200005B /* Views/FXView.swift */; };
 		C100000E /* CoreAudioDevices.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000E /* CoreAudioDevices.swift */; };
 		C100000F /* Views/MIDISettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000F /* Views/MIDISettingsView.swift */; };
 		C1000010 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C2000010 /* Assets.xcassets */; };
@@ -61,6 +62,7 @@
 		C200000D /* Views/AudioSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/AudioSettingsView.swift; sourceTree = "<group>"; };
 		C2000059 /* Views/TiltControlsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/TiltControlsView.swift; sourceTree = "<group>"; };
 		C200005A /* Views/ParametersView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ParametersView.swift; sourceTree = "<group>"; };
+		C200005B /* Views/FXView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/FXView.swift; sourceTree = "<group>"; };
 		C200000E /* CoreAudioDevices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreAudioDevices.swift; sourceTree = "<group>"; };
 		C200000F /* Views/MIDISettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MIDISettingsView.swift; sourceTree = "<group>"; };
 		C2000010 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -146,6 +148,7 @@
 				C200000D /* Views/AudioSettingsView.swift */,
 				C2000059 /* Views/TiltControlsView.swift */,
 				C200005A /* Views/ParametersView.swift */,
+				C200005B /* Views/FXView.swift */,
 				C200000E /* CoreAudioDevices.swift */,
 				C200000F /* Views/MIDISettingsView.swift */,
 				C2000010 /* Assets.xcassets */,
@@ -298,6 +301,7 @@
 				C100000D /* Views/AudioSettingsView.swift in Sources */,
 				C1000059 /* Views/TiltControlsView.swift in Sources */,
 				C100005A /* Views/ParametersView.swift in Sources */,
+				C100005B /* Views/FXView.swift in Sources */,
 				C100000E /* CoreAudioDevices.swift in Sources */,
 				C100000F /* Views/MIDISettingsView.swift in Sources */,
 				C1000012 /* Views/SarangiEditorView.swift in Sources */,

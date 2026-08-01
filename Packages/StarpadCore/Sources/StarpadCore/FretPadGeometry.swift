@@ -31,7 +31,7 @@ import Foundation
 //
 // Platform-independent (no SwiftUI). Reuses `PitchPadEngine` (MPE),
 // `VoronoiCell`/`DisplaySeed` (to drive `CellFillsView`), `pitchColor`, and
-// the sargam helpers from `ScaleDegrees.swift`. See `docs/fret-pad.md`.
+// the scale-label helpers from `ScaleDegrees.swift`. See `docs/fret-pad.md`.
 
 // MARK: - Model
 
@@ -77,15 +77,21 @@ public struct FretArrangement: Equatable {
     /// window) glides the voice to the new pitch instead of retriggering.
     /// Mono, last-note priority while on. See `FretLegato`.
     public var legato: Bool
-    /// The 4 drone buttons' pitches as ratios vs the tonic (2026-07-23):
-    /// press-to-sound jawari-taraf drones along the surface's right edge,
-    /// played with the free hand. Each maps to an EXISTING taraf row at
-    /// press time (pitch-class first, then nearest octave —
-    /// `BowEngine.droneRow`). Default ,Sa · ,Ma · ,Pa · Sa (an octave
-    /// below the tonic octave).
+    /// The 3 drone buttons' DISPLAY pitches as ratios vs the played tonic
+    /// (2026-07-23; 4 → 3 slots and display-only 2026-07-25). Each button
+    /// plucks a sympathetic string mapped in the Tarab tab
+    /// (`InstrumentState.droneStringIds`); these ratios only drive the
+    /// button labels/colors on both surfaces — the Mac derives them from
+    /// the mapped strings' sounding pitches and they ride the ordinary
+    /// arrangement autosave + iPad sync. Default ,Sa · ,Pa · Sa.
     public var droneRatios: [Double]
 
-    public static let defaultDroneRatios = [0.5, 2.0 / 3.0, 3.0 / 4.0, 1.0]
+    /// The number of drone buttons/slots — the ONE count the geometry, the
+    /// sync blob, the CC range (102...102+count-1) and the Tarab tab's
+    /// drone-string slots all derive from.
+    public static let droneCount = 3
+
+    public static let defaultDroneRatios = [0.5, 3.0 / 4.0, 1.0]
 
     public init(segments: [FretSegment], ghostExtentOctaves: Double = 0.5,
                 legato: Bool = true,
@@ -94,7 +100,7 @@ public struct FretArrangement: Equatable {
         self.ghostExtentOctaves = max(0, min(2, ghostExtentOctaves))
         self.legato = legato
         var r = droneRatios.map { max(0.25, min(4.0, $0)) }
-        if r.count != 4 { r = FretArrangement.defaultDroneRatios }
+        if r.count != FretArrangement.droneCount { r = FretArrangement.defaultDroneRatios }
         self.droneRatios = r
     }
 
@@ -116,14 +122,17 @@ public struct FretArrangement: Equatable {
             let semis = Int((12.0 * log2(deg.ratio)).rounded())
             let pc = ((semis % 12) + 12) % 12
             let x = (Double(columnForPC[pc] ?? 0) + 0.5) / 7.0
-            // The off-center bands sit close to the middle (centers 0.66 /
-            // 0.34, like the String Pad's paired keys), leaving open approach
-            // space toward the pad edges.
+            // The off-center bands sit close to the middle (centers 0.74 /
+            // 0.26 — a 0.176 gap between the paired frets), leaving open
+            // approach space toward the pad edges. Sized for the half-height
+            // surface band (`Config.fretPadHeightFraction`): on screen these
+            // render at the same absolute position/size as the old
+            // full-height layout's 0.412–0.588 / 0.544–0.696 / 0.304–0.456.
             let band: (top: Double, bottom: Double)
             switch pc {
-            case 0, 7:            band = (0.39, 0.61)     // S, P — centered
-            case 2, 4, 5, 9, 11:  band = (0.565, 0.755)   // shuddha — lower middle
-            default:              band = (0.245, 0.435)   // komal/tivra — upper middle
+            case 0, 7:            band = (0.324, 0.676)   // S, P — centered
+            case 2, 4, 5, 9, 11:  band = (0.588, 0.892)   // shuddha — lower middle
+            default:              band = (0.108, 0.412)   // komal/tivra — upper middle
             }
             segments.append(FretSegment(degreeIndex: i, x: x, topY: band.top,
                                         bottomY: band.bottom))
@@ -142,22 +151,41 @@ public func fretRatio(_ segment: FretSegment,
     return degrees[segment.degreeIndex].ratio
 }
 
+// MARK: - Band
+
+/// The playable **band** within the full surface: full width,
+/// `Config.fretPadHeightFraction` of the height, vertically centered. The
+/// fret arrangement's normalized coordinates span this rect; the space
+/// above/below is dead — only the drone buttons (positioned in FULL-surface
+/// space, `droneButtonRects`) live there. Shared by both platforms so the
+/// Mac tab mirrors the iPad exactly.
+public func fretPadBandRect(in size: CGSize) -> CGRect {
+    let h = size.height * Config.fretPadHeightFraction
+    return CGRect(x: 0, y: (size.height - h) / 2, width: size.width, height: h)
+}
+
 // MARK: - Drone buttons
 
-/// The 4 drone buttons' hit rectangles in the surface's padded touch space:
-/// a right-edge column from the top down to the vertical center. Shared by
-/// both platforms' visual layers and touch hit-tests so they can never
-/// disagree. The buttons live INSIDE the playing surface (claimed at touch
-/// ONSET only) — a separate side column would make the whole right edge
-/// dead space and swallow touches aimed at the rightmost fret.
+/// The 3 drone buttons' hit rectangles in the FULL surface's padded touch
+/// space (independent of the fret band — the buttons keep the position they
+/// had when the surface was all band): a right-edge column around the upper
+/// quarter. Shared by both platforms' visual layers and touch hit-tests so
+/// they can never disagree. The buttons live INSIDE the playing surface
+/// (claimed at touch ONSET only) — a separate side column would make the
+/// whole right edge dead space and swallow touches aimed at the rightmost
+/// fret.
 public func droneButtonRects(size: CGSize) -> [CGRect] {
     let w: CGFloat = 56
     let spacing: CGFloat = 8
     let top: CGFloat = 4
     let x = size.width - w - 2
+    // Button size keeps the original 4-slot column's (which ran top →
+    // vertical center); the 3-button stack starts half a button pitch
+    // lower so its vertical center sits where the 4-button column's did.
     let h = max(20, (size.height * 0.5 - top - 3 * spacing) / 4)
-    return (0..<4).map { i in
-        CGRect(x: x, y: top + CGFloat(i) * (h + spacing), width: w, height: h)
+    let y0 = top + (h + spacing) / 2
+    return (0..<FretArrangement.droneCount).map { i in
+        CGRect(x: x, y: y0 + CGFloat(i) * (h + spacing), width: w, height: h)
     }
 }
 
@@ -184,7 +212,8 @@ public func fretBandX(atPixelX x: CGFloat, ghostExtentOctaves: Double,
 // MARK: - Placement (per-fret pixel geometry)
 
 /// A fret resolved to pixel space for one frame: its `x`, vertical extent, the
-/// live (octave-shifted) `ratio`, and the sargam `name`. Ghost copies get an
+/// live (octave-shifted) `ratio`, and its `name` — the scale's own label for
+/// the degree, with `'`/`,` octave marks on the repeats. Ghost copies get an
 /// octave suffix on `id` so they don't collide with the base fret.
 public struct FretPlacement: Identifiable {
     public let id: String
@@ -227,7 +256,9 @@ public func fretPlacements(arrangement: FretArrangement,
                 : "\(segment.id.uuidString)#\(shift)"
             out.append(FretPlacement(id: id, segmentID: segment.id,
                                      isGhost: shift != 0, ratio: ratio,
-                                     name: sargamName(forRatio: ratio), x: x,
+                                     name: scaleLabel(degree: segment.degreeIndex,
+                                                      octave: shift,
+                                                      degrees: degrees), x: x,
                                      topY: CGFloat(segment.topY) * size.height,
                                      bottomY: CGFloat(segment.bottomY) * size.height))
         }

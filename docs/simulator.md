@@ -116,10 +116,9 @@ The setters clamp values into the same ranges as the UI sliders.
 
 | Name                  | Range            | Effect |
 |-----------------------|------------------|--------|
-| `param.<key>` / `string.<key>` | per-key | **Any** parameter in `ParamRegistry` — e.g. `param.bow_jt_gain`, `param.bow_rev_mix`, `param.bow_taraf_jawari`, `param.bow_vib_cents`. Both prefixes are equivalent (`string.` is the historical spelling). Routed through `AppController.setParamValue`, the same path the Parameters-tab sliders take, so a sweep shows in the UI and persists; `live`/`hybrid` keys apply instantly, `rebuild` keys ride a debounced engine rebuild. A key the registry doesn't know still lands as a raw artifact override. See [parameters.md](parameters.md). |
-| `sarangi.<paramId>`   | per-param        | A tarab/model param on `SarangiStore` (e.g. tarab tuning). |
-| `drone1`..`drone4`    | press/release    | Press (`>0.5`) / release a Fret Pad drone (jawari-taraf row). |
-| `stringPurity`        | 0..1             | Taraf purity axis (composite slot 1: buzzy → clean — sweeps `bow_taraf_jawari` down through its live scaler). Runtime, no rebuild. |
+| `param.<key>` / `string.<key>` | per-key | **Any** parameter in `ParamRegistry` — e.g. `param.bow_jt_gain`, `param.bow_rev_mix`, `param.bow_vib_cents`. Both prefixes are equivalent (`string.` is the historical spelling). Routed through `AppController.setParamValue`, the same path the Parameters-tab sliders take, so a sweep shows in the UI and persists; `live`/`hybrid` keys apply instantly, `rebuild` keys ride a debounced engine rebuild. A key the registry doesn't know still lands as a raw artifact override. See [parameters.md](parameters.md). |
+| `drone1`..`drone3`    | press/release    | Press (`>0.5`) / release a Fret Pad drone (jawari-taraf row). |
+| `stringPurity`        | 0..1             | Taraf purity axis (composite slot 1: lush buzzy chorus → clean kin — sweeps the jawari tone LP `bow_jt_lp` down from open AND recruitment `bow_jt_sel` 1→0, from the boosted full chorus through the fitted taraf down to the played note's harmonic kin). Runtime, no rebuild. |
 | `stringTarafDecay`    | 0..1             | Taraf decay axis (composite slot 2: natural → choked). |
 | `stringToneTilt`      | -1..1            | Tone tilt axis (composite slot 3: bass → treble). |
 | `composite1`..`composite8` | 0..1        | Generic composite-parameter slots (the named 0–1 controls in the Controls tab). |

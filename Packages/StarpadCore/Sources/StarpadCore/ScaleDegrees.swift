@@ -1,8 +1,8 @@
 import Foundation
 
 /// Scale-derived helpers shared across the app: the enabled degrees of a
-/// `PitchScale`, sargam naming, and the scale presets the Fret Pad's scale
-/// editor offers.
+/// `PitchScale`, the ONE pitch-naming path (the scale's own labels), and the
+/// scale presets the Fret Pad's scale editor offers.
 ///
 /// 2026-07-24: extracted from `StringPadGeometry.swift` and
 /// `ChordPadGeometry.swift` when those were deleted. Both files were
@@ -10,7 +10,16 @@ import Foundation
 /// 2026-07-23 simplification — but each still held symbols the surviving
 /// Fret Pad depends on, which is why they had lingered.
 
-// MARK: - Scale-derived pitch + sargam names
+// MARK: - Scale-derived pitch names
+//
+// **Pitches are named by the scale, everywhere.** A scale point carries its
+// own label (`PitchPoint.displayLabel` — the user's text, or the ratio when
+// blank), and every surface that names a pitch — the Fret Pad's fret labels,
+// the drone buttons, the Tarab tab's degree dropdowns — reads that same
+// label through the helpers below. There is no second naming vocabulary:
+// the fixed 12-tone sargam table that used to name frets and drones was
+// removed 2026-07-25 because it disagreed with the scale editor's own labels
+// (the default scale's "2-" showed up as "r" on the pad).
 
 /// The Pitch Pad scale's enabled degrees, sorted low→high, as `(ratio, label)`.
 public func scaleDegrees(from scale: PitchScale) -> [(ratio: Double, label: String)] {
@@ -20,22 +29,46 @@ public func scaleDegrees(from scale: PitchScale) -> [(ratio: Double, label: Stri
         .map { (ratio: $0.ratio, label: $0.displayLabel) }
 }
 
-/// Sargam names for the 12 chromatic pitch classes.
-public let sargamNames = ["S", "r", "R", "g", "G", "m", "M", "P", "d", "D", "n", "N"]
-/// Sargam name for a semitone offset above the tonic, with `'`/`,` marks for
-/// octaves above/below the base octave.
-public func sargamName(semitonesAboveTonic semis: Int) -> String {
-    let pc = ((semis % 12) + 12) % 12
-    let oct = Int(floor(Double(semis) / 12.0))
-    var name = sargamNames[pc]
-    if oct > 0 { name += String(repeating: "'", count: oct) }
-    else if oct < 0 { name += String(repeating: ",", count: -oct) }
-    return name
+/// A degree label transposed by `octave`: `'` per octave above the scale's
+/// base octave, `,` per octave below (the notation the pad has always used
+/// for its octave-repeat frets and its low drones).
+public func octaveMarked(_ label: String, octave: Int) -> String {
+    if octave > 0 { return label + String(repeating: "'", count: octave) }
+    if octave < 0 { return label + String(repeating: ",", count: -octave) }
+    return label
 }
 
-/// Sargam name for a ratio (its nearest chromatic semitone).
-public func sargamName(forRatio r: Double) -> String {
-    sargamName(semitonesAboveTonic: Int((12.0 * log2(r)).rounded()))
+/// The scale's label for degree `index` (into `degrees`, low→high) shifted by
+/// `octave`. `"—"` when the index is out of range (the scale shrank under a
+/// stale reference — the same skip-don't-delete rule as `fretRatio`).
+public func scaleLabel(degree index: Int, octave: Int = 0,
+                       degrees: [(ratio: Double, label: String)]) -> String {
+    guard degrees.indices.contains(index) else { return "—" }
+    return octaveMarked(degrees[index].label, octave: octave)
+}
+
+/// The scale's label for an arbitrary `ratio` over the tonic: the degree
+/// nearest it in log-pitch, in any octave, with that octave's marks. Used
+/// where only a ratio survives (the drone buttons, whose pitches are derived
+/// from the mapped tarab strings); prefer the degree-index form above
+/// wherever the degree is known, since it can't mis-match.
+public func scaleLabel(forRatio ratio: Double,
+                       degrees: [(ratio: Double, label: String)]) -> String {
+    guard ratio > 0 else { return "—" }
+    let l = log2(ratio)
+    var best: (label: String, distance: Double)? = nil
+    for degree in degrees where degree.ratio > 0 {
+        // The octave transposition of this degree that lands closest to
+        // `ratio` — so a ratio a hair under the octave names itself from the
+        // tonic above rather than from the scale's topmost degree.
+        let dl = log2(degree.ratio)
+        let octave = (l - dl).rounded()
+        let distance = abs(l - dl - octave)
+        if best == nil || distance < best!.distance {
+            best = (octaveMarked(degree.label, octave: Int(octave)), distance)
+        }
+    }
+    return best?.label ?? "—"
 }
 
 

@@ -89,12 +89,22 @@ the nearest qualifying fret at a rate = **gate × proximity × settle**:
   **slew cap ≈ 1500 ¢/s** on the correction (inside natural meend speeds):
   **smoothness is guaranteed by construction**, whatever the constants.
 
-When **no fret qualifies the correction freezes** (never decays): a
-deliberate microtonal hold doesn't drift, and each assisted landing becomes
-the new tuning anchor — a relative frame exactly like the onset offset,
-bounded by the snap radius, re-anchored at the next inflection. Because the
-output is always the slewed state, no event (candidate switch, zone
-entry/exit, speed spike) can produce a pitch discontinuity.
+A candidate the touch is **actively receding from** (moving away, smoothed
+speed above the stationary floor) exerts **no pull** — the magnet corrects
+approaches and rests, never fights an escape from a fret. (2026-08-01: it
+used to — a slow glide off a fret kept re-anchoring to it across the whole
+basin, then the residue froze at the basin edge and carried, so a
+below-extent approach to the next fret landed ~+97 ¢ sharp of it and only
+snapped true on entering its extent.) When **no pull qualifies**, motion
+decides the correction's fate: a **stationary** touch keeps it **frozen** (a
+deliberate microtonal hold doesn't drift — and the movement gate's floor
+keeps touch jitter frozen too), while a **moving** touch **sheds it with
+distance travelled** (1/e per `correctionDecayPx` = 12 px, under the same
+slew cap), so a glide away from an assisted landing converges on the raw
+field pitch however slow the tempo and the next approach lands true.
+Because the output is always the slewed state, no event (candidate switch,
+zone entry/exit, speed spike) can produce a pitch discontinuity. Guard:
+`FretDragAssistTests`.
 
 Since stops emit **no move events**, a ~60 Hz timer runs while touches are
 down (both surfaces), feeding `tick(time:)` → `engine.glide`; move events
@@ -175,7 +185,11 @@ thresholds define "truth" and are deliberately not fitted.
 
 **Fit provenance (2026-07-16, iPad):** 8 repetitions of the connected phrase
 *p n d n p d m p g* (~145 ms/note), pulled off the device with
-`xcrun devicectl device copy from … --domain-type appDataContainer`. Findings
+`xcrun devicectl device copy from … --domain-type appDataContainer`. **Note
+(2026-08-01): the escape/decay rules (receding candidates pull nothing;
+moving touches shed the carried correction) postdate every recording to
+date — pre-change recordings replay under the new rules and show elevated
+parity, so re-record before trusting a fit.** Findings
 baked into the current constants: raw landings were 29¢ mean / 62¢ p90 off
 (overshooting past the note 45/64 times), half beyond the old 1× radius —
 hence `radiusScale`; the speed gate never opened at this tempo — hence the
@@ -206,22 +220,35 @@ Scale") mirrors the (now removed) String Pad: **7 evenly-spaced columns**,
 one per svara — `x = (col + 0.5)/7` for columns S · R/r · G/g · m/M · P ·
 D/d · N/n — with the vertical svara split:
 
-- **S and P** (pc 0, 7): centered segments (y 0.39–0.61)
+- **S and P** (pc 0, 7): centered segments (y 0.324–0.676)
 - **shuddha** degrees (pc 2 4 5 9 11 → R G m D N): lower middle
-  (y 0.565–0.755, center 0.66)
+  (y 0.588–0.892, center 0.74)
 - **komal/tivra** (pc 1 3 6 8 10 → r g M d n): upper middle
-  (y 0.245–0.435, center 0.34)
+  (y 0.108–0.412, center 0.26)
 
-(The off-center bands sit at the String Pad's paired-key centers 0.66 / 0.34,
-leaving open approach space toward the pad edges. Segments are drawn thin,
+(These are sized for the **half-height surface band** (below) — on screen
+they render at the same absolute position/size as the pre-crop full-height
+layout's 0.412–0.588 / 0.544–0.696 / 0.304–0.456 bands. A 0.176 gap
+separates the paired frets, leaving open approach space toward the pad edges. Segments are drawn thin,
 1.5 px base / 1 px ghost, with a 2.5 px-half-width sounding glow — the same
 thin rectangles are the field's resolver cells.)
 
 A fret's pitch is a `degreeIndex` into the enabled Pitch Pad scale degrees,
 looked up live (`fretRatio`), so re-tuning the scale re-tunes the pad (fret
 positions stay put — they're free); a degree that disappears skips its fret
-rather than deleting it. Names are sargam (`sargamName(forRatio:)`, `'`/`,`
-octave marks on ghosts).
+rather than deleting it. **A fret is named by the scale**: its label is the
+scale point's own `label` (`PitchPoint.displayLabel` — the text you typed in
+the scale editor, or the ratio when blank), read through
+`scaleLabel(degree:octave:degrees:)`, with `'`/`,` octave marks on the ghost
+repeats. The default scale reads `S r R g G m M P d D n N` on the pad —
+exactly as it reads in the scale editor, because the pad has no names of its
+own. Before 2026-07-25 the pad ran a fixed 12-tone sargam table
+(`sargamName`) alongside a default scale labelled `1 · 2- · 2 · 3- …`, so
+the same pitch was called two things (`2-` drawn as `r`); the table was
+deleted and the default scale took the sargam names itself, which is why
+they survive — as the scale's labels, editable and replaceable like any
+other scale's. Load a preset (Major, Dorian, …) or a saved scale and the pad
+speaks THAT scale's labels instead.
 
 ## Editing
 
@@ -249,18 +276,22 @@ gridlines, labels, and endpoint handles, styling ghosts like base frets):
   a thin-rectangle `VoronoiCell` (`fretFillCells`) so the snapped fret glows;
   during a glide the assist's candidate fret glows with gate-shaped weight
   (display only — pitch never re-snaps).
-- The sargam helpers and the mouse-capture / readout patterns from the
+- The scale-label helpers (`scaleDegrees`, `scaleLabel`, `octaveMarked` in
+  `ScaleDegrees.swift`) and the mouse-capture / readout patterns from the
   String-Pad era.
 
 ## Drone buttons (2026-07-23)
 
-Four **press-to-sound drone buttons** sit along the surface's right edge,
-from the top to the vertical center (the lower half stays open), on **both**
-the Mac tab and the iPad surface — the free hand plays them while the other
-plays melody. The buttons live **inside the playing surface** (`droneButtonRects`
-in StarpadCore — one shared rect function for both platforms' visuals and
-hit-tests): a touch/click is claimed as a drone press only when its **onset**
-lands inside one of the 4 rectangles, hit-tested in the surface's own touch
+Three **press-to-sound drone buttons** (4 → 3 on 2026-07-25) sit along the
+surface's right edge around the upper quarter — the 3-button stack keeps the
+same button size and spacing as the original 4-button top-to-center column
+and starts half a button pitch lower, so its **vertical center is unchanged**
+— on **both** the Mac tab and the iPad surface — the free hand plays them
+while the other plays melody. The buttons live **inside the playing surface**
+(`droneButtonRects` in StarpadCore — one shared rect function for both
+platforms' visuals and hit-tests, count from `FretArrangement.droneCount`):
+a touch/click is claimed as a drone press only when its **onset**
+lands inside one of the 3 rectangles, hit-tested in the surface's own touch
 handler (`began` on iPad, `handleDown` on Mac) — never via SwiftUI gestures.
 Everything around and **below** the buttons plays normally, and melody drags
 that wander across a button keep gliding. (The first layout put the buttons
@@ -275,29 +306,39 @@ drive content would push the string quasi-statically against the jawari bone
 and pump the buzz (an audible slow tremolo; the 2026-07-23 fix). Other base
 the String voice's jt web carries them.
 
-- **Pitches**: `FretArrangement.droneRatios` — 4 ratios, default
-  **,Sa · ,Ma · ,Pa · Sa** (1/2, 2/3, 3/4, 1 — an octave below the tonic
-  octave), edited from the Mac toolbar's **Drones** menu (chromatic JI
-  svaras across the lower + base octaves, plus S′). The ratios are relative
-  to the **PLAYED tonic** (`pitchPad.tonicMidi` — pushed by `AppController`
-  as `AudioEngine.setDroneConfig(ratios:tonicHz:)`), NOT the tarab/sarangi
-  tonic: the drones must harmonize with the melody, which is tuned
-  independently of the fitted string table. **Every configured pitch is
-  guaranteed a jawari row at engine build** (`buildEngine(droneHz:)`): a jt
-  row **rings ~15.5 ¢ sharp of its nominal table frequency** (the grazing
-  jawari bone stiffens the termination — measured +13.5…+19 ¢ across rows,
-  `bow_drone_comp_cents`), so the target nominal is the request compensated
-  down by that shift; an existing row within ±6 ¢ of the target is reused
-  (true unison — the fitted table's strings keep priority), otherwise a
-  dedicated jawari string is appended at the target (median gain/t60).
-  Presses map through the same compensation
-  (`BowEngine.droneRow(forRequestedHz:)`, pitch-class first). Verified
-  2026-07-23: all four drones sound within ~±4 ¢ of the requested pitches.
-  A ratio or tonic change triggers a (debounced) String-engine rebuild.
-  (First-revision stored/synced Sa·Ma·Pa·Sa′ defaults migrate to the
-  lowered default on read.)
+- **Mapping (2026-07-25 — no dedicated drone strings)**: each button plucks
+  **ONE sympathetic string**, mapped in the **Tarab tab's "Drone buttons"
+  section** (`InstrumentState.droneStringIds`, 3 × optional `StringSpec.id`,
+  persisted with the instrument document; nil = unmapped, button inert).
+  All sympathetic strings are the same — a mapped string sounds exactly as
+  its tarab row is tuned (ratio · gain · t60), and if the row is disabled
+  or the jawari selection doesn't pick it up (e.g. gain below
+  `bow_jt_gmin`), the button is silent, same as the row itself. The whole
+  dedicated-drone-row machinery from 2026-07-23…25 is deleted: the
+  ±6 ¢ reuse-if-covered check, the appended rows with median gain/t60, the
+  per-slot `DroneStringSpec` voice, the `bow_drone_comp_cents`
+  requested-pitch compensation and the pitch-class-nearest press matching
+  — a press is an **identity lookup** on the mapped row's nominal Hz
+  (`BowEngine.droneRow(forExactHz:)`). **Auto-mapping**: fresh documents
+  and every bank regeneration map each slot to the highest-gain enabled
+  string within ±100 ¢ of its target (low Sa · low Pa · Sa) — gain-first
+  so the loud doubling strings win over quiet rows; manual
+  mappings otherwise stick (a deleted row's mapping prunes to nil on
+  decode). Mapping changes don't rebuild the engine — the jt web is
+  untouched; the buttons just retarget (`AudioEngine.setDroneMappedFreqs`,
+  which first releases any held button so its old row can't drone on).
+- **Button labels**: `FretArrangement.droneRatios` is now **display-only**
+  — the Mac derives the mapped strings' sounding pitches vs the PLAYED
+  tonic and writes them into the arrangement (`AppController`), so the
+  labels/colors on both surfaces ride the ordinary autosave + iPad sync.
+  A button is named like a fret — `scaleLabel(forRatio:degrees:)` picks the
+  scale degree nearest the ratio, in any octave, and marks the octave — so
+  the drones speak the scale's vocabulary too (the iPad names them the same
+  way: the scale blob carries the labels). An unmapped slot keeps its last ratio and is simply inert. The
+  toolbar's Drones menu (the JI ratio picker) is gone — pitch is the
+  mapped string's own tuning, edited like any tarab row.
 - **Signal path**: on press/release both surfaces call
-  `PitchPadEngine.setDrone(_:pressed:)`, which emits **CC 102–105 on
+  `PitchPadEngine.setDrone(_:pressed:)`, which emits **CC 102–104 on
   channel 0** (value 127/0). Multi-finger safe on iPad: a second finger on
   a held button is refcounted, and the release fires when the last one
   lifts. The Mac pad
@@ -306,24 +347,64 @@ the String voice's jt web carries them.
   forwarded to the mapper) → `setDronePressed` → `BowEngine.
   dronePress/droneRelease` → the kernel's `bow_poly_jt_pluck` (sets the
   decaying onset boost) / `bow_poly_jt_drone` (sets the hold level) /
-  `bow_poly_jt_drone_env` (attack/release/boost-decay times, pushed at
-  engine build). Per-row control-scalar writes; the excitation is applied
+  `bow_poly_jt_drone_env` + `bow_poly_jt_drone_tone` (attack/release/
+  boost-decay times + the drive band-pass corners, pushed at engine
+  build). Per-row control-scalar writes; the excitation is applied
   inside `jt_tick_string`, so serial/pool/async paths all get it and the
   unused path stays byte-null. Held drones are re-armed after a structural
   rebuild (`reapplyHeldDrones`); a release skips rows another held button
-  still maps to.
-- **Levels & envelope** (`bow_drone_level` 0.08 · `bow_drone_onset` 0.3 ·
-  `bow_drone_attack_ms` 40 · `bow_drone_release_ms` 60 ·
-  `bow_drone_onset_decay_ms` 200 — read from bp in `BowEngine.init`,
-  overridable via the audition `string.<key>` path): calibrated single-
-  instance against a tapped fret note at CC11 32 — **a drone tap matches
-  the note tap's taraf response** (both peak ≈ 0.022 RMS with the same
-  ~2.5 s ring contour; "the fret tap minus the main voice"), and a hold
-  sustains at ≈ 0.012 RMS, sitting under the melody. **Calibrate with ONE
-  app instance running** — a second instance doubles the audio (+6 dB,
-  chorus wobble) and its competing jt pools cause steady flat-fill
-  overload logs. Audition hooks: `voiceParam` names `drone1`–`drone4`
-  (value > 0.5 = press).
+  still maps to (two buttons mapped to the same string share its row).
+- **Kin spread (mellow-drone rev, 2026-07-26)**: a press drives not just
+  the mapped row but its **kin rows** — `BowEngine.dronePress` scores
+  every row's harmonic kinship to the held row through the same
+  `recruitAffinity` lattice/width the recruitment axis (`bow_jt_sel`)
+  uses, and sets each row's drive to `bow_drone_level ×` that weight
+  (held row = 1, octaves/fifths/twelfths fall off by `(p·q)^-kin`,
+  scaled by `bow_drone_spread` 0..1; the melody-follower row never takes
+  spread drive). Multiple held drones soft-OR (misses multiply, so a shared
+  kin row takes the survivors' weight on release). This is what makes a
+  drone tap wake the taraf the way *playing that note* does — before
+  this rev only the single mapped row sounded, which read as a harsh
+  isolated whine.
+- **Pitched drive (same rev)**: each driven row's drive is
+  `bow_drone_tone_mix` (0.5) sine **at the row's own mode-1 frequency**
+  + the remainder band-passed noise (`bow_drone_lp_hz` 1600 /
+  `bow_drone_hp_hz` 25). A played note hands a sympathetic string a
+  PITCHED bridge force; pure noise (the first rev) rings the row's high
+  modes far above their played-note balance — measured ring H4 ≈ H1
+  against the played tap's H4 −29 dB, which is exactly the "harsh,
+  sharp" report. With the sine drive the drone ring's harmonic profile
+  matches the played tap's (H1-dominant, buzz filling H2/H3 naturally).
+- **Levels & envelope** (`bow_drone_level` 0.026 · `bow_drone_onset`
+  0.052 · `bow_drone_attack_ms` 150 · `bow_drone_release_ms` 350 ·
+  `bow_drone_onset_decay_ms` 500 — read from bp in `BowEngine.init`,
+  overridable via the audition `string.<key>` path): the mellow-drone
+  rev slowed the first rev's fast swell/fall (40/60/200 ms, onset 0.3
+  over level 0.08 — "rises and falls too quickly"; rise-to-90% is now
+  ~310 ms) and recalibrated the level for the resonant sine drive
+  (drive AT mode-1 resonance builds ~20 dB more ring per unit drive
+  than noise; the level–ring curve turns superlinear past ~0.008 as
+  the bone-buzz regime adds radiation). A first calibration at level
+  0.006 / mix 0.85 / lp 450 (tap = 57 % of the pad tap, ring centroid
+  ~300 Hz) came back "far too quiet", and a second at 0.016 was still
+  short of the played note — the calibration TARGET is **loudness
+  parity: a drone tap = a fret tap at the same pitch** (2026-07-27,
+  user-specified). Raw RMS undersells the gap: the pad tap's energy is
+  brighter, so match on an A-WEIGHTED short-window peak, not RMS.
+  Calibrated single-instance against a tapped fret note at CC11 32 —
+  **drone tap 46.5 dB(A) / 0.0437 peak RMS vs the pad tap's 46.9 /
+  0.0424** with the ring centroid just under the played tap's (467 vs
+  504 Hz; the first-rev noise drive rang at ~1280 Hz), and a hold
+  sustains at ≈ 0.014 RMS. (Reference levels moved when the jawari
+  graze-depth work landed the same week — recalibrate against a fresh
+  pad tap, not stored numbers.) **Calibrate with ONE app instance
+  running** — a second instance doubles the audio (+6 dB, chorus
+  wobble) and its competing jt pools cause steady flat-fill overload
+  logs. Audition hooks: `voiceParam` names `drone1`–`drone3`
+  (value > 0.5 = press). **A drone mapped to a DISABLED tarab string is
+  inert by design** (no jt row exists) — press `drone3` (Sa, enabled by
+  default) when auditioning, and check the mapped string first when a
+  button seems dead.
 
 ## On the iPad
 
@@ -333,13 +414,13 @@ the iPad shows `FretPadViewIOS` (in `Starpad/Starpad/PitchPadView_iOS.swift`).
 
 The segment layout is **its own state** (fret positions and snap zones aren't
 derivable from the scale), so it's pushed as a **third SysEx message**
-(`F0 7D 03 …`, `FretArrangementSysEx`, blob **v5**
+(`F0 7D 03 …`, `FretArrangementSysEx`, blob **v6**
 `[ver][ghostQuarterOctaves][flags][count]` then
 `[degreeIndex][x14: 2×7-bit][topY][bottomY][enabled]` per segment, then the
-4 drone ratios as 14-bit cents-above-−1200 — x quantized to 14 bits, y to 7;
-flags bit0 = legato) alongside the scale
+3 drone ratios as 14-bit cents-above-−1200 — x quantized to 14 bits, y to 7;
+flags bit0 = legato; v6 = the 4 → 3 drone reduction) alongside the scale
 message, sent whenever the arrangement changes while the Fret Pad is the
-active layout. Pre-v5 blobs / pre-v4 stored docs are
+active layout. Pre-v6 blobs / pre-v4 stored docs are
 rejected and fall back to the default. `ScaleSyncReceiver` decodes it into
 its `@Published fretArrangement` (persisted via `FretArrangementSyncStore`
 for offline relaunch; if the iPad has never synced, `ContentView` falls back
@@ -351,14 +432,22 @@ The iPad surface is **always perform mode** (no gridlines, labels, or
 handles; ghosts styled like base frets) and **fully multitouch** — each finger
 gets its own onset snap decision and keeps its own constant `snapOffsetLog`
 for the life of the touch, so simultaneous snapped and approach touches
-coexist.
+coexist. The playable frets live in a **band** (`fretPadBandRect`): a
+full-width strip spanning `Config.fretPadHeightFraction` (0.5) of the
+surface height, vertically centered and marked by a hairline border. The
+arrangement's normalized y spans just the band; the space above/below it is
+dead — except the **drone buttons**, which keep their FULL-surface position
+(right edge, top → vertical center, same as before the band crop). Both
+surfaces draw the whole picture — band, border, dead space, buttons — and
+the Mac tab letterboxes to the full `iPadSurfaceAspect`, so **what you see
+on the iPad is exactly what the Fret Pad tab shows**.
 
 ## Code map
 
 - `Packages/StarpadCore/Sources/StarpadCore/FretPadGeometry.swift` — model
   (`FretSegment` = degreeIndex + free `x` + topY/bottomY + enabled;
   `FretArrangement` = segments + ghostExtentOctaves + legato +
-  droneRatios), band↔pixel
+  droneRatios), the playable band rect (`fretPadBandRect`), band↔pixel
   mapping (`fretPixelX(forBandX:)` / `fretBandX(atPixelX:)`), per-frame
   `fretPlacements`, the pitch field (`fretFieldLog` + `fretColumnLog` —
   two-column x-interpolation, y-resolved columns), onset `fretSnap`, edit
@@ -366,17 +455,21 @@ coexist.
 - `Packages/StarpadCore/Sources/StarpadCore/FretArrangementStore.swift` —
   `_Current.json` debounced autosave (atomic writes), ids minted on decode;
   doc **v4** (free x; pre-v4 rejected → default rebuilt; `droneRatios`
-  optional — absent falls back to Sa·Ma·Pa·Sa′).
+  optional — absent falls back to the default; 4-slot-era sets migrate,
+  see *Drone buttons*).
 - `Packages/StarpadCore/Sources/StarpadCore/ScaleSync.swift` —
-  `PadLayout.fretPad`, `FretArrangementSysEx` (subtype `0x03`, blob v5),
+  `PadLayout.fretPad`, `FretArrangementSysEx` (subtype `0x03`, blob v6),
   `FretArrangementSyncStore`, and `ScaleSyncReceiver.fretArrangement`.
 - `StarpadMac/Views/FretPadView.swift` — the Mac tab: toolbar (Panic / Scale
   menu / Reset / Octave ± / Legato / Perform / Drones / Rec / readout /
-  Snap / Velocity / Prime / Tonic), Canvas surface, AppKit mouse capture,
+  Snap / Velocity / Prime / Tonic — the tonic being a `ScrollableField` of Hz
+  (scroll = cents) plus a note menu of the half-octave around it; see
+  [Scales & Tuning — The tonic](scales-and-tuning.md#the-tonic-starpadmac-fret-pad-tab)),
+  Canvas surface, AppKit mouse capture,
   interactions, the drone button strip, and the scale list editor.
 - `Starpad/Starpad/PitchPadView_iOS.swift` — `FretPadViewIOS` +
   `FretPadSurfaceIOS` (perform-only surface, per-touch snap offsets) +
-  `DroneStripIOS` (the 4 drone buttons, right edge top→center).
+  `DroneStripIOS` (the 3 drone buttons, right edge, upper quarter).
 
 Editing and Mac-side persistence stay Mac-only
 (`FretArrangements/_Current.json` under Application Support); the iPad only

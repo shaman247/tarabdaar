@@ -28,7 +28,9 @@ struct ParametersView: View {
     }
 
     @State private var search = ""
-    @State private var expanded: Set<String> = ["Bow stroke"]
+    /// Every group starts open — the tab is a reference surface, and hunting
+    /// for a knob behind a collapsed header costs more than the scroll does.
+    @State private var expanded: Set<String> = Set(ParamRegistry.groups.map(\.name))
 
     /// Groups filtered by the search box (empty groups drop out).
     private var groups: [(name: String, params: [ParamSpec])] {
@@ -51,13 +53,13 @@ struct ParametersView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                InstrumentPresetToolbar(controller: controller)
+                PresetToolbar(controller: controller)
                 Divider()
                 Text("PARAMETERS")
-                    .font(.caption.weight(.bold))
+                    .font(.padCaption.weight(.bold))
                     .foregroundStyle(.secondary)
-                Text("Every parameter of the String instrument, in native units. A value here is where the parameter rests when nothing is driving it; tilts and composites modulate on top. Use the mapping button on a row to bind it to a tilt or add it to a composite. Double-click a row label to reset it. Rows tagged \u{201C}rebuild\u{201D} re-apply a moment after the value settles; everything else is instant.")
-                    .font(.caption)
+                Text("Every parameter of the String instrument, in native units. A value here is where the parameter rests when nothing is driving it; tilts and composites modulate on top. Use the mapping button on a row to bind it to a tilt or add it to a composite. Click a row label to show its description; double-click to reset it. Rows tagged \u{201C}rebuild\u{201D} re-apply a moment after the value settles; everything else is instant.")
+                    .font(.padCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 10) {
@@ -86,7 +88,7 @@ struct ParametersView: View {
                         }
                         .padding(.top, 2)
                     } label: {
-                        Text(group.name).font(.subheadline).bold()
+                        Text(group.name).font(.padSubheadline).bold()
                     }
                 }
             }
@@ -109,6 +111,10 @@ private struct ParamRow: View {
     /// store) redraw when the store changes.
     @ObservedObject var stringStore: StringParamStore
     let spec: ParamSpec
+
+    /// Tooltips are unreliable, so a single click on the label expands the
+    /// help text inline under the row instead.
+    @State private var showHelp = false
 
     private var value: Double { controller.paramValue(spec.key) }
 
@@ -148,16 +154,43 @@ private struct ParamRow: View {
     private var isMapped: Bool { !boundTilts.isEmpty || !memberOf.isEmpty }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            row
+            if showHelp {
+                Text(helpText)
+                    .font(.padCaption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .padding(.leading, 8)
+                    .padding(.bottom, 4)
+            }
+        }
+        .help(helpText)
+    }
+
+    private var row: some View {
         HStack(spacing: 8) {
             Text(spec.label)
-                .font(.caption)
-                .frame(width: 150, alignment: .leading)
+                .font(.padCaption)
+                .foregroundStyle(showHelp ? Color.accentColor : Color.primary)
+                .frame(width: Typography.scaledWidth(150), alignment: .leading)
                 .contentShape(Rectangle())
-                .onTapGesture(count: 2) { controller.resetParam(spec.key) }
+                // The single tap must fire immediately — an exclusive
+                // double/single composition holds it for the double-click
+                // window, which reads as lag. Simultaneous recognition
+                // means a double-click's two single taps also fire; the
+                // reset handler pins the help open so the net state is
+                // deterministic (reset + help shown).
+                .onTapGesture { showHelp.toggle() }
+                .simultaneousGesture(TapGesture(count: 2).onEnded {
+                    controller.resetParam(spec.key)
+                    showHelp = true
+                })
             Slider(value: binding, in: bounds)
             Text(format(value))
-                .frame(width: 54, alignment: .trailing)
-                .font(.caption.monospacedDigit())
+                .frame(width: Typography.scaledWidth(54), alignment: .trailing)
+                .font(.padCaption.monospacedDigit())
                 .foregroundStyle(.secondary)
             mappingChips
             mappingMenu
@@ -172,7 +205,6 @@ private struct ParamRow: View {
             .opacity(controller.paramIsDefault(spec.key) ? 0.25 : 1)
             .disabled(controller.paramIsDefault(spec.key))
         }
-        .help(helpText)
     }
 
     /// The apply strategy is an implementation detail as of 2026-07-24 —
@@ -196,7 +228,7 @@ private struct ParamRow: View {
         HStack(spacing: 3) {
             ForEach(boundTilts, id: \.rawValue) { d in
                 Text(d.shortLabel)
-                    .font(.caption2.weight(.semibold))
+                    .font(.padCaption2.weight(.semibold))
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
                     .background(Color.accentColor.opacity(0.25),
@@ -204,7 +236,7 @@ private struct ParamRow: View {
             }
             ForEach(memberOf) { c in
                 Text(c.name)
-                    .font(.caption2)
+                    .font(.padCaption2)
                     .lineLimit(1)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
@@ -212,7 +244,7 @@ private struct ParamRow: View {
                                 in: RoundedRectangle(cornerRadius: 3))
             }
         }
-        .frame(width: 130, alignment: .leading)
+        .frame(width: Typography.scaledWidth(130), alignment: .leading)
     }
 
     private var mappingMenu: some View {

@@ -146,7 +146,7 @@ final class ZipperTests: XCTestCase {
     /// The real risk: `bow_mu_s` is a friction COEFFICIENT inside a
     /// feedback loop — stepping it changes how the string evolves, not the
     /// current sample, so it cannot click. Parameters that MULTIPLY the
-    /// output (drive weight, radiation floor, taraf tap, trim, room mix)
+    /// output (drive weight, radiation floor, jawari mix, trim, room mix)
     /// are different: a step in one of those is a step in the signal.
     /// Sweep each and check for excess HF against a fine sweep.
     func testGainLikeParametersDoNotZipperAtTiltRate() throws {
@@ -155,7 +155,7 @@ final class ZipperTests: XCTestCase {
         let gainLike: [(String, Double, Double)] = [
             ("bow_w", 0.6, 1.8),            // bridge-force weight (pre-radiation)
             ("bow_body_c0", 0.05, 0.8),     // direct radiation floor
-            ("bow_taraf_dir", 0.0, 1.5),    // sympathetic tap level
+            ("bow_jt_gain", 0.05, 1.0),     // jawari-web output mix
             ("bow_live_trim", 0.05, 0.35),  // output trim (Swift-side gain)
             ("bow_rev_mix", 0.0, 0.3),      // room mix (Swift-side)
         ]
@@ -192,7 +192,7 @@ final class ZipperTests: XCTestCase {
         let gainLike: [(String, Double, Double)] = [
             ("bow_w", 0.6, 1.8),
             ("bow_body_c0", 0.05, 0.8),
-            ("bow_taraf_dir", 0.0, 1.5),
+            ("bow_jt_gain", 0.05, 1.0),
             ("bow_live_trim", 0.05, 0.35),
             ("bow_rev_mix", 0.0, 0.3),
             ("bow_mu_s", 0.5, 1.15),

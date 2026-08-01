@@ -15,14 +15,15 @@ import Foundation
 ///  * `.rebuild` — a `bowed_string.json` build scalar; applied as a
 ///                 persisted override with a debounced off-main rebuild.
 ///  * `.hybrid`  — a build scalar that ALSO has a live 0…1 scaler in the
-///                 kernel (jawari buzz depth ↔ `bow_set_jaw_gain`,
-///                 vibrato cents ↔ the aftertouch amount). The user sees
-///                 ONE knob in native units: values at or below the built
-///                 value ride the scaler (instant); pushing above it
-///                 raises the build scalar (rebuild). This is what
-///                 collapsed the duplicate pairs — the old `bow_jaw_gain`
-///                 and `bow_vibrato` WERE these scalers, exposed as if
-///                 they were separate parameters.
+///                 kernel (vibrato cents ↔ the aftertouch amount). The
+///                 user sees ONE knob in native units: values at or below
+///                 the built value ride the scaler (instant); pushing
+///                 above it raises the build scalar (rebuild). This is
+///                 what collapsed the duplicate pairs — the old
+///                 `bow_vibrato` WAS that scaler, exposed as if it were a
+///                 separate parameter. (The other hybrid, the sympathetic
+///                 web's buzz depth, went away with the web itself on
+///                 2026-07-24.)
 ///
 /// Everything in this registry is editable in the Parameters tab, usable
 /// as a composite member, and bindable to a tilt (directly or through a
@@ -210,6 +211,12 @@ public enum ParamRegistry {
             ParamSpec("bow_jt_apex", "graze depth", group: "Jawari taraf (modal contact)",
                       2e-6, 5e-5, 1e-5,
                       help: "Bone protrusion. The evolution lives at the grazing knee — deep press linearizes (sparkle only), too shallow never engages."),
+            ParamSpec("bow_jt_evolve", "evolution", group: "Jawari taraf (modal contact)",
+                      0.0, 1.0, 0.5, apply: .live,
+                      help: "Harmonic-evolution rate — the tanpura/sitar twang axis: a signed bone offset spanning graze margin ×4 … ×¼ around the fitted bone, slewed inside the kernel (~40 ms) so the bone GLIDES — tilt-sweepable without a strum. 1 = the ring always sits in the grazing band: energy cascades up the partials fast (centroid rise ~0.3 s vs ~1.2 s stock) and at ANY level — the twang is reliable, and the taraf rings a few dB hotter (a real opened jawari does too; trim with level). 0 = the string is pressed past the knee: the wrap holds, harmonics stay put, no twang. 0.5 = the fitted geometry, byte-null. Applies live."),
+            ParamSpec("bow_jt_tap", "radiation tap", group: "Jawari taraf (modal contact)",
+                      0.86, 0.98, 0.90,
+                      help: "Where along the string the taraf radiates (fraction of its length; the drive tap stays fitted). Radiated harmonic k weighs |sin(k·π·tap)| — 0.90 (legacy) humps at h5 and NULLS h10, which muffles the jawari formant; toward the bridge the hump slides up (0.95 → h10, 0.97 → h16) and the fundamental falls away, voicing the ring as the classic cluster of high harmonics over quiet lows."),
             ParamSpec("bow_jt_alpha", "contact law", group: "Jawari taraf (modal contact)",
                       1.0, 2.0, 1.5,
                       help: "Contact stiffness exponent. 1.5 = Hertz (fast sqrt path — the live default); other values cost more CPU."),
@@ -225,63 +232,32 @@ public enum ParamRegistry {
             ParamSpec("bow_jt_bst", "inharmonicity", group: "Jawari taraf (modal contact)",
                       0.0, 1.0e-3, 2.0e-4,
                       help: "Stiffness stretch of the upper partials (steel-wire dispersion). Lower = more harmonic top = less bell-metallic; legacy 2e-4 puts mode 40 ~15% sharp."),
-            // The two LIVE jawari-taraf axes. `bow_jt_lp` was already one key
-            // with a live path; `bow_jt_damp` used to sit in the Parameters
-            // tab as "taraf damping", colliding by name with the sympathetic
-            // web's "HF damping" below — it damps THESE modal rows.
+            // The two LIVE jawari-taraf axes.
             ParamSpec("bow_jt_lp", "tone LP (Hz)", group: "Jawari taraf (modal contact)",
                       1000.0, 20000.0, 20000.0, apply: .live,
                       help: "One-pole low-pass on the radiated jawari sum ONLY (the main string is untouched). ≥ 20 kHz = bypass, bit-exact legacy. Applies live."),
+            ParamSpec("bow_jt_hp", "tone HP (Hz)", group: "Jawari taraf (modal contact)",
+                      0.0, 4000.0, 0.0, apply: .live,
+                      help: "One-pole high-pass on the radiated jawari sum ONLY — the formant voicing: quiets the taraf's fundamental band so the high-harmonic cluster (see radiation tap) carries the ring. ~1–2× the tonic leaves the twang untouched and drops the lows ~6 dB/oct below the corner. 0 = bypass, bit-exact legacy. Applies live."),
+            ParamSpec("bow_jt_body", "body radiation", group: "Jawari taraf (modal contact)",
+                      0.0, 1.0, 0.0, apply: .live,
+                      help: "Blend of the radiated jawari sum through the SAME formula-body radiation bank the played strings radiate through — the coherence lever: at 0 the taraf radiates raw (beside the instrument), at 1 it rings from the instrument's body with the voice's own formants. Shared coefficients (a body edit re-voices both), own filter state. 0 = bypass, bit-exact legacy. Applies live."),
             ParamSpec("bow_jt_damp", "extra damping", group: "Jawari taraf (modal contact)",
                       0, 1, 0.0, apply: .live,
                       help: "Runtime damping of these modal rows: 0 = the natural long ring, 1 = choked within a second. Applies live — this is what the Taraf Decay composite sweeps."),
+            ParamSpec("bow_jt_sel", "recruitment", group: "Jawari taraf (modal contact)",
+                      0, 1, 0.5, apply: .live,
+                      help: "How much of the taraf joins each note, bipolar around 0.5 = the fitted response. Below: rows lose bridge drive by harmonic distance from the played notes until at 0 only kin rows ring (unison, faint octaves, fainter fifth); chords recruit additively (soft-OR, bounded). Above: the chorus swells — at 1 every row is driven harder AND the radiated jt sum is lifted, both ×`bow_jt_sel_lush` [2] (~+6 dB with extra cascade — an opened-jawari lushness where the whole taraf joins prominently). Held drones and rings already sounding are never ducked. Lattice: `bow_jt_sel_width` (cents, 30) and `bow_jt_sel_kin` (exponent, 0.7 — shared with the drone spread), bp scalars like the tilt range keys. Applies live — the Taraf Purity composite's recruitment member (purity up = kin-only)."),
         ]),
 
-        ("Taraf (sympathetic)", [
-            ParamSpec("bow_taraf_Z", "coupling Z", group: "Taraf (sympathetic)",
-                      0.0, 0.05, 0.0033,
-                      help: "Junction impedance per string (passive wave junction — structurally stable). Small = long free ring; large = strong charge but the bridge drains it. 0 = no taraf."),
-            ParamSpec("bow_taraf_gain", "ring level", group: "Taraf (sympathetic)",
-                      0.0, 12.0, 1.0,
-                      help: "Taraf output weight (√count-normalized; zero loop-gain impact)."),
-            ParamSpec("bow_taraf_dir", "ring radiation", group: "Taraf (sympathetic)",
-                      0.0, 2.0, 0.5,
-                      help: "Ringing-string radiation tap through the body — a passive junction cannot radiate free decay; this is how the wash reaches the air."),
-            ParamSpec("bow_taraf_pol_cents", "polarization (¢)", group: "Taraf (sympathetic)",
-                      0.0, 8.0, 3.0,
-                      help: "Two polarizations per string, golden-ratio detuned — the slow near-unison shimmer of a real string pair."),
-            ParamSpec("bow_taraf_damp", "HF damping", group: "Taraf (sympathetic)",
-                      0.0, 1.0, 0.5,
-                      help: "f² string damping of the sympathetic web — high partials of the ring die faster. (The modal jawari rows have their own live 'extra damping' above.)"),
-            ParamSpec("bow_taraf_bright", "brightness", group: "Taraf (sympathetic)",
-                      0.0, 1.0, 0.5,
-                      help: "Termination corner of the ring (0 = dark, 1 = wiry)."),
-            ParamSpec("bow_taraf_inharm", "inharmonicity", group: "Taraf (sympathetic)",
-                      0.0, 0.5, 0.1,
-                      help: "Stiff-wire dispersion — upper ring partials sharp."),
-            ParamSpec("bow_taraf_t60", "ring length ×", group: "Taraf (sympathetic)",
-                      0.1, 6.0, 1.0,
-                      help: "Scales the string table's per-string decay times (capped at 8 s — energy discipline)."),
-            // HYBRID: the build depth of the web's jawari buzz, live-scalable
-            // down through the kernel's `jawG`. The old `bow_jaw_gain`
-            // "web buzz amount" WAS that scaler, shown as a second knob.
-            ParamSpec("bow_taraf_jawari", "jawari buzz", group: "Taraf (sympathetic)",
-                      0.0, 2.0, 1.3, apply: .hybrid, restFraction: 1.0,
-                      help: "Flat-bridge contact buzz on the sympathetic web (0 = the plain bridge of a viola d'amore; high = sitar/sarangi jangle). Turning it DOWN from the fitted depth is instant (the kernel's buzz scaler); pushing above it rebuilds the web. The Taraf Purity composite sweeps this to 0."),
-            ParamSpec("bow_open_Z", "open-string coupling", group: "Taraf (sympathetic)",
-                      0.0, 0.04, 0.0,
-                      help: "The un-bowed MAIN GUT strings (mandra Pa + mandra Sa) as sympathetics — the real sarangi's LF halo. 0 = off."),
-            ParamSpec("bow_open_gain", "open-string ring", group: "Taraf (sympathetic)",
-                      0.0, 3.0, 0.0, help: "Radiated level of the open gut pair."),
-            ParamSpec("bow_open_t60", "open ring (s)", group: "Taraf (sympathetic)",
-                      0.5, 5.0, 2.5, help: "Gut open-string decay."),
-            ParamSpec("bow_open_damp", "open HF damp", group: "Taraf (sympathetic)",
-                      0.3, 1.0, 0.85,
-                      help: "Gut kills high partials fast — the warm dark ring."),
-            ParamSpec("bow_taraf_duck", "driven-tap duck", group: "Taraf (sympathetic)",
-                      0.0, 1.0, 1.0,
-                      help: "While a taraf string is DRIVEN at a partial coincidence with the bowed note, its direct tap ducks to this weight (the junction still radiates the driven response; the tap owns the free ring). 1 = off."),
-        ]),
+        // The "Taraf (sympathetic)" group — `bow_taraf_*` and `bow_open_*`,
+        // the LINEAR comb web on the passive wave junction plus the open gut
+        // pair — was DELETED 2026-07-24. It was a cheap approximation of a
+        // buzzing sympathetic string (comb + a flat-bridge buzz term) living
+        // alongside the modal-jawari block, which models the same thing
+        // properly. Silenced (coupling Z 0) the instrument sounded better,
+        // so the web is gone and `bow_jt_*` above IS the taraf. The Tarab
+        // tab still tunes it — those rows now feed the jawari builder only.
 
         ("Articulation", [
             ParamSpec("bow_place_ms", "place (ms)", group: "Articulation",
@@ -335,11 +311,11 @@ public enum ParamRegistry {
             ParamSpec("bow_rev_rt60", "room decay (s)", group: "Radiation & output",
                       0.2, 2.0, 1.0, help: "Room reverberation time."),
             ParamSpec("bow_rev_width", "room width", group: "Radiation & output",
-                      0.0, 1.0, 0.6,
+                      0.0, 1.0, 0.8,
                       help: "L/R decorrelation of the room tail — a real room's reverberant field differs at the two ears. Cancels in the mono fold-down. 0 = the old mono room."),
             ParamSpec("bow_st_spread", "taraf width", group: "Radiation & output",
-                      0.0, 1.0, 0.7,
-                      help: "Stereo spread of the sympathetic strings' DIRECT radiation (taraf tap + jawari rows, drones included): each svara rings from its own fixed place around the tonic. Bridge-borne energy stays centred. Mono fold-down invariant. 0 = mono."),
+                      0.0, 1.0, 0.2,
+                      help: "Stereo spread of the jawari rows' DIRECT radiation (drones included): each svara rings from its own fixed place around the tonic. Bridge-borne energy stays centred. Mono fold-down invariant. 0 = mono. Default narrowed 0.7 → 0.2 (2026-08-01): a real sarangi is one small radiator — a wide source halo reads as an accompanying chorus; the room width carries the image instead."),
             ParamSpec("bow_st_played", "bow-noise spread", group: "Radiation & output",
                       0.0, 0.5, 0.15,
                       help: "Per-voice spread of the bow-contact noise (the played string's position on the bridge). The played tone itself radiates from the body and stays centred."),
@@ -347,7 +323,56 @@ public enum ParamRegistry {
                       -1, 1, 0.0, apply: .live,
                       help: "Overall spectral tilt: −1 = bass-biased, 0 = flat, +1 = treble-biased. A complementary shelf pair on the whole voice before the room. Applies live — the Tone Tilt composite sweeps this."),
         ]),
+        fxGroup("FX — voice → taraf", "fx_drive_",
+                "the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched"),
+        fxGroup("FX — voice", "fx_voice_",
+                "the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain"),
+        fxGroup("FX — taraf", "fx_taraf_",
+                "the sympathetic web's own radiated output (drones included), before the shared radiation chain"),
+        fxGroup("FX — global", "fx_global_",
+                "the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level)"),
     ]
+
+    /// One FX insert point's parameter block (FX tab, 2026-08-01): a
+    /// 10-band graphic EQ and a selectable additive reverb, all `.live`
+    /// (they never touch the physics tables) and all off by default —
+    /// the untouched rack is byte-null. `prefix` matches
+    /// `SarangiKit.FXPoint.keyPrefix`; the suffixes are what
+    /// `FXSettings.apply(field:value:)` parses.
+    private static func fxGroup(_ name: String, _ prefix: String,
+                                _ what: String)
+        -> (name: String, params: [ParamSpec]) {
+        var p: [ParamSpec] = [
+            ParamSpec("\(prefix)eq_on", "EQ on", group: name,
+                      0, 1, 0, step: 1, apply: .live,
+                      help: "Enable the 10-band graphic EQ at this point — \(what). Toggling glides the bands to/from flat (click-free)."),
+        ]
+        let bands = ["31.5 Hz", "63 Hz", "125 Hz", "250 Hz", "500 Hz",
+                     "1 kHz", "2 kHz", "4 kHz", "8 kHz", "16 kHz"]
+        for (i, b) in bands.enumerated() {
+            p.append(ParamSpec("\(prefix)eq_b\(i + 1)", "EQ \(b) (dB)",
+                               group: name, -12, 12, 0, apply: .live,
+                               help: "Octave peaking band at \(b), ±12 dB. Inert while the point's EQ is off."))
+        }
+        p += [
+            ParamSpec("\(prefix)rev_on", "reverb on", group: name,
+                      0, 1, 0, step: 1, apply: .live,
+                      help: "Enable the reverb at this point — \(what). Toggling glides the wet level (click-free)."),
+            ParamSpec("\(prefix)rev_type", "reverb type", group: name,
+                      0, 1, 0, step: 1, apply: .live,
+                      help: "0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level)."),
+            ParamSpec("\(prefix)rev_mix", "reverb mix", group: name,
+                      0, 1, 0.3, apply: .live,
+                      help: "Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off."),
+            ParamSpec("\(prefix)rev_size", "reverb size", group: name,
+                      0, 1, 0.93, apply: .live,
+                      help: "Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s."),
+            ParamSpec("\(prefix)rev_cut", "reverb cutoff (Hz)", group: name,
+                      500, 20000, 10000, apply: .live,
+                      help: "Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit."),
+        ]
+        return (name, p)
+    }
 
     // MARK: - Lookup
 
@@ -389,7 +414,7 @@ public enum ParamRegistry {
         "bow_Zt", "bow_age_a", "bow_age_ms", "bow_body_c0", "bow_br_fc",
         "bow_cr_ms", "bow_cr_w", "bow_gut_fc2", "bow_gut_g", "bow_mu_d",
         "bow_mu_s", "bow_noise", "bow_noise_dir", "bow_nut_fc",
-        "bow_taraf_dir", "bow_taraf_duck", "bow_tors_c", "bow_tors_g",
+        "bow_tors_c", "bow_tors_g",
         "bow_tors_ratio", "bow_v0", "bow_w", "bow_yinf",
         // `bow_kret` reaches the kernel as a scalar too; the loop-gain cap
         // can swallow a small nudge, which is why the empirical probe
@@ -413,14 +438,11 @@ public enum ParamRegistry {
         "bow_body_rad", "bow_body_scale", "bow_body_y",
         "bow_jt_alpha", "bow_jt_apex", "bow_jt_bst", "bow_jt_drive",
         "bow_jt_fhf", "bow_jt_gain", "bow_jt_hcb", "bow_jt_norm",
-        // NOT reloadable — these move the sympathetic web's DELAY
-        // LENGTHS, which cannot be swapped under a running ring:
-        //   bow_taraf_damp, bow_taraf_inharm, bow_taraf_pol_cents
-        // and these ride the per-voice arrays incl. the charge window,
-        // which init consumes rather than stores:
-        //   bow_taraf_Z, bow_taraf_bright, bow_taraf_gain
-        // (`bow_taraf_jawari` is already live DOWNWARD via its hybrid
-        // scaler, which is the direction that matters musically.)
+        "bow_jt_tap",
+        // The old exclusion list here covered the linear sympathetic web
+        // (`bow_taraf_*`), whose delay lengths and per-voice charge window
+        // could not be swapped under a running ring. That web is gone
+        // (2026-07-24); `bow_body_modes` is the only structural key left.
     ]
 
     /// True when a change to `key` can be pushed onto the running engine.
@@ -431,15 +453,13 @@ public enum ParamRegistry {
     /// The kernel's live 0…1 scaler behind a `.hybrid` parameter. The
     /// scaler is an implementation detail — no UI shows it.
     public enum HybridScaler: String {
-        case jawGain      // bow_set_jaw_gain — the web's buzz depth
         case vibratoAmount // the aftertouch axis — vibrato cents
     }
 
     public static func hybridScaler(_ key: String) -> HybridScaler? {
         switch key {
-        case "bow_taraf_jawari": return .jawGain
-        case "bow_vib_cents":    return .vibratoAmount
-        default:                 return nil
+        case "bow_vib_cents": return .vibratoAmount
+        default:              return nil
         }
     }
 }

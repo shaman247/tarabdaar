@@ -125,7 +125,7 @@ k 7.5, drag smoothing 0.3, velocity 92.
 | Brightness | (74) | 0–127 | None | Bow position: sul ponticello ↔ sul tasto |
 | Bow Pressure | (1) | 0–127 | None | Bow force inside the playable wedge |
 | Expression | (11) | 0–64 | Tilt 1 | Loudness: rest (0.5) sends the fitted median; tilt down fades toward silence, up ≈ +8 dB |
-| Taraf Purity | (71) | 0–127 | Tilt 1 | Composite slot 1 (default members: jawari buzz 1.3→0, jt tone LP 16 k→1.5 kHz) |
+| Taraf Purity | (71) | 0–127 | Tilt 1 | Composite slot 1 (default members: jt tone LP 16 k→1.5 kHz, recruitment `bow_jt_sel` 1→0 — lush chorus down to the played note's kin) |
 | Taraf Decay | (73) | 0–127 | Tilt 2 | Composite slot 2 (default member: taraf damping 0→1) |
 | Tone Tilt | (72) | 0–127 | Tilt 3 | Composite slot 3 (default member: tone tilt −1→1) |
 | Composite 4–8 | (20–24) | 0–127 | None | Free composite-parameter slots, defined in the Mac's Controls tab |
@@ -217,9 +217,10 @@ twice, in two tabs, under two names — `bow_jaw_gain` "web buzz amount"
 next to `bow_taraf_jawari` "jawari buzz", and `bow_vibrato` "vibrato
 depth" next to `bow_vib_cents` "vibrato depth (¢)". In both cases the
 Parameters-tab knob was literally the kernel's 0–1 **scaler** for the
-Sarangi-tab build scalar. They are now single `hybrid` parameters
-(`bow_taraf_jawari`, `bow_vib_cents`), and the scalers are an
-implementation detail. `bow_jt_damp` (the modal jawari rows' runtime
-damping) and `bow_taraf_damp` (the sympathetic web's f² HF damping) were
-never the same thing — they damp different string banks — and are now
-labelled and grouped so they can't be confused.
+Sarangi-tab build scalar, so they became single `hybrid` parameters with
+the scaler as an implementation detail. One of those pairs has since gone
+entirely: the **linear sympathetic web was deleted on 2026-07-24**, taking
+`bow_taraf_jawari` (and every other `bow_taraf_*`/`bow_open_*` key) with
+it, so `bow_vib_cents` is the only hybrid left. The web's `bow_taraf_damp`
+went the same way; `bow_jt_damp`, the modal jawari rows' runtime damping,
+is a different bank and remains.

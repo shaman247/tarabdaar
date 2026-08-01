@@ -62,15 +62,11 @@ final class RealtimePerformanceTests: XCTestCase {
             case .hybrid:
                 let h = headroom[key] ?? spec.def
                 if h > 1e-12, value <= h {
+                    // vibrato's scaler IS the aftertouch axis, the same
+                    // channel `AudioEngine.setStringVibrato` uses
                     let a = value / h
-                    if key == "bow_taraf_jawari" {
-                        src.setJawGain(a)
-                    } else {
-                        // vibrato's scaler IS the aftertouch axis, the
-                        // same channel `AudioEngine.setStringVibrato` uses
-                        src.mapper.midi(0xD0,
-                            UInt8(max(0, min(127, Int((a * 127).rounded())))), 0)
-                    }
+                    src.mapper.midi(0xD0,
+                        UInt8(max(0, min(127, Int((a * 127).rounded())))), 0)
                     return
                 }
                 push(key, value)
@@ -268,7 +264,7 @@ final class RealtimePerformanceTests: XCTestCase {
                             noteOn: [(0.05, 59)], noteOff: [(3.9, 59)]) { rig, t in
             let flick = (t * 5.0).truncatingRemainder(dividingBy: 1.0) < 0.5
                 ? 1.0 : 0.0                                 // 5 Hz square
-            rig.apply("bow_taraf_jawari", flick * 1.3)      // hybrid scaler
+            rig.apply("bow_vib_cents", flick * 25.0)        // hybrid scaler
             rig.apply("bow_tone_tilt", flick * 2.0 - 1.0)   // live axis
             rig.apply("bow_w", 0.8 + flick * 0.8)           // kernel gain scalar
         }
@@ -300,9 +296,9 @@ final class RealtimePerformanceTests: XCTestCase {
             // quantized so it only re-triggers a handful of times, the way
             // a debounced UI/tilt path would
             let x = (t / 4.0 * 6).rounded() / 6.0
-            rig.apply("bow_taraf_bright", 0.2 + 0.6 * x)
+            rig.apply("bow_rev_rt60", 0.3 + 1.2 * x)
         }
-        check("REBUILD-TIER SWEEP (bow_taraf_bright, crossfaded)", r,
+        check("REBUILD-TIER SWEEP (bow_rev_rt60, crossfaded)", r,
               maxStepRatio: 8.0)
         XCTAssertGreaterThan(r.rebuilds, 0, "the scenario never rebuilt")
     }

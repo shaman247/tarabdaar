@@ -57,21 +57,28 @@ public struct PitchScale: Equatable {
     /// keyboard-like layout. The scale spans the half-open octave
     /// `[1, 2)` — 2/1 is **not** a member; the octave appears on the
     /// pad as the upper-octave repeat (ghost) of 1/1.
+    ///
+    /// Degrees are named in **sargam** (`S r R g G m M P d D n N`,
+    /// 2026-07-25) — and since every pitch in the app is named by the scale
+    /// (see `ScaleDegrees.swift`), those are the names the frets, the drone
+    /// buttons and the Tarab tab show. **Must stay in step with the bundled
+    /// `StarpadMac/Default.json`**, which is what actually loads; this is
+    /// the fallback for a missing/unreadable resource.
     public static var defaultJI: PitchScale {
         // (numerator, denominator, "black key" flag, label)
         let entries: [(Int, Int, Bool, String)] = [
-            (1, 1, false, "1"),      // C   — tonic
-            (16, 15, true, "2-"),    // C#
-            (9, 8, false, "2"),      // D
-            (6, 5, true, "3-"),      // D#
-            (5, 4, false, "3"),      // E
-            (4, 3, false, "4"),      // F
-            (45, 32, true, "4+"),    // F# — tritone
-            (3, 2, false, "5"),      // G
-            (8, 5, true, "6-"),      // G#
-            (5, 3, false, "6"),      // A
-            (16, 9, true, "7-"),     // A#
-            (15, 8, false, "7"),     // B
+            (1, 1, false, "S"),      // C   — tonic
+            (16, 15, true, "r"),     // C#
+            (9, 8, false, "R"),      // D
+            (6, 5, true, "g"),       // D#
+            (5, 4, false, "G"),      // E
+            (4, 3, false, "m"),      // F
+            (45, 32, true, "M"),     // F# — tritone
+            (3, 2, false, "P"),      // G
+            (8, 5, true, "d"),       // G#
+            (5, 3, false, "D"),      // A
+            (16, 9, true, "n"),      // A#
+            (15, 8, false, "N"),     // B
         ]
         let whiteY = 5.0 / 6.0
         let blackY = 2.0 / 6.0
@@ -340,7 +347,64 @@ public final class PitchPadEngine: ObservableObject {
     /// "Save" then routes to "Save As…" since there's no name to
     /// overwrite.
     @Published public var currentScaleName: String? = nil
-    @Published public var tonicMidi: Int = 62       // D4 = the "1/1"
+    /// The tonic's integer note anchor — the "1/1". ALWAYS starts at
+    /// `defaultTonicMidi` (D4): the tonic is not persisted on either side, so
+    /// every launch opens on D4 and the session tonic is set fresh from the
+    /// Fret Pad tab.
+    @Published public var tonicMidi: Int = PitchPadEngine.defaultTonicMidi
+    /// Fractional tonic refinement in CENTS (±50) on top of `tonicMidi` —
+    /// together they are THE app tonic, set in Hz from the Fret Pad tab
+    /// (`setTonic(hz:)`) and mirrored everywhere else (tarab, drones, iPad
+    /// sync). Kept split (note + cents) so the MIDI/sync plumbing keeps its
+    /// integer note anchor.
+    @Published public var tonicCents: Double = 0
+
+    /// The tonic as an absolute frequency — the ONE Hz value everything
+    /// else is relative to.
+    public var tonicHz: Double {
+        440.0 * pow(2.0, (tonicFractionalMidi - 69.0) / 12.0)
+    }
+
+    /// Set the tonic from a frequency: nearest MIDI note + cents remainder.
+    public func setTonic(hz: Double) {
+        guard hz > 20, hz < 4000 else { return }
+        setTonic(fractionalMidi: 69.0 + 12.0 * log2(hz / 440.0))
+    }
+
+    /// Set the tonic from a fractional MIDI note, re-split into the integer
+    /// anchor + a ±50¢ remainder (the range the sync blob encodes).
+    public func setTonic(fractionalMidi: Double) {
+        let clamped = max(Double(Self.tonicNoteRange.lowerBound),
+                          min(Double(Self.tonicNoteRange.upperBound), fractionalMidi))
+        let note = Int(clamped.rounded())
+        tonicMidi = note
+        tonicCents = (clamped - Double(note)) * 100.0
+    }
+
+    /// Set the tonic's integer note anchor, KEEPING the current cents offset —
+    /// so a fine tuning (e.g. −14¢ against a reference) survives picking a
+    /// different note. Used by the Fret Pad's note pickers.
+    public func setTonic(midi: Int) {
+        tonicMidi = max(Self.tonicNoteRange.lowerBound,
+                        min(Self.tonicNoteRange.upperBound, midi))
+    }
+
+    /// Nudge the tonic by a signed cents delta, rolling over into the note
+    /// anchor so `tonicCents` stays in ±50. Used by the Fret Pad's
+    /// scroll-wheel micro-adjustment.
+    public func nudgeTonic(cents: Double) {
+        setTonic(fractionalMidi: tonicFractionalMidi + cents / 100.0)
+    }
+
+    /// The MIDI notes the tonic anchor may take — whole octaves, C1…B7.
+    /// Bounds both the typed Hz and the Fret Pad's note menu.
+    public static let tonicNoteRange = 24...107
+
+    /// The tonic every launch opens on: **D4** (293.665 Hz), the sarangi
+    /// tonic this instrument is voiced around.
+    public static let defaultTonicMidi = 62
+
+    public var tonicFractionalMidi: Double { Double(tonicMidi) + tonicCents / 100.0 }
     @Published public var velocity: Int = 92
     /// Half-width of the soft interpolation zone around each cell
     /// boundary, in pixels. See `docs/pitch-pad.md` (Inner & outer
@@ -542,7 +606,7 @@ public final class PitchPadEngine: ObservableObject {
         touchWeights[touchId] = weights
         configureBendRangeIfNeeded(channel: channel)
         let semisAboveTonic = 12.0 * log2(r)
-        let fractional = Double(tonicMidi) + semisAboveTonic
+        let fractional = tonicFractionalMidi + semisAboveTonic
         let note = Int(fractional.rounded())
         heldNote[channel] = note
         let bend = bendValue(forSemisFromNote: fractional - Double(note))
@@ -598,7 +662,7 @@ public final class PitchPadEngine: ObservableObject {
         if r == lastBentRatio[touchId] { return }
         lastBentRatio[touchId] = r
         let semisAboveTonic = 12.0 * log2(r)
-        let fractional = Double(tonicMidi) + semisAboveTonic
+        let fractional = tonicFractionalMidi + semisAboveTonic
         let bend = bendValue(forSemisFromNote: fractional - Double(note))
         midi.sendPitchBend(value: bend, channel: UInt8(channel))
         sounding.ratio = r
@@ -636,13 +700,13 @@ public final class PitchPadEngine: ObservableObject {
         }
     }
 
-    /// Drone button `index` (0–3) press/release (Fret Pad). Emits CC
+    /// Drone button `index` (0–2) press/release (Fret Pad). Emits CC
     /// 102+index (value 127/0) on channel 0 — on the Mac this lands
     /// in-process at `AudioEngine.sendHostedMIDI`, on the iPad it rides
     /// the USB cable like every other message; the Mac intercepts the CC
     /// and drives the String voice's jawari-taraf drone rows.
     public func setDrone(_ index: Int, pressed: Bool) {
-        guard (0..<4).contains(index) else { return }
+        guard (0..<FretArrangement.droneCount).contains(index) else { return }
         midi.sendControlChange(controller: UInt8(102 + index),
                                value: pressed ? 127 : 0, channel: 0)
     }
@@ -701,6 +765,7 @@ public final class PitchPadEngine: ObservableObject {
         if state.scale != scale || state.layout != layout { panic() }
         scale = state.scale
         tonicMidi = state.tonicMidi
+        tonicCents = state.tonicCents
         marginPixels = state.marginPixels
         layout = state.layout
         currentScaleName = nil
@@ -766,7 +831,7 @@ public final class PitchPadEngine: ObservableObject {
         for (touchId, channel) in touchChannels {
             guard let note = heldNote[channel],
                   let r = currentRatio[touchId] else { continue }
-            let base = (Double(tonicMidi) + 12.0 * log2(r)) - Double(note)
+            let base = (tonicFractionalMidi + 12.0 * log2(r)) - Double(note)
             let bend = bendValue(forSemisFromNote: base)
             midi.sendPitchBend(value: bend, channel: UInt8(channel))
         }

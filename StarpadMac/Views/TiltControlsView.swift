@@ -26,10 +26,10 @@ struct TiltControlsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text("TILT CONTROLS")
-                    .font(.caption.weight(.bold))
+                    .font(.padCaption.weight(.bold))
                     .foregroundStyle(.secondary)
                 Text("Each tilt drives any set of composites or single parameters between the endpoints of its range slider, in the target's own units (left = tilted fully one way, right = fully the other; resting flat sits halfway). \u{201C}From center\u{201D} holds the low endpoint through the resting half and sweeps only past neutral. The iPad streams raw tilt values; the Mac evaluates these bindings, so edits take effect immediately.")
-                    .font(.caption)
+                    .font(.padCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach([InputDimension.tilt1, .tilt2, .tilt3], id: \.rawValue) { dim in
@@ -38,11 +38,11 @@ struct TiltControlsView: View {
                     }
                 }
                 Text("COMPOSITE PARAMETERS")
-                    .font(.caption.weight(.bold))
+                    .font(.padCaption.weight(.bold))
                     .foregroundStyle(.secondary)
                     .padding(.top, 8)
                 Text("A composite parameter is a named 0\u{2013}1 control built from several parameters: each member sweeps its own low\u{2192}high range as the composite rises. Bind composites to tilts above, or drive them from audition scores. Most members follow the tilt instantly; a few are engine-build values that re-apply through a crossfaded rebuild about a fifth of a second after the value settles (hover a member for which).")
-                    .font(.caption)
+                    .font(.padCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(controller.composites) { comp in
@@ -55,7 +55,9 @@ struct TiltControlsView: View {
                 }
                 .disabled(controller.composites.count >= CompositeParam.maxSlots)
                 Divider().padding(.top, 8)
-                ControlsPresetToolbar(controller: controller)
+                Text("Composites and tilt bindings save with the preset — Save preset… on the Parameters tab (⌘5).")
+                    .font(.padCaption)
+                    .foregroundStyle(.secondary)
             }
             .padding(20)
             .frame(maxWidth: 780, alignment: .leading)
@@ -104,7 +106,7 @@ private struct TiltBindingSection: View {
             let bound = controller.tiltBindings(for: dim)
             if bound.isEmpty {
                 Text("Nothing bound")
-                    .font(.caption)
+                    .font(.padCaption)
                     .foregroundStyle(.tertiary)
             }
             ForEach(bound, id: \.self) { t in
@@ -158,13 +160,13 @@ private struct TiltBindingRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Text(controller.targetDisplayName(target))
-                .font(.caption)
-                .frame(width: 140, alignment: .leading)
+                .font(.padCaption)
+                .frame(width: Typography.scaledWidth(140), alignment: .leading)
                 .help(controller.targetDisplayName(target))
             Text(readout(lo))
-                .font(.caption2.monospacedDigit())
+                .font(.padCaption2.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .trailing)
+                .frame(width: Typography.scaledWidth(44), alignment: .trailing)
             TiltRangeSlider(
                 lo: Binding(
                     get: { lo },
@@ -180,15 +182,15 @@ private struct TiltBindingRow: View {
                 .frame(minWidth: 180)
                 .help("Drag either handle: left value = tilted fully one way, right value = fully the other. Handles may cross for an inverted mapping.")
             Text(readout(hi))
-                .font(.caption2.monospacedDigit())
+                .font(.padCaption2.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .leading)
+                .frame(width: Typography.scaledWidth(44), alignment: .leading)
             Toggle("From center", isOn: Binding(
                 get: { fromCenter },
                 set: { controller.setTiltBinding(target, dim: dim, lo: lo,
                                                  hi: hi, fromCenter: $0) }))
                 .toggleStyle(.checkbox)
-                .font(.caption2)
+                .font(.padCaption2)
             Spacer(minLength: 0)
             Button {
                 controller.removeTiltBinding(target, dim: dim)
@@ -221,7 +223,7 @@ private struct CompositeEditor: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("Name")
-                            .font(.caption2)
+                            .font(.padCaption2)
                             .foregroundStyle(.secondary)
                         TextField("", text: Binding(
                             get: { comp.name },
@@ -259,7 +261,7 @@ private struct CompositeEditor: View {
                     }
                     if comp.members.isEmpty {
                         Text("No parameters — add one to give this control an effect")
-                            .font(.caption)
+                            .font(.padCaption)
                             .foregroundStyle(.tertiary)
                     }
                     ForEach(comp.members) { m in
@@ -304,15 +306,15 @@ private struct CompositeMemberRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Text(info.label)
-                .font(.caption)
-                .frame(width: 128, alignment: .leading)
+                .font(.padCaption)
+                .frame(width: Typography.scaledWidth(128), alignment: .leading)
                 .help(isLive
                       ? "Applies instantly while the composite moves"
                       : "Re-applies through a crossfaded engine rebuild, ~0.2 s after the value settles")
             Text(readout(member.lo))
-                .font(.caption2.monospacedDigit())
+                .font(.padCaption2.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 46, alignment: .trailing)
+                .frame(width: Typography.scaledWidth(46), alignment: .trailing)
             TiltRangeSlider(
                 lo: Binding(
                     get: { member.lo },
@@ -326,9 +328,9 @@ private struct CompositeMemberRow: View {
                 .frame(minWidth: 180)
                 .help("The value this base parameter holds at composite 0 (left) and composite 1 (right). Handles may cross for an inverted sweep.")
             Text(readout(member.hi))
-                .font(.caption2.monospacedDigit())
+                .font(.padCaption2.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 46, alignment: .leading)
+                .frame(width: Typography.scaledWidth(46), alignment: .leading)
             Spacer(minLength: 0)
             Button {
                 controller.removeCompositeMember(compositeID, key: member.key)
@@ -414,72 +416,5 @@ struct TiltRangeSlider: View {
         let span = range.upperBound - range.lowerBound
         guard span > 0 else { return 0 }
         return CGFloat(min(max((v - range.lowerBound) / span, 0), 1))
-    }
-}
-
-// MARK: - Controls preset (save / load the mapping)
-
-/// Saves and loads the **controls** half of a rig — the composites and the
-/// tilt bindings — as a `.starpadmap` file, separately from the instrument
-/// (which the Parameters tab saves as `.starpad`).
-///
-/// The split exists because a sound and the way you map your tilts are
-/// independent: loading a new instrument should not cost you a mapping you
-/// have tuned to your playing, and trying a friend's mapping should not
-/// replace your sound. Both are the same `StarpadPreset` document with
-/// different sections filled in, and loading is scope-filtered — so an
-/// older combined `.starpad` can be loaded here too, applying only its
-/// control half.
-private struct ControlsPresetToolbar: View {
-    @ObservedObject var controller: AppController
-    @State private var status: String?
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Button { save() } label: {
-                Label("Save controls…", systemImage: "square.and.arrow.down")
-            }
-            .help("Save the composites and tilt bindings as a .starpadmap file. The instrument saves separately, from the Parameters tab.")
-            Button { load() } label: {
-                Label("Load controls…", systemImage: "square.and.arrow.up")
-            }
-            .help("Load composites and tilt bindings. Only the controls half is applied — your instrument and parameter values are left alone.")
-            if let status {
-                Text(status).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer()
-        }
-        .font(.caption)
-    }
-
-    private func save() {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Controls.starpadmap"
-        panel.allowedContentTypes = []
-        panel.message = "Saves the composites and tilt bindings."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let name = url.deletingPathExtension().lastPathComponent
-        do {
-            try controller.savePreset(to: url, name: name, scope: .controls)
-            status = "Saved \(name)"
-        } catch {
-            status = "Save failed: \(error.localizedDescription)"
-        }
-    }
-
-    private func load() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            let p = try controller.loadPreset(from: url, scope: .controls)
-            let what = p.sections(in: .controls)
-            status = what.isEmpty
-                ? "No controls in that file\(p.kind == .instrument ? " — it is an instrument preset" : "")"
-                : "Loaded \(what.joined(separator: ", "))"
-        } catch {
-            status = "Load failed: \(error.localizedDescription)"
-        }
     }
 }

@@ -73,4 +73,11 @@ public enum Config {
     /// match the iPad's relative size and position. ≈ 1366 / 990 ≈ 1.38.
     public static let iPadSurfaceAspect: CGFloat =
         iPadScreenSize.width / (iPadScreenSize.height - iPadToolbarHeight)
+    /// The Fret Pad's playable **band**: a full-width strip spanning this
+    /// fraction of the surface height, vertically centered
+    /// (`fretPadBandRect`). Both platforms draw the full surface — the Mac
+    /// tab letterboxes to `iPadSurfaceAspect` and mirrors the iPad exactly:
+    /// the bordered band, the dead space above/below it, and the drone
+    /// buttons at their full-surface position.
+    public static let fretPadHeightFraction: CGFloat = 0.5
 }

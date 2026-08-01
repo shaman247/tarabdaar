@@ -129,7 +129,7 @@ struct CalibrationView: View {
                     activeStep = .rest
                 }) {
                     Label("Recalibrate All", systemImage: "arrow.counterclockwise")
-                        .font(.caption)
+                        .font(.padCaption)
                         .foregroundColor(.orange)
                 }
 
@@ -167,35 +167,35 @@ struct CalibrationView: View {
 
         return HStack(spacing: 10) {
             Image(systemName: step.icon)
-                .font(.caption)
+                .font(.padCaption)
                 .foregroundColor(isCaptured ? .green : .gray)
-                .frame(width: 20)
+                .frame(width: Typography.scaledWidth(20))
 
             Text(step.title)
-                .font(.system(size: 12, weight: .medium))
+                .font(.padSmall(12, weight: .medium))
                 .foregroundColor(isCaptured ? .white : .gray)
-                .frame(width: 100, alignment: .leading)
+                .frame(width: Typography.scaledWidth(100), alignment: .leading)
 
             Text(step.instruction)
-                .font(.system(size: 11))
+                .font(.padSmall(11))
                 .foregroundColor(.gray.opacity(0.6))
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if let pt = captured {
                 Text(String(format: "P%+.0f° R%+.0f° Y%+.0f°", pt.pitchDegrees, pt.rollDegrees, pt.yawDegrees))
-                    .font(.system(size: 10))
+                    .font(.padSmall(10))
                     .foregroundColor(.green.opacity(0.6))
-                    .frame(width: 160, alignment: .trailing)
+                    .frame(width: Typography.scaledWidth(160), alignment: .trailing)
             } else {
                 Text("—")
-                    .font(.system(size: 10))
+                    .font(.padSmall(10))
                     .foregroundColor(.gray.opacity(0.3))
-                    .frame(width: 160, alignment: .trailing)
+                    .frame(width: Typography.scaledWidth(160), alignment: .trailing)
             }
 
             Button(action: { activeStep = step }) {
                 Text(isCaptured ? "Redo" : "Set")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.padSmall(10, weight: .bold))
                     .foregroundColor(.white)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
@@ -276,7 +276,7 @@ struct CalibrationView: View {
     private func sensorValue(label: String, value: Double) -> some View {
         VStack(spacing: 2) {
             Text(label)
-                .font(.caption)
+                .font(.padCaption)
                 .foregroundColor(.gray)
             Text(String(format: "%+.1f°", value))
                 .font(.system(.body))

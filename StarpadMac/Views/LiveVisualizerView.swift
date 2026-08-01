@@ -56,7 +56,7 @@ struct LiveVisualizerView: View {
     private var statusCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("MIDI INPUT")
-                .font(.caption.weight(.bold))
+                .font(.padCaption.weight(.bold))
                 .foregroundStyle(.secondary)
             HStack(spacing: 10) {
                 Image(systemName: midi.sourceCount > 0 ? "cable.connector"
@@ -69,7 +69,7 @@ struct LiveVisualizerView: View {
                          : "No MIDI input")
                         .font(.title3)
                     Text(midi.statusMessage)
-                        .font(.caption)
+                        .font(.padCaption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -114,7 +114,7 @@ struct LiveVisualizerView: View {
                          renderTimeMs, maxRenderTimeMs),
                   systemImage: "waveform")
         }
-        .font(.system(.caption))
+        .font(.padCaption)
         .foregroundStyle(.secondary)
     }
 
@@ -124,7 +124,7 @@ struct LiveVisualizerView: View {
     /// reference tied to the instrument's compass rather than drifting with
     /// what's played. Falls back to two octaves around the tonic.
     private func pitchAxisRange() -> ClosedRange<Double> {
-        let tonicHz = 440.0 * pow(2.0, (Double(controller.pitchPad.tonicMidi) - 69.0) / 12.0)
+        let tonicHz = controller.pitchPad.tonicHz
         let ratios = scaleDegrees(from: controller.pitchPad.scale)
             .map(\.ratio).filter { $0 > 0 }
         if let mn = ratios.min(), let mx = ratios.max(), mx > mn {
@@ -196,11 +196,11 @@ private struct TimeSeriesGraph: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title)
-                    .font(.caption.weight(.bold))
+                    .font(.padCaption.weight(.bold))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text(readout)
-                    .font(.system(.callout, design: .monospaced).weight(.medium))
+                    .font(.system(size: Typography.callout, design: .monospaced).weight(.medium))
                     .foregroundStyle(color)
             }
             GeometryReader { geo in
@@ -227,7 +227,7 @@ private struct TimeSeriesGraph: View {
                         Spacer()
                         Text(bottomLabel)
                     }
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(.padSmall(9, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 2)

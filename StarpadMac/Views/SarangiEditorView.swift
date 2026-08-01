@@ -1,25 +1,23 @@
-import AppKit
 import SarangiKit
 import StarpadCore
 import SwiftUI
 
 /// The preset header at the top of the **Parameters** tab.
 ///
-/// 2026-07-24: saves and loads the **instrument** — the sarangi document
-/// (tarab table + tonic + model params, which is what the old `.sarangi`
-/// file held on its own), the physics overrides, and every parameter's
-/// resting value — as a `.starpad` file. The old separate `.sarangi` save
-/// is folded in here, and old `.sarangi` files still open.
-///
-/// The **controls** half (composites + tilt bindings) saves separately
-/// from the Controls tab, so loading a new sound never costs you your
-/// tilt setup. An older combined `.starpad` can be loaded from either
-/// place; each applies only its own half.
-struct InstrumentPresetToolbar: View {
+/// 2026-07-30: ONE preset, one list, no file panels. A preset is the whole
+/// rig — the sarangi document (tarab table + tonic + model params), the
+/// physics overrides, every parameter's resting value, the composites and
+/// the tilt bindings. **Save preset…** asks only for a name; the preset
+/// lands in the app-managed library (`PresetLibrary`,
+/// `Application Support/Starpad/Presets/`) and appears in the **Load
+/// preset** menu automatically, right under the factory default(s).
+struct PresetToolbar: View {
     @ObservedObject var controller: AppController
     @ObservedObject var store: SarangiStore
 
     @State private var status: String?
+    @State private var savePopoverShown = false
+    @State private var saveName = ""
 
     init(controller: AppController) {
         self.controller = controller
@@ -32,34 +30,39 @@ struct InstrumentPresetToolbar: View {
             HStack(spacing: 8) {
                 Menu {
                     ForEach(Preset.allCases, id: \.self) { p in
-                        // The Sarangi Live default: the EXACT fitted Pilu tarab
-                        // table + tonic (auto-sync turned OFF so the fitted
-                        // strings stick — re-enable it in the Tarab tab), the
-                        // network params, and the untouched bowed_string.json
-                        // physics (every String override cleared).
+                        // The factory default, as a FULL rig: the generated
+                        // bank + untouched bowed_string.json physics (every
+                        // override and resting value cleared) + the default
+                        // composites and tilt bindings.
                         Button(p.displayName) {
-                            store.loadSarangiLiveDefault(p)
-                            // Clears the physics overrides AND every
-                            // resting parameter value (Parameters tab).
-                            controller.resetAllParams()
+                            controller.loadFactoryPreset(p)
                             status = "Loaded \(p.displayName)"
+                        }
+                    }
+                    if !controller.savedPresetNames.isEmpty {
+                        Divider()
+                        ForEach(controller.savedPresetNames, id: \.self) { name in
+                            Button(name) { load(name) }
+                        }
+                        Divider()
+                        Menu("Delete preset") {
+                            ForEach(controller.savedPresetNames, id: \.self) { name in
+                                Button(name, role: .destructive) { delete(name) }
+                            }
                         }
                     }
                 } label: {
                     Label("Load preset", systemImage: "rectangle.stack")
                 }
                 .fixedSize()
-                Spacer()
-            }
-            HStack(spacing: 8) {
-                Button { savePreset() } label: {
-                    Label("Save instrument…", systemImage: "square.and.arrow.down")
+                .help("Load a preset — the factory default or any saved preset. A preset is the whole rig: instrument, parameter values, composites and tilt bindings.")
+                Button { savePopoverShown = true } label: {
+                    Label("Save preset…", systemImage: "square.and.arrow.down")
                 }
-                .help("Save the sarangi instrument, the physics and every parameter value as a .starpad file. Tilt bindings and composites save separately, from the Controls tab.")
-                Button { loadPreset() } label: {
-                    Label("Load instrument…", systemImage: "square.and.arrow.up")
+                .help("Save the whole rig — sarangi document, physics, parameter values, composites and tilt bindings — as a named preset in the list.")
+                .popover(isPresented: $savePopoverShown, arrowEdge: .bottom) {
+                    savePopover
                 }
-                .help("Load a .starpad instrument (or an older .sarangi file). Only the instrument half is applied — your composites and tilt bindings are left alone.")
                 if let status {
                     Text(status)
                         .foregroundStyle(.secondary)
@@ -67,40 +70,67 @@ struct InstrumentPresetToolbar: View {
                 }
                 Spacer()
             }
-            .font(.caption)
+            .font(.padCaption)
         }
+        .onAppear { controller.refreshPresetLibrary() }
     }
 
-    // MARK: - Save / load
+    /// Name-only save: no file panel, the library owns the location.
+    /// Saving under an existing name overwrites that preset.
+    private var savePopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Save preset").font(.headline)
+            TextField("Preset name", text: $saveName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 220)
+                .onSubmit { save() }
+            HStack {
+                if controller.savedPresetNames.contains(
+                    where: { $0.caseInsensitiveCompare(saveName.trimmingCharacters(in: .whitespaces)) == .orderedSame }) {
+                    Text("Replaces the existing preset")
+                        .font(.padCaption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Save") { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(saveName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(14)
+    }
 
-    private func savePreset() {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Instrument.starpad"
-        panel.allowedContentTypes = []
-        panel.message = "Saves the instrument: sarangi document, physics and parameter values."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let name = url.deletingPathExtension().lastPathComponent
+    // MARK: - Save / load / delete
+
+    private func save() {
         do {
-            try controller.savePreset(to: url, name: name, scope: .instrument)
+            let name = try controller.savePresetToLibrary(name: saveName)
             status = "Saved \(name)"
+            savePopoverShown = false
+            saveName = ""
         } catch {
             status = "Save failed: \(error.localizedDescription)"
         }
     }
 
-    private func loadPreset() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+    private func load(_ name: String) {
         do {
-            let p = try controller.loadPreset(from: url, scope: .instrument)
-            let what = p.sections(in: .instrument)
+            let p = try controller.loadPresetFromLibrary(name: name)
+            let what = p.sections()
             status = what.isEmpty
-                ? "No instrument in that file\(p.kind == .controls ? " — it is a controls preset" : "")"
-                : "Loaded \(what.joined(separator: ", "))"
+                ? "Nothing to load in \(name)"
+                : "Loaded \(name) — \(what.joined(separator: ", "))"
         } catch {
             status = "Load failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func delete(_ name: String) {
+        do {
+            try controller.deletePresetFromLibrary(name: name)
+            status = "Deleted \(name)"
+        } catch {
+            status = "Delete failed: \(error.localizedDescription)"
         }
     }
 }

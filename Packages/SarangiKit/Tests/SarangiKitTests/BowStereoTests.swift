@@ -2,8 +2,8 @@ import XCTest
 @testable import SarangiKit
 
 /// STARPAD STEREO SIDE PATH (2026-07-23): the poly kernel's physically-
-/// derived side stream — per-source pans (played slots, taraf web, jt rows)
-/// radiated through side body banks; L = mid + side, R = mid − side.
+/// derived side stream — per-source pans (played slots, jt rows) radiated
+/// through side body banks; L = mid + side, R = mid − side.
 /// Three invariants:
 ///   1. keys absent → the legacy path exactly (L == R bit-for-bit),
 ///   2. keys armed → a real side stream (L ≠ R),
@@ -26,8 +26,7 @@ final class BowStereoTests: XCTestCase {
         let tonic = 261.63
         let taraf = BowedStringEngineTests.testTaraf
         var tables = BowTables.buildOpenString(sr: sr * Double(osf),
-                                               tonic: tonic, bp: bp,
-                                               taraf: taraf)
+                                               tonic: tonic, bp: bp)
         tables.jt = BowTables.buildJawariTables(rows: taraf,
                                                 srk: sr * Double(osf),
                                                 bp: bp)

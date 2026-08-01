@@ -8,8 +8,10 @@ Starpad's iPad target emits MPE MIDI over USB and produces no sound of its own. 
 
 **Every incoming MPE channel-voice byte funnels through `AudioEngine.sendHostedMIDI(...)`** (the name is kept for continuity), which routes it to the String voice via `routeSarangiModelMIDI` → the long-lived `BowControlMapper` (per-finger note identity + bend keyed by the status byte's channel nibble — the Starpad MPE divergence). All note sources funnel through `sendHostedMIDI` — real-iPad MPE (here), the Mac in-process Fret Pad, and the headless simulator — so this one hook captures everything. It also tracks the played note/bend and the latest CC11 per channel and publishes a thread-safe `performanceReadout()` (played pitch in Hz + commanded loudness 0–1) that the **Live tab** graphs poll — see [UI Layout — Live tab](ui-layout.md#live-tab).
 
-One class of CCs never reaches any voice: **CC 102–105** are the Fret Pad's
-**drone buttons** (value ≥ 64 = pressed). `sendHostedMIDI` intercepts them at
+One class of CCs never reaches any voice: **CC 102–104** are the Fret Pad's
+3 **drone buttons** (value ≥ 64 = pressed; CC 105 — the retired 4th slot —
+is still intercepted and dropped so an old iPad build can't leak it to the
+mapper). `sendHostedMIDI` intercepts them at
 the top and calls `AudioEngine.setDronePressed`, which drives the String
 voice's jawari-taraf drone rows (see [Fret Pad](fret-pad.md#drone-buttons-2026-07-23));
 they arrive identically from the iPad's buttons (over USB) and the Mac's own
@@ -135,15 +137,21 @@ evaluating parameters altogether. Tilt bindings are now purely Mac-local —
 the iPad streams only its raw tilt report and the Mac evaluates. Subtype
 `0x02`, the old String-Pad arrangement, is likewise unused.)
 
-- **Encoding** (`PitchScaleSysEx`, StarpadCore, blob `version 3`): `F0 7D 01
+- **Encoding** (`PitchScaleSysEx`, StarpadCore, blob `version 4`): `F0 7D 01
   <payload> F7`, where `7D` is the non-commercial SysEx ID, `01` the "scale"
   subtype, and the payload is base64 (7-bit-safe) of a **compact binary** blob
-  (`[ver][tonic][margin][layout][count]` then per point `num/den` as 14-bit
-  pairs, `y`, `enabled`, and a length-prefixed UTF-8 label) — kept small so it
-  clears the iOS USB-MIDI SysEx bridge comfortably. The synced state is a
-  `SyncedScaleState` = the scale plus `tonicMidi`, `marginPixels`, and
-  `layout` (`PadLayout` — always `.fretPad` now; the enum keeps its other
-  cases for blob compatibility but only the Fret Pad exists on either side).
+  (`[ver][tonic][tonicCents14][margin][layout][count]` then per point
+  `num/den` as 14-bit pairs, `y`, `enabled`, and a length-prefixed UTF-8
+  label) — kept small so it clears the iOS USB-MIDI SysEx bridge comfortably.
+  The synced state is a `SyncedScaleState` = the scale plus `tonicMidi`,
+  `tonicCents`, `marginPixels`, and `layout` (`PadLayout` — always `.fretPad`
+  now; the enum keeps its other cases for blob compatibility but only the
+  Fret Pad exists on either side). **v4 (2026-07-25) added the fractional
+  tonic** — the tonic is set in Hz on the Mac (the app's one Hz input) and
+  rarely lands exactly on a MIDI note, so the blob carries a ±50 ¢ refinement
+  as 14-bit centi-cents; without it the iPad would play up to a quarter-tone
+  off the Mac's tarab. Older blobs are rejected (both apps ship the format
+  together, like the fret-arrangement blob).
 - **iPad receive** (`ScaleSyncReceiver`, StarpadCore): a virtual CoreMIDI
   **destination** named "Starpad Scale" so the Mac sees the iPad as a MIDI
   destination. It reassembles SysEx across packets (`F0`…`F7`), decodes, and

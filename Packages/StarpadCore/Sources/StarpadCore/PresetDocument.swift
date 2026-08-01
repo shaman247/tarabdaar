@@ -1,54 +1,25 @@
 import Foundation
 import SarangiKit
 
-/// THE STARPAD PRESET (2026-07-24) — the saved-rig document.
+/// THE STARPAD PRESET (2026-07-24; unified 2026-07-30) — the saved-rig
+/// document.
 ///
 /// It folds in what used to be the `.sarangi` document (the tarab table +
 /// tonic + model params) and adds what was previously unsaveable: the
 /// parameter values, the composites built from them, and the tilt
 /// bindings that drive them.
 ///
-/// **Two scopes, saved separately** (2026-07-24, second pass): a sound and
-/// the way you map your tilts are independent things, and you want to swap
-/// one without losing the other. So the app saves an **instrument** preset
-/// (`.starpad`) and a **controls** preset (`.starpadmap`) from their own
-/// tabs. Both are this same document with different sections filled in,
-/// and loading is scope-filtered — a file that happens to carry both (an
-/// older combined `.starpad`) can be loaded as either, applying only that
-/// half.
+/// **One file, the whole rig** (2026-07-30): a `.starpad` save carries
+/// every section — the instrument AND the controls. The 2026-07-24
+/// instrument/controls split (`.starpad` + `.starpadmap`, scope-filtered
+/// loading) was folded back together: one preset is one rig. Loading
+/// applies whatever sections a file has, so the old split-era files still
+/// work — a `.starpadmap` simply carries only composites + tilt bindings
+/// and leaves the instrument alone. (Split-era files also wrote a `kind`
+/// tag; it decodes away ignored.)
 ///
 /// Sections stay optional so a partial file is legitimate and so a file
 /// written by a newer build that adds a section still loads here.
-/// Which half of a rig a preset covers.
-public enum PresetScope: String, Codable, CaseIterable, Sendable {
-    /// The SOUND: the sarangi instrument document, the physics overrides,
-    /// and every parameter's resting value.
-    case instrument
-    /// The MAPPING: composites and the tilt bindings that drive them.
-    case controls
-    /// Everything (what a combined save produced before the split).
-    case all
-
-    public var label: String {
-        switch self {
-        case .instrument: return "instrument"
-        case .controls:   return "controls"
-        case .all:        return "instrument + controls"
-        }
-    }
-
-    /// Default file extension. Distinct so the open panel and the Finder
-    /// make the two obviously different things.
-    public var fileExtension: String {
-        self == .controls ? "starpadmap" : "starpad"
-    }
-
-    /// True when this scope includes `other` — `.all` covers both.
-    public func covers(_ other: PresetScope) -> Bool {
-        self == .all || self == other
-    }
-}
-
 public struct StarpadPreset: Codable {
 
     /// 1 = the initial format. Bump only for changes a reader cannot
@@ -57,11 +28,6 @@ public struct StarpadPreset: Codable {
     public var name: String = ""
     /// ISO-8601, informational only.
     public var savedAt: String?
-    /// What this file was saved AS. Informational — loading is filtered by
-    /// the scope the caller asks for, not by this — but it lets the UI say
-    /// "that's a controls preset" when you open one in the wrong place.
-    /// Absent in files written before the instrument/controls split.
-    public var kind: PresetScope?
 
     /// The sarangi instrument document: tarab strings, tonic, model
     /// params. This is exactly what a `.sarangi` file used to hold.
@@ -83,30 +49,23 @@ public struct StarpadPreset: Codable {
 
     // MARK: - Sections
 
-    /// What a file carries, for the load-time summary. Pass a scope to
-    /// describe only the half that will actually be applied.
-    public func sections(in scope: PresetScope = .all) -> [String] {
+    /// What a file carries, for the load-time summary.
+    public func sections() -> [String] {
         var s: [String] = []
-        if scope.covers(.instrument) {
-            if instrument != nil { s.append("instrument") }
-            if let o = stringOverrides, !o.isEmpty { s.append("\(o.count) physics") }
-            if let p = paramValues, !p.isEmpty { s.append("\(p.count) parameters") }
-        }
-        if scope.covers(.controls) {
-            if let c = composites, !c.isEmpty { s.append("\(c.count) composites") }
-            if let t = tiltMapping {
-                let n = t.mappings.values.filter { !$0.bindings.isEmpty }.count
-                if n > 0 { s.append("\(n) tilt bindings") }
-            }
+        if instrument != nil { s.append("instrument") }
+        if let o = stringOverrides, !o.isEmpty { s.append("\(o.count) physics") }
+        if let p = paramValues, !p.isEmpty { s.append("\(p.count) parameters") }
+        if let c = composites, !c.isEmpty { s.append("\(c.count) composites") }
+        if let t = tiltMapping {
+            let n = t.mappings.values.filter { !$0.bindings.isEmpty }.count
+            if n > 0 { s.append("\(n) tilt bindings") }
         }
         return s
     }
 
-    /// True when the file has nothing this scope would apply — the case
-    /// worth telling the player about instead of silently doing nothing.
-    public func isEmpty(in scope: PresetScope) -> Bool {
-        sections(in: scope).isEmpty
-    }
+    /// True when the file has nothing to apply — the case worth telling
+    /// the player about instead of silently doing nothing.
+    public var isEmpty: Bool { sections().isEmpty }
 
     // MARK: - Coding
 

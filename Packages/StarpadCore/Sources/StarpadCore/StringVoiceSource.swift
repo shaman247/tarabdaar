@@ -39,9 +39,14 @@ public final class StringVoiceSource {
     /// `StringParamStore`'s baseline so the editor shows/resets to these
     /// and an override landing back on a seed value is dropped.
     public static let liveParamSeeds: [String: Double] = [
-        "bow_st_spread": 0.7,     // taraf web + jawari-row spread
+        // 2026-08-01 coherence rev: the 0.7 spread read as an
+        // accompanying chorus around a centred soloist — a real sarangi
+        // is ONE small radiator whose width comes from the room, so the
+        // source halo narrows (0.7 → 0.2) and the room's decorrelated
+        // width carries the image (0.6 → 0.8) instead.
+        "bow_st_spread": 0.2,     // taraf web + jawari-row spread
         "bow_st_played": 0.15,    // played-string (+ bow noise) spread
-        "bow_rev_width": 0.6,     // room tail L/R decorrelation
+        "bow_rev_width": 0.8,     // room tail L/R decorrelation
     ]
 
     public let mapper = BowControlMapper()
@@ -139,28 +144,34 @@ public final class StringVoiceSource {
     // values pushed by composite parameters, kept here — the long-lived
     // side — so a structural rebuild (tonic/scale/drone change)
     // republishes them onto the fresh engine. Defaults = the fitted
-    // sound: full web buzz, build-time jt tone LP, no extra damping,
-    // flat tone tilt.
-    private var jawGain = 1.0
+    // sound: build-time jt tone LP, no extra damping, flat tone tilt.
     private var jtLpHz = 0.0
+    private var jtHpHz = 0.0
+    private var jtBody = 0.0
     private var tarafDamp = 0.0
     private var toneTilt = 0.0
-
-    /// Web buzz SCALER 0..1 — the live half of the `bow_taraf_jawari`
-    /// hybrid parameter: 1 = the built (fitted) buzz depth, 0 = none.
-    /// Upstream SarangiKit calls this scalar `bow_jaw_gain`; in Starpad it
-    /// is not a parameter of its own (see `ParamRegistry`).
-    /// Control-thread safe.
-    public func setJawGain(_ g01: Double) {
-        jawGain = min(max(g01, 0.0), 1.0)
-        currentEngine()?.setJawGain(jawGain)
-    }
+    private var tarafSel = 0.5    // bow_jt_sel neutral = the fitted taraf
+    private var jtEvolve = 0.5    // bow_jt_evolve neutral = fitted bone
 
     /// Radiated-jt tone LP corner (`bow_jt_lp`, runtime path; Hz,
     /// <= 0 = the build-time state). Control-thread safe.
     public func setJtToneLp(hz: Double) {
         jtLpHz = max(hz, 0.0)
         currentEngine()?.setJtToneLp(hz: jtLpHz)
+    }
+
+    /// Radiated-jt tone HP corner (`bow_jt_hp`; Hz, <= 0 = bypass) —
+    /// the jawari-formant voicing. Control-thread safe.
+    public func setJtToneHp(hz: Double) {
+        jtHpHz = max(hz, 0.0)
+        currentEngine()?.setJtToneHp(hz: jtHpHz)
+    }
+
+    /// Radiated-jt body-radiation mix (`bow_jt_body`; 0 = bypass) — the
+    /// taraf through the voice's own body bank. Control-thread safe.
+    public func setJtBody(_ mix01: Double) {
+        jtBody = min(max(mix01, 0.0), 1.0)
+        currentEngine()?.setJtBody(jtBody)
     }
 
     /// Taraf damping 0..1 (`bow_jt_damp`): 0 = natural ring, 1 = choked
@@ -175,6 +186,43 @@ public final class StringVoiceSource {
     public func setToneTilt(_ t: Double) {
         toneTilt = min(max(t, -1.0), 1.0)
         currentEngine()?.setToneTilt(toneTilt)
+    }
+
+    /// Taraf recruitment 0..1 (`bow_jt_sel`), bipolar around 0.5 = the
+    /// fitted taraf: below, rows lose bridge drive by harmonic distance
+    /// from the played notes (0 = kin-only); above, every row is driven
+    /// harder (1 = the lush full chorus). Control-thread safe.
+    public func setTarafSelectivity(_ s01: Double) {
+        tarafSel = min(max(s01, 0.0), 1.0)
+        currentEngine()?.setTarafSelectivity(tarafSel)
+    }
+
+    /// Harmonic evolution 0…1 (`bow_jt_evolve`): the twang axis — a
+    /// kernel-slewed signed bone offset (BowEngine owns the map).
+    /// Control-thread safe.
+    public func setJtEvolve(_ e01: Double) {
+        jtEvolve = min(max(e01, 0.0), 1.0)
+        currentEngine()?.setJtEvolve(jtEvolve)
+    }
+
+    // FX rack (2026-08-01): the four insert points' settings, kept here —
+    // the long-lived side — like the runtime base parameters above, so a
+    // structural rebuild republishes them onto the fresh engine (the FX
+    // DSP state itself is per-engine; tails restart across a rebuild's
+    // crossfade, settings never snap back).
+    private var fxSettings = FXPoint.allCases.map { _ in FXSettings() }
+
+    /// Apply one FX registry parameter (`fx_<point>_<field>`) — parses the
+    /// key, updates the cached point settings, and pushes the whole point
+    /// to the running engine. Control-thread safe. Returns false for an
+    /// unrecognised key.
+    @discardableResult
+    public func setFXParam(_ key: String, _ value: Double) -> Bool {
+        guard let (point, field) = FXPoint.parse(key: key),
+              fxSettings[point.rawValue].apply(field: field, value: value)
+        else { return false }
+        currentEngine()?.setFX(point, fxSettings[point.rawValue])
+        return true
     }
 
     public init(sr: Double = 48000) {
@@ -270,10 +318,17 @@ public final class StringVoiceSource {
             // re-apply the runtime base parameters: they are playing
             // state, not build state — a rebuild must not snap the
             // sound back to defaults mid-performance
-            if jawGain != 1 { engine.setJawGain(jawGain) }
             if jtLpHz > 0 { engine.setJtToneLp(hz: jtLpHz) }
+            if jtHpHz > 0 { engine.setJtToneHp(hz: jtHpHz) }
+            if jtBody > 0 { engine.setJtBody(jtBody) }
             if tarafDamp != 0 { engine.setTarafDamp(tarafDamp) }
             if toneTilt != 0 { engine.setToneTilt(toneTilt) }
+            if tarafSel != 0.5 { engine.setTarafSelectivity(tarafSel) }
+            if jtEvolve != 0.5 { engine.setJtEvolve(jtEvolve) }
+            for point in FXPoint.allCases
+                where fxSettings[point.rawValue] != FXSettings() {
+                engine.setFX(point, fxSettings[point.rawValue])
+            }
         }
         let ms = crossfadeMs ?? Self.engineCrossfadeMs
         os_unfair_lock_lock(&state.lock)
@@ -353,19 +408,16 @@ public final class StringVoiceSource {
     /// `overrides` = String-editor / audition scalar overrides, applied OVER
     /// the artifact (pitch knots/cents arrays ride the artifact untouched).
     /// EXPENSIVE (~tables + kernel init + jt pool spawn) — call off main.
-    /// `droneHz` = the drone buttons' ABSOLUTE SOUNDING pitches (played
-    /// tonic × configured ratio). A jt row rings ~`bow_drone_comp_cents`
-    /// (15.5 c) SHARP of its nominal frequency — the jawari bone stiffens
-    /// the termination — so each drone's target nominal is the request
-    /// compensated down by that shift; an existing row within ±6 c of the
-    /// target is reused (true unison), otherwise a dedicated jawari string
-    /// is appended at the target (gain/t60 = the jt table's median). Either
-    /// way the drone SOUNDS at the requested pitch.
     /// Discarded blocks of settle pre-roll before a freshly built engine
     /// is published (4096 frames each, ~85 ms of audio). See the note at
     /// the pre-roll itself — this is the dominant cost of a rebuild, so it
     /// is kept to the minimum the crossfade can finish off.
-    static var settleBlocks = 4
+    /// 4 → 5 (2026-07-25): the scale-defined bank rings the doubling
+    /// strings in EXACT unison with their mid-choir twins (no detune any
+    /// more), so the publish chime stacks coherently and decays slower —
+    /// four blocks left it ~2.8 dB above the old 6-block floor
+    /// (`testShortPreRollIsNoLouderOnPublishThanTheOldLongOne`).
+    static var settleBlocks = 5
 
     /// IN-PLACE PARAMETER PUSH (2026-07-24): apply an edit to the RUNNING
     /// engine instead of building a new one. Recomputes the kernel's
@@ -380,15 +432,11 @@ public final class StringVoiceSource {
     /// back to a build). Only valid for `ParamRegistry.inPlaceKeys` — the
     /// caller owns that check.
     ///
-    /// `droneHz` MUST be the same drone pitches the engine was built with:
-    /// they add rows to the jawari web, so a different list changes the
-    /// row COUNT, the kernel refuses the reload (shape moved), and the
-    /// edit would silently do nothing.
     @discardableResult
     public func applyLiveParams(tonicHz: Double,
                                 strings: [ResolvedString],
                                 overrides: [String: Double],
-                                droneHz: [Double] = [],
+                                follower: (gain: Double, t60: Double)? = nil,
                                 needsJawariTables: Bool = true) -> Bool {
         guard let engine = currentEngine(),
               var bp = Presets.bowedStringParams() else { return false }
@@ -402,30 +450,44 @@ public final class StringVoiceSource {
         // Same builder the engine was made with, so the tables are exactly
         // what a rebuild would have produced.
         var tables = BowTables.buildOpenString(sr: modelSR * Double(osf),
-                                               tonic: tonicHz, bp: bp,
-                                               taraf: taraf)
+                                               tonic: tonicHz, bp: bp)
         // STAGE 3: the body modal bank and the jawari tables are reloaded
         // in place too, so body/jt parameters are live as well. The jt
         // build is the expensive part (~3.4 ms) — skip it unless a jt key
         // is actually involved.
         if needsJawariTables {
+            let rows = Self.jawariRows(bp: bp, tonicHz: tonicHz,
+                                       taraf: taraf, follower: follower)
             tables.jt = BowTables.buildJawariTables(
-                rows: Self.jawariRows(bp: bp, tonicHz: tonicHz,
-                                      taraf: taraf, droneHz: droneHz),
-                srk: modelSR * Double(osf), bp: bp)
+                rows: rows, srk: modelSR * Double(osf), bp: bp,
+                trackRowIndex: follower != nil ? rows.count - 1 : nil)
         }
         engine.setLiveParams(bp: bp, scalars: tables.scalars, tables: tables)
         return true
     }
 
     /// The modal-jawari ROW SELECTION (the python `_jt_load` mirror,
-    /// upstream 2026-07-21c) + the drone rows. Factored out of
-    /// `buildEngine` (2026-07-24) so the in-place path builds the SAME
-    /// rows — if these two ever diverge, a live jt edit would install
-    /// tables for a different string set than the kernel is running.
+    /// upstream 2026-07-21c). The ONE implementation — `buildEngine` and
+    /// the in-place path both call it, so a live jt edit always installs
+    /// tables for exactly the string set the kernel is running. (Until
+    /// 2026-07-25 `buildEngine` kept its own inline copy — the shapes could
+    /// differ and the kernel silently refused every live jt reload.)
+    ///
+    /// The tarab rows are the ONLY input: the drone buttons pluck existing
+    /// rows (mapped per-slot in the Tarab tab) and add nothing here — the
+    /// dedicated-drone-row append (2026-07-23 … 2026-07-25, with its
+    /// ±6 ¢ reuse check and `bow_drone_comp_cents` target shift) is gone.
+    ///
+    /// `follower` (2026-07-25): the melody-follower string, appended LAST
+    /// when enabled — outside the class-coverage selection, the `gmin`
+    /// gate and the `bow_jt_max` cap (its pitch is dynamic, so coverage
+    /// logic doesn't apply). Built at tonic/2 so the fixed mode
+    /// allocation covers the low register (the kernel only TRIMS modes
+    /// as the pitch rises). Appended last so `droneRow(forExactHz:)`
+    /// identity lookups hit the real tarab rows first.
     static func jawariRows(bp: BowParams, tonicHz: Double,
                            taraf: [(f: Double, gain: Double, t60: Double)],
-                           droneHz: [Double])
+                           follower: (gain: Double, t60: Double)? = nil)
         -> [(f: Double, gain: Double, t60: Double)] {
         // (the python _jt_load mirror, upstream 2026-07-21c)
         func cents(_ f: Double) -> Double {
@@ -476,6 +538,9 @@ public final class StringVoiceSource {
                 jtRows.append(r)
             }
         }
+        if let fw = follower {
+            jtRows.append((f: tonicHz * 0.5, gain: fw.gain, t60: fw.t60))
+        }
         return jtRows
     }
 
@@ -484,7 +549,8 @@ public final class StringVoiceSource {
                                    mapper: BowControlMapper,
                                    sr: Double = 48000,
                                    overrides: [String: Double] = [:],
-                                   droneHz: [Double] = []) -> BowEngine? {
+                                   follower: (gain: Double, t60: Double)? = nil)
+        -> BowEngine? {
         guard var bp = Presets.bowedStringParams() else { return nil }
         for (k, v) in overrides { bp.num[k] = v }
         // STARPAD LIVE SEEDS (2026-07-23): keys the artifact doesn't
@@ -500,83 +566,22 @@ public final class StringVoiceSource {
             bp.num[k] = v
         }
         let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
-        // taraf TUNING rows from the tarab table (Tarab tab / scale sync)
+        // taraf TUNING rows from the tarab table (Tarab tab / scale sync).
+        // Since the linear web was removed (2026-07-24) these feed the
+        // modal-jawari block only — it is the whole sympathetic response.
         let taraf = strings.filter(\.enabled)
             .map { (f: $0.freq, gain: $0.gain, t60: $0.t60) }
         var tables = BowTables.buildOpenString(sr: sr * Double(osf),
-                                               tonic: tonicHz, bp: bp,
-                                               taraf: taraf)
-        // MODAL-JAWARI taraf: consensus-pitch-class coverage selection
-        // (the python _jt_load mirror, upstream 2026-07-21c)
-        func cents(_ f: Double) -> Double {
-            var c = (1200.0 * log2(f / tonicHz))
-                .truncatingRemainder(dividingBy: 1200.0)
-            if c < 0 { c += 1200.0 }
-            return c
-        }
-        let gmin = bp.v("bow_jt_gmin", 0.5)
-        let jtMax = Int(bp.v("bow_jt_max", 0.0) + 0.5)
-        var elig = taraf.filter { $0.gain >= gmin }
-        elig.sort { $0.gain != $1.gain ? $0.gain > $1.gain
-                                       : $0.f < $1.f }
-        let cap = jtMax > 0 ? jtMax : elig.count
-        let reg = elig.filter {
-            $0.f >= 0.85 * tonicHz && $0.f <= 2.1 * tonicHz
-        }
-        var groups: [Int: [(f: Double, gain: Double, t60: Double)]] = [:]
-        for r in reg {
-            let pc = Int((cents(r.f) / 60.0).rounded()) % 20
-            groups[pc, default: []].append(r)
-        }
-        let order = groups.sorted { a, b in
-            let ga = a.value.map(\.gain).max() ?? 0
-            let gb = b.value.map(\.gain).max() ?? 0
-            if ga != gb { return ga > gb }
-            return (a.value.map(\.f).min() ?? 0)
-                 < (b.value.map(\.f).min() ?? 0)
-        }
-        var jtRows: [(f: Double, gain: Double, t60: Double)] = []
-        for (_, members) in order {
-            if jtRows.count >= cap { break }
-            let cs = members.map { cents($0.f) }.sorted()
-            let med = cs.count % 2 == 1 ? cs[cs.count / 2]
-                : 0.5 * (cs[cs.count / 2 - 1] + cs[cs.count / 2])
-            let best = members.min { a, b in
-                let da = abs(cents(a.f) - med), db = abs(cents(b.f) - med)
-                if da != db { return da < db }
-                if a.gain != b.gain { return a.gain > b.gain }
-                return a.f < b.f
-            }!
-            jtRows.append(best)
-        }
-        for r in elig {
-            if jtRows.count >= cap { break }
-            if !jtRows.contains(where: { $0.f == r.f && $0.gain == r.gain
-                                         && $0.t60 == r.t60 }) {
-                jtRows.append(r)
-            }
-        }
-        // DRONE rows (2026-07-23): guarantee every configured drone pitch
-        // exists in the web. An existing row within ±40 c keeps priority
-        // (the fitted table's deliberate detunes are the instrument's
-        // character); otherwise a dedicated string is appended at the
-        // exact pitch with the table's median gain/t60.
-        func median(_ v: [Double], fallback: Double) -> Double {
-            guard !v.isEmpty else { return fallback }
-            let sorted = v.sorted()
-            return sorted[sorted.count / 2]
-        }
-        let dnGain = median(jtRows.map(\.gain), fallback: 0.85)
-        let dnT60 = median(jtRows.map(\.t60), fallback: 5.0)
-        let dnComp = pow(2.0, -bp.v("bow_drone_comp_cents", 15.5) / 1200.0)
-        for hz in droneHz where hz > 20.0 {
-            let target = hz * dnComp
-            if !jtRows.contains(where: { abs(1200.0 * log2($0.f / target)) <= 6.0 }) {
-                jtRows.append((f: target, gain: dnGain, t60: dnT60))
-            }
-        }
+                                               tonic: tonicHz, bp: bp)
+        // MODAL-JAWARI taraf: the shared selection (also the in-place
+        // path's), so live jt edits see exactly these rows. The melody
+        // follower (when enabled) is the LAST row, marked for the
+        // kernel's live retune.
+        let rows = jawariRows(bp: bp, tonicHz: tonicHz, taraf: taraf,
+                              follower: follower)
         tables.jt = BowTables.buildJawariTables(
-            rows: jtRows, srk: sr * Double(osf), bp: bp)
+            rows: rows, srk: sr * Double(osf), bp: bp,
+            trackRowIndex: follower != nil ? rows.count - 1 : nil)
         let engine = BowEngine(tables: tables, mapper: mapper, bp: bp,
                                sr: sr, rfir: [],
                                eLp: bp.v("bow_rad_lp", 8000.0),

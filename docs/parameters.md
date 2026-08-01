@@ -43,8 +43,8 @@ below are the shipped defaults (all editable in-app).
 
 | Parameter | At 0 | At 1 | Notes |
 |---|---|---|---|
-| jawari buzz (`bow_taraf_jawari`) | 1.3 | 0 | Flat-bridge contact buzz on the sympathetic web (0 = the plain bridge of a viola d'amore; high = sitar/sarangi jangle). Turning it DOWN from the fitted depth is instant (the kernel's buzz scaler); pushing above it rebuilds the web. The Taraf Purity composite sweeps this to 0. |
 | tone LP (Hz) (`bow_jt_lp`) | 16000 | 1500 | One-pole low-pass on the radiated jawari sum ONLY (the main string is untouched). ≥ 20 kHz = bypass, bit-exact legacy. Applies live. |
+| recruitment (`bow_jt_sel`) | 0.5 | 0 | How much of the taraf joins each note, bipolar around 0.5 = the fitted response. Below: rows lose bridge drive by harmonic distance from the played notes until at 0 only kin rows ring (unison, faint octaves, fainter fifth); chords recruit additively (soft-OR, bounded). Above: the chorus swells — at 1 every row is driven harder AND the radiated jt sum is lifted, both ×`bow_jt_sel_lush` [2] (~+6 dB with extra cascade — an opened-jawari lushness where the whole taraf joins prominently). Held drones and rings already sounding are never ducked. Lattice: `bow_jt_sel_width` (cents, 30) and `bow_jt_sel_kin` (exponent, 0.7 — shared with the drone spread), bp scalars like the tilt range keys. Applies live — the Taraf Purity composite's recruitment member (purity up = kin-only). |
 
 ### Taraf Decay
 
@@ -137,32 +137,18 @@ slider rather than being clamped).
 | `bow_jt_gain` | level | 0 … 3 | 0.3 | rebuild | Output mix of the jawari web (the gap-law calibration landed at 0.3). |
 | `bow_jt_drive` | drive | 0.001 … 0.3 | 0.03 | rebuild | Bridge-force coupling INTO the strings — sets the graze operating point: too low = no cascade, too high = over-drained/linearized. |
 | `bow_jt_apex` | graze depth | 2e-06 … 5e-05 | 1e-05 | rebuild | Bone protrusion. The evolution lives at the grazing knee — deep press linearizes (sparkle only), too shallow never engages. |
+| `bow_jt_evolve` | evolution | 0 … 1 | 0.5 | live | Harmonic-evolution rate — the tanpura/sitar twang axis: a signed bone offset spanning graze margin ×4 … ×¼ around the fitted bone, slewed inside the kernel (~40 ms) so the bone GLIDES — tilt-sweepable without a strum. 1 = the ring always sits in the grazing band: energy cascades up the partials fast (centroid rise ~0.3 s vs ~1.2 s stock) and at ANY level — the twang is reliable, and the taraf rings a few dB hotter (a real opened jawari does too; trim with level). 0 = the string is pressed past the knee: the wrap holds, harmonics stay put, no twang. 0.5 = the fitted geometry, byte-null. Applies live. |
+| `bow_jt_tap` | radiation tap | 0.86 … 0.98 | 0.9 | rebuild | Where along the string the taraf radiates (fraction of its length; the drive tap stays fitted). Radiated harmonic k weighs |sin(k·π·tap)| — 0.90 (legacy) humps at h5 and NULLS h10, which muffles the jawari formant; toward the bridge the hump slides up (0.95 → h10, 0.97 → h16) and the fundamental falls away, voicing the ring as the classic cluster of high harmonics over quiet lows. |
 | `bow_jt_alpha` | contact law | 1 … 2 | 1.5 | rebuild | Contact stiffness exponent. 1.5 = Hertz (fast sqrt path — the live default); other values cost more CPU. |
 | `bow_jt_norm` | level norm | 0 … 1.5 | 1 | rebuild | Per-string t60-response normalization — evens the driven level across scale degrees (long-ring rows charge hotter); 0 = raw physics. |
 | `bow_jt_hcb` | contact damping | 1 … 40 | 8 | rebuild | Hysteretic damping of the string–bone contact. More = softer buzz transients (rounder force pulses, less clang); the legacy hardcoded value is 8. |
 | `bow_jt_fhf` | damping corner (Hz) | 800 … 12000 | 4000 | rebuild | Corner of the per-mode f² damping law — above it, partials die progressively faster. LOWER = warmer (the top decays in tens of ms while fundamentals sustain). Legacy 4000. |
 | `bow_jt_bst` | inharmonicity | 0 … 0.001 | 0.0002 | rebuild | Stiffness stretch of the upper partials (steel-wire dispersion). Lower = more harmonic top = less bell-metallic; legacy 2e-4 puts mode 40 ~15% sharp. |
 | `bow_jt_lp` | tone LP (Hz) | 1000 … 20000 | 20000 | live | One-pole low-pass on the radiated jawari sum ONLY (the main string is untouched). ≥ 20 kHz = bypass, bit-exact legacy. Applies live. |
+| `bow_jt_hp` | tone HP (Hz) | 0 … 4000 | 0 | live | One-pole high-pass on the radiated jawari sum ONLY — the formant voicing: quiets the taraf's fundamental band so the high-harmonic cluster (see radiation tap) carries the ring. ~1–2× the tonic leaves the twang untouched and drops the lows ~6 dB/oct below the corner. 0 = bypass, bit-exact legacy. Applies live. |
+| `bow_jt_body` | body radiation | 0 … 1 | 0 | live | Blend of the radiated jawari sum through the SAME formula-body radiation bank the played strings radiate through — the coherence lever: at 0 the taraf radiates raw (beside the instrument), at 1 it rings from the instrument's body with the voice's own formants. Shared coefficients (a body edit re-voices both), own filter state. 0 = bypass, bit-exact legacy. Applies live. |
 | `bow_jt_damp` | extra damping | 0 … 1 | 0 | live | Runtime damping of these modal rows: 0 = the natural long ring, 1 = choked within a second. Applies live — this is what the Taraf Decay composite sweeps. |
-
-### Taraf (sympathetic)
-
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `bow_taraf_Z` | coupling Z | 0 … 0.05 | 0.0033 | rebuild | Junction impedance per string (passive wave junction — structurally stable). Small = long free ring; large = strong charge but the bridge drains it. 0 = no taraf. |
-| `bow_taraf_gain` | ring level | 0 … 12 | 1 | rebuild | Taraf output weight (√count-normalized; zero loop-gain impact). |
-| `bow_taraf_dir` | ring radiation | 0 … 2 | 0.5 | rebuild | Ringing-string radiation tap through the body — a passive junction cannot radiate free decay; this is how the wash reaches the air. |
-| `bow_taraf_pol_cents` | polarization (¢) | 0 … 8 | 3 | rebuild | Two polarizations per string, golden-ratio detuned — the slow near-unison shimmer of a real string pair. |
-| `bow_taraf_damp` | HF damping | 0 … 1 | 0.5 | rebuild | f² string damping of the sympathetic web — high partials of the ring die faster. (The modal jawari rows have their own live 'extra damping' above.) |
-| `bow_taraf_bright` | brightness | 0 … 1 | 0.5 | rebuild | Termination corner of the ring (0 = dark, 1 = wiry). |
-| `bow_taraf_inharm` | inharmonicity | 0 … 0.5 | 0.1 | rebuild | Stiff-wire dispersion — upper ring partials sharp. |
-| `bow_taraf_t60` | ring length × | 0.1 … 6 | 1 | rebuild | Scales the string table's per-string decay times (capped at 8 s — energy discipline). |
-| `bow_taraf_jawari` | jawari buzz | 0 … 2 | 1.3 built · rests at 1× the built value | hybrid | Flat-bridge contact buzz on the sympathetic web (0 = the plain bridge of a viola d'amore; high = sitar/sarangi jangle). Turning it DOWN from the fitted depth is instant (the kernel's buzz scaler); pushing above it rebuilds the web. The Taraf Purity composite sweeps this to 0. |
-| `bow_open_Z` | open-string coupling | 0 … 0.04 | 0 | rebuild | The un-bowed MAIN GUT strings (mandra Pa + mandra Sa) as sympathetics — the real sarangi's LF halo. 0 = off. |
-| `bow_open_gain` | open-string ring | 0 … 3 | 0 | rebuild | Radiated level of the open gut pair. |
-| `bow_open_t60` | open ring (s) | 0.5 … 5 | 2.5 | rebuild | Gut open-string decay. |
-| `bow_open_damp` | open HF damp | 0.3 … 1 | 0.85 | rebuild | Gut kills high partials fast — the warm dark ring. |
-| `bow_taraf_duck` | driven-tap duck | 0 … 1 | 1 | rebuild | While a taraf string is DRIVEN at a partial coincidence with the bowed note, its direct tap ducks to this weight (the junction still radiates the driven response; the tap owns the free ring). 1 = off. |
+| `bow_jt_sel` | recruitment | 0 … 1 | 0.5 | live | How much of the taraf joins each note, bipolar around 0.5 = the fitted response. Below: rows lose bridge drive by harmonic distance from the played notes until at 0 only kin rows ring (unison, faint octaves, fainter fifth); chords recruit additively (soft-OR, bounded). Above: the chorus swells — at 1 every row is driven harder AND the radiated jt sum is lifted, both ×`bow_jt_sel_lush` [2] (~+6 dB with extra cascade — an opened-jawari lushness where the whole taraf joins prominently). Held drones and rings already sounding are never ducked. Lattice: `bow_jt_sel_width` (cents, 30) and `bow_jt_sel_kin` (exponent, 0.7 — shared with the drone spread), bp scalars like the tilt range keys. Applies live — the Taraf Purity composite's recruitment member (purity up = kin-only). |
 
 ### Articulation
 
@@ -187,8 +173,92 @@ slider rather than being clamped).
 | `bow_live_trim` | output trim | 0.01 … 0.5 | 0.175 | rebuild | Final level (matched to the Sarangi Live instrument). |
 | `bow_rev_mix` | room mix | 0 … 0.3 | 0.08 | rebuild | Room level. The wet pair is width-decorrelated (see room width); the L+R fold-down stays pan-invariant. 0 = bone dry. |
 | `bow_rev_rt60` | room decay (s) | 0.2 … 2 | 1 | rebuild | Room reverberation time. |
-| `bow_rev_width` | room width | 0 … 1 | 0.6 | rebuild | L/R decorrelation of the room tail — a real room's reverberant field differs at the two ears. Cancels in the mono fold-down. 0 = the old mono room. |
-| `bow_st_spread` | taraf width | 0 … 1 | 0.7 | rebuild | Stereo spread of the sympathetic strings' DIRECT radiation (taraf tap + jawari rows, drones included): each svara rings from its own fixed place around the tonic. Bridge-borne energy stays centred. Mono fold-down invariant. 0 = mono. |
+| `bow_rev_width` | room width | 0 … 1 | 0.8 | rebuild | L/R decorrelation of the room tail — a real room's reverberant field differs at the two ears. Cancels in the mono fold-down. 0 = the old mono room. |
+| `bow_st_spread` | taraf width | 0 … 1 | 0.2 | rebuild | Stereo spread of the jawari rows' DIRECT radiation (drones included): each svara rings from its own fixed place around the tonic. Bridge-borne energy stays centred. Mono fold-down invariant. 0 = mono. Default narrowed 0.7 → 0.2 (2026-08-01): a real sarangi is one small radiator — a wide source halo reads as an accompanying chorus; the room width carries the image instead. |
 | `bow_st_played` | bow-noise spread | 0 … 0.5 | 0.15 | rebuild | Per-voice spread of the bow-contact noise (the played string's position on the bridge). The played tone itself radiates from the body and stays centred. |
 | `bow_tone_tilt` | tone tilt (bass–treble) | -1 … 1 | 0 | live | Overall spectral tilt: −1 = bass-biased, 0 = flat, +1 = treble-biased. A complementary shelf pair on the whole voice before the room. Applies live — the Tone Tilt composite sweeps this. |
+
+### FX — voice → taraf
+
+| Key | Name | Range | Default | Apply | Description |
+|---|---|---|---|---|---|
+| `fx_drive_eq_on` | EQ on | 0 … 1 | 0 | live | Enable the 10-band graphic EQ at this point — the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched. Toggling glides the bands to/from flat (click-free). |
+| `fx_drive_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_rev_on` | reverb on | 0 … 1 | 0 | live | Enable the reverb at this point — the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched. Toggling glides the wet level (click-free). |
+| `fx_drive_rev_type` | reverb type | 0 … 1 | 0 | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
+| `fx_drive_rev_mix` | reverb mix | 0 … 1 | 0.3 | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
+| `fx_drive_rev_size` | reverb size | 0 … 1 | 0.93 | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
+| `fx_drive_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
+
+### FX — voice
+
+| Key | Name | Range | Default | Apply | Description |
+|---|---|---|---|---|---|
+| `fx_voice_eq_on` | EQ on | 0 … 1 | 0 | live | Enable the 10-band graphic EQ at this point — the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain. Toggling glides the bands to/from flat (click-free). |
+| `fx_voice_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_rev_on` | reverb on | 0 … 1 | 0 | live | Enable the reverb at this point — the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain. Toggling glides the wet level (click-free). |
+| `fx_voice_rev_type` | reverb type | 0 … 1 | 0 | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
+| `fx_voice_rev_mix` | reverb mix | 0 … 1 | 0.3 | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
+| `fx_voice_rev_size` | reverb size | 0 … 1 | 0.93 | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
+| `fx_voice_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
+
+### FX — taraf
+
+| Key | Name | Range | Default | Apply | Description |
+|---|---|---|---|---|---|
+| `fx_taraf_eq_on` | EQ on | 0 … 1 | 0 | live | Enable the 10-band graphic EQ at this point — the sympathetic web's own radiated output (drones included), before the shared radiation chain. Toggling glides the bands to/from flat (click-free). |
+| `fx_taraf_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_rev_on` | reverb on | 0 … 1 | 0 | live | Enable the reverb at this point — the sympathetic web's own radiated output (drones included), before the shared radiation chain. Toggling glides the wet level (click-free). |
+| `fx_taraf_rev_type` | reverb type | 0 … 1 | 0 | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
+| `fx_taraf_rev_mix` | reverb mix | 0 … 1 | 0.3 | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
+| `fx_taraf_rev_size` | reverb size | 0 … 1 | 0.93 | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
+| `fx_taraf_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
+
+### FX — global
+
+| Key | Name | Range | Default | Apply | Description |
+|---|---|---|---|---|---|
+| `fx_global_eq_on` | EQ on | 0 … 1 | 0 | live | Enable the 10-band graphic EQ at this point — the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level). Toggling glides the bands to/from flat (click-free). |
+| `fx_global_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_rev_on` | reverb on | 0 … 1 | 0 | live | Enable the reverb at this point — the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level). Toggling glides the wet level (click-free). |
+| `fx_global_rev_type` | reverb type | 0 … 1 | 0 | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
+| `fx_global_rev_mix` | reverb mix | 0 … 1 | 0.3 | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
+| `fx_global_rev_size` | reverb size | 0 … 1 | 0.93 | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
+| `fx_global_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
 

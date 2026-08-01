@@ -30,13 +30,18 @@ public enum PadLayout: Int, Codable, CaseIterable, Identifiable {
 public struct SyncedScaleState: Codable, Equatable {
     public var points: [PitchPoint]
     public var tonicMidi: Int
+    /// Fractional tonic refinement in cents (±50) — the tonic is set in Hz
+    /// on the Mac and rarely lands exactly on a MIDI note; without this the
+    /// iPad would play up to a quarter-tone off the Mac's tarab.
+    public var tonicCents: Double
     public var marginPixels: Double
     public var layout: PadLayout
 
-    public init(points: [PitchPoint], tonicMidi: Int, marginPixels: Double,
-                layout: PadLayout = .pitchPad) {
+    public init(points: [PitchPoint], tonicMidi: Int, tonicCents: Double = 0,
+                marginPixels: Double, layout: PadLayout = .pitchPad) {
         self.points = points
         self.tonicMidi = tonicMidi
+        self.tonicCents = tonicCents
         self.marginPixels = marginPixels
         self.layout = layout
     }
@@ -57,17 +62,25 @@ public struct SyncedScaleState: Codable, Equatable {
 ///   - The payload is base64 (all bytes ASCII ≤ 127, so 7-bit-safe) of a
 ///     **compact binary** blob — far smaller than JSON so it survives the
 ///     iOS USB-MIDI SysEx bridge comfortably. Blob layout:
-///       `[ver:1][tonic:1][margin:1][layout:1][count:1]` then per point
+///       `[ver:1][tonic:1][tonicCents14: 2×7-bit][margin:1][layout:1][count:1]`
+///       then per point
 ///       `[num14: 2×7-bit][den14: 2×7-bit][y:1][enabled:1][labelLen:1][label UTF-8…]`.
+///     v4 added the fractional tonic (centi-cents above −50 ¢, so ±50 ¢ at
+///     0.01 ¢ resolution) — older blobs are rejected; both apps ship the
+///     format together, like the fret-arrangement blob.
 public enum PitchScaleSysEx {
     public static let nonCommercialID: UInt8 = 0x7D
     public static let scaleSubID: UInt8 = 0x01
-    private static let version: UInt8 = 3
+    private static let version: UInt8 = 4
 
     public static func encode(_ state: SyncedScaleState) -> [UInt8] {
         let tonic = UInt8(max(0, min(127, state.tonicMidi)))
+        // centi-cents above −50 ¢: 0…10000, fits 14 bits
+        let cc = max(0, min(10000, Int(((state.tonicCents + 50.0) * 100.0).rounded())))
         let margin = UInt8(max(0, min(127, Int(state.marginPixels.rounded()))))
-        var blob: [UInt8] = [version, tonic, margin,
+        var blob: [UInt8] = [version, tonic,
+                             UInt8(cc >> 7), UInt8(cc & 0x7F),
+                             margin,
                              UInt8(state.layout.rawValue & 0x7F),
                              UInt8(min(127, state.points.count))]
         for p in state.points.prefix(127) {
@@ -97,13 +110,14 @@ public enum PitchScaleSysEx {
         if b.last == 0xF7 { b.removeLast() }
         guard b.count >= 2, b[0] == nonCommercialID, b[1] == scaleSubID else { return nil }
         guard let blob = Data(base64Encoded: Data(b[2...])).map(Array.init),
-              blob.count >= 5, blob[0] == version else { return nil }
+              blob.count >= 7, blob[0] == version else { return nil }
 
         let tonic = Int(blob[1])
-        let margin = Double(blob[2])
-        let layout = PadLayout(rawValue: Int(blob[3])) ?? .pitchPad
-        let count = Int(blob[4])
-        var i = 5
+        let cents = Double((Int(blob[2]) << 7) | Int(blob[3])) / 100.0 - 50.0
+        let margin = Double(blob[4])
+        let layout = PadLayout(rawValue: Int(blob[5])) ?? .pitchPad
+        let count = Int(blob[6])
+        var i = 7
         var points: [PitchPoint] = []
         for _ in 0..<count {
             guard i + 7 <= blob.count else { return nil }
@@ -120,6 +134,7 @@ public enum PitchScaleSysEx {
                                      label: label, enabled: enabled))
         }
         return SyncedScaleState(points: points, tonicMidi: tonic,
+                                tonicCents: cents,
                                 marginPixels: margin, layout: layout)
     }
 }
@@ -159,15 +174,16 @@ public enum SyncedScaleStore {
 ///   `[degreeIndex:1][x14: 2×7-bit][topY:1][bottomY:1][enabled:1]` (x is the
 ///   free band position, quantized to 14 bits; y to 7 bits; the ghost extent
 ///   rides as quarter-octaves, so 0.5 → 2; flags bit0 = tap legato), then the
-///   4 drone-button ratios as 14-bit cents-above-−1200 (2×7-bit each, so the
-///   0.25–4.0 ratio range fits). Blob v2 replaced v1's integer
-///   octaves-per-side with the fractional extent; v3 added the flags byte;
-///   v4 added the free per-segment x; v5 added the drone ratios (older blobs
+///   `FretArrangement.droneCount` (3) drone-button ratios as 14-bit
+///   cents-above-−1200 (2×7-bit each, so the 0.25–4.0 ratio range fits).
+///   Blob v2 replaced v1's integer octaves-per-side with the fractional
+///   extent; v3 added the flags byte; v4 added the free per-segment x;
+///   v5 added the drone ratios; v6 dropped from 4 to 3 drones (older blobs
 ///   are rejected — both apps ship the format together).
 public enum FretArrangementSysEx {
     public static let nonCommercialID: UInt8 = 0x7D
     public static let arrangementSubID: UInt8 = 0x03
-    private static let version: UInt8 = 5
+    private static let version: UInt8 = 6
 
     public static func encode(_ a: FretArrangement) -> [UInt8] {
         func b7(_ v: Int) -> UInt8 { UInt8(max(0, min(127, v))) }
@@ -184,7 +200,7 @@ public enum FretArrangementSysEx {
             blob.append(b7(Int((s.bottomY * 127).rounded())))
             blob.append(s.enabled ? 1 : 0)
         }
-        for i in 0..<4 {
+        for i in 0..<FretArrangement.droneCount {
             let r = i < a.droneRatios.count ? a.droneRatios[i]
                 : FretArrangement.defaultDroneRatios[i]
             // cents above −1200 (ratio 0.25…4 → 0…3600), 14-bit
@@ -222,8 +238,8 @@ public enum FretArrangementSysEx {
             i += 6
         }
         var drones = FretArrangement.defaultDroneRatios
-        if i + 8 <= blob.count {
-            for d in 0..<4 {
+        if i + 2 * FretArrangement.droneCount <= blob.count {
+            for d in 0..<FretArrangement.droneCount {
                 let c = (Int(blob[i]) << 7) | Int(blob[i + 1])
                 drones[d] = pow(2.0, (Double(c) - 1200.0) / 1200.0)
                 i += 2

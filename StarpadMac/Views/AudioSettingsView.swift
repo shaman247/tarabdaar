@@ -24,7 +24,7 @@ struct AudioSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("AUDIO")
-                .font(.caption.weight(.bold))
+                .font(.padCaption.weight(.bold))
                 .foregroundStyle(.secondary)
             instrumentPanel
             outputDevicePanel
@@ -43,10 +43,10 @@ struct AudioSettingsView: View {
         Panel(title: "String voice") {
             VStack(alignment: .leading, spacing: 8) {
                 Text("The String physics sarangi (bowed_string.json) — the pure-physics bowed gut string with the modal-jawari taraf in-kernel; poly gut strings on one bridge, per-finger MPE bend.")
-                    .font(.caption)
+                    .font(.padCaption)
                     .foregroundStyle(.secondary)
                 Text("Sound: Sarangi tab (physics) · Tarab tab (sympathetic strings) · Controls tab (tilt bindings + composites) · Parameters tab (resting defaults).")
-                    .font(.caption2)
+                    .font(.padCaption2)
                     .foregroundStyle(.tertiary)
             }
         }
@@ -83,7 +83,7 @@ struct AudioSettingsView: View {
                     if let dev = devices.first(where: { $0.id == selectedID }),
                        let mfg = dev.manufacturer {
                         Text(mfg)
-                            .font(.caption)
+                            .font(.padCaption)
                             .foregroundStyle(.secondary)
                     }
                 }

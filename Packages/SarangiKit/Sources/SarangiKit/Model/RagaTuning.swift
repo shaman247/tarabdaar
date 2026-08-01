@@ -12,21 +12,16 @@ public struct Raga: Identifiable, Sendable, Hashable, Codable {
     }
 }
 
-/// Raga tuning engine — port of `src/raga.py` (JI ratios, chromatic taraf row,
-/// and the 37-string `build_strings` layout). `estimate_tonic` is dropped (it
-/// needs a recording); the tonic is set by the user.
+/// Raga tuning engine — port of `src/raga.py` (JI ratios and the
+/// `build_strings` layout, minus the chromatic taraf row — removed
+/// 2026-07-25). `estimate_tonic` is dropped (it needs a recording); the
+/// tonic is set by the user.
 public enum RagaTuning {
 
     /// Just-intonation swara ratios (semitone offset from Sa → ratio).
     public static let jiRatios: [Int: Double] = [
         0: 1.0, 1: 16.0 / 15, 2: 9.0 / 8, 3: 6.0 / 5, 4: 5.0 / 4, 5: 4.0 / 3,
         6: 45.0 / 32, 7: 3.0 / 2, 8: 8.0 / 5, 9: 5.0 / 3, 10: 16.0 / 9, 11: 15.0 / 8,
-    ]
-
-    /// 15 fixed JI-chromatic ratios of the main chromatic taraf row.
-    public static let chromaticRatios: [Double] = [
-        0.625, 0.667, 0.703, 0.75, 0.794, 0.833, 0.889, 0.9375,
-        1.0, 1.0667, 1.125, 1.2, 1.25, 1.333, 1.406,
     ]
 
     public static let ragas: [Raga] = [
@@ -39,79 +34,88 @@ public enum RagaTuning {
     ]
     public static func raga(id: Int) -> Raga { ragas.first { $0.id == id } ?? ragas[0] }
 
-    public static func swaraHz(tonic: Double, semitone: Int, octave: Int = 0) -> Double {
-        tonic * (jiRatios[((semitone % 12) + 12) % 12] ?? 1.0) * pow(2.0, Double(octave))
-    }
-
-    public static let taraf_lo = 55.0, taraf_hi = 9000.0
-
     /// JI swara ratios for a raga's semitone intervals (degrees from Sa).
     public static func ratios(forIntervals intervals: [Int]) -> [Double] {
         intervals.map { jiRatios[(($0 % 12) + 12) % 12] ?? 1.0 }
     }
 
-    /// The physical sympathetic bank: 37 strings in 4 choirs (JI-tuned, detuned),
-    /// each tagged with its `StringGroup`. Exact structural port of
-    /// `raga.build_strings`, generalised to accept arbitrary scale-degree
-    /// `ratios` (the Pitch Pad scale) instead of only raga intervals. With
-    /// `detune == false` the per-string Gaussian cents are zero (golden parity);
-    /// otherwise a seeded chorus. The spec order + one `rng.normal` per spec are
-    /// preserved exactly, so the intervals path is bit-identical to before.
-    public static func buildChoirs(tonic: Double, ratios: [Double],
-                                   seed: UInt64 = 42, detune: Bool = true) -> [(ResolvedString, StringGroup)] {
-        var rng = SeededGaussian(seed: seed)
-        // Pa = a scale degree near 3/2 (else the bare fifth); vadi = 2nd-highest.
-        let pa = ratios.first { abs($0 - 1.5) < 0.02 } ?? 1.5
-        let vadi = ratios.count >= 2 ? ratios[ratios.count - 2] : 1.6
+    /// The sympathetic-bank LAYOUT in scale-degree space — ONE flat pool:
+    /// one string per scale degree, emphasized Sa/Pa, the low-octave choir
+    /// and 6 upper-octave repeats. Structural port of `raga.build_strings`,
+    /// re-expressed as (degree, octave) references into the centralized
+    /// scale (2026-07-25) — every string sounds a pitch OF the scale, so
+    /// the whole bank retunes when the scale or the tonic moves. The
+    /// seeded ±cents detune chorus died with the free-ratio model (a
+    /// degree can't be a few cents off itself), and the 15-string
+    /// chromatic row was removed the same day (its 0.40 gain sat below
+    /// the jawari selection's `bow_jt_gmin`, so it never sounded).
+    /// Gains/t60s come from raga.build_strings — the 2026-07 refit
+    /// lengthened the t60s (5/7/9 s); with `B_damp` in-loop f² damping
+    /// only the FUNDAMENTAL keeps that ring, upper partials decay in
+    /// fractions of a second (sympathetic selectivity by harmonic order).
+    ///
+    /// NO DUPLICATE PITCHES (2026-07-26): the historic layout doubled
+    /// Sa/Pa (exact-unison twin rows since the detune removal). The pool
+    /// is one-string-per-pitch now, so each duplicate folds into its
+    /// STRONGEST twin (higher gain, then longer t60 — the doubling row's
+    /// values, which is where the emphasis lived), and the result is
+    /// sorted by pitch. The golden comparison in `ModelTests` applies the
+    /// same fold to the fixture.
+    public static func buildSpecs(scaleRatios: [Double]) -> [StringSpec] {
+        guard !scaleRatios.isEmpty else { return [] }
+        let n = scaleRatios.count
+        // Pa = the degree nearest 3/2; vadi = the 2nd-highest degree.
+        let paIdx = scaleRatios.indices.min {
+            abs(scaleRatios[$0] - 1.5) < abs(scaleRatios[$1] - 1.5)
+        } ?? 0
+        let vadiIdx = n >= 2 ? n - 2 : 0
+        let thirdIdx = n > 2 ? 2 : vadiIdx
 
-        // (ratio, rel_gain, t60, bright, sigma_cents, group)
-        // t60s verbatim from raga.build_strings (goldens assert parity) — the
-        // 2026-07 refit lengthened them (5/7/9 s); with `B_damp` in-loop f²
-        // damping only the FUNDAMENTAL keeps that ring, upper partials decay
-        // in fractions of a second (sympathetic selectivity by harmonic order).
-        var specs: [(Double, Double, Double, Bool, Double, StringGroup)] = []
-        for r in chromaticRatios { specs.append((r, 0.40, 5.0, false, 6.0, .chromatic)) }   // A: 15 chromatic
-        for r in ratios { specs.append((r, 0.85, 5.0, true, 3.5, .scale)) }                 // B: scale-tuned mid
-        specs.append((1.0, 0.95, 7.0, false, 9.0, .scale))                                  //   Sa doubling
-        specs.append((pa, 0.90, 7.0, false, 9.0, .scale))                                   //   Pa doubling
-        let lowSet = [1.0, pa, vadi, ratios.count > 2 ? ratios[2] : vadi]                   // C: low choir
-        for r in lowSet { specs.append((r * 0.5, 0.80, 7.0, false, 3.5, .lowOctave)) }
-        specs.append((0.5, 0.95, 9.0, false, 4.0, .lowOctave))                              //   low Sa
-        specs.append((pa * 0.5, 0.85, 8.0, false, 4.0, .lowOctave))                         //   low Pa
-        specs.append((vadi * 0.5, 0.75, 7.0, false, 4.0, .lowOctave))
-        for r in ratios.prefix(6) { specs.append((r * 2.0, 0.70, 3.5, true, 3.5, .upperOctave)) } // D: 6 upper octave
-
-        var out: [(ResolvedString, StringGroup)] = []
-        for (ratio, gain, t60, bright, sigma, group) in specs {
-            let cents = detune ? min(12.0, max(-12.0, rng.normal(sigma: sigma))) : 0.0
-            let f = tonic * ratio * pow(2.0, cents / 1200.0)
-            if f >= taraf_lo, f <= taraf_hi {
-                // class law (raga.build_strings): choir A (chromatic) = chrom,
-                // diatonic/doublings/low/upper = RAGA-tuned (buzz most)
-                out.append((ResolvedString(freq: (f * 1000).rounded() / 1000, gain: gain, t60: t60, bright: bright,
-                                           raga: group != .chromatic), group))
-            }
+        // (degree, octave, gain, t60) — the historic list, doublings and
+        // all. 2026-08-01 coherence rev: the refit's 5/7 s crowd t60s
+        // rang so long after a phrase that the wash decoupled from the
+        // playing and read as a pad behind the voice — the CROWD (the
+        // per-degree rows, low choir, upper repeats) shortened ~×0.6.
+        // The three DRONE ANCHORS the buttons auto-map to (Sa, low Sa,
+        // low Pa) keep their fitted 7/9/8 s: on the instrument those ARE
+        // the long-ringing strings, they're consonant with everything,
+        // and their tap ring is character-pinned by
+        // `DroneExcitationTests` (fundamental dominance decays on the
+        // row's own t60). The old crowd values are one git show away.
+        var rows: [(Int, Int, Double, Double)] = []
+        for d in 0..<n { rows.append((d, 0, 0.85, 3.0)) }          // scale-tuned mid
+        rows.append((0, 0, 0.95, 7.0))                             //   Sa doubling (anchor)
+        rows.append((paIdx, 0, 0.90, 4.5))                         //   Pa doubling
+        for d in [0, paIdx, vadiIdx, thirdIdx] {                   // low choir
+            rows.append((d, -1, 0.80, 4.5))
         }
-        return out
+        rows.append((0, -1, 0.95, 9.0))                            //   low Sa (anchor)
+        rows.append((paIdx, -1, 0.85, 8.0))                        //   low Pa (anchor)
+        rows.append((vadiIdx, -1, 0.75, 4.5))
+        for d in 0..<min(6, n) { rows.append((d, 1, 0.70, 2.5)) }  // 6 upper octave
+
+        // fold duplicates (keep strongest) + sort by pitch
+        var best: [String: (Int, Int, Double, Double)] = [:]
+        for r in rows {
+            let key = "\(r.1)/\(r.0)"
+            if let w = best[key], (w.2, w.3) >= (r.2, r.3) { continue }
+            best[key] = r
+        }
+        return best.values
+            .sorted { a, b in
+                let ra = scaleRatios[a.0] * pow(2.0, Double(a.1))
+                let rb = scaleRatios[b.0] * pow(2.0, Double(b.1))
+                return ra != rb ? ra < rb
+                    : (a.1, a.0) < (b.1, b.0)
+            }
+            .map { StringSpec(degree: $0.0, octave: $0.1, gain: $0.2, t60: $0.3) }
     }
 
-    /// Back-compat: the DSP-facing bank from raga intervals (untagged). Identical
-    /// output to the original `buildStrings` — used by the engine + golden tests.
-    public static func buildStrings(tonic: Double, intervals: [Int],
-                                    seed: UInt64 = 42, detune: Bool = true) -> [ResolvedString] {
-        buildChoirs(tonic: tonic, ratios: ratios(forIntervals: intervals), seed: seed, detune: detune).map(\.0)
-    }
-
-    /// Editable, group-tagged bank from raga intervals (manual fallback).
-    public static func buildGroupedSpecs(tonic: Double, intervals: [Int],
-                                         seed: UInt64 = 42, detune: Bool = true) -> [StringSpec] {
-        buildGroupedSpecs(tonic: tonic, ratios: ratios(forIntervals: intervals), seed: seed, detune: detune)
-    }
-
-    /// Editable, group-tagged bank from arbitrary scale-degree ratios (Pitch Pad).
-    public static func buildGroupedSpecs(tonic: Double, ratios: [Double],
-                                         seed: UInt64 = 42, detune: Bool = true) -> [StringSpec] {
-        buildChoirs(tonic: tonic, ratios: ratios, seed: seed, detune: detune).map { StringSpec($0.0, group: $0.1) }
+    /// The resolved bank from raga intervals — used by the golden tests.
+    public static func buildStrings(tonic: Double, intervals: [Int]) -> [ResolvedString] {
+        let scale = ratios(forIntervals: intervals)
+        return buildSpecs(scaleRatios: scale)
+            .map { $0.resolved(tonic: tonic, scaleRatios: scale) }
     }
 }
 

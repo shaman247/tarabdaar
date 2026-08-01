@@ -16,7 +16,7 @@ struct ConnectionStatusView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("MIDI INPUT")
-                .font(.caption.weight(.bold))
+                .font(.padCaption.weight(.bold))
                 .foregroundStyle(.secondary)
             statusPanel
             sourcesPanel

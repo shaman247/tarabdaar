@@ -15,7 +15,7 @@ import SarangiKit
 ///
 /// MPE MIDI arrives at `sendHostedMIDI` and is routed to the String voice's
 /// `BowControlMapper` (`routeSarangiModelMIDI`); the Fret Pad drone buttons
-/// (CC 102–105) drive the kernel's jawari-taraf drone rows. The tarab tuning
+/// (CC 102–104) drive the kernel's jawari-taraf drone rows. The tarab tuning
 /// (from the Tarab tab, pushed via `rebuildSarangi`) tunes the kernel's taraf;
 /// the String physics scalars ride `stringVoiceOverrides`.
 ///
@@ -45,21 +45,25 @@ public class AudioEngine: ObservableObject {
     /// (re)built from the current tuning when the voice is enabled later.
     private var lastSarangiStrings: [ResolvedString] = []
     private var lastSarangiTonic: Double = 261.63
+    /// The melody-follower string (2026-07-25): (gain, t60) when enabled,
+    /// nil when off — pushed with every `rebuildSarangi` like the rows.
+    private var lastSarangiFollower: (gain: Double, t60: Double)?
     /// String-editor / audition scalar overrides applied OVER the
     /// `bowed_string.json` artifact at every String engine build.
     public var stringVoiceOverrides: [String: Double] = [:]
-    /// Drone buttons (Fret Pad, 2026-07-23): the 4 configured pitches as
-    /// ratios vs the PLAYED tonic (`droneTonicHz` — the Fret Pad's
-    /// `pitchPad.tonicMidi`, pushed by `AppController`; the drones must
-    /// harmonize with the melody, which is independent of the tarab
-    /// tonic). Each press maps to a jawari-taraf row of the current String
-    /// engine (`BowEngine.droneRow`, pitch-class first); the engine build
-    /// guarantees a row exists at every configured pitch
-    /// (`buildEngine(droneHz:)`). Guarded by `lock` with `droneHeld`
-    /// (presses arrive on the MIDI thread, config on main).
-    private var droneRatios: [Double] = [0.5, 2.0 / 3.0, 0.75, 1.0]
-    private var droneTonicHz: Double = 0
-    private var droneHeld = [Bool](repeating: false, count: 4)
+    /// Drone buttons (Fret Pad, 2026-07-23; string-mapped 2026-07-25):
+    /// each of the 3 buttons plucks ONE mapped sympathetic string —
+    /// `droneFreqs` holds the mapped rows' nominal Hz
+    /// (`InstrumentState.droneStringFreqs`, pushed with every
+    /// `rebuildSarangi`; nil = unmapped/disabled → button inert). A press
+    /// finds the jt row by identity (`BowEngine.droneRow(forExactHz:)`) —
+    /// no dedicated rows, no nearest-pitch matching. Guarded by `lock`
+    /// with `droneHeld` (presses arrive on the MIDI thread, config on
+    /// main).
+    private var droneFreqs = [Double?](repeating: nil,
+                                       count: FretArrangement.droneCount)
+    private var droneHeld = [Bool](repeating: false,
+                                   count: FretArrangement.droneCount)
     /// Serial build queue for the String engine (tables + kernel init + jt
     /// worker-pool spawn are too heavy for the main thread); `stringBuildGen`
     /// discards builds that were superseded while in flight.
@@ -550,14 +554,17 @@ public class AudioEngine: ObservableObject {
     // MARK: - MIDI in
 
     /// Push a 3-byte MIDI message into the String voice. Drone buttons
-    /// (Fret Pad, CC 102–105) are consumed here; everything else is routed
+    /// (Fret Pad, CC 102–104) are consumed here; everything else is routed
     /// to the String voice's `BowControlMapper`.
     public func sendHostedMIDI(status: UInt8, data1: UInt8, data2: UInt8) {
         let channel = UInt8(status & 0x0F)
         let statusHi = status & 0xF0
 
-        // Drone buttons (Fret Pad): CC 102–105 press/release (value ≥ 64 =
-        // pressed). Consumed here — never forwarded to the mapper.
+        // Drone buttons (Fret Pad): CC 102+i press/release (value ≥ 64 =
+        // pressed). Consumed here — never forwarded to the mapper. CC 105
+        // (the retired 4th slot) is still swallowed so an old iPad build
+        // can't leak it into the mapper; `setDronePressed` bounds-checks it
+        // into a no-op.
         if statusHi == 0xB0, (102...105).contains(data1) {
             setDronePressed(Int(data1) - 102, data2 >= 64)
             return
@@ -679,12 +686,14 @@ public class AudioEngine: ObservableObject {
         useSarangiModelVoice = on
         let strings = lastSarangiStrings
         let tonic = lastSarangiTonic
+        let follower = lastSarangiFollower
         hostedChannelNote.removeAll(keepingCapacity: true)
         hostedChannelBend.removeAll(keepingCapacity: true)
         hostedChannelExpr.removeAll(keepingCapacity: true)
         heldChannelOrder.removeAll(keepingCapacity: true)
         lock.unlock()
-        if on { rebuildStringVoice(tonic: tonic, strings: strings) }
+        if on { rebuildStringVoice(tonic: tonic, strings: strings,
+                                   follower: follower) }
         storeMeter((0, 0, false))
         return true
     }
@@ -696,20 +705,29 @@ public class AudioEngine: ObservableObject {
     }
 
     /// Runtime BASE PARAMETERS of the String voice (2026-07-24 composite
-    /// rework) — the four live-appliable base params composite parameters
+    /// rework) — the live-appliable base params composite parameters
     /// sweep (no engine rebuild; chunk-rate smoothed in `BowEngine`).
     /// Values persist across engine rebuilds. Thread-safe.
-    public func setStringJawGain(_ g01: Double) {
-        stringVoiceSource?.setJawGain(g01)
-    }
     public func setStringJtToneLp(hz: Double) {
         stringVoiceSource?.setJtToneLp(hz: hz)
+    }
+    public func setStringJtToneHp(hz: Double) {
+        stringVoiceSource?.setJtToneHp(hz: hz)
+    }
+    public func setStringJtBody(_ mix01: Double) {
+        stringVoiceSource?.setJtBody(mix01)
     }
     public func setStringTarafDamp(_ amt01: Double) {
         stringVoiceSource?.setTarafDamp(amt01)
     }
     public func setStringToneTilt(_ t: Double) {
         stringVoiceSource?.setToneTilt(t)
+    }
+    public func setStringTarafSelectivity(_ s01: Double) {
+        stringVoiceSource?.setTarafSelectivity(s01)
+    }
+    public func setStringJtEvolve(_ e01: Double) {
+        stringVoiceSource?.setJtEvolve(e01)
     }
 
     /// String-voice jawari-web overload telemetry (see
@@ -765,79 +783,85 @@ public class AudioEngine: ObservableObject {
         // Matters at rest: the unified apply pushes every live parameter
         // at startup, and this one rests at 20 kHz.
         case "bow_jt_lp":     setStringJtToneLp(hz: value >= 20000 ? 0 : value)
+        case "bow_jt_hp":     setStringJtToneHp(hz: value)
+        case "bow_jt_body":   setStringJtBody(value)
         case "bow_jt_damp":   setStringTarafDamp(value)
+        case "bow_jt_sel":    setStringTarafSelectivity(value)
+        case "bow_jt_evolve": setStringJtEvolve(value)
         case "bow_tone_tilt": setStringToneTilt(value)
-        default:              return false
+        default:
+            // FX rack (2026-08-01): every `fx_<point>_<field>` key routes
+            // to the source's cached settings (re-applied across rebuilds).
+            if key.hasPrefix("fx_") {
+                return stringVoiceSource?.setFXParam(key, value) ?? false
+            }
+            return false
         }
         return true
     }
 
     /// Drive the kernel's live 0…1 scaler behind a `.hybrid` parameter.
     /// The scaler is an implementation detail — it exists so a build-time
-    /// depth (jawari buzz, vibrato cents) can be turned DOWN from its
-    /// built value without an engine rebuild. `ParamRegistry` owns the
-    /// native-units ↔ scaler conversion; no UI shows these directly.
+    /// depth (vibrato cents) can be turned DOWN from its built value
+    /// without an engine rebuild. `ParamRegistry` owns the native-units ↔
+    /// scaler conversion; no UI shows these directly.
     public func setStringHybridScaler(_ scaler: ParamRegistry.HybridScaler,
                                       _ amount01: Double) {
         let a = max(0.0, min(1.0, amount01))
         switch scaler {
-        case .jawGain:        setStringJawGain(a)
         case .vibratoAmount:  setStringVibrato(a)
         }
     }
 
     // MARK: - Drone buttons (Fret Pad)
 
-    /// Update the drone configuration: the 4 pitch ratios and the PLAYED
-    /// tonic they're relative to. Called from `AppController` whenever
-    /// `FretArrangement.droneRatios` or the Fret Pad tonic changes. A real
-    /// change rebuilds the String engine so the jt web carries a row at
-    /// every configured pitch (`buildEngine(droneHz:)`).
-    public func setDroneConfig(ratios: [Double], tonicHz: Double) {
+    /// Update which sympathetic strings the drone buttons pluck. A
+    /// mapping-only change — the jawari web is untouched, so no rebuild.
+    /// Any held button is released first (its OLD row must not drone on
+    /// with no release path to it).
+    public func setDroneMappedFreqs(_ freqs: [Double?]) {
         lock.lock()
-        var changed = abs(droneTonicHz - tonicHz) > 1e-9
-        droneTonicHz = tonicHz
-        for i in droneRatios.indices where ratios.indices.contains(i) {
-            let r = max(0.25, min(4.0, ratios[i]))
-            if abs(r - droneRatios[i]) > 1e-9 { changed = true }
-            droneRatios[i] = r
+        let heldOld = droneHeld.indices
+            .filter { droneHeld[$0] }
+            .compactMap { droneFreqs[$0] }
+        for i in droneFreqs.indices {
+            droneFreqs[i] = freqs.indices.contains(i) ? freqs[i] : nil
+            droneHeld[i] = false
         }
-        let on = useSarangiModelVoice
-        let tonic = lastSarangiTonic
-        let strings = lastSarangiStrings
+        let src = stringVoiceSource
         lock.unlock()
-        if changed, on { rebuildStringVoice(tonic: tonic, strings: strings) }
+        guard let engine = src?.currentEngine() else { return }
+        for hz in heldOld {
+            if let row = engine.droneRow(forExactHz: hz) {
+                engine.droneRelease(row: row)
+            }
+        }
     }
 
-    /// The Hz a drone button requests: configured ratio × the played tonic
-    /// (falling back to the engine's own tonic before the first config push).
-    private func droneHz(_ ratio: Double, engine: BowEngine) -> Double {
-        (droneTonicHz > 0 ? droneTonicHz : engine.tonicHz) * ratio
-    }
-
-    /// Press/release drone button `index` (0–3): pluck-and-hold / release
-    /// the String engine's jawari-taraf row nearest the configured pitch.
-    /// Safe from the MIDI thread.
+    /// Press/release drone button `index` (0–2): pluck-and-hold / release
+    /// the mapped sympathetic string's jt row (identity lookup on its
+    /// nominal Hz). Unmapped slot / string not in the web = inert. Safe
+    /// from the MIDI thread.
     public func setDronePressed(_ index: Int, _ pressed: Bool) {
         lock.lock()
-        guard droneHeld.indices.contains(index) else { lock.unlock(); return }
+        guard droneHeld.indices.contains(index),
+              let hz = droneFreqs[index] else { lock.unlock(); return }
         let was = droneHeld[index]
         droneHeld[index] = pressed
-        let ratio = droneRatios[index]
-        // Ratios of the OTHER still-held buttons — a release must not
+        // Frequencies of the OTHER still-held buttons — a release must not
         // silence a row another button also maps to.
         let othersHeld = droneHeld.indices
             .filter { $0 != index && droneHeld[$0] }
-            .map { droneRatios[$0] }
+            .compactMap { droneFreqs[$0] }
         let src = stringVoiceSource
         lock.unlock()
         guard pressed != was, let engine = src?.currentEngine(),
-              let row = engine.droneRow(forRequestedHz: droneHz(ratio, engine: engine))
+              let row = engine.droneRow(forExactHz: hz)
         else { return }
         if pressed {
             engine.dronePress(row: row)
         } else if !othersHeld.contains(where: {
-            engine.droneRow(forRequestedHz: droneHz($0, engine: engine)) == row
+            engine.droneRow(forExactHz: $0) == row
         }) {
             engine.droneRelease(row: row)
         }
@@ -847,11 +871,12 @@ public class AudioEngine: ObservableObject {
     /// starts from silent drone state).
     private func reapplyHeldDrones(to engine: BowEngine) {
         lock.lock()
-        let held = droneHeld.indices.filter { droneHeld[$0] }
-            .map { droneRatios[$0] }
+        let held = droneHeld.indices
+            .filter { droneHeld[$0] }
+            .compactMap { droneFreqs[$0] }
         lock.unlock()
-        for ratio in held {
-            if let row = engine.droneRow(forRequestedHz: droneHz(ratio, engine: engine)) {
+        for hz in held {
+            if let row = engine.droneRow(forExactHz: hz) {
                 engine.dronePress(row: row)
             }
         }
@@ -862,24 +887,19 @@ public class AudioEngine: ObservableObject {
     /// keeps held notes/axes across the swap; a newer build supersedes any
     /// in-flight older one. Called on voice enable and on every structural
     /// tarab/tonic change.
-    private func rebuildStringVoice(tonic: Double, strings: [ResolvedString]) {
+    private func rebuildStringVoice(tonic: Double, strings: [ResolvedString],
+                                    follower: (gain: Double, t60: Double)? = nil) {
         guard let src = stringVoiceSource else { return }
         stringBuildGen += 1
         let gen = stringBuildGen
         let overrides = stringVoiceOverrides
         let mapper = src.mapper
-        // Drone pitches ride the build so the jt web always carries a row
-        // at each configured pitch (relative to the PLAYED tonic).
-        lock.lock()
-        let dTonic = droneTonicHz > 0 ? droneTonicHz : tonic
-        let dHz = droneRatios.map { dTonic * $0 }
-        lock.unlock()
         stringBuildQueue.async { [weak self] in
             let engine = StringVoiceSource.buildEngine(tonicHz: tonic,
                                                       strings: strings,
                                                       mapper: mapper,
                                                       overrides: overrides,
-                                                      droneHz: dHz)
+                                                      follower: follower)
             DispatchQueue.main.async {
                 guard let self, gen == self.stringBuildGen else { return }
                 if engine == nil {
@@ -905,20 +925,16 @@ public class AudioEngine: ObservableObject {
         let on = useSarangiModelVoice
         let tonic = lastSarangiTonic
         let strings = lastSarangiStrings
+        let follower = lastSarangiFollower
         lock.unlock()
         guard on, let src = stringVoiceSource else { return false }
-        // The drone pitches the engine was BUILT with — they add jawari
-        // rows, so the in-place reload has to see the identical list.
-        lock.lock()
-        let dTonic = droneTonicHz > 0 ? droneTonicHz : tonic
-        let dHz = droneRatios.map { dTonic * $0 }
-        lock.unlock()
         stringVoiceOverrides = overrides
         // Rebuilding the jawari tables is the costly half (~3.4 ms); only
         // do it when a jawari key actually moved.
         let jtTouched = changed.contains { $0.hasPrefix("bow_jt") }
         return src.applyLiveParams(tonicHz: tonic, strings: strings,
-                                   overrides: overrides, droneHz: dHz,
+                                   overrides: overrides,
+                                   follower: follower,
                                    needsJawariTables: jtTouched)
     }
 
@@ -930,8 +946,10 @@ public class AudioEngine: ObservableObject {
         let on = useSarangiModelVoice
         let tonic = lastSarangiTonic
         let strings = lastSarangiStrings
+        let follower = lastSarangiFollower
         lock.unlock()
-        if on { rebuildStringVoice(tonic: tonic, strings: strings) }
+        if on { rebuildStringVoice(tonic: tonic, strings: strings,
+                                   follower: follower) }
     }
 
     /// Effective hardware sample rate of the current output device.
@@ -946,28 +964,39 @@ public class AudioEngine: ObservableObject {
     /// every structural change (raga/tonic/string edits, Tarab-tab sync). The
     /// String kernel's taraf tracks the same tuning as the tarab table; the
     /// build runs off-main (the mapper keeps held notes across the swap).
-    /// (The `params`/`fx`/`eqBands`/`groups`/`coupled` arguments are retained
-    /// for the `SarangiStore` call site — the String voice reads only the
-    /// tuning; its physics come from `bowed_string.json` + `stringVoiceOverrides`.)
-    public func rebuildSarangi(params: SarangiParams, strings: [ResolvedString],
-                               tonic: Double, fx: FXRack,
-                               eqBands: [VoiceEQBand] = [],
-                               groups: [StringGroup] = [],
-                               coupled: CoupledConfig? = nil) {
+    ///
+    /// The String voice reads only the tuning — its physics come from
+    /// `bowed_string.json` + `stringVoiceOverrides`. This used to also take
+    /// `params`/`fx`/`eqBands`/`groups`/`coupled` and ignore all five; they
+    /// were dropped with the rest of the coupled-network remnants
+    /// (2026-07-24), along with the `applySarangiScalars` /
+    /// `applySarangiFXScalars` / `applySarangiFXFilters` no-op hooks.
+    /// `droneFreqs` (2026-07-25) = per drone button, the mapped sympathetic
+    /// string's nominal Hz (`InstrumentState.droneStringFreqs`; nil =
+    /// unmapped/disabled → button inert).
+    /// `follower` (2026-07-25) = the melody-follower string's (gain, t60)
+    /// when enabled (`InstrumentState.resolvedFollower`; nil = off).
+    public func rebuildSarangi(strings: [ResolvedString], tonic: Double,
+                               droneFreqs: [Double?] = [],
+                               follower: (gain: Double, t60: Double)? = nil) {
         lockAndMeasure()
         lastSarangiStrings = strings
         lastSarangiTonic = tonic
+        lastSarangiFollower = follower
+        for i in self.droneFreqs.indices {
+            self.droneFreqs[i] = droneFreqs.indices.contains(i) ? droneFreqs[i] : nil
+        }
+        // A slot unmapped while held must not stay latched: the fresh
+        // engine starts silent and `reapplyHeldDrones` skips nil slots,
+        // so drop the flag too (a later press starts clean).
+        for i in droneHeld.indices where self.droneFreqs[i] == nil {
+            droneHeld[i] = false
+        }
         let armModel = useSarangiModelVoice
         lock.unlock()
-        if armModel { rebuildStringVoice(tonic: tonic, strings: strings) }
+        if armModel { rebuildStringVoice(tonic: tonic, strings: strings,
+                                         follower: follower) }
     }
-
-    /// Retained no-op hooks for the `SarangiStore` model/FX bindings — the
-    /// coupled bridge–body network they drove was removed with the SWAM/sitar
-    /// base voices, so these have no effect on the String voice.
-    public func applySarangiScalars(_ params: SarangiParams, fx: FXRack) {}
-    public func applySarangiFXScalars(_ fx: FXRack) {}
-    public func applySarangiFXFilters(_ fx: FXRack) {}
 
     deinit {
         #if os(macOS)
