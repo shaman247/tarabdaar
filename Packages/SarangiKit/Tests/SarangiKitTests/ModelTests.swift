@@ -5,7 +5,7 @@ final class ModelTests: XCTestCase {
 
     /// TARAB BANK LAYOUT. `RagaTuning.buildSpecs` generates the tarab
     /// whenever the scale sync regenerates the layout, so its degree/gain/
-    /// t60 law is live Starpad behaviour. The golden was exported from the
+    /// t60 law is live Tarabdaar behaviour. The golden was exported from the
     /// offline `raga.build_strings` (detune off); it is kept as a plain
     /// regression fixture now that there is no upstream to track. Its first
     /// 15 rows are the chromatic choir, REMOVED 2026-07-25 — dropped from

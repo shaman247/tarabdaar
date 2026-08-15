@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Starpad documentation site generator (2026-07-24).
+"""Tarabdaar documentation site generator (2026-07-24).
 
 Renders every docs/*.md into docs/html/<page>.html with a fixed left
 sidebar: the page list (curated order, extras appended) plus the current
@@ -277,7 +277,7 @@ def main():
     for slug in ordered:
         body, headings = convert(sources[slug])
         nav = ['<div class="site"><a href="index.html" '
-               'style="color:inherit">Starpad Docs</a></div>']
+               'style="color:inherit">Tarabdaar Docs</a></div>']
         for p in ordered:
             cur = " current" if p == slug else ""
             nav.append('<a class="page%s" href="%s.html">%s</a>'
@@ -294,7 +294,7 @@ def main():
                '<html lang="en"><head><meta charset="utf-8">\n'
                '<meta name="viewport" content="width=device-width, '
                'initial-scale=1">\n'
-               "<title>%s — Starpad</title>\n<style>%s</style></head>\n"
+               "<title>%s — Tarabdaar</title>\n<style>%s</style></head>\n"
                '<body><div class="layout"><nav>%s</nav>\n'
                "<main>%s</main></div></body></html>\n"
                % (slug, html.escape(titles[slug]), CSS,

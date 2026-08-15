@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.music</string>
+	<key>NSHumanReadableCopyright</key>
+	<string></string>
+	<!-- Switch 2 Joy-Cons are BLE devices with a vendor GATT protocol;
+	     Tarabdaar connects to them directly via CoreBluetooth. -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Tarabdaar connects directly to Switch 2 Joy-Con controllers over Bluetooth LE for tilt and drone control.</string>
+</dict>
+</plist>

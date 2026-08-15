@@ -5,10 +5,12 @@
 > runs only as the tilt/mapping host — see [Architecture](architecture.md)).
 > The active playing surface, the **Fret Pad**, glides **directly**: the
 > touch position resolves to a pitch (the fret field / onset snap) and
-> `PitchPadEngine` bends the held note to it — so dragging glides smoothly
-> without retriggering, and the pitch always tracks the finger. On the iPad
-> a 60 Hz loop re-sends that bend plus tilt-driven expression; on the Mac
-> `glide` sends the bend immediately. See [Fret Pad](fret-pad.md).
+> `PitchPadEngine` writes it into the outbound state at full resolution —
+> dragging glides smoothly without retriggering, and the pitch always
+> tracks the finger. Since the TLP cutover (2026-08-14) there is no bend
+> re-send loop: the wire carries at most one fresh state frame per sender
+> tick, and continuity between updates is the Mac-side 9 Hz meend
+> smoother's job (as it always was). See [Fret Pad](fret-pad.md).
 
 The glide system below controls pitch transitions on the **legacy
 keyboard**. It operated in two modes: **tap glides** (waypoint queue with
@@ -135,7 +137,7 @@ Once snapped, the pitch stays locked until the finger moves at least 1/3 of a ke
 
 When the finger lifts mid-drag, the pitch snaps to the nearest scale tone before the voice is released. The `releaseAfterSnap` flag on `PitchChannel` tells the glide loop to keep the voice alive until the snap converges (within 1 cent of the target), then release it. This ensures notes always end on a clean pitch.
 
-In mono mode, the release grace period cooperates with snap-on-release: the grace timer skips its release if `releaseAfterSnap` is pending, deferring to the glide loop.
+The release grace period cooperates with snap-on-release: the grace timer skips its release if `releaseAfterSnap` is pending, deferring to the glide loop.
 
 ### Exiting Drag Mode
 
@@ -143,8 +145,16 @@ Drag mode clears when:
 - The snap-on-release convergence completes (glide loop releases the voice)
 - A tap-based glide takes over (`startGlide` sets `dragging = false`)
 
-## Polyphonic Glides
+## Polyphony
 
-In polyphonic mode, there are no tap-based glides or waypoint queues. Each touch activates its own independent voice. Glides only occur via **drag** — sliding a finger across the keyboard continuously changes that voice's pitch.
+`NoteManager` is **monophonic**, and always has been in practice: the
+`polyphonicMode` toggle it carried had no UI and no writer anywhere in either
+app, so its per-touch voice-allocation branches (`polyTouchEnded` /
+`polyTouchMoved` / `polyDragState` / `polySnapTimers`) were unreachable. They
+were deleted 2026-08-02 along with the flag.
 
-Each voice tracks its own drag state (direction, zone, target frequency) via per-touch `PolyDragInfo` structs. Direction reversal correction, exponential smoothing, stop snapping (with dead zone), and snap-on-release all work the same as in monophonic drag mode, but independently per voice. Each voice has its own snap timer via `polySnapTimers`.
+Polyphony on the instrument is `PitchPadEngine`'s, not this class's — the Fret
+Pad gives every `touchId` its own MPE channel with no mode switch at all (see
+[Architecture — Polyphony](architecture.md#polyphony-ipad)). `NoteManager`
+itself now only drives the 60 Hz tilt report plus the audition scripts'
+`noteOn`/`glide` path.

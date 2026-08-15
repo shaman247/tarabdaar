@@ -36,7 +36,7 @@ sys.path.insert(0, HERE)
 import sarangi_iterate as si   # noqa: E402  (DIMS + pinned for the merge)
 
 REPO = si.REPO
-SWIFT = os.path.join(REPO, "StarpadMac", "SoundPreset.swift")
+SWIFT = os.path.join(REPO, "TarabdaarMac", "SoundPreset.swift")
 DEFAULT_IN = os.path.join(si.SDIR, "live_best.json")
 
 # DIM name → Swift `s.<field>` scalar assignment in the swamViola block.
@@ -153,7 +153,7 @@ def main():
     with open(tmp, "w") as f:
         f.write(new_txt)
     os.replace(tmp, SWIFT)
-    print("[bake-preset] done — rebuild StarpadMac and A/B against the materialized winner.")
+    print("[bake-preset] done — rebuild TarabdaarMac and A/B against the materialized winner.")
 
 
 if __name__ == "__main__":

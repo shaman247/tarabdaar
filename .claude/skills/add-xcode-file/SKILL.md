@@ -1,9 +1,9 @@
 ---
 name: add-xcode-file
-description: Add a new source file to the Starpad Xcode project. Use whenever creating a .swift file that must compile into the iOS (Starpad) or macOS (StarpadMac) target — those require hand-editing Starpad.xcodeproj/project.pbxproj with the repo's ID conventions. Files under Packages/ are SPM-discovered and need none of this.
+description: Add a new source file to the Tarabdaar Xcode project. Use whenever creating a .swift file that must compile into the iOS (Tarabdaar) or macOS (TarabdaarMac) target — those require hand-editing Tarabdaar.xcodeproj/project.pbxproj with the repo's ID conventions. Files under Packages/ are SPM-discovered and need none of this.
 ---
 
-# Adding a file to the Starpad Xcode project
+# Adding a file to the Tarabdaar Xcode project
 
 ## Files under `Packages/` — nothing to do
 
@@ -14,10 +14,10 @@ One catch: anything referenced from outside the package must be `public` —
 including the type, its `init`, and every method or property used across the
 module boundary. A missing `public` on `init` is the usual failure.
 
-## Files in the iOS target (`Starpad/Starpad/`) or macOS target (`StarpadMac/`)
+## Files in the iOS target (`Tarabdaar/Tarabdaar/`) or macOS target (`TarabdaarMac/`)
 
 These are **not** auto-discovered. Add the file to
-`Starpad.xcodeproj/project.pbxproj` in four places:
+`Tarabdaar.xcodeproj/project.pbxproj` in four places:
 
 1. A `PBXBuildFile` entry — ID prefix `A1xxxxxx` for iOS, `C1xxxxxx` for macOS
 2. A `PBXFileReference` entry — `A2xxxxxx` / `C2xxxxxx`
@@ -35,10 +35,10 @@ and still fail to link — check all four.
 ```
 
 The iOS target is not covered by that script; build it separately if the file
-landed in `Starpad/Starpad/`:
+landed in `Tarabdaar/Tarabdaar/`:
 
 ```bash
-cd Starpad && xcodebuild -project Starpad.xcodeproj -scheme Starpad \
+cd Tarabdaar && xcodebuild -project Tarabdaar.xcodeproj -scheme Tarabdaar \
   -destination 'platform=iOS Simulator,name=iPad Air 13-inch (M3)' \
   build 2>&1 | grep -E "error:|warning:"
 ```

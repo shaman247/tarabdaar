@@ -1,29 +1,29 @@
 #!/bin/bash
-# StarpadMac release build: archive → export → notarize → staple.
+# TarabdaarMac release build: archive → export → notarize → staple.
 # Produces a notarized .app ready for direct distribution.
 #
 # Prereqs (one-time):
 #   1. Apple Developer enrollment + Developer ID Application certificate
 #      installed in Keychain Access.
-#   2. `xcrun notarytool store-credentials starpad-notary ...` (see
+#   2. `xcrun notarytool store-credentials tarabdaar-notary ...` (see
 #      docs/packaging.md).
 #   3. Fill in TEAM_ID and SIGN_IDENTITY below.
 #
 # Usage:
 #   ./tools/release-mac.sh
 # Output:
-#   build/Release/Starpad.app
+#   build/Release/Tarabdaar.app
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # ---- USER CONFIG ------------------------------------------------------------
 TEAM_ID="WN86FWABN8"
 SIGN_IDENTITY="Developer ID Application: YOUR NAME (${TEAM_ID})"
-NOTARY_PROFILE="starpad-notary"
+NOTARY_PROFILE="tarabdaar-notary"
 # -----------------------------------------------------------------------------
 
 BUILD_DIR="build"
-ARCHIVE_PATH="${BUILD_DIR}/StarpadMac.xcarchive"
+ARCHIVE_PATH="${BUILD_DIR}/TarabdaarMac.xcarchive"
 EXPORT_PATH="${BUILD_DIR}/Release"
 
 rm -rf "${BUILD_DIR}"
@@ -31,8 +31,8 @@ mkdir -p "${EXPORT_PATH}"
 
 # 1. Archive
 echo "→ Archiving…"
-xcodebuild -project Starpad/Starpad.xcodeproj \
-    -scheme StarpadMac \
+xcodebuild -project Tarabdaar/Tarabdaar.xcodeproj \
+    -scheme TarabdaarMac \
     -configuration Release \
     -destination 'generic/platform=macOS' \
     -archivePath "${ARCHIVE_PATH}" \
@@ -61,11 +61,11 @@ xcodebuild -exportArchive \
     -exportPath "${EXPORT_PATH}" \
     -exportOptionsPlist "${BUILD_DIR}/ExportOptions.plist"
 
-APP_PATH="${EXPORT_PATH}/StarpadMac.app"
+APP_PATH="${EXPORT_PATH}/TarabdaarMac.app"
 
 # 3. Zip for notarytool submission
 echo "→ Notarizing…"
-ZIP_PATH="${BUILD_DIR}/StarpadMac.zip"
+ZIP_PATH="${BUILD_DIR}/TarabdaarMac.zip"
 ditto -c -k --keepParent "${APP_PATH}" "${ZIP_PATH}"
 
 xcrun notarytool submit "${ZIP_PATH}" \

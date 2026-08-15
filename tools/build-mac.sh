@@ -1,5 +1,5 @@
 #!/bin/bash
-# Headless StarpadMac build. Exits non-zero on warnings/errors. Wire
+# Headless TarabdaarMac build. Exits non-zero on warnings/errors. Wire
 # this into a pre-commit hook or CI step so a Mac-breaking change made
 # during iPad work catches before merge.
 #
@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 # stays in sync with the parameter set by construction — a definition
 # change that breaks the generator fails the build here.
 echo "→ regenerating docs/parameters.md"
-swift run -c release --package-path Packages/StarpadCore paramdoc \
+swift run -c release --package-path Packages/TarabdaarCore paramdoc \
     docs/parameters.md
 
 # Render the whole docs/ tree to the HTML site (docs/html/, sidebar TOC).
@@ -27,8 +27,8 @@ echo "→ regenerating docs/html"
 python3 tools/gen_docs_html.py
 
 OUTPUT=$(xcodebuild \
-    -project Starpad/Starpad.xcodeproj \
-    -scheme StarpadMac \
+    -project Tarabdaar/Tarabdaar.xcodeproj \
+    -scheme TarabdaarMac \
     -destination 'platform=macOS,arch=arm64' \
     -derivedDataPath build/mac-ci \
     -quiet build 2>&1)
@@ -37,11 +37,11 @@ EXIT=$?
 echo "$OUTPUT" | grep -E "error:|warning:" | grep -v "appintents\|never used\|consider replacing" || true
 
 if [ $EXIT -ne 0 ]; then
-    echo "❌ StarpadMac build failed"
+    echo "❌ TarabdaarMac build failed"
     exit $EXIT
 fi
 if echo "$OUTPUT" | grep -q "error:"; then
-    echo "❌ StarpadMac build had errors"
+    echo "❌ TarabdaarMac build had errors"
     exit 1
 fi
-echo "✅ StarpadMac build succeeded"
+echo "✅ TarabdaarMac build succeeded"

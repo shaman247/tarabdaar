@@ -1,33 +1,61 @@
 # MIDI & Audio
 
-Starpad's iPad target emits MPE MIDI over USB and produces no sound of its own. The Mac target (or any other USB-MIDI-aware host) receives the MIDI and synthesizes it with the sarangi **String voice** — the only voice. The two share only standard MIDI on the wire (plus one-way pad-sync SysEx).
+**2026-08-14: the wire is TLP (the TarabLink Protocol), not the MIDI vocabulary.** The iPad streams one compact binary **state frame** (all touches at full-resolution pitch + tilt + drones, atomic, latest-wins) plus a small set of reliable **events**; the Mac streams sync events and a Joy-Con display frame back. Both directions tunnel inside a single SysEx envelope (`F0 7D 10 <sender role> <7-in-8 packed frame> F7`) over the existing CoreMIDI transports — the USB session when wired, the **BLE-MIDI session** otherwise (deliberately: Apple grants its own BLE-MIDI service a privileged ~11.25 ms connection interval that a custom CoreBluetooth link cannot get — a third-party GATT connection floors at 15 ms — so tunneling over BLE-MIDI is the only wireless bearer that could not regress latency). MPE note+bend, tilt CC pairs and the per-message SysEx blobs are all retired from the wire; the MIDI vocabulary survives only in-process (auditions, external controllers). The protocol lives in `Packages/TarabdaarCore/Sources/TarabdaarCore/Link/`.
+
+## The TLP wire (Link/, 2026-08-14)
+
+Frames are little-endian, explicitly encoded byte tables (`TLPFrame.swift`), one frame per SysEx envelope (`TLPPack.swift` — a sender-role septet, then 7 payload bytes → 1 MSB septet + 7 low bytes, 8/7 overhead vs base64's 4/3). Type byte `0x01–0x3F` = events (reliable, never dropped), `0x40–0x5F` = state (latest-wins, coalescable per type). The role byte is the **loop guard**: each side drops frames stamped with its own role, so traffic echoed back through a MIDI loop (IAC bus, patchbay, USB+BLE double delivery) can neither mark the link up (which would arm the staleness kill path with no peer) nor pollute sequence gating. Reassembly on both ends is **per source** (keyed by the CoreMIDI connection refCon) — a shared buffer corrupts the moment two sources carry SysEx concurrently.
+
+**`0x40 PERF_STATE`** (iPad→Mac): `[type][flags][stateSeq u16][timestampUs u32][tiltX s16][tiltY s16][tiltZ s16][accelX s16][accelY s16][accelZ s16][droneMask][touchCount]` + per touch `[id u16][onsetSeq u8][velocity u8][pressure u8][flags u8][pitch f32]`. `pitch` is fractional MIDI (~0.0008 ¢ steps vs the old bend wire's 0.586 ¢); tilt is 16-bit and atomic with pitch (the torn MSB/LSB CC pairs are gone). The accel fields (**TLP v2, 2026-08-14**) carry raw `userAcceleration` at ±4 g full scale — display-only diagnostics for the Setup tab's received-acceleration view (`LinkIngest.onAccel`), written by the same 60 Hz motion tick as the tilt; no binding or physics reads them. The v2 layout change bumped `TLP.versionMin/Max` to 2, and the HELLO check is a proper range intersection, so a v1 peer stays down cleanly instead of silently failing to decode every frame. **Touch lifecycle lives IN the frame**: each frame is the complete touch set — an id absent from the newer frame is a note-off, a new id is a note-on, a changed `onsetSeq` on a present id is a retrigger that survived coalescing. The newest frame is the truth, so a coalesced queue can never lose a release, and onset+pitch arrive atomically (the tanpura main-instrument pluck fires immediately at the exact bent pitch — no pending-pluck-on-next-bend on this path).
+
+**`0x41 JOYCON_STATE`** (Mac→iPad): the Joy-Con tilt display + the `connected` flag, latest-wins with a heartbeat floor (replaces the `F0 7D 05` SysEx and its force-resend-on-edges dance).
+
+**Events** `[type][eventSeq u16]`: `HELLO 0x01` (version handshake; also a sequence **epoch** — receiving one re-anchors all dedupe, so a restarted peer is never mistaken for stale traffic), `PING 0x03`/`PONG 0x04` (the Mac measures RTT + clock offset — link latency is displayable for the first time; watch `TarabLink:` lines in Console), `PANIC 0x08`, `SCALE_STATE 0x10` / `FRET_ARRANGEMENT 0x11` (the **same v4/v6 binary blobs** the legacy SysEx carried, minus base64 — codecs split into `encodeBlob`/`decodeBlob`, iPad persistence byte-identical), `RESYNC_REQUEST 0x1F` (pad asks, host replies with all three sync payloads).
+
+**Sender discipline** (`LinkOutbox` + the 120 Hz paced sender in `TarabLink`): producers do O(1) locked writes into `OutboundPlayState`; a `DispatchSourceTimer` on the link's own `userInteractive` serial queue — **off the main thread**, so UI stalls can't delay frames — emits at most ONE fresh state frame per tick (≤8.3 ms sampling age), events immediately. State enqueues replace any unsent frame of the same type (fresher = always safe); events never drop or reorder. Idle heartbeat every 250 ms; the far side marks the link **stale** after 1.5 s of silence and runs the kill path — which is **surgical**: `LinkIngest.linkDidDrop` releases only the touches and drones its OWN frames introduced, never the Mac's local-pad notes, and the peer's PANIC event routes through the same surgical path (a wire event must never have global blast radius — the 2026-08-14 staccato-loop lesson). Sequence gating (wrap-aware u16) dedupes the brief USB↔BLE overlap on plug/unplug. `kick()` is throttled to 1/s and the Mac's state pushes coalesce to ≥300 ms apart, so no caller bug can storm the wire with resync→push cycles again.
+
+**Lane selection is `MIDIEngine`'s existing wired-first rule** — there is no lane state machine in the link. The iPad sends via `sendSysExToLink` (real links only, never its own virtual loopback); the Mac sends via `sendSysEx(toDestinationsMatching: "iPad")` with `fallbackToAll` only for events. A CoreMIDI setup change (cable plugged/pulled, BLE session up) triggers `link.kick()` — re-HELLO + resync.
 
 ## Mac MIDI input (MIDIInput.swift)
 
 `MIDIInput` creates a CoreMIDI input port and `MIDIPortConnectSource`s every visible source on launch — and re-runs the connect pass whenever CoreMIDI fires a setup-changed notification, so plugging the iPad in mid-session brings it online automatically.
 
-**Every incoming MPE channel-voice byte funnels through `AudioEngine.sendHostedMIDI(...)`** (the name is kept for continuity), which routes it to the String voice via `routeSarangiModelMIDI` → the long-lived `BowControlMapper` (per-finger note identity + bend keyed by the status byte's channel nibble — the Starpad MPE divergence). All note sources funnel through `sendHostedMIDI` — real-iPad MPE (here), the Mac in-process Fret Pad, and the headless simulator — so this one hook captures everything. It also tracks the played note/bend and the latest CC11 per channel and publishes a thread-safe `performanceReadout()` (played pitch in Hz + commanded loudness 0–1) that the **Live tab** graphs poll — see [UI Layout — Live tab](ui-layout.md#live-tab).
+**Inbound SysEx is reassembled** (F0…F7 across packets/callbacks, realtime bytes skipped) and complete runs fire `onSysEx` → `TarabLink.receivedSysEx`: this is the tunnel's receive socket. The link decodes PERF_STATE frames and `LinkIngest` (TarabdaarCore) diffs them — removals → onsets/retriggers → glides, drone-mask edges, change-gated tilt — into `AudioEngine.touchOn/touchGlide/touchOff` and `setDronePressed`, all on the link queue (the CoreMIDI thread's old role; everything downstream is the same thread-safe path).
 
-One class of CCs never reaches any voice: **CC 102–104** are the Fret Pad's
-3 **drone buttons** (value ≥ 64 = pressed; CC 105 — the retired 4th slot —
-is still intercepted and dropped so an old iPad build can't leak it to the
-mapper). `sendHostedMIDI` intercepts them at
-the top and calls `AudioEngine.setDronePressed`, which drives the String
-voice's jawari-taraf drone rows (see [Fret Pad](fret-pad.md#drone-buttons-2026-07-23));
-they arrive identically from the iPad's buttons (over USB) and the Mac's own
-strip (in-process).
+**Channel-voice MIDI still flows** — for external controllers and the in-process paths — through `AudioEngine.sendHostedMIDI(...)` → `routeSarangiModelMIDI` → the long-lived `BowControlMapper` (`.midi` slot keys; the wire path uses `.touch` keys — same allocation/steal/legato laws, shared slots). The Live-tab `performanceReadout()` tracks both: touch-keyed bookkeeping reads exact semis, MIDI-keyed reads note+bend.
 
-A side observer runs alongside the forwarding: the **`onCC` callback** delivers every CC to `AppController`, which drives the composite-parameter slots (see the composites in the Controls tab). Composite-slot CCs are also consumed inside `sendHostedMIDI` (routed to `onCompositeCC` → `AppController.applyComposite`).
+Drone CCs 102–104 (value ≥ 64 = pressed; 105 swallowed) are still intercepted in `sendHostedMIDI` for the in-process path; on the wire the drones are `droneMask` bits in the state frame.
 
-## String-voice tilt axes
+## Joy-Con / game-controller input (Mac, 2026-08-05)
 
-**String-voice tilt axes (2026-07-23):**
-`routeSarangiModelMIDI` consumes three global CCs before the mapper —
-**CC71** taraf purity (0 buzzy … 127 pure), **CC73** taraf decay (0 natural
-… 127 choked), **CC72** tone tilt (0 bass … 64 flat … 127 treble). The iPad
-tilts emit them by default (see [sensors.md](sensors.md)); the values land
-on `StringVoiceSource` → `BowEngine` and survive engine rebuilds. Details
-in [sarangi.md](sarangi.md).
+A Bluetooth-paired **left Nintendo Switch Joy-Con** (or any GameController-framework device) is a supplemental Mac-side input — **`TarabdaarMac/JoyConInput.swift`**, wired in `AppController.start()`. It is purely additive: it feeds the exact funnels the iPad's MIDI stream feeds, so both inputs coexist (last writer wins) and nothing changes for the iPad when the controller is absent, asleep, or disconnected. No MIDI is involved — the calls go straight into the Mac process.
+
+- **Stick → tilts.** While deflected, the calibrated stick drives **tilt 1** (x) and **tilt 2** (y) directly (each −1…1 → 0…1, centre = 0.5) through `AppController.applyTiltAxis` — the same evaluation the iPad's raw tilt report (`TiltAxisWire`) drives, so the Controls-tab bindings apply unchanged. **Priority, not last-writer-wins (2026-08-05):** while deflected, the Joy-Con OWNS axes 1/2 — the iPad's writes to them are dropped (`joyConTiltActive`, `compositeLock`-guarded) so the two 60 Hz streams can't ping-pong; at rest the Joy-Con is silent and the iPad's stream flows through untouched. Sends are change-gated with ~9-bit quantization: full-mode reports arrive at 60 Hz whether or not anything moved, and unquantized 12-bit sensor noise kept resetting the debounced rebuild flush downstream (the "laggy tilts" bug). **Deflection gate (2026-08-05): per-axis, 0.1** — the neutral drifts a little between sessions, so an axis counts as deflected only at |v| ≥ 0.1, rescaled for continuity (0.1 → tilt 0.5, full → 0/1); below it the axis pins to exact centre (a steady 0.5 instead of drift wiggle), and both axes under threshold = rest (release to the iPad).
+- **Directional buttons → drone buttons.** The printed **← / ↓ / →** arrows press-and-release drone buttons **1 / 2 / 3** via `AudioEngine.setDronePressed` — identical to the CC 102–104 path above. **↑ is reserved** (unmapped).
+- **L → drone strum.** Plucks all three drone buttons with a 90 ms tanpura-style stagger; release rings them out (a generation counter cancels a quick tap's still-scheduled presses).
+- **ZL → tilt re-centre.** Drives tilt 1/2 back to 0.5 — the way back to neutral, since releasing the stick parks the tilts.
+
+**Grip rotation (2026-08-05):** macOS presents a lone Joy-Con in its SIDEWAYS orientation — stick axes in the sideways frame, the printed arrows delivered as A/B/X/Y by sideways placement (the sideways frame is the upright device turned 90° CCW). Tarabdaar's grip is **upright**, so `attach` rotates both back when the product category is a lone Joy-Con: stick `(x, y) = (y_os, −x_os)`, and A=↓, B=←, X=→, Y=↑. A paired L+R duo ("Joy-Con (L/R)") presents as a real gamepad and is not rotated.
+
+**The raw-HID side-channel (2026-08-05):** the lone-Joy-Con presentation is a `GCGamepad` that *omits L and ZL entirely* (Left/Right Shoulder are the rail's SL/SR) and delivers the stick as a **digital 8-direction hat** (`isAnalog == false`). The device itself offers more, so `JoyConInput.startHID()` runs an `IOHIDManager` in parallel (Nintendo VID + Joy-Con PIDs 0x2006/0x2007, main-run-loop callbacks). In the default **simple mode (0x3F)** only the button bytes are real (L/ZL = byte 2 bits 6/7 — the analog axis fields are constant-centre filler, measured), so on attach `requestFullMode()` sends the Joy-Con protocol's mode-switch (output report 0x01, neutral rumble bytes, subcommand `0x03 0x30`, retried until the first 0x30 arrives). **Full mode (0x30, 60 Hz)** then carries everything in the upright device frame: the left-side button byte (arrows + SL/SR + L/ZL → the same `Control` funnel, so the buttons survive even if the GC presentation goes quiet after the mode switch) and the **12-bit analog stick** (bytes 6–8), which then DRIVES the tilts — the GC hat handler stands down (`hidFullMode`) and tilt steering escapes the 8-direction quantization. The panel's "Raw HID" line shows the live report hex and the calibrated stick as "HID axes".
+
+**Switch 2 Joy-Con (2026-08-11, `JoyCon2BLE`):** Joy-Con 2 are **BLE-only with a vendor GATT protocol** — no Bluetooth-Classic HID, no HID-over-GATT — so macOS cannot pair them (they never appear in Bluetooth settings) and neither GameController nor IOHID sees them. Tarabdaar's own CoreBluetooth client owns the connection: scan broadly (the advertisement doesn't list the vendor service), filter on Nintendo's manufacturer-data company ID **`0x0553`** (their Bluetooth SIG identifier — NOT `0x057E`, the USB VID, which appears later in the payload with the PID; a live Joy-Con 2 (L) advertises `53 05 01 00 03 7e 05 67 20 …` with an EMPTY name, so the "joy-con" name fallback never fires), connect, subscribe to the input notify characteristic `AB7DE9BE-89FE-49AD-828F-118F09DF7FD2` on service `…7FD0`. Notifications carry buttons as a little-endian u32 at bytes 4–7 (left Joy-Con: dpad Down/Up/Right/Left = bits 16–19, SR 20, SL 21, L 22, ZL 23) and the left stick 12-bit-packed at bytes 10–12 (device frame, same packing as the classic 0x30 report) — protocol per the community RE ([Nohzockt/Switch2-Controllers](https://github.com/Nohzockt/Switch2-Controllers)). Everything feeds the SAME funnels (`setButton`, `processRawStick` → calibration → tilts); **recalibrate after switching controller generations** (one stored calibration, different electrical ranges). To connect the first time, hold the Joy-Con 2's sync button while the panel line reads "scanning"; reconnects rescan automatically. Requires `NSBluetoothAlwaysUsageDescription` (Info.plist) — macOS prompts once. After discovery, a **player-LED assignment** stops the "unassigned" light race: Joy-Con 2 ignore the classic `30 …` subcommand format entirely — commands use the **`0x91` framing on a dedicated command characteristic** (`649D4AC9-8EB7-4E6C-AF44-1EA54FE5F005`, acks on `C765A961-D9D8-4D36-A20A-5315B111836A`, subscribed first; per [trevlars/switch2-controllers-linux](https://github.com/trevlars/switch2-controllers-linux)). LED set = `09 91 01 07 00 04 00 00 <pattern> 00 00 00`, player-1 pattern `0x01` (re-sent on first input notification if the write raced discovery). **Motion (2026-08-11):** the same command channel enables IMU streaming — features init + enable (`0C 91 01 02/04 00 04 00 00 07 00 00 00`, flags `0x03 | motion 0x04`); the 63-byte notification then carries accel int16 LE ×3 at offset 0x30 and gyro ×3 at 0x36 (fields stay zero without the enable). Shown raw in the panel's IMU line (~10 Hz), scaled by the classic constants (±8 g → /4096, ±2000 °/s → /16.4 — approximate until measured).
+
+**THE ARM-ONLY TILT CALIBRATION (2026-08-13 evening, current)** — the Mac has **five bindable control axes** (`ControlAxes.dims`): **Arm ↕, Arm ↔, Arm ⟲** — the iPad's tilt report (streamed **continuously**, not just while a note sounds — actually true only since the 2026-08-13 bugfix: the iPad never assigned `NoteManager.midiEngine`, so the "continuous" report no-oped silently into nil and tilts only reached the wire from the pad's old touch-gated emitter, which is now deleted; `ContentView` wires the engine like the Mac's `IPadSimulator` always did) through the guided arm calibration below, or raw pitch/roll/yaw passthrough (uncentered) when uncalibrated — plus the stick's own **Stick X/Y** (per-axis 0.1 gate, centre written once on release). Every axis has exactly one source: the ownership/priority/blocking machinery is gone. History: the 2026-08-12 BODY-AXIS REWORK ran the same solve over R⁶ = [iPad tilts, Joy-Con fused gravity] with two extra WRIST sweeps and a `tilt4` axis; the wrist half was removed the next evening (`tilt4` keeps its `InputDimension` case so saved bindings decode), taking every Joy-Con dependency out of the tilt path — including the same-day IMU-liveness gate, which existed only because the solve used to tick off Joy-Con IMU reports.
+
+The three arm axes come from a **joint calibration** (`JoyConInput.BodyCal`, Setup panel "Calibrate arm tilts…", phases advanced by Next or **dpad-up**; "Redo previous" or **dpad-down** steps back one phase — clears the current partial capture and the previous phase's samples, everything earlier stands — dpad-down reverts to drone button 2 outside a running capture): a rest capture then three guided sweeps (arm ↕, arm ↔, arm rotation), **each starting from the rest pose** (ending at rest is good practice, not enforced). The rest pose is measured seven times — the rest phase plus each sweep's first/last ~0.25 s windows — and merged ROBUSTLY: component-wise median, inliers within `max(0.05, 2×median distance)`, mean of the inliers = `f0`. A player who can't reproduce the exact rest pose leaves off-rest readings in the set; they're rejected as outliers, never a redo. Each sweep's extents (and the both-ways check, live and at the fit) are judged against the sweep's own nearest-inlier reading — start or end, whichever is actually at rest; merged `f0` if neither is — so rest wander between phases neither biases the solve nor fails the capture. The fitted detail line reports how many readings agreed and the inlier spread. The panel also shows a **rotating 3D scatter of the capture, live while samples stream in** (2026-08-14, `CalCloudView`): the rest cluster (white) and the three sweep arcs (orange/green/cyan) in raw tilt space, slow turntable spin with depth-scaled dots, the current phase highlighted, and a white ring on the rest cluster's centre — how cleanly the arcs intersect at rest reads directly off the picture. Fed by `JoyConInput.calCloud` (~20 Hz decimated snapshots; the fit uses the full samples), with the turntable and the yellow "you are here" marker on a 60 Hz `TimelineView` that reads `liveArmPos` fresh each tick; the finished capture stays visible until the next one begins. Feature vector f ∈ R³ = the iPad's raw tilt report; each sweep's dominant direction by PCA (power iteration) **about the sweep's own mean** (2026-08-13 fix — taken about rest, a sweep whose average pose settled slightly off rest had its direction rotated toward the constant offset, so a genuine both-ways motion projected one-sided: the "+0.000 extents" failure); live coordinates from the joint least squares `c = (DᵀD)⁻¹Dᵀ(f − f0)` — non-perpendicular sweeps are separated by the solve. Extents are measured through the same solve and applied piecewise (asymmetric lo/hi → rest 0.5, extremes 0/1), absorbing first-order nonlinearity. A sweep that doesn't cross rest both ways, or two near-identical sweeps (≥95% direction alignment, with the singular-Gram inversion as backstop), discards the capture — the message **names the offending sweep(s)** and the alignment percentage. The panel also gives feedback DURING the capture (2026-08-13): live sample counts per phase, refusal to advance an under-sampled phase, and an instant per-sweep verdict on advance (samples, both-ways with the measured ± extents, % alignment against every earlier sweep). A fatal sweep — one-sided relative to rest, or ≥95% aligned with an earlier one — **clears itself and repeats on the spot** rather than letting the run continue toward a guaranteed discard; 80–95% alignment warns but advances. One-sided almost always means the rest pose sat at one END of that motion's range (the both-ways check is relative to the captured rest, not to the sweep's own midpoint) — re-start with a mid-range rest pose. After a successful fit the panel reports the closest sweep pair and its alignment; some alignment is expected, since the three arm motions overlap in attitude space. Persisted under `tarabdaar.armCal.v1` (the retired 6-dim `tarabdaar.bodyCal.v1` blob is ignored); **ZL re-zeroes the rest pose** without re-fitting; uncalibrated, the iPad's raw axes pass through to axes 0–2, uncentered. **The capture and the live solve tick off the tilt stream itself** (`feedArmTilt` → `armTick`, hopped to main) — no Joy-Con involvement anywhere in the tilt path. Incoming messages are **frame-coalesced (2026-08-14)**: the wire carries one axis per message, so a single report arrives as up to three messages a few hundred µs apart, and sampling the vector at each one records TORN frames — measured on a circular motion, the per-message trail was 100% axis-aligned segments (mean turn 90°, a staircase) vs 0% and 4° once bursts within 4 ms merge. Messages inside the gap update the current frame in place; trail, capture and smoothing all see atomic frames. The arm features are then **EMA-smoothed per frame (α 0.25, 2026-08-14)** before the solve, the capture and the panel marker: the report is 7-bit-quantized attitude and a resting arm flickers ±1–2 steps across quantization boundaries, which the solve's Gram-inverse rows amplify (more with sweep cross-talk) into visibly jittering control axes. ZL re-zero also reads the smoothed vector. **2026-08-13: this is the app's SINGLE tilt calibration** — the legacy 7-point iPad calibration was deleted (its per-axis projection was an affine map the joint solve learns anyway), so the feature vector is raw attitude at a fixed ±90° scale (`MotionManager.normalizedTilts`: pitch/roll/yaw). **The wire is a 16-bit state-frame field (2026-08-14 evening, TLP)** — the tilt rides in every PERF_STATE frame, atomic with pitch (the same-day 14-bit MSB/LSB CC pair, which fixed the earlier 7-bit square-wave flicker at 1.4°/step, lived a few hours before the TLP cutover subsumed it; the in-process CC decode survives for audition scores). The frame-coalescing above predates TLP's atomic frames and is now belt-and-braces. The link's **250 ms heartbeat** keeps stillness distinguishable from disconnection; `LinkIngest` change-gates before bindings. The Joy-Con display is the `JOYCON_STATE 0x41` frame (stick + wrist axes at 8-bit, flags bit 0 stick live, bit 1 body live, bit 2 = a Joy-Con is attached; see below) — the iPad's third (wrist) square sits idle since the wrist axes were removed.
+
+**Stick calibration (2026-08-05, `JoyConInput.StickCal`):** the stick's gate is roughly a circle around an off-centre rest (the in-hand neutral is not the flat-on-table rest), so per-axis min/max can never send a diagonal to (±1, ±1) — the rim at 45° reaches neither axis extreme. Instead the **rim is calibrated as a radius per angle bin** (16 bins) and mapped **circle → square** at runtime: radius normalized by the interpolated rim radius at that angle, then the direction scaled so the larger component reaches 1 — rest → tilts (0.5, 0.5), rim in any direction = full deflection, diagonal rim = (1, 1). The panel's **Recalibrate stick** button runs the two-phase capture (phase 1, ~half a second: hold the stick at rest in the playing grip; phase 2: **sweep a full circle along the rim**, then **Done** — any rim segment left unswept, radius < 150 raw units, discards the capture, and the panel counts segments live). The result persists in `UserDefaults` (`tarabdaar.joyconStickCal.v2`); the stick doesn't drive the tilts while a capture runs. Uncalibrated fallback: rest from the first 24 samples after attach + a fixed 1400-unit span.
+
+**The alias trap (2026-08-05, the launch bug):** a `GCPhysicalInputProfile` names one physical element under several keys — a lone Joy-Con's stick appears as BOTH `Left Thumbstick` and `Direction Pad`. Binding the d-pad without an identity check turns stick deflection into button presses (the stick plucked drones). `attach` resolves the stick first and binds a Direction Pad's buttons only when it is a **distinct element** (`dpad !== stick`); the physical directional buttons still arrive via the A/B/X/Y bindings.
+
+**iPad mirror (2026-08-05; TLP frame since 2026-08-14):** the iPad toolbar shows a second tilt square (`JoyConTiltPane`, next to the iPad's own `TiltBars`) mirroring the Joy-Con stick, so every tilt source is visible at a glance while playing. Fed by the Mac's `JOYCON_STATE 0x41` state frame — latest-wins, paced/coalesced by the link, 250 ms heartbeat floor — sent via `AppController.sendJoyConDisplay` → `link.setJoyConState` on each (already change-gated) stick update. Name targeting is the link's ("iPad" match, BLE bypass — see the BLE-MIDI section). **Display-only except one bit (2026-08-13)**: nothing persists; the axes and liveness flags are pure display — `ScaleSyncReceiver.joyConTilt` publishes them and the pane dims when the stick is at rest (the iPad's own motion then owns the tilts); while the stick is active the iPad's own `TiltBars` square grays out instead — exactly one square is bright at a time, showing which source is live. The exception is flags **bit 2, `connected`** (a Joy-Con is attached to the Mac): the iPad's Fret Pad ACTS on it, hiding its drone buttons in step with the Mac surface while the controller plays the drones (see [fret-pad.md](fret-pad.md)). That bit rides EVERY frame and the heartbeat floor guarantees its edges arrive — the old force-resend-on-attach/disconnect dance is gone (`force` on connect edges just skips pacing).
+
+**Game Controller panel (Setup tab ⌘7, `JoyConStatusView`):** the monitor for all of this — connection status, the profile's element inventory with aliases grouped (`Direction Pad / Left Thumbstick` on one line = one element, two names), the raw stick x/y with a driving-tilts/deadzone indicator, the six `Control` chips lighting while held, and the last raw element event as the OS names it (so an unmapped or oddly-aliased input can be identified). Stick/raw-event publishes are throttled to ~15 Hz. Below it, the **"Received motion (3D)"** view (the iPad-overlay twin, see [sensors.md](sensors.md)) redraws from a **60 Hz `TimelineView`, reading the live trail (`JoyConInput.liveTrace`) fresh inside each tick** rather than a throttled `@Published` snapshot — the trail moves at the wire rate, matching the iPad overlay's smoothness (the old 12 Hz `rawTrace` publish was the visible frame-rate gap). Beside it, **"Received acceleration (3D)"** draws the PERF_STATE accel fields the same way (origin-centred, fixed ±0.5 g scale, `JoyConInput.liveAccelTrace` via `LinkIngest.onAccel`). The "Raw tilt stream" scope and the "Control axes" readout (`AppController.tiltReadout` and its 15 Hz timer) were removed 2026-08-14.
+
+**Joy-Con IMU panels (2026-08-14):** while a controller streams motion, the panel shows the Joy-Con's own **gyroscope** (raw rate, device frame, fixed ±360 °/s) and **accelerometer** (raw, INCLUDES gravity — at rest the vector rides the 1 g sphere; fixed ±2 g) as the same origin-centred turntable trails, plus a **magnetometer** panel that appears only when non-zero data arrives (Joy-Con 2 only; classic Joy-Cons have no magnetometer, and the community-RE mag offset at 0x3C is UNVERIFIED — the length + non-zero gates keep a wrong guess invisible). Sources: the classic Joy-Con's 0x30 report carries three 5 ms-spaced IMU frames at byte 12 (accel i16×3 at 1 g = 4096 LSB, gyro i16×3 at 16.4 LSB/°/s) but streams zeros until **subcommand 0x40 arg 0x01** enables the IMU — sent once full mode is confirmed, retried until non-zero motion arrives; the Joy-Con 2's BLE notification carries the same scales at 0x30/0x36 and was already parsed for the fusion. Buffers are unpublished (`liveJoyConGyro/Accel/Mag`), read by the same 60 Hz `TimelineView` pattern as the received views; `jcIMUActive`/`jcMagActive` flip once on the first non-zero sample to gate the panels.
+
+`JoyConInput` attaches one controller at a time (first to appear; on disconnect it falls over to any other paired controller) and sets `GCController.shouldMonitorBackgroundEvents` so it keeps working while another app has focus. Handlers fire on the main queue; both downstream funnels are thread-safe.
 
 ## Audio graph
 
@@ -61,123 +89,83 @@ See [Sound Design](sound-design.md) for the String voice's DSP details.
 
 ## MIDI Engine (MIDIEngine, iPad)
 
-### Initialization
+`MIDIEngine` is the tunnel's **byte pump**, not an MPE emitter any more. It owns the CoreMIDI client, the wired/BLE destination classification and the wired-first rule (below), and two send paths:
 
-MIDI setup is deferred to `onAppear` (not `init`) because the iOS MIDI server may not be ready at app launch. The engine retries up to 3 times with increasing delays.
+- **`sendSysExToLink`** — the TLP tunnel: the frame goes only to the real link (wired first, BLE otherwise), never to virtual endpoints (the device's own "Tarabdaar Scale" receiver would loop it back).
+- The channel-voice senders (`sendNoteOn`/`sendPitchBend`/…) survive **for the in-process bus only** (`publishToCoreMIDI: false` + `onLocalEvent`) — the substrate of the audition scripts and `IPadSimulator`. Nothing sends them to the wire.
 
-Two endpoints are created:
-- **Virtual source** ("Starpad Output"): for on-device apps to receive from
-- **Output port**: for direct send to all external destinations (Mac over USB)
-
-Every MIDI message is sent through both paths simultaneously.
-
-### MPE Configuration
-
-At startup, the engine sends an MPE Zone configuration on the master channel (channel 0):
-- RPN 0x0006 with value 15 = 15 member channels (1-15)
-
-### Per-Note Channel Rotation
-
-Each `activateChannel` call in NoteManager allocates the next MIDI channel via round-robin (1 → 2 → ... → 15 → 1). This ensures:
-- Pitch bends on a new note don't affect reverb tails of previous notes
-- Each note has independent aftertouch
-
-On first use of a channel, a pitch bend range RPN is sent to set ±48 semitones (`Config.midiPitchBendRange`). `NoteManager` caches per-channel after that. On the Mac, the String voice's `BowControlMapper` reads `Config.midiPitchBendRange` directly (per-channel bend, the Starpad MPE divergence), so a ±48 bend maps correctly with no AU-parameter round-trip.
-
-### Pitch Bend Calculation
-
-```
-baseSemitone = MIDI note number of the original noteOn
-currentSemitone = 12 * log2(currentFreq / 440) + 69
-offset = currentSemitone - baseSemitone
-normalizedBend = clamp(offset / pitchBendRange, -1, 1)
-midiValue = 8192 + int(normalizedBend * 8191)
-```
-
-The `baseNote` is set once at channel activation and never changes during the note's lifetime. All pitch movement is expressed as pitch bend relative to this base.
-
-### Channel Pressure (Aftertouch)
-
-Tilt expression is sent as channel pressure (0xD0):
-```
-pressure = clamp(tiltUp * 127, 0, 127)
-```
-
-This is the MPE standard for per-note continuous expression.
-
-### Message Types Sent
-
-| Message | Status | Usage |
-|---------|--------|-------|
-| Note On | 0x90 | Channel activation |
-| Note Off | 0x80 | Channel release |
-| Pitch Bend | 0xE0 | Continuous pitch (glide + finger movement) |
-| Channel Pressure | 0xD0 | Tilt expression |
-| Control Change | 0xB0 | RPN setup, dimension-routed CCs, all-notes-off (panic) |
+Setup is deferred to `onAppear` (the iOS MIDI server may not be ready at launch; 3 retries). The virtual source "Tarabdaar Output" and the MPE zone init still exist for the in-process path's benefit and for any external host that listens, but the iPad's PLAYING no longer emits MPE: `PitchPadEngine` writes touches (exact fractional-MIDI pitch, no channel, no bend quantization, no 15-channel cap) into `OutboundPlayState`, and `NoteManager`'s 60 Hz tick writes tilt into the same snapshot — `TarabLink` paces it all onto the wire as PERF_STATE frames (see the TLP section above).
 
 ## Connecting iPad to Mac over USB
 
 1. Connect the iPad to the Mac via USB cable.
 2. On the Mac: open **Audio MIDI Setup → Window → Show MIDI Studio**, double-click the iPad icon, and enable it.
-3. Launch the Starpad app on the iPad and the StarpadMac app on the Mac. The Mac's top-bar pill should turn green and show `MIDI: N src` once it sees the iPad as a source. The first MIDI Note On from the iPad plays the String voice on the Mac immediately.
+3. Launch the Tarabdaar app on the iPad and the TarabdaarMac app on the Mac. The Mac's top-bar pill should turn green and show `MIDI: N src` once it sees the iPad as a source. The first MIDI Note On from the iPad plays the String voice on the Mac immediately.
 
 That's it — no Bonjour pairing, no IP addresses. Each side keeps its own settings; only MIDI flows between them (plus the one scale-sync SysEx below).
 
+## Connecting over Bluetooth (BLE-MIDI, 2026-08-12)
+
+The cable is optional: the same TLP tunnel runs over a standard **Bluetooth LE MIDI** session, freeing the playing arm from the USB-C cable. The BLE session is an ordinary CoreMIDI endpoint pair, and the Mac's `MIDIInput` reconnects all sources on every setup-change notification, so it's picked up on both sides the moment it appears. (BLE-MIDI is kept as the bearer DELIBERATELY: Apple's stack gives its own MIDI service a privileged ~11.25 ms connection interval; a custom app GATT link floors at 15 ms with no API to request lower, so replacing the session would have REGRESSED wireless latency. The tunnel's coalescing removes BLE-MIDI's real weakness — per-message queue buildup under load — instead.)
+
+1. On the iPad: tap the **antenna button** at the right end of the pad toolbar and enable **Advertise** in the system sheet (`CABTMIDILocalPeripheralViewController`; requires the `NSBluetoothAlwaysUsageDescription` in the iOS Info.plist — iOS prompts once).
+2. On the Mac: **Audio MIDI Setup → Window → Show MIDI Studio → Bluetooth** (the Bluetooth toolbar icon), find the iPad in the list, click **Connect**.
+3. The Mac pill turns green as usual; play. The session is per-run — after relaunching either side, re-advertise and reconnect.
+
+**Transport indicators (iPad toolbar):** a USB icon (`cable.connector`) sits next to the antenna, fed by `MIDIEngine`'s per-transport destination counts (`wiredDestinationCount` / `bluetoothDestinationCount`). Color carries the state — **green = the transport currently carrying the MIDI** (wired-first, so USB is green whenever the cable is in), **white = connected but idle** (e.g. Bluetooth paired while the cable is plugged), **dim gray = absent**. Exactly one icon is green whenever any destination exists, so a glance shows both what's connected and what's live.
+
+**Wired-first, automatic (2026-08-12):** both transports can be connected at once — `MIDIEngine` sends each message over exactly ONE of them. Destinations classify three ways by `kMIDIPropertyDriverOwner` (checked at endpoint/entity/device level): **Bluetooth** (the Apple Bluetooth MIDI driver), **wired** (any other driver — the USB/IDAM bridge, IAC, network), and **virtual** (no driver owner — endpoints published by apps, including the iPad's own "Tarabdaar Scale" scale-sync receiver). Virtual destinations are always targeted and count as neither link — classifying them as wired once made the iPad's own scale receiver suppress the Bluetooth link entirely (lit USB indicator, no sound). Between the real links, Bluetooth is used only when no wired destination exists, so USB carries the traffic while the cable is in and Bluetooth takes over the moment it's pulled; plugging back in switches back. The switch rides the CoreMIDI setup-change notification (`refreshEndpointCounts` re-partitions a cached destination snapshot — the 60 Hz send path never re-queries endpoint properties). Without the rule, both transports live would deliver every message twice. `sendSysEx` applies the name filter across ALL destinations first and the wired-first rule within the matches, so a Bluetooth-only iPad still receives the scale sync even when unrelated wired destinations (IAC, other gear) exist.
+
+Caveats:
+
+- **Latency**: BLE-MIDI rides the ~11.25–15 ms BLE connection interval, so expect roughly 10–20 ms added over USB's ~1–3 ms on the transport hop. The tunnel keeps at most one fresh state frame in flight, so the old failure mode — bend/CC storms queueing behind themselves and latency creeping — is gone; the Mac's `TarabLink:` Console lines report measured RTT (ping/pong) for judging a given room/radio. Judge feel on the instrument.
+- **No name crosses a BLE-MIDI link**: the Mac sees the session as a generic endpoint (measured: `display='iOS Bluetooth'`), so `sendSysEx`'s destination-name filter can never identify the iPad over Bluetooth. Bluetooth destinations therefore **bypass the name filter** — a BLE-MIDI session in this rig is only ever the iPad link, so transport is the identification; wired-first still routes to the cable when both are up. The Mac's TLP sends match `"iPad"` (the USB-bridged device name), with the send-to-all fallback for events only.
+
 ## Scale sync (Mac → iPad)
 
-StarpadMac is the scale **editor**; the iPad is the **performer**. The Mac
-pushes the playing scale to the iPad over the same USB cable as a MIDI
-**SysEx** message — plus the **Fret Pad's fret arrangement** as its own SysEx
-message (`F0 7D 03` `FretArrangementSysEx` — see [Fret Pad](fret-pad.md)).
-These two are the only non-MPE, cross-device data Starpad sends.
+TarabdaarMac is the scale **editor**; the iPad is the **performer**. The Mac
+pushes the playing scale and the **Fret Pad's fret arrangement** as TLP
+events (`SCALE_STATE 0x10` / `FRET_ARRANGEMENT 0x11` — see [Fret
+Pad](fret-pad.md)); these two remain the only cross-device **state**. The
+Joy-Con tilt display rides the `JOYCON_STATE 0x41` state frame (see the
+Joy-Con section above).
 
-(A fourth message, `F0 7D 04 TiltMappingSysEx`, briefly pushed tilt
-bindings to the iPad; it was **deleted 2026-07-24** when the iPad stopped
-evaluating parameters altogether. Tilt bindings are now purely Mac-local —
-the iPad streams only its raw tilt report and the Mac evaluates. Subtype
-`0x02`, the old String-Pad arrangement, is likewise unused.)
+(The legacy per-message SysEx subtypes `0x01`/`0x03`/`0x05` retired into
+the tunnel 2026-08-14; `0x02` and `0x04` were deleted 2026-07-24 and stay
+dead. The `F0 7D 10` TLP envelope is the ONLY SysEx either side sends.)
 
-- **Encoding** (`PitchScaleSysEx`, StarpadCore, blob `version 4`): `F0 7D 01
-  <payload> F7`, where `7D` is the non-commercial SysEx ID, `01` the "scale"
-  subtype, and the payload is base64 (7-bit-safe) of a **compact binary** blob
-  (`[ver][tonic][tonicCents14][margin][layout][count]` then per point
-  `num/den` as 14-bit pairs, `y`, `enabled`, and a length-prefixed UTF-8
-  label) — kept small so it clears the iOS USB-MIDI SysEx bridge comfortably.
-  The synced state is a `SyncedScaleState` = the scale plus `tonicMidi`,
-  `tonicCents`, `marginPixels`, and `layout` (`PadLayout` — always `.fretPad`
-  now; the enum keeps its other cases for blob compatibility but only the
-  Fret Pad exists on either side). **v4 (2026-07-25) added the fractional
-  tonic** — the tonic is set in Hz on the Mac (the app's one Hz input) and
-  rarely lands exactly on a MIDI note, so the blob carries a ±50 ¢ refinement
-  as 14-bit centi-cents; without it the iPad would play up to a quarter-tone
-  off the Mac's tarab. Older blobs are rejected (both apps ship the format
-  together, like the fret-arrangement blob).
-- **iPad receive** (`ScaleSyncReceiver`, StarpadCore): a virtual CoreMIDI
-  **destination** named "Starpad Scale" so the Mac sees the iPad as a MIDI
-  destination. It reassembles SysEx across packets (`F0`…`F7`), decodes, and
-  calls `PitchPadEngine.applySyncedState` — which panics on a scale or
-  layout change (so a note isn't stranded on a vanishing cell), swaps the
-  scale/tonic/margin/layout, and persists the state to `SyncedScaleStore`
-  (UserDefaults) so it survives an offline relaunch.
-- **Mac send** (`AppController` + `MIDIEngine.sendSysEx`): Combine
-  subscriptions push on every `pitchPad.scale` / `tonic` / `margin` / `layout`
-  edit (debounced ~300 ms) and whenever a destination appears (iPad connect).
-  `sendSysEx` targets only destinations whose name contains "Starpad Scale",
-  so the blob doesn't hit other gear.
+- **Encoding**: the event payloads are the SAME binary blobs the SysEx era
+  used — `PitchScaleSysEx.encodeBlob` (blob v4:
+  `[ver][tonic][tonicCents14][margin][layout][count]` then per point
+  `num/den` 14-bit pairs, `y`, `enabled`, length-prefixed UTF-8 label) and
+  `FretArrangementSysEx.encodeBlob` (v6) — carried raw, no base64. The
+  synced state is a `SyncedScaleState` = the scale plus `tonicMidi`,
+  `tonicCents` (±50 ¢ at 0.01 ¢ — the tonic is set in Hz on the Mac and
+  rarely lands on a MIDI note), `marginPixels`, and `layout` (`PadLayout`
+  — always `.fretPad` now; the enum keeps its other cases for blob
+  compatibility). Older blob versions are rejected; both apps ship the
+  format together.
+- **iPad receive** (`ScaleSyncReceiver` + `TarabLink`): the receiver keeps
+  its CoreMIDI plumbing (input port on all sources + the "Tarabdaar Scale"
+  virtual destination) purely as the tunnel's reassembler — complete
+  `F0 7D 10` runs route to `TarabLink`, decoded events call back into the
+  receiver's appliers, which publish and persist EXACTLY as before
+  (`SyncedScaleStore` / `FretArrangementSyncStore`, byte-identical
+  UserDefaults blobs — no migration). `PitchPadEngine.applySyncedState`
+  panics on a scale/layout change (no note stranded on a vanishing cell)
+  and swaps scale/tonic/margin/layout.
+- **Mac send** (`AppController` + `TarabLink`): Combine subscriptions push
+  on every `pitchPad.scale` / `tonic` / `margin` / `layout` edit (debounced
+  ~300 ms) and whenever a destination appears (iPad connect); the iPad also
+  explicitly asks via `RESYNC_REQUEST` on link-up.
 
-One-way Mac→iPad; the iPad has no scale editor. The synced state includes
-the **tonic** (which MIDI note 1/1 maps to) and the **margin** (the Fret
-Pad's Snap distance), both set on the Mac (the iPad's tonic readout is
-read-only). The iPad performs the Fret Pad. The iPad persists the last synced
-state (`SyncedScaleStore`, UserDefaults) and opens on it after an offline
-relaunch.
+One-way Mac→iPad; the iPad has no scale editor. The iPad persists the last
+synced state and opens on it after an offline relaunch.
 
-### Routing iPad MIDI to other hosts (Ableton, etc.)
+### External MIDI hosts
 
-The iPad acts as a standard USB-MIDI controller, so the same cable can drive any MPE-aware DAW alongside the Mac. In Ableton, for example:
-
-1. Open **Preferences → Link, Tempo & MIDI** and enable the iPad MIDI input (Track on).
-2. Set the destination instrument's pitch bend range to ±48 semitones.
-3. Enable MPE on the track so per-note pitch bend works.
+The iPad's MPE wire stream retired with the TLP cutover (2026-08-14), so
+the iPad no longer drives third-party DAWs directly. The Mac still accepts
+external MPE controllers on `MIDIInput`'s channel-voice path.
 
 If using Ableton's "Note PB" mode, pitch bends are automatically per-note when MPE is enabled.

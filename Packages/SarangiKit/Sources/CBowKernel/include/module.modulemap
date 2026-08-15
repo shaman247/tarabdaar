@@ -1,0 +1,5 @@
+module CBowKernel {
+    header "bow_kernel.h"
+    header "tanpura_kernel.h"
+    export *
+}

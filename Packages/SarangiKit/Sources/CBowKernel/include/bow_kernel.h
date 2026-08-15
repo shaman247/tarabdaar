@@ -16,7 +16,7 @@
  *
  * There used to be a second, MONO kernel here (bow_kernel.c, ~2800 lines)
  * whose only purpose was byte-parity with the offline Python render's C
- * source. Starpad never ran it — the live voice is always polyphonic — and
+ * source. Tarabdaar never ran it — the live voice is always polyphonic — and
  * it was deleted with the rest of the upstream-parity machinery
  * (2026-07-24) along with its ~18 mono entry points.
  */
@@ -82,7 +82,7 @@ void bow_poly_jt_pluck(void *vst, int s, double amp);
 void bow_poly_jt_drone_env(void *vst, double atkSec, double relSec, double onsetDecaySec);
 void bow_poly_jt_drone_tone(void *vst, double lpHz, double hpHz, double toneMix);
 
-/* MELODY-FOLLOWER row (Starpad 2026-07-25): one modal-jawari row live-
+/* MELODY-FOLLOWER row (Tarabdaar 2026-07-25): one modal-jawari row live-
    retunes to the played pitch. track_config arms row `row` (call at engine
    build off the audio thread, or again after bow_poly_jt_set_coeffs to
    refresh the law constants — re-arming the same row keeps its current
@@ -106,7 +106,7 @@ void bow_poly_jt_track_target(void *vst, double hz);
 void bow_poly_jt_set_lp(void *vst, double a);
 void bow_poly_jt_set_damp_t60(void *vst, double t60);
 
-/* jt tone HP (Starpad 2026-07-26): one-pole high-pass on the radiated jt
+/* jt tone HP (Tarabdaar 2026-07-26): one-pole high-pass on the radiated jt
    sum, applied AFTER the tone LP inside the same output walk — the
    jawari-formant voicing (quiets the taraf's fundamental band under the
    high-harmonic cluster; pairs with the `bow_jt_tap` radiation tap).
@@ -115,7 +115,7 @@ void bow_poly_jt_set_damp_t60(void *vst, double t60);
    coefficient moves. Plain scalar write, any thread. */
 void bow_poly_jt_set_hp(void *vst, double a);
 
-/* jt BODY radiation mix (Starpad 2026-08-01): 0..1 blend of the radiated
+/* jt BODY radiation mix (Tarabdaar 2026-08-01): 0..1 blend of the radiated
    jt sum through the SAME formula-body radiation bank the played strings
    radiate through (shared coefficient arrays, own filter state — mid +
    side twins inside the jt output walk, applied BEFORE the tone LP/HP).
@@ -125,7 +125,7 @@ void bow_poly_jt_set_hp(void *vst, double a);
    is byte-null. NOT part of the load ABI. */
 void bow_poly_jt_set_body(void *vst, double mix);
 
-/* HARMONIC-EVOLUTION lift (Starpad 2026-07-26): a SIGNED vertical bone
+/* HARMONIC-EVOLUTION lift (Tarabdaar 2026-07-26): a SIGNED vertical bone
    offset in meters (+ = bone dropped — the graze margin shrinks and the
    twang cascade opens; − = raised — the wrap presses past the knee, no
    twang). Slewed inside the kernel (~40 ms, once per divided jt sample)
@@ -136,7 +136,7 @@ void bow_poly_jt_set_body(void *vst, double mix);
    map (apex · (1 − 4^(1−2e))). Clamped ±1e-3. 0 at rest = byte-null. */
 void bow_poly_jt_set_evolve(void *vst, double meters);
 
-/* RECRUITMENT weights (Starpad 2026-07-26): per-row scale on the BRIDGE
+/* RECRUITMENT weights (Tarabdaar 2026-07-26): per-row scale on the BRIDGE
    drive into each modal-jawari string — the taraf-selectivity axis. The
    host computes each row's harmonic kinship to the currently played
    pitches and writes the weights here (plain per-row scalar stores, the
@@ -193,9 +193,49 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
    outS = NULL, or never arming, is the mono path (bow_poly_process wraps
    it). */
 void bow_poly_set_stereo(void *vst, const double *webPan, int nWeb, const double *jtPan, int nJt, const double *slotPan, int nSlot);
+
+/* TARABDAAR SITAR TWANG (2026-08-01): a grazing jawari WRAP on the PLAYED
+   strings' bridge termination — the sitar's flat-bridge contact on the
+   melody string itself (the jt taraf's bones are untouched). While an
+   excursion tip presses past the graze knee (per-side peak envelopes,
+   so the graze engages at ANY strike level — the bow_jt_evolve
+   consistency lesson), the bridge segment SHORTENS by a smoothed
+   rolling-contact offset (the web's v2 roll idiom): a per-cycle,
+   energy-CONSERVING phase modulation that pumps the harmonic cascade
+   round trip by round trip (a subtractive fold alone measured as buzz
+   + a choked ring), plus a light hysteretic contact-loss fold.
+   set_twang is the live 0..1 amount (plain scalar store, any thread —
+   the drone-setter contract; slewed ~30 ms in-kernel; 0 from a cold
+   start / never calling is byte-null, a live 0 self-disarms after the
+   slew). set_twang_shape is the OFFLINE fitting hook (the
+   bow_jt_set_lift precedent): kneeR = graze knee as a fraction of each
+   side's peak envelope, depth = the contact-loss fold slope, relMs =
+   the envelope's release (attack is instant), rollSmp = the wrap's
+   length shortening in kernel samples at amount 1, bright/ring/gut =
+   the sitar-morph strengths (termination brightening exponent, release-
+   damping ease, gut-loss ease — the wrap alone cascades into
+   terminations that reabsorb HF within tens of ms); non-positive keeps
+   the fitted defaults. */
+void bow_poly_set_twang(void *vst, double amt);
+void bow_poly_set_twang_shape(void *vst, double kneeR, double depth,
+                              double relMs, double rollSmp,
+                              double bright, double ring, double gut);
+
+/* TARABDAAR INSTRUMENT WIDTH (2026-08-01 unifying rev): hear the ONE
+   instrument from TWO observation points — a dense random-sign
+   diffuse-field difference bank (700 Hz - 6.5 kHz, directivity-ramped)
+   on the complete radiated output, run once per bus (voice, jt wash;
+   shared coefficients, per-bus state — linearity keeps the split FX
+   buses' side streams valid). The whole stereo law in one knob:
+   interaural coherence falls with frequency like a real instrument's,
+   with zero net lean (not a pan, not Haas/detune). width 0..1 is
+   slewed ~30 ms render-side; 0 from a cold start / never calling =
+   byte-null. Rides the bow_poly_set_stereo side stream (outS non-NULL
+   + stOn). */
+void bow_poly_set_stereo_width(void *vst, double width);
 void bow_poly_process2(void *vst, int n, int stride, const double *f0, const double *vb, const double *fb, const double *beta, const double *gate, const double *xv, double *out, double *outS);
 
-/* STARPAD FX INSERTS (2026-08-01). Two byte-null-by-default hooks for the
+/* TARABDAAR FX INSERTS (2026-08-01). Two byte-null-by-default hooks for the
    host FX rack:
 
    bow_poly_set_drive_fx — the "voice → taraf" insert: `fn` is called on

@@ -8,10 +8,10 @@
 > the linear sympathetic taraf web; and finally — once the package stopped
 > being a vendored copy of `~/Desktop/sarangi` — the additive violin voice,
 > the byte‑parity **mono kernel**, and 3.4 MB of offline goldens. Mac tabs:
-> Live ⌘1 · Tarab ⌘2 · Fret Pad ⌘3 · Controls ⌘4 · Parameters ⌘5 · FX ⌘6 · Setup ⌘7.
+> Live ⌘1 · Strings ⌘2 · Fret Pad ⌘3 · Controls ⌘4 · Parameters ⌘5 · FX ⌘6 · Setup ⌘7.
 
-Starpad's sarangi is **`SarangiKit`** (`Packages/SarangiKit/`), which began as
-a port of the Sarangi Live project (`~/Desktop/sarangi`) and became Starpad's
+Tarabdaar's sarangi is **`SarangiKit`** (`Packages/SarangiKit/`), which began as
+a port of the Sarangi Live project (`~/Desktop/sarangi`) and became Tarabdaar's
 own code when the upstream link was cut on 2026‑07‑24. The played voice is the
 **String instrument**: a GENERIC PURE‑PHYSICS bowed gut string —
 **`BowEngine`** running the **C friction kernel** (`CBowKernel`,
@@ -21,15 +21,18 @@ Python render's C source) at 96 kHz, decimated to 48 kHz, with:
 - a **formula body** (modal resonators from physical scalars — no fitted FIR,
   no fingerprint mask, no coupled/chain artifacts),
 - the **modal‑jawari taraf fused in‑kernel** (`bow_jt_*`: the grazing‑bone
-  modal‑contact physics validated by the upstream tanpura campaign; armed by
-  default via `bow_jtaraf_on 1`, running ASYNC one‑block‑late on its own
-  worker pool so the audio callback never waits). Since the **2026‑07‑22
+  modal‑contact physics validated by the upstream tanpura campaign; **always
+  on** — the `bow_jtaraf_on` arming switch was removed 2026‑08‑02, since the
+  block IS the sympathetic response and its only other setting was "no taraf
+  at all"; the block builds whenever there are enabled tarab rows, running
+  ASYNC one‑block‑late on its own worker pool so the audio callback never
+  waits). Since the **2026‑07‑22
   J8z6 update** the shipping jt config is **J8/zone6**: `bow_jt_J` 8
   with the new `bow_jt_zone` 0.006 key (default 0.010 = legacy) — the
   contact lives in ~6 mm around the apex, so a narrowed zone concentrates
   the modes on the active region (`BowTables.buildJawariTables` reads it;
   upstream measured J8z6 closer‑to‑converged than the old J16 at 10 mm and
-  ~24% cheaper). **2026‑07‑23 warmth knobs** (Starpad‑local; every default =
+  ~24% cheaper). **2026‑07‑23 warmth knobs** (Tarabdaar‑local; every default =
   the previously hardcoded value, so untouched artifacts sound byte‑identical):
   `bow_jt_hcb` (contact hysteresis damping, legacy 8 — more = rounder buzz
   pulses), `bow_jt_fhf` (the per‑mode f² damping‑law corner, legacy 4000 Hz —
@@ -88,8 +91,32 @@ Python render's C source) at 96 kHz, decimated to 48 kHz, with:
   body formants and the wash didn't, which is a large part of why the
   taraf read as a separate backing chorus rather than the same
   instrument,
-- **runtime parameters (2026‑07‑23/24; composite rework, then the
-  2026‑07‑24 unification)** — RUNTIME playing controls (no rebuild),
+- the **taraf bridge‑coupling web** (2026‑08‑01, the coherence rev's
+  TWO‑WAY fix): one SILENT linear comb per enabled tarab row back on
+  the passive wave junction (`bow_cpl_*`, group "Taraf coupling";
+  default `bow_cpl_z` 0 = byte‑null) — no buzz terms, no radiation
+  tap, no polarization doublets; a row's only output is the junction
+  itself. The played strings finally FEEL the taraf as a load: a note
+  at a kin pitch drains into its rows (sympathetic absorption), the
+  rows store the energy and return it through the body (the release
+  bloom a one‑way drive cannot make), and the returning junction
+  force also re‑drives the jt block, so the radiated ring sustains
+  with it. Passive by construction (g < 1, zi > 0 — the exact
+  delay‑free junction solve that shipped through 2026‑07‑24; the
+  builder is the restored `webLoopCoeffs` law). One physical string,
+  two computational devices: the comb carries the string's bridge
+  load, the jt row its buzz + radiated ring. Measured
+  (`TarafCouplingTests`, single row, jt off): kin release tail +17%
+  RMS near the SINGLE‑ROW matching optimum z ≈ 0.05, non‑kin flat at
+  EVERY z, bounded at the knob ceiling. **z is PER‑ROW and the bank
+  multiplies it** — total bridge load ≈ rows × z, so the single‑row
+  optimum over‑damps a full bank (measured in‑app on the 19‑row
+  default: z 0.05 drags held notes ~5 dB; z 0.0141 ≈ −2.5 dB with the
+  release bloom clearly audible — tail RMS UP right after note‑off
+  while the long wash ring SHORTENS ~9 dB, both physical). The
+  offline fit's Z (0.0141) was fitted at full‑bank scale — the
+  audition reference; coupling damp/bright/inharm default to the
+  artifact's fitted web values (0.019 / 0.80 / 0.1), — RUNTIME playing controls (no rebuild),
   reached now as ordinary `ParamRegistry` entries: `bow_jt_lp`,
   `bow_jt_damp` and `bow_tone_tilt` are `.live`. (A fourth used to be the
   jawari‑buzz scaler `bow_set_jaw_gain`, the live half of the `.hybrid`
@@ -115,38 +142,64 @@ Python render's C source) at 96 kHz, decimated to 48 kHz, with:
      state `jtLpYS`). Measured (bowed note): hi‑band buzz falls
      MONOTONICALLY −24 → −34.5 dB over the full throw, RMS eases
      0.120 → 0.100 — no loudness bloom, no tuning change.
-     **(b) RECRUITMENT** (`bow_jt_sel`, 2026‑07‑26; BIPOLAR rework the
-     same day — the first, subtract‑only cut was near‑inaudible: a
-     scale‑tuned tarab is mostly KIN to every scale note, and a ×2
-     drive boost measured only +8% ring because the graze contact
-     drains what it is fed). The axis is centred on **0.5 = the fitted
-     taraf** (bit‑exact). BELOW: per‑row BRIDGE‑DRIVE weights — the
-     render thread scores every jawari row's harmonic kinship to the
-     gated pitches (kin lattice: unison 1, octaves/twelfth/fifth/fourth
-     fading as `(p·q)^-bow_jt_sel_kin` [0.7, shared with the drone
-     spread], Gaussian cents corridor `bow_jt_sel_width` [30 c] — both
-     bp scalars; the kin score is SQUARED at the endpoint so octaves
-     sit clearly under the unison and the fifth family is faint) and
-     pushes them through `bow_poly_jt_drive_weights`; the jt tick slews
-     each row ~30 ms and scales its incoming bridge force. Chords
-     combine soft‑OR (misses multiply — gentler than a max, bounded at
-     1); no gated note holds the last weights so a ring keeps its
-     recruit pattern; the melody‑follower row is always weight 1; drone
-     rows' own noise drive adds AFTER the weight, so a held drone is
-     never ducked. Weights gate recruitment, not the ring — energy a
-     row holds decays naturally. ABOVE: the chorus swells toward
-     ×`bow_jt_sel_lush` [2] on two levers — the drive weights (cascade
-     character) AND the radiated jt gain (`bow_poly_jt_set_gain_mul`,
-     slewed in the output walk — the level, which nothing drains).
-     Measured on a non‑kin note (`TarafRecruitTests`): post‑release
-     taraf tail −19.5 dB at 0, +6.7 dB at 1, relative to fitted.
-     Unarmed the kernel is byte‑null (`TarafRemovalParityTests`
-     unchanged). The purity composite sweeps it 0.5 → 0 (purity up =
-     kin‑only; since the 2026‑08‑01 coherence rev the resting tilt
-     rests ON the fitted taraf — the shipped lo used to be 1.0, which
-     with the default rest‑zero tilt curve parked the resting
-     instrument at the ×2 lush chorus, a wash that read as a backing
-     ensemble; raise the member's lo above 0.5 to rest lusher again).
+     **(b) RECRUITMENT** (`bow_jt_sel`, 2026‑07‑26; PROFILE rework
+     2026‑08‑01 — the first bipolar axis' top half was a pure uniform
+     boost (drive ×lush + radiated gain), so the whole knob read as a
+     taraf VOLUME slider; an interim monotone "breadth" cut topped out
+     at the fitted response, still note‑dependent. The axis now sweeps
+     each row's CONTRIBUTION to the taraf at held loudness).
+     **0.5 = the fitted taraf** (all weights 1, bit‑exact) — the
+     natural resonance profile: unison rows dominate, octaves a few dB
+     down, fifths faint, unrelated rows only haze. BELOW: per‑row
+     BRIDGE‑DRIVE weights — the render thread scores every jawari
+     row's harmonic kinship to the gated pitches (kin lattice: unison
+     1, octaves/twelfth/fifth/fourth fading as `(p·q)^-bow_jt_sel_kin`
+     [0.7, shared with the drone spread], Gaussian cents corridor
+     `bow_jt_sel_width` [30 c] — both bp scalars; the kin score is
+     SQUARED at the endpoint so octaves sit clearly under the unison
+     and the fifth family is faint) and pushes them through
+     `bow_poly_jt_drive_weights`; the jt tick slews each row ~30 ms
+     and scales its incoming bridge force. ABOVE: the profile FLATTENS
+     — resonant rows are CUT toward the common haze level
+     (w → √(haze/(haze+kin²)); a unison row falls to ~0.22, a non‑kin
+     row keeps full drive — cuts because extra drive is drained by the
+     graze contact, ×2 drive measured only +8% ring) until at 1 every
+     row contributes EQUALLY and the response no longer depends on the
+     played note. LOUDNESS COMPENSATION throughout: the radiated jt
+     gain (`bow_poly_jt_set_gain_mul`, slewed in the output walk)
+     holds the taraf's power — below 0.5 at the note's own fitted
+     level, above 0.5 blending to ONE fixed common level (rows·haze +
+     `recruitKinNominal` [1.75, a tonic‑like note's kin power]), so
+     the flat end is note‑independent in level too. The model
+     (`BowEngine.recruitGainMul`) is an incoherent power sum over the
+     kin scores plus a per‑row haze floor (`recruitHazeFloor` 0.05 —
+     also the flat end's per‑row target, and what keeps the gain
+     engaging smoothly on non‑kin notes), cap ×`bow_jt_sel_comp` [4,
+     the kernel clamp]; the follower row and held‑drone rows count as
+     fully ringing in the model, so a held drone is never pumped by
+     the compensation. Chords combine soft‑OR (misses multiply —
+     gentler than a max, bounded at 1); no gated note holds the last
+     weights + gain so a ring keeps its recruit pattern; the
+     melody‑follower row keeps weight 1 on the selective half but
+     flattens like a unison row on the flat half; drone rows' own
+     noise drive adds AFTER the weight, so a held drone is never
+     ducked. Weights gate recruitment, not the ring — energy a row
+     holds decays naturally. Measured (`TarafRecruitTests`): on a KIN
+     note the post‑release taraf tail holds within −3.1/+1.6 dB of
+     fitted over the whole throw; on a non‑kin note the kin‑only end
+     thins the chorus to −15.5 dB (physics leaves only haze to boost —
+     the ×4 cap keeps it honest; uncompensated it would sit ~12 dB
+     lower still) and the flat end lifts it +4.5 dB toward the common
+     level. Cross‑note tails do NOT fully equalize at the flat end —
+     the weights level each row's contribution and the gain levels the
+     modeled response, but how hard a note excites the bridge still
+     varies with its register and dynamics, as on a physical
+     instrument. Unarmed the kernel is byte‑null
+     (`TarafRemovalParityTests` unchanged). The purity composite
+     sweeps it 0.5 → 0 (purity up = kin‑only; rest = the fitted taraf
+     — resting at 1.0 would park the instrument on the
+     note‑independent flat wash, the same decoupled "backing ensemble"
+     failure the coherence rev fixed).
      (A THIRD mechanism, **REMOVED with the linear web 2026‑07‑24**:
      `bow_[poly_]set_jaw_gain` scaled the formula‑taraf web's buzz
      sources — `jn` in‑loop contact/fold, `jw` output‑tap grazing —
@@ -197,16 +250,76 @@ Python render's C source) at 96 kHz, decimated to 48 kHz, with:
   +17 dB ring, 2.8× tail; damp 1 → post‑release tail RMS 0.014 → 0.0002;
   EQ ±1 → ~±13 dB complementary band tilt. Note the
   kernel + BowEngine sections,
+- the **sitar‑twang axis** (`bow_twang`, 2026‑08‑01, 0…1, default 0 =
+  byte‑null, `.live`; fitted to `sitar1.wav`): a grazing jawari WRAP on
+  the **played strings'** bridge termination — distinct from the jt
+  taraf's bones. While an excursion tip of the bridge‑reflected wave
+  presses past the graze knee, the string's speaking length shortens by
+  a smoothed rolling‑contact offset (`bow_poly_set_twang` /
+  `poly_string_return` + the `buf2` read in `poly_string_force`) — an
+  energy‑CONSERVING per‑cycle phase modulation that pumps the harmonic
+  cascade round trip by round trip — and the terminations morph toward
+  sitar hardware (pow‑exponent brightening of the bridge/nut/gut
+  corners, eased finger‑release damping). Findings that shaped it, all
+  measured on the shipping artifact: a one‑sided subtractive fold is
+  ESCAPED by a bowed loop (the Helmholtz wrap settles on whichever
+  polarity the fold misses — the lobe measurably flipped sides when the
+  fold did), so the graze rides per‑side instant‑attack peak envelopes
+  (the web rollE idiom, knee ~0.55 × the side's own peak — twang at ANY
+  strike level, the bow_jt_evolve consistency lesson); a subtractive
+  fold at ANY useful depth reads as buzz + a choked ring (energy
+  deleted, not cascaded), which is why the wrap is a length modulation
+  (the web's v2 roll idiom) and the contact‑loss fold ships at 0; the
+  wrap alone drains the note into the stock lossy top (the morph is
+  what lets the pumped 2.5–6 kHz cluster SUSTAIN). **The extended top
+  (same day, the "go twangier" rev):** the endpoints are HOTTER than
+  the sitar1.wav fit — roll 5.5 / bright 3.33 / knee 0.5, with the
+  ring/gut eases (1.27/1.07) deliberately past their derive caps so
+  the fitted sustain saturates by ~0.75 of the throw and the last
+  quarter spends its travel on wrap + brightness. **The sitar1.wav
+  match therefore lives near `bow_twang` ≈ 0.75** (measured there:
+  buzz‑band/low‑band gap ≈ −9.6/−9.9/−12.7 dB at 150/300/600 ms vs the
+  sample's −6/−2/−7; at 1 the early gap opens to ≈ −7 dB — pushing the
+  wrap past roll ≈ 5.5 measured NO further buzz, only drain: a bigger
+  swing also smears more HF, the equilibrium saturates. **PITCH LOCK
+  (two open‑loop terms + one tracker, all byte‑null off):** (1) the
+  wrap's mean shortening (naively ~+7…18 c sharp) is subtracted by a
+  ~30 ms tracker of twD's time‑average (an engaged‑gated "corner
+  phase" variant measured WORSE — the engagement/corner phase
+  relation varies per note); (2) the termination brightening REMOVES
+  loop phase delay (a one‑pole's low‑f phase delay is a/(1−a)
+  samples), restored analytically on the bridge read — verified exact
+  (±0.1 smp) over three octaves on a wrap‑free morph; (3) the wrap's
+  phase‑SELECTIVE residual is cancelled by the fitted curve
+  n(P) = 0.335 − 66.2/P samples per unit amt·roll. Result: the
+  twanged ring holds the plain ring's pitch to ~±5 c (worst −7 c low
+  register at full twang) with a brief sitar‑like onset settle
+  (~+10 c decaying in ~300 ms) at high notes; the residual WANDERS
+  with the chaotic ring — it is not a constant, so chasing it below
+  ±5 c open‑loop is noise‑fitting. The offline re‑fit hook is
+  `bow_poly_set_twang_shape` (kneeR/depth/relMs/rollSmp/bright/ring/
+  gut, the `bow_jt_set_lift` precedent); harness `TwangFitTests`
+  (env‑gated), guards `TwangTests` (byte‑null, sustained buzz,
+  level‑consistency, click‑free live sweep). Note the base ring sags
+  ~7 c flat after release (finger‑release damping); the twang ring is
+  locked to THAT (the two rings agree), not to nominal,
 - an **analytic Schelleng press envelope** (wedge‑relative force mapping),
   place‑then‑draw articulation with attack bite, aftertouch vibrato, and
   **self‑calibrated intonation** (two‑stage pitch‑correction tables),
+- the **sustain‑liveness layer** (2026‑08‑01, fitted to clean SWAM Violin 3
+  captures): a post‑onset settle (`bow_settle_db`) that eases the stroke off
+  its capture overshoot, three seeded Ornstein–Uhlenbeck walks
+  (`bow_drift_*`) that give a held note its slow pitch/level/timbre wander,
+  and a glide‑rate bow lightening (`bow_glide_dip_db`) that articulates
+  legato transitions — measurements and traps in
+  [sound-design.md](sound-design.md),
 - **polyphony as physics**: `bow_live_poly 8` gut strings on ONE shared
   bridge (delay‑free junction) — chords are extra strings, a single line is
   mono meend on one string (9 Hz glide smoother).
 
 The whole instrument — played strings + taraf + body + radiation + room — is
 the kernel; it needs ONLY **`bowed_string.json`** and renders **straight to
-the mix** (in Starpad: `StringVoiceSource` → `symGain` → `mainMixerNode`).
+the mix** (in Tarabdaar: `StringVoiceSource` → `symGain` → `mainMixerNode`).
 It **is the only voice** — the base‑voice picker and the SWAM/sitar sources
 are deleted.
 
@@ -220,13 +333,13 @@ fitted JSONs that fed them (`sarangi_model_v57.json`, `sarangi_coupled.json`,
 The physics were fitted offline in `~/Desktop/sarangi` and ship as
 `bowed_string.json`. (The fitted tarab table, `sarangi_pilu_strings.json`,
 was retired 2026-07-25 with the scale-defined pitch model — the tarab is
-generated from the centralized scale now.) Starpad does not re‑fit — but it
+generated from the centralized scale now.) Tarabdaar does not re‑fit — but it
 does now **own** the DSP: there is no re‑sync, and the package is edited in
 place.
 
-## The String instrument in Starpad
+## The String instrument in Tarabdaar
 
-- **`StringVoiceSource`** (`Packages/StarpadCore/.../StringVoiceSource.swift`)
+- **`StringVoiceSource`** (`Packages/TarabdaarCore/.../StringVoiceSource.swift`)
   — an `AVAudioSourceNode` at the artifact's native **48 kHz** (the mixer
   input SRCs to the 44.1 kHz engine) pulling `BowEngine.render`. Engine swaps
   are published under a brief unfair lock; swapped‑out engines are retained
@@ -249,7 +362,7 @@ place.
 - **Controls — `BowControlMapper`** (`SarangiKit/Bow/BowControls.swift`), the
   long‑lived mapper shared across rebuilds: CC11 expr · CC1 press · CC74 pos
   · CC2/**75** tilt · aftertouch = player vibrato · CC120/123 all‑off.
-  **STARPAD MPE DIVERGENCE**: note identity and pitch bend are keyed by the
+  **TARABDAAR MPE DIVERGENCE**: note identity and pitch bend are keyed by the
   status byte's channel nibble (per‑note channels, **per‑channel bend** —
   each Pitch Pad finger bends only its own gut string); a single‑channel
   controller behaves exactly like upstream. `bendRange` is set to
@@ -267,9 +380,9 @@ place.
   at build time. Audition path: **`string.<key>`** (e.g.
   `string.bow_jt_gain`, `string.bow_rev_mix`, `string.bow_live_trim`).
 - **The parameter list (Parameters tab, ⌘5)** — `ParametersView`
-  (`StarpadMac/Views/ParametersView.swift`) over **`ParamRegistry`**
-  (`Packages/StarpadCore/…/ParamRegistry.swift`), backed for physics rows by
-  **`StringParamStore`** (`StarpadMac/StringParamStore.swift`). Eight
+  (`TarabdaarMac/Views/ParametersView.swift`) over **`ParamRegistry`**
+  (`Packages/TarabdaarCore/…/ParamRegistry.swift`), backed for physics rows by
+  **`StringParamStore`** (`TarabdaarMac/StringParamStore.swift`). Eight
   groups: **Bow stroke · Body (formula modes) · Bow & string · Playing
   ranges · Jawari taraf (modal contact) ·
   Articulation · Radiation & output** — the physics rows are
@@ -277,9 +390,9 @@ place.
   String‑engine rebuild; the bow/taraf/tone rows apply instantly.
   (Before the 2026‑07‑24 unification this list was a separate **Sarangi
   tab** and the live axes had their own Parameters tab, which is how
-  buzz/vibrato/damping ended up with two knobs each.) Starpad cannot rewrite the
+  buzz/vibrato/damping ended up with two knobs each.) Tarabdaar cannot rewrite the
   bundled artifact, so edits persist as an **override dict**
-  (`starpad.stringOverrides.v1` in UserDefaults) applied over the artifact
+  (`tarabdaar.stringOverrides.v1` in UserDefaults) applied over the artifact
   at build time; an override that lands back on the artifact value is
   dropped, so *dirty* means "differs from the Sarangi Live default".
   Double‑click a row label to reset that value; the header's **"Default
@@ -293,10 +406,10 @@ place.
   give exactly the upstream default instrument: the untouched
   `bowed_string.json` physics (zero overrides), the EXACT fitted Pilu string
   table, Sa = 328.9 Hz, and — NEW since the String era — **tarab auto‑sync
-  starts OFF** so the fitted table sticks (the Tarab tab's "Follow the Pitch
+  starts OFF** so the fitted table sticks (the Strings tab's "Follow the Pitch
   Pad scale" switch opts back in; `SarangiStore.persistKey` bumped v7→**v8**
   so stale documents don't shadow the new default).
-- **What lives elsewhere**: the Tarab tab IS the String voice's taraf tuning;
+- **What lives elsewhere**: the Strings tab IS the String voice's taraf tuning;
   room/level live in the physics panel (Radiation & output). The coupled‑network
   params, the FX rack, the output user‑EQ, and the drive gain are all deleted
   (they acted on the removed coupled network).
@@ -317,24 +430,44 @@ place.
   forms `L = mid + side, R = mid − side`; the side (and the room's
   decorrelated width tank, `Reverb.processMonoStereo`) cancel in L+R, so
   the **mono fold‑down is bit‑identical to the legacy mono output**
-  (`BowStereoTests` asserts all three invariants). Scalars — **not in the
-  artifact**; seeded by `StringVoiceSource.liveParamSeeds` (also merged
-  into `StringParamStore`'s baseline so editor default/reset semantics
-  agree): `bow_st_spread` 0.2 (jt‑row spread; was 0.7 until the
-  2026‑08‑01 coherence rev — a wide source halo literally staged the
-  taraf as an accompanying chorus around a centred soloist, where a
-  real sarangi is ONE small radiator whose width comes from the room) ·
-  `bow_st_played` 0.15 (bow‑noise spread) · `bow_rev_width` 0.8 (room
-  decorrelation; was 0.6 — the image width now lives in the room, not
-  the source). 0 = the
-  bit‑exact mono path (also the case for every parity golden — the keys
-  are absent from `bowed_string.json`, and the mono kernel / fixture /
-  `renderFixture` paths never arm it). Measured (audition `stereo_on5`):
-  balance ±0.6 dB while playing, side/mid ≈ 0.26 under melody → ≈ 0.5 on
-  the bare halo, L/R coherence 0.91 (lows) → 0.59 (highs).
+  (`BowStereoTests` asserts all three invariants). **The pans are LEGACY
+  staging since the 2026‑08‑01 width unification** (below): the spread
+  scalars are unseeded (registry defaults 0 = disarmed) and the pan
+  machinery is kept only for A/B, pending removal.
+- **Instrument width (2026‑08‑01 unifying rev): ONE width law for the
+  whole instrument** — `bow_st_width` (`bow_poly_set_stereo_width`,
+  `bow_kernel_poly.c`). The physical claim: one small instrument heard
+  from TWO observation points — identical at low frequency (monopole
+  radiation), diffusely decorrelated at high frequency, because above
+  the Schroeder crossover a real body's radiation is a dense
+  overlapping mode field where two listening positions see random
+  independent mode shapes. The fitted mid has no resolved modal
+  structure up there (its 9 signature modes all sit 55–250 Hz; the
+  upper spectrum ships as flat `c0` feedthrough), so the
+  observation‑point DIFFERENCE is modelled the way the mid models the
+  diffuse region itself: a **diffuse‑field difference bank** — 16
+  dense random‑sign side‑only modes, 700 Hz – 6.5 kHz, Q ≈ 12,
+  golden/plastic jitter like the mid's own diffuse tail, peak weight
+  `1.4·d(f)` (directivity ramp 300 Hz → 3 kHz; |ΔH| ≤ 2·|H| bounds
+  it). The bank runs **once per bus** — the pre‑jt voice mid and the
+  jt wash — with shared coefficients and per‑bus state: by linearity
+  the two together equal one bank on the complete radiated output,
+  and the split FX buses keep valid side streams. Not a pan, not
+  Haas/detune: a static passive difference transfer, width slewed
+  ~30 ms kernel‑side, derived from the sample rate alone. Seeded
+  `bow_st_width` 0.2; replaced the per‑source pans (`bow_st_spread` /
+  `bow_st_played`, disarmed) AND the interim body‑side residue
+  readout (same day — a second per‑mode readout of the body bank,
+  measured inaudible on this fit and deleted; git history has it).
+  Measured (offline probe, seed 0.2, both buses live): melody
+  interaural coherence ≈ 0.99 below 1 kHz → ~0.9 at 4–8 kHz, the
+  bare wash ~0.3–0.4 in its ring band (a wider halo than the retired
+  pans gave), balance within ±0.8 dB; 0.6 is very wide (melody
+  ~0.4–0.5). Guard:
+  `BowStereoTests.testInstrumentWidthAloneWidensAndFoldsDown`.
 
 The sections below describe the **coupled‑network chain** — removed from
-Starpad on 2026‑07‑24 (it colored the deleted SWAM / sitar base voices) and
+Tarabdaar on 2026‑07‑24 (it colored the deleted SWAM / sitar base voices) and
 kept in SarangiKit for upstream parity tests only.
 
 ## What used to be here — the coupled network and the violin voice
@@ -344,7 +477,7 @@ the repository**, not merely unused:
 
 - **The v57 additive source voice** (`Violin/`: `ViolinModel` / `ViolinSynth` /
   `ExprEqualizer`, plus the 3.3 MB `sarangi_model_v57.json` control‑grid
-  tables). It stopped being a Starpad voice with the SWAM strip.
+  tables). It stopped being a Tarabdaar voice with the SWAM strip.
 - **The passive coupled bridge–body network** (`SarangiEngine.renderSample`,
   `ResonatorBank` / `CombString` / `BodyAdmittance` / `WModalBank`, the 25
   `SarangiParams` scalars, the FX rack, `sarangi_coupled.json`). It stopped
@@ -352,14 +485,14 @@ the repository**, not merely unused:
 
 Both survived a while longer because SarangiKit was a **vendored copy** of
 `~/Desktop/sarangi` and they were needed to keep its parity tests running. That
-link was cut on 2026‑07‑24: SarangiKit is Starpad's own code now, so everything
+link was cut on 2026‑07‑24: SarangiKit is Tarabdaar's own code now, so everything
 whose only job was to track upstream went with it — including the byte‑parity
 **mono kernel** (`bow_kernel.c`) and every offline golden. Git history has the
 physics write‑ups if they are ever wanted back.
 
-## Sympathetic strings (the Tarab tab, ⌘2)
+## Sympathetic strings (the Strings tab, ⌘2)
 
-The tarab live in their own **Tarab tab** (`TarabView`) as **one flat pool
+The tarab live in their own **Strings tab** (`StringsView`) as **one flat pool
 of strings** — a `StringSpec` (`Model/StringSpec.swift`) is `degree, octave,
 gain, t60, enabled`. **The pitch is SCALE-DEFINED (2026-07-25)**: `degree`
 indexes `InstrumentState.scaleRatios` — the ONE centralized scale, mirrored
@@ -449,7 +582,7 @@ builder's 18 kHz `fx` corner as the pitch rises (an under‑resolved contact
 mode limit‑cycles into broadband static — the dynamic‑taraf‑era lesson),
 with the contact compliance matrix re‑prefix‑summed on each count change.
 With no note held the target stays put, so the string rings out wherever
-the melody left it. Guard: `FollowerStringTests` (StarpadCore) pins that
+the melody left it. Guard: `FollowerStringTests` (TarabdaarCore) pins that
 the row's ring follows each played pitch (drone‑excited, ±40 c band scan)
 and that octave‑jump abuse stays bounded. Note the known jt property that
 a wrapped row rings a hair sharp of nominal (grazing‑bone stiffening)
@@ -517,23 +650,23 @@ full measurements if a fitted-table mode is ever wanted back.
 
 ## Mac side: state, editor, persistence
 
-- **`SarangiStore`** (`StarpadMac/SarangiStore.swift`) owns the editable
+- **`SarangiStore`** (`TarabdaarMac/SarangiStore.swift`) owns the editable
   `InstrumentState`. Every tarab edit funnels into a **debounced structural
   rebuild** (`AudioEngine.rebuildSarangi(strings:tonic:droneFreqs:)`); the
   scale push (`syncTarabToScale`) rebuilds immediately. Auto‑saves to
   UserDefaults (`persistKey` **v8**, deliberately never bumped for the
   2026‑07‑25 model rewrites — the stored blob was migrated in place each
   time); export/import `.sarangi` JSON.
-- **Tarab tab (⌘2)** (`TarabView`): the sympathetic strings + optional scale sync.
+- **Strings tab (⌘2)** (`StringsView`): the sympathetic strings + optional scale sync.
 - **Controls tab (⌘4)** (`TiltControlsView`): the tilt bindings (to a
   composite or straight to a parameter) + the composite parameters.
 - **Parameters tab (⌘5)** (`ParametersView`): every parameter of the
   instrument + the preset toolbar / "Default (Sarangi Live)" reset.
 
-## SarangiKit is Starpad's own code
+## SarangiKit is Tarabdaar's own code
 
 Until 2026‑07‑24 this section was a **re‑vendor divergence table**: SarangiKit
-was a copy of `~/Desktop/sarangi`, a re‑sync overwrote every Starpad‑local
+was a copy of `~/Desktop/sarangi`, a re‑sync overwrote every Tarabdaar‑local
 change, and the code still compiled afterwards — which is what made it
 dangerous. Each row named a feature that would silently disappear (the MPE
 per‑channel bend, the jt warmth knobs, the tilt axes, the live‑parameter C
@@ -542,14 +675,14 @@ the removal of the linear taraf web).
 
 None of that applies now. The upstream link is cut, there is no re‑sync, and
 the DSP is edited here. What replaces the table as a safety net is
-`TarafRemovalParityTests` (StarpadCore): it renders a scripted phrase through
+`TarafRemovalParityTests` (TarabdaarCore): it renders a scripted phrase through
 `StringVoiceSource` and compares a **SHA‑256 of the samples** against the
 shipping instrument, so any accidental change to the kernel, the table
 builders or the post‑chain fails loudly and deliberately.
 
 ## Audio graph
 
-`AudioEngine` (`Packages/StarpadCore/Sources/StarpadCore/AudioEngine.swift`) — one path:
+`AudioEngine` (`Packages/TarabdaarCore/Sources/TarabdaarCore/AudioEngine.swift`) — one path:
 
 ```
 MPE in ► routeSarangiModelMIDI ► StringVoiceSource ► symGain ► mainMixerNode ► output
@@ -594,7 +727,7 @@ upstream‑parity suites went with the code they covered):
 - **`ModelTests`** — the tarab bank layout and note‑name round trip.
 
 The instrument's real regression guard lives next door:
-**`TarafRemovalParityTests`** in StarpadCore pins a SHA‑256 of a rendered
+**`TarafRemovalParityTests`** in TarabdaarCore pins a SHA‑256 of a rendered
 phrase. Run with `cd Packages/SarangiKit && swift test`.
 
 ## Calibration notes

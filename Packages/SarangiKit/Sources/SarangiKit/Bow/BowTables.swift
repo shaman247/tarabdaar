@@ -66,7 +66,7 @@ public struct JtTables: Sendable {
     /// (bow_jt_lp, Hz; ≥ 20 kHz ⇒ 0 = bypass, the byte-exact legacy
     /// path). Applied via bow_jt_set_lp — NOT part of the load ABI.
     public var lpA: Double = 0
-    /// MELODY FOLLOWER (Starpad 2026-07-25): index of the row that
+    /// MELODY FOLLOWER (Tarabdaar 2026-07-25): index of the row that
     /// live-retunes to the played pitch (-1 = none), plus the law
     /// constants the kernel's in-place retune re-applies (the row's
     /// t60 and the builder's `bow_jt_fhf`/`bow_jt_bst`). Armed via
@@ -108,7 +108,7 @@ public enum BowTables {
     /// keep every literal and the arithmetic order identical; the C
     /// converts zone tables to float, so sub-1e-7 double drift between
     /// the twins is invisible). rows = the jawari-class subset.
-    /// `trackRowIndex` (Starpad 2026-07-25): marks one row as the melody
+    /// `trackRowIndex` (Tarabdaar 2026-07-25): marks one row as the melody
     /// FOLLOWER — the kernel live-retunes it to the played pitch. The row
     /// is built like any other (at its nominal `f`, which should sit low —
     /// the mode allocation is fixed at build, and the kernel only ever
@@ -118,9 +118,10 @@ public enum BowTables {
         rows: [(f: Double, gain: Double, t60: Double)],
         srk: Double, bp: BowParams,
         trackRowIndex: Int? = nil) -> JtTables? {
-        guard bp.v("bow_jtaraf_on", 0.0) > 0.5, !rows.isEmpty else {
-            return nil
-        }
+        // No arming switch (2026-08-02): the modal-jawari block IS the
+        // taraf, so it builds whenever there are rows to build. The only
+        // "off" is an empty row set (every tarab string disabled).
+        guard !rows.isEmpty else { return nil }
         let J = Int(bp.v("bow_jt_J", 40.0) + 0.5)
         // bow_jt_zone (2026-07-22, J8z6): the contact lives in ~6 mm
         // around the apex — a narrowed zone concentrates J on the
@@ -137,7 +138,7 @@ public enum BowTables {
         let apex = bp.v("bow_jt_apex", 1.0e-5)
         let kc = bp.v("bow_jt_kc", 1.0e10)
         let alpha = bp.v("bow_jt_alpha", 1.3)
-        // Starpad tone knobs (2026-07-23; defaults = the legacy hardcoded
+        // Tarabdaar tone knobs (2026-07-23; defaults = the legacy hardcoded
         // values, so untouched artifacts build byte-identical tables):
         // hcb = contact hysteresis damping, fhf = HF damping corner of the
         // per-mode t60 law, bst = stiffness inharmonicity coefficient.
@@ -262,7 +263,7 @@ public enum BowTables {
         T.phys = [kc, alpha, hcB, 2.5 * apex, gain, drive, Double(div)]
         T.threads = Int32(bp.v("bow_jt_threads", 0.0).rounded())
         T.async = bp.v("bow_jt_async", 0.0) > 0.5 ? 1 : 0
-        // Starpad jt tone LP (2026-07-23): one-pole on the radiated jt sum,
+        // Tarabdaar jt tone LP (2026-07-23): one-pole on the radiated jt sum,
         // at the KERNEL sample rate (the hold stream is written per kernel
         // sample). ≥ 20 kHz = bypass (coefficient 0 → the kernel skips the
         // filter entirely — bit-exact legacy output).
@@ -292,21 +293,117 @@ public enum BowTables {
     ///
     /// The sympathetic strings are NOT built here — see
     /// `buildJawariTables`.
+    // ----------------------------------------------------------------- //
+    // string-loop law (blocks.web_loop_coeffs — the ONE loop-coefficient
+    // law). Deleted 2026-07-24 with the radiating web; RESTORED verbatim
+    // 2026-08-01 for the bridge-coupling web below.
+    // ----------------------------------------------------------------- //
+    static let dampFRef = 110.0            // blocks.DAMP_F_REF (lockstep)
+
+    /// (L, eta, c, s, g, D) of the web string loop at the KERNEL rate.
+    static func webLoopCoeffs(f0: Double, t60: Double, sr: Double,
+                              inharm: Double, damp: Double)
+        -> (L: Int, eta: Double, c: Double, s: Double, g: Double, D: Double) {
+        let c = -min(max(inharm, 0.0), 0.6)
+        let q = min(0.2499999, 0.25 * min(max(damp, 0.0), 1.0) * dampFRef / f0)
+        let s = 0.5 * (1.0 - (1.0 - 4.0 * q).squareRoot())
+        let D = sr / f0 - (1.0 - c) / (1.0 + c) - 2.0 * s
+        let L = max(2, Int(floor(D - 0.5)))
+        let d = D - Double(L)
+        let eta = (1.0 - d) / (1.0 + d)
+        var g = min(0.99985, pow(10.0, -3.0 * D / (max(t60, 0.05) * sr)))
+        if s > 0.0 {
+            let w0 = 2.0 * Double.pi * f0 / sr
+            let fMag = (1.0 - s) * (1.0 - s) + s * s
+                + 2.0 * s * (1.0 - s) * cos(w0)
+            g = min(0.99985, min(g / fMag, pow(10.0, -3.0 * D / (32.0 * sr))))
+        }
+        return (L, eta, c, s, g, D)
+    }
+
     public static func buildOpenString(sr: Double, tonic: Double,
-                                       bp: BowParams) -> BowKernelTables {
-        // NO WEB VOICES (2026-07-24, the taraf simplification). This builder
-        // used to add two families of linear comb strings on the passive
-        // wave junction — the FORMULA TARAF (`bow_taraf_*`: the sympathetic
-        // steel web, polarization doublets, flat-bridge buzz) and the OPEN
-        // MAIN GUT pair (`bow_open_*`) — and the kernel radiated their free
-        // ring through a direct tap. Both are gone: the MODAL-JAWARI block
-        // (`bow_jt_*`, built by `buildJawariTables`) is the instrument's
-        // whole sympathetic response now, and it models the string–bone
-        // contact rather than approximating it with a comb + buzz term.
-        // The kernel's web machinery is untouched (it stays byte-parity
-        // with the offline source) — it simply runs with nv = 0, which is
-        // exactly the state the old `bow_taraf_Z` 0 produced.
+                                       bp: BowParams,
+                                       taraf: [(f: Double, gain: Double,
+                                                t60: Double)] = [])
+        -> BowKernelTables {
+        // NO RADIATING WEB VOICES (2026-07-24, the taraf simplification).
+        // This builder used to add two families of linear comb strings on
+        // the passive wave junction — the FORMULA TARAF (`bow_taraf_*`: the
+        // sympathetic steel web, polarization doublets, flat-bridge buzz)
+        // and the OPEN MAIN GUT pair (`bow_open_*`) — and the kernel
+        // radiated their free ring through a direct tap. Both stay gone AS
+        // VOICES: the MODAL-JAWARI block (`bow_jt_*`,
+        // `buildJawariTables`) is the instrument's whole RADIATED
+        // sympathetic response, modelling the string–bone contact rather
+        // than approximating it with a comb + buzz term, and the old
+        // `bow_taraf_*` / `bow_open_*` keys are permanently inert.
         var t = BowKernelTables(sr: sr)
+        // ---- TARAF BRIDGE-COUPLING web (2026-08-01, the coherence rev's
+        // two-way fix). Each enabled tarab row gets ONE linear comb string
+        // back on the PASSIVE wave junction — the deleted formula taraf's
+        // machinery (`webLoopCoeffs`, verbatim) stripped to the coupling
+        // physics: NO buzz terms (jw/jl/jn 0 — the jt block models the
+        // bone contact properly), NO direct radiation tap (twt/wout 0 —
+        // the only output path is the junction itself, so what a row
+        // returns radiates through the BODY with the voice), NO
+        // polarization doublets (detune doubling is rejected — one comb
+        // per row, exactly the tarab pool). This adds the real TWO-WAY
+        // mechanism the one-way jt drive cannot express: the bridge sees
+        // the taraf as a load — a note at a kin pitch drains into the row
+        // (sympathetic absorption raises the played string's decay), the
+        // row stores the energy and returns it through the junction (the
+        // bloom), and the exchange is passive by construction (g < 1,
+        // zi > 0 — the exact delay-free junction solve that shipped
+        // through 2026-07-24). One physical string, two computational
+        // devices: the comb carries its bridge load, the jt row its
+        // buzz + radiated ring. `bow_cpl_z` 0 (the default) builds
+        // nothing — nv 0, passive 0, byte-null, every parity fixture
+        // untouched. Coupling defaults are the artifact's FITTED web
+        // values (bow_taraf_damp 0.019 / bright 0.80 / inharm 0.1); the
+        // fitted Z was 0.014116 — the audition reference for the knob.
+        let zC = bp.v("bow_cpl_z", 0.0)
+        let cplRows = taraf.filter { $0.gain > 1e-9 }
+        if !cplRows.isEmpty, zC > 1e-9 {
+            let gMean = cplRows.map(\.gain).reduce(0, +)
+                / Double(cplRows.count)
+            let t60s = bp.v("bow_cpl_t60", 1.0)
+            let inh = bp.v("bow_cpl_inharm", 0.1)
+            let dmp = bp.v("bow_cpl_damp", 0.019)
+            let fcC = min(1400.0 + bp.v("bow_cpl_bright", 0.8) * 6000.0,
+                          0.45 * sr)
+            let lpAC = exp(-2.0 * Double.pi * fcC / sr)
+            for r in cplRows {
+                let t60 = min(max(r.t60, 0.05) * t60s, 8.0)
+                let (L, eta, c, sD, g, _) = webLoopCoeffs(
+                    f0: r.f, t60: t60, sr: sr, inharm: inh, damp: dmp)
+                let c0w = (1.0 - sD) * (1.0 - sD)
+                let c1w = 2.0 * sD * (1.0 - sD)
+                let c2w = sD * sD
+                let p = eta * c
+                let ssum = eta + c
+                t.L.append(Int32(L))
+                t.cs.append(ssum)
+                t.cp.append(p)
+                t.w0.append(p * c0w)
+                t.w1.append(p * c1w + ssum * c0w)
+                t.w2.append(p * c2w + ssum * c1w + c0w)
+                t.w3.append(ssum * c2w + c1w)
+                t.w4.append(c2w)
+                t.g.append(g)
+                t.lpA.append(lpAC)
+                t.wout.append(0.0)         // no direct radiation tap
+                t.kap.append(0.0)          // passive junction: no κ drive
+                t.alphaw.append(0.0)       // no played string in the web
+                let zi = zC * (r.gain / max(gMean, 1e-9))
+                t.zi.append(zi)
+                t.zdrv.append(2.0 * zi / (1.0 - g))
+                t.jw.append(0.0)           // buzz stays in the jt block
+                t.jl.append(0.0)
+                t.jn.append(0.0)
+                t.twt.append(0.0)          // tap weight: silent as a source
+                t.chg.append(0.0)          // cold start
+            }
+        }
         let Z = bp.v("bow_Z", 1.0)
         let dc = exp(-2.0 * Double.pi * 25.0 / sr)     // coupled.DC_BLOCK_HZ
         let GOLD = 0.6180339887498949                  // 1/φ jitter sequence
@@ -457,8 +554,10 @@ public enum BowTables {
             1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_lo", 402.0) / sr),
             bp.v("bow_noise_dir", 0.0),
             1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_dir_hi", 6000.0) / sr),
-            0.0,                                       // PASSIVE wave junction
-                                                       // (no web to couple)
+            t.L.isEmpty ? 0.0 : 1.0,                   // PASSIVE wave junction:
+                                                       // armed only when the
+                                                       // coupling web built
+                                                       // voices (bow_cpl_z)
             bp.v("bow_gut_g", 1.0),
             bp.v("bow_disp_n", 1.0),
             bp.v("bow_nail_k", 0.0),

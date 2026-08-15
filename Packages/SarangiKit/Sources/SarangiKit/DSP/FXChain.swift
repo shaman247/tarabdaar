@@ -1,6 +1,6 @@
 import Foundation
 
-/// The four FX insert points of the Starpad rack (2026-08-01), in signal
+/// The four FX insert points of the Tarabdaar rack (2026-08-01), in signal
 /// order. Each point carries an optional graphic EQ and an optional
 /// reverb; everything is OFF by default (the whole rack byte-null).
 ///

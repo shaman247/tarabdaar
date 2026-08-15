@@ -19,7 +19,7 @@ PKG = REPO / "Packages" / "StarpadDSP"
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / "tools" / "sym-envelopes.html"
 
 
-DATA = Path("/tmp/starpad-sym-envelopes.json")
+DATA = Path("/tmp/tarabdaar-sym-envelopes.json")
 
 
 def collect():

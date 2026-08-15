@@ -11,7 +11,7 @@ shared body/room EQ:
 `sarangi4.wav` is the key: an ascending+descending run over 8 distinct notes
 (Eb4..Eb5, the top octave of E♭ harmonic minor). The tarab strings are tuned to
 E♭ harmonic minor at FIXED pitches (MIDI 51..75, 15 strings — see
-`StarpadMac/SympatheticStringSet.swift::sarangiTarab`), so across the 8 notes the
+`TarabdaarMac/SympatheticStringSet.swift::sarangiTarab`), so across the 8 notes the
 sympathetic partials sit at the SAME frequencies while the main-string partials
 MOVE with F_i. That difference, under one shared body, is the separation handle.
 

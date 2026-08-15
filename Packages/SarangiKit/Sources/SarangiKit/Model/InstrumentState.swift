@@ -2,7 +2,7 @@ import Foundation
 
 /// The persisted instrument document: the tonic, the scale it is resolved
 /// against, and the editable sympathetic strings. Saved/loaded inside a
-/// `.starpad` preset.
+/// `.tarabdaar` preset.
 ///
 /// SCALE-CENTRALIZED (2026-07-25): `scaleRatios` mirrors the ONE Pitch Pad
 /// scale (degrees from the tonic in [1, 2), sorted ascending) and `tonicHz`
@@ -12,7 +12,7 @@ import Foundation
 /// opt-out (the "Follow the Pitch Pad scale" toggle was removed the same
 /// day). The ROW LAYOUT (which degrees get strings, emphasis, octave
 /// repeats) regenerates when the scale's degree COUNT changes — existing
-/// rows would go stale-and-clamped — or on the Tarab tab's explicit
+/// rows would go stale-and-clamped — or on the Strings tab's explicit
 /// "Regenerate" action; otherwise hand edits (gains, t60s, added/removed
 /// rows) stand. The raga fields (`ragaId`/`ragaName`/`intervals`) were
 /// dropped with the free-ratio model — the raga table survives in
@@ -32,7 +32,7 @@ public struct InstrumentState: Codable, Sendable {
     public var droneStringIds: [UUID?]
     /// The melody-follower string (2026-07-25): pitch = the highest note
     /// being played (live, kernel-side); gain/t60/enabled are ordinary
-    /// Tarab-tab knobs. Default disabled (byte-null when off).
+    /// Strings-tab knobs. Default disabled (byte-null when off).
     public var follower: FollowerSpec
     public var schemaVersion: Int
 
@@ -42,8 +42,8 @@ public struct InstrumentState: Codable, Sendable {
     // toggle, 2026-07-25 — following is unconditional now). Documents that
     // still carry the keys decode fine — they are ignored.
 
-    /// The number of drone buttons/slots. Mirrors StarpadCore's
-    /// `FretArrangement.droneCount` (SarangiKit sits below StarpadCore, so
+    /// The number of drone buttons/slots. Mirrors TarabdaarCore's
+    /// `FretArrangement.droneCount` (SarangiKit sits below TarabdaarCore, so
     /// it can't read it) — `DroneStringTests` pins the two equal.
     public static let droneSlotCount = 3
 
@@ -207,7 +207,7 @@ public struct InstrumentState: Codable, Sendable {
     /// rows (scale degrees + doublings + octave repeats), discarding any
     /// hand edits. The old rows' ids die with them, so the drone mapping
     /// re-runs too. Used when the scale's degree count changes and by the
-    /// Tarab tab's explicit "Regenerate" action.
+    /// Strings tab's explicit "Regenerate" action.
     public mutating func regenerateFromScale(tonicHz: Double, ratios: [Double]) {
         guard tonicHz > 20, tonicHz < 4000, !ratios.isEmpty else { return }
         self.tonicHz = tonicHz

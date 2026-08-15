@@ -7,10 +7,11 @@ import CBowKernel
 /// → E_lp radiation low-pass → room reverb. The kernel
 /// output is ONE mono stream (taraf direct radiation is fused in-kernel);
 /// by default stereo is an equal split so the L+R sum is pan-invariant like
-/// every other mode. With `bow_st_spread`/`bow_st_played` armed (Starpad
-/// live, 2026-07-23) the POLY kernel adds a physically-derived SIDE stream
-/// — per-source pans across the bridge — and L/R = mid ± side; the L+R
-/// fold-down still equals the mono output exactly. No capture curve live
+/// every other mode. With `bow_st_width` armed (2026-08-01 unifying rev;
+/// the legacy `bow_st_spread`/`bow_st_played` pans still arm too) the
+/// POLY kernel adds a physically-derived SIDE stream — the whole
+/// instrument heard from two observation points — and L/R = mid ± side;
+/// the L+R fold-down still equals the mono output exactly. No capture curve live
 /// (live is its own neutral capture) and no pre-roll/pre-charge (start
 /// from silence).
 ///
@@ -65,21 +66,24 @@ public final class BowEngine {
     private var radFIR: FIRFilter?
     private var radLp: Biquad?
     private var radHill: Biquad?
-    /// STARPAD STEREO SIDE PATH (2026-07-23): the poly kernel renders a
+    /// TARABDAAR STEREO SIDE PATH (2026-07-23): the poly kernel renders a
     /// second SIDE stream carrying only the DIRECT radiation — the taraf
     /// strings' direct tap, the modal-jawari rows' own radiation (drones
     /// included), and the bow-contact noise — each panned by PITCH CLASS
     /// around the tonic (spread·sin(2π·pc): tonic centre-stage, svaras
     /// at fixed symmetric places, octaves share a place — see the pan
-    /// rationale at the arming site). Bridge-borne energy (played force,
-    /// driven web resonance) radiates from the one central body and stays
-    /// mid-only, so the image is a spread halo around a centred voice.
-    /// The side rides its own decimator + radiation-chain twins here, then
-    /// L = mid + side, R = mid − side — the L+R fold-down is bit-identical
-    /// to the legacy mono output. Armed only when `bow_st_spread` /
-    /// `bow_st_played` are present and nonzero (keys absent from the
-    /// artifact ⇒ every golden/parity test keeps the exact mono path);
-    /// Starpad's live build seeds them in `buildEngine`.
+    /// rationale at the arming site — LEGACY, seeded 0 since the width
+    /// unification). The shipping law is `bow_st_width` (2026-08-01):
+    /// the whole instrument HEARD from two observation points — the
+    /// kernel's diffuse-field difference bank on the complete radiated
+    /// output — so the centred image gains width without leaning. The
+    /// side rides its own decimator + radiation-chain twins here, then
+    /// L = mid + side, R = mid − side — the L+R fold-down is
+    /// bit-identical to the legacy mono output. Armed only when
+    /// `bow_st_width` (or a legacy pan spread) is present and nonzero
+    /// (keys absent from the artifact ⇒ every golden/parity test keeps
+    /// the exact mono path); Tarabdaar's live build seeds `bow_st_width`
+    /// in `buildEngine`.
     private var stereoOn = false
     private var decS = HalfBandDecimator()
     private var radFIRS: FIRFilter?
@@ -96,7 +100,7 @@ public final class BowEngine {
     var fpMask: BowFpMask?
     var reverb: Reverb
 
-    // ---- STARPAD FX RACK (2026-08-01): four insert points, all off by
+    // ---- TARABDAAR FX RACK (2026-08-01): four insert points, all off by
     // default (byte-null). drive/voice/taraf run at the KERNEL rate
     // (pre-decimation — summing the split buses there keeps the no-FX
     // path bit-exact); global runs at the engine rate after the whole
@@ -145,16 +149,23 @@ public final class BowEngine {
     // pitch as its target once per chunk (plain kernel scalar write).
     private var trackArmed = false
     private var trackHzPushed = 0.0
-    // RECRUITMENT / taraf selectivity (2026-07-26): `bow_jt_sel` scales
-    // each jawari row's BRIDGE drive by its harmonic kinship to the
-    // gated pitches. The target is a control-thread write; the render
-    // thread rescores the rows per chunk and pushes per-row weights the
-    // kernel slews (~30 ms). Kin falloff width / strength law are bp
-    // scalars (`bow_jt_sel_width`, `bow_jt_sel_kin`).
+    // RECRUITMENT / contribution profile (2026-07-26; PROFILE rework
+    // 2026-08-01 — the first bipolar axis' top half was a pure loudness
+    // boost and the whole knob read as a taraf volume; the interim
+    // monotone-breadth cut topped out at the fitted response, still
+    // note-dependent): `bow_jt_sel` sweeps each jawari row's BRIDGE
+    // drive across the contribution PROFILE — 0 = kin-only, 0.5 =
+    // fitted (natural resonance), 1 = every row contributing EQUALLY,
+    // note-independent — with the radiated jt gain compensating so the
+    // taraf's LOUDNESS holds across the throw. The target is a
+    // control-thread write; the render thread rescores the rows per
+    // chunk and pushes per-row weights the kernel slews (~30 ms). Kin
+    // falloff width / strength law are bp scalars (`bow_jt_sel_width`,
+    // `bow_jt_sel_kin`).
     private var selTarget = 0.5               // bow_jt_sel runtime (0.5 = fitted)
     private var selEngaged = false            // render thread: axis in effect
     private var selWidthCents = 30.0          // bow_jt_sel_width
-    private var selLush = 2.0                 // bow_jt_sel_lush (boost at 1)
+    private var selComp = 4.0                 // bow_jt_sel_comp (loudness-comp cap)
     private var selGMulPushed = 1.0           // last pushed radiated-gain mul
     private var selKinCents: [Double] = []    // kin offsets (cents)
     private var selKinStrength: [Double] = [] // (p·q)^-kinExp per kin
@@ -175,6 +186,23 @@ public final class BowEngine {
     /// so the tilt never collapses the image toward the middle.
     private var tiltLoShelfS: Biquad
     private var tiltHiShelfS: Biquad
+
+    // ---- OUTPUT SAFETY LIMITER (2026-08-01) ----
+    // Linked-stereo peak limiter at the VERY END of both post-chains
+    // (after the global FX insert): instant-attack peak detector,
+    // exponential release (`bow_lim_rel_ms`), gain smoothed ~0.2 ms,
+    // and a hard clamp at min(1, 1.25×ceiling) for the few attack
+    // samples the smoothing lets through. BELOW the ceiling it
+    // multiplies nothing — bit-exact passthrough (the parity phrase
+    // peaks ~0.06 against the 0.8 default, so every golden is
+    // untouched). It exists for the kin peaks (a hard-struck unison
+    // Sa/Pa adds the voice, the jt ring and the coupling return
+    // coherently) and the ±16 dB expression axis.
+    private var limThresh = 0.8       // bow_lim_thresh (1.0 ≈ FS safety)
+    private var limRelCoef = 0.000139 // bow_lim_rel_ms (150 ms at 48 k)
+    private let limAttCoef = 0.1      // ~0.2 ms gain smoothing
+    private var limEnv = 0.0
+    private var limGain = 1.0
 
     // preallocated per-buffer scratch. Control arrays are SLOT-MAJOR at a
     // fixed allocation stride (maxFrames·osFactor); the mono path uses
@@ -272,6 +300,7 @@ public final class BowEngine {
         fxPending = [FXSettings(), FXSettings(), FXSettings(), FXSettings()]
         polySnap = BowControlMapper.PolySnapshot(count: nPoly)
         filters = [BowControlFilter](repeating: filter, count: nPoly)
+        for i in filters.indices { filters[i].seedDrift(UInt64(i)) }
         lastSerial = [UInt32](repeating: 0, count: nPoly)
         slotSilent = [Bool](repeating: false, count: nPoly)
         mapper.setSlotLimit(nPoly)
@@ -304,7 +333,7 @@ public final class BowEngine {
             s[54], s[55],
             s[56], s[57],
             s[58], s[59], s[60])
-        // Drone-row excitation scalars (Starpad drone buttons; not in
+        // Drone-row excitation scalars (Tarabdaar drone buttons; not in
         // the artifact — bp defaults, overridable via `string.<key>`).
         droneLevel = bp.v("bow_drone_level", 0.026)
         droneOnset = bp.v("bow_drone_onset", 0.052)
@@ -325,6 +354,11 @@ public final class BowEngine {
         tiltEqDbMax = bp.v("bow_tilt_eq_db", 9.0)
         tiltEqLoHz = bp.v("bow_tilt_eq_lo", 300.0)
         tiltEqHiHz = bp.v("bow_tilt_eq_hi", 2400.0)
+        // output safety limiter (2026-08-01) — bp resting values; live
+        // edits arrive via applyPendingLive (the same reads)
+        limThresh = min(max(bp.v("bow_lim_thresh", 0.8), 0.1), 1.0)
+        limRelCoef = 1.0 - exp(-1.0 /
+            (max(bp.v("bow_lim_rel_ms", 150.0), 5.0) * 0.001 * sr))
         tiltLoShelf = Biquad.lowShelf(f0: bp.v("bow_tilt_eq_lo", 300.0),
                                       gainDB: 0.0, sr: sr)
         tiltHiShelf = Biquad.highShelf(f0: bp.v("bow_tilt_eq_hi", 2400.0),
@@ -340,7 +374,8 @@ public final class BowEngine {
             // size the per-row scratch. Separate allocations — sharing
             // storage would COW-copy on the render thread's first write.
             selWidthCents = bp.v("bow_jt_sel_width", 30.0)
-            selLush = max(1.0, bp.v("bow_jt_sel_lush", 2.0))
+            // the kernel's gain_mul clamps at 4 — the cap can't exceed it
+            selComp = min(max(bp.v("bow_jt_sel_comp", 4.0), 1.0), 4.0)
             let kinExp = bp.v("bow_jt_sel_kin", 0.7)
             selKinCents = Self.recruitKin.map { 1200.0 * log2($0.ratio) }
             selKinStrength = Self.recruitKin.map { pow($0.pq, -kinExp) }
@@ -348,6 +383,7 @@ public final class BowEngine {
             jtTrackRowIdx = Int(jt.trackRow)
             jtDwTargets = [Double](repeating: 1.0, count: jt.rowFreqs.count)
             jtDwPushed = [Double](repeating: 1.0, count: jt.rowFreqs.count)
+            droneHeldMask = [Bool](repeating: false, count: jt.rowFreqs.count)
             selPitches = [Double](repeating: 0.0, count: self.maxPoly)
             if let pk = pkernel {
                 bow_poly_jt_load(pk, Int32(jt.M.count), jt.J, jt.M,
@@ -431,7 +467,7 @@ public final class BowEngine {
             jtLpHzCur = tiltPureLpHiHz
             jtLpHzPushed = tiltPureLpHiHz
         }
-        // STARPAD STEREO SIDE PATH (2026-07-23): arm the poly kernel's
+        // TARABDAAR STEREO SIDE PATH (2026-07-23): arm the poly kernel's
         // side stream with per-source pans by PITCH CLASS around the
         // tonic — pan = spread·sin(2π·pc). The tonic (and every octave
         // of it) rings centre-stage; the other svaras take fixed places
@@ -447,8 +483,17 @@ public final class BowEngine {
         // ⇒ never armed — the exact legacy mono path.
         let stSpread = bp.v("bow_st_spread", 0.0)
         let stPlayed = bp.v("bow_st_played", 0.0)
+        // INSTRUMENT WIDTH (2026-08-01 unifying rev): the whole
+        // instrument heard from two observation points — the kernel's
+        // diffuse-field difference bank on the complete radiated output
+        // (voice bus + jt wash, one instance each by linearity). The
+        // image stays centred; its upper spectrum stops being
+        // interaurally identical. This is the ONE shipping width law —
+        // the per-source pans above it are legacy staging, seeded 0
+        // (disarmed) pending removal. Mono fold-down invariant as ever.
+        let stWidth = bp.v("bow_st_width", 0.0)
         if let pk = pkernel, fpMask == nil,
-           stSpread > 1e-6 || stPlayed > 1e-6 {
+           stSpread > 1e-6 || stPlayed > 1e-6 || stWidth > 1e-6 {
             let tonic = tables.scalars.count > 44 ? tables.scalars[44]
                                                   : 261.63
             func pcPans(_ freqs: [Double], spread: Double) -> [Double] {
@@ -476,6 +521,7 @@ public final class BowEngine {
                                 jtPan.isEmpty ? nil : jtPan,
                                 Int32(jtPan.count),
                                 slotPan, Int32(nPoly))
+            if stWidth > 1e-6 { bow_poly_set_stereo_width(pk, stWidth) }
             // side twins of the radiation chain (same coefficients,
             // independent state — linearity keeps mid/side consistent)
             if !rfir.isEmpty { radFIRS = FIRFilter(taps: rfir) }
@@ -498,7 +544,15 @@ public final class BowEngine {
             }
             stereoOn = true
         }
-        // STARPAD FX (2026-08-01): install the voice→taraf drive hook.
+        // SITAR TWANG (2026-08-01): a bp resting value arms the played
+        // strings' grazing bridge fold at build (the audition/test
+        // `string.bow_twang` route; the app's live push arrives on
+        // top). 0 = byte-null.
+        if let pk = pkernel {
+            let tw = min(max(bp.v("bow_twang", 0.0), 0.0), 1.0)
+            if tw > 1e-9 { bow_poly_set_twang(pk, tw) }
+        }
+        // TARABDAAR FX (2026-08-01): install the voice→taraf drive hook.
         // Installed unconditionally (init, off the audio thread); the
         // unit's own `isEngaged` gate keeps it byte-null while the drive
         // point is off. `passUnretained` is safe — deinit frees the
@@ -569,6 +623,11 @@ public final class BowEngine {
     /// remaps run on main.
     private var droneHeldRows: Set<Int> = []
     private var droneLock = os_unfair_lock()
+    /// Render-readable shadow of `droneHeldRows` (element stores under
+    /// `droneLock`; the render thread reads it lock-free — the
+    /// drone-setter contract): the recruitment loudness compensation
+    /// counts a held row as fully ringing, so a drone is never pumped.
+    private var droneHeldMask: [Bool] = []
 
     /// Per-row drone drive weights for a set of held rows: a held row is
     /// 1, every other row takes its best kin affinity to the held set
@@ -618,6 +677,7 @@ public final class BowEngine {
         else { return }
         os_unfair_lock_lock(&droneLock)
         droneHeldRows.insert(row)
+        if row < droneHeldMask.count { droneHeldMask[row] = true }
         let w = droneDriveWeights(rows: droneHeldRows)
         let wNew = droneDriveWeights(rows: [row])
         for i in 0..<w.count {
@@ -639,6 +699,7 @@ public final class BowEngine {
         else { return }
         os_unfair_lock_lock(&droneLock)
         droneHeldRows.remove(row)
+        if row < droneHeldMask.count { droneHeldMask[row] = false }
         let w = droneDriveWeights(rows: droneHeldRows)
         for i in 0..<w.count {
             bow_poly_jt_drone(pk, Int32(i), droneLevel * w[i])
@@ -701,6 +762,30 @@ public final class BowEngine {
     /// map above.
     private var jtApexRef = 1.0e-5
 
+    /// SITAR TWANG 0…1 (base parameter `bow_twang`): the played strings'
+    /// grazing bridge fold — 0 = the plain bridge (byte-exact legacy),
+    /// 1 = the fitted sitar-jawari wrap (even-harmonic flattening + the
+    /// delayed high-harmonic bloom). The knee rides each string's own
+    /// peak envelope in-kernel, so the twang engages at any strike
+    /// level. Plain kernel scalar write (the drone-setter contract); the
+    /// kernel slews the amount ~30 ms.
+    public func setTwang(_ amt01: Double) {
+        guard let pk = pkernel else { return }
+        bow_poly_set_twang(pk, min(max(amt01, 0.0), 1.0))
+    }
+
+    /// OFFLINE fitting hook for the twang fold's shape (the
+    /// `bow_jt_set_lift` precedent — no registry parameter drives this;
+    /// internal so only tests/tools reach it). Non-positive keeps the
+    /// kernel's fitted default.
+    func setTwangShape(kneeR: Double, depth: Double, relMs: Double,
+                       rollSmp: Double, bright: Double = 0,
+                       ring: Double = 0, gut: Double = 0) {
+        guard let pk = pkernel else { return }
+        bow_poly_set_twang_shape(pk, kneeR, depth, relMs, rollSmp,
+                                 bright, ring, gut)
+    }
+
     /// TARAF DAMPING amount 0..1 (base parameter `bow_jt_damp`): 0 = the
     /// natural ring (off, byte-exact), rising = extra momentum damping,
     /// t60 log-interpolated `bow_tilt_damp_max_t60` (20 s) down to
@@ -712,29 +797,40 @@ public final class BowEngine {
         os_unfair_lock_unlock(&tiltLock)
     }
 
-    /// TARAF RECRUITMENT 0..1 (base parameter `bow_jt_sel`), BIPOLAR
-    /// around the fitted sound (2026-07-26 rework — the first cut only
-    /// subtracted drive from the fitted point, which was near-inaudible
-    /// in normal play: a scale-tuned tarab is mostly KIN to every scale
-    /// note, and un-driven rows still ring out for seconds):
-    ///  * **0.5 = the fitted taraf** (all weights 1, bit-exact).
-    ///  * **below 0.5** rows lose bridge drive by harmonic DISTANCE from
-    ///    the played pitches until at 0 only kin rows ring — the kin
-    ///    score is SQUARED at the endpoint so octaves sit clearly below
-    ///    the unison and the fifth family is faint (the lattice itself
+    /// TARAF RECRUITMENT PROFILE 0..1 (base parameter `bow_jt_sel`;
+    /// 2026-08-01 PROFILE rework — the first bipolar axis' top half was
+    /// a pure uniform boost, so the knob read as a taraf VOLUME; the
+    /// interim monotone-breadth cut topped out at the fitted response,
+    /// which is still note-dependent. The knob now sweeps each row's
+    /// CONTRIBUTION to the taraf, loudness held):
+    ///  * **0.5 = the fitted taraf** (all weights 1, bit-exact) — the
+    ///    natural resonance profile: unison rows dominate, octaves a
+    ///    few dB down, fifths faint, unrelated rows only haze.
+    ///  * **below 0.5** rows lose bridge drive by harmonic DISTANCE
+    ///    from the played pitches until at 0 only kin rows ring — the
+    ///    kin score is SQUARED at the endpoint so octaves sit clearly
+    ///    below the unison and the fifth family is faint (the lattice
     ///    stays `bow_jt_sel_kin`, shared with the drone spread).
-    ///  * **above 0.5** the chorus swells toward ×`bow_jt_sel_lush` (2)
-    ///    at 1, on TWO levers at once: every row's drive weight (the
-    ///    graze cascade wakes — character, worth only ~+8% ring on its
-    ///    own because the contact drains what it is fed) and the
-    ///    RADIATED jt gain (`bow_poly_jt_set_gain_mul` — the level, ~+6
-    ///    dB, which nothing drains), so the whole taraf joins the chorus
-    ///    prominently, an opened-jawari lushness.
-    /// Chords recruit additively on the selective half (soft-OR —
-    /// gentler than a max, still bounded). Weights gate the DRIVE only:
-    /// rings already sounding decay naturally, and a held drone's own
-    /// noise drive is never ducked. Per-row slew in the kernel (~30 ms);
-    /// rescored per chunk on the render thread.
+    ///  * **above 0.5** the profile FLATTENS: resonant rows are cut
+    ///    toward the common haze level (`w → √(haze/(haze+kin²))` — the
+    ///    cut direction is the lever that works; extra drive is drained
+    ///    by the graze contact) until at 1 every row contributes
+    ///    EQUALLY and the taraf's response no longer depends on what
+    ///    the voice plays.
+    ///  * **loudness compensation**: the RADIATED jt gain
+    ///    (`bow_poly_jt_set_gain_mul`) holds the level — below 0.5 at
+    ///    the note's own fitted power, above 0.5 blending to ONE fixed
+    ///    common level (rows·haze + `recruitKinNominal`, a tonic-like
+    ///    note's kin power) so the flat end is note-independent in
+    ///    level too. Capped ×`bow_jt_sel_comp` (4, the kernel clamp).
+    ///    Held-drone rows and the melody follower count as fully
+    ///    ringing in the model, so the compensation never pumps a held
+    ///    drone.
+    /// Chords recruit additively (soft-OR — gentler than a max, still
+    /// bounded). Weights gate the DRIVE only: rings already sounding
+    /// decay naturally, and a held drone's own noise drive is never
+    /// ducked. Per-row slew in the kernel (~30 ms); rescored per chunk
+    /// on the render thread.
     public func setTarafSelectivity(_ s01: Double) {
         os_unfair_lock_lock(&tiltLock)
         selTarget = min(max(s01, 0.0), 1.0)
@@ -774,24 +870,15 @@ public final class BowEngine {
         return min(best, 1.0)
     }
 
-    /// One row's bridge-drive weight for a set of played pitches at a
-    /// given recruitment value — the exact math the render thread pushes
-    /// into the kernel (minus the follower-row exemption). 0.5 = 1
-    /// everywhere (fitted); 0 = squared kin score; 1 = `lush`. Public
-    /// for tests and offline tuning; the render path uses precomputed
-    /// tables.
-    public static func recruitWeight(rowHz: Double, playedHz: [Double],
-                                     selectivity: Double,
-                                     widthCents: Double = 30.0,
-                                     kinExp: Double = 0.7,
-                                     lush: Double = 2.0) -> Double {
-        let s = min(max(selectivity, 0.0), 1.0)
-        // lush half: uniform boost, no pitch dependence
-        if s >= 0.5 { return 1.0 + (s - 0.5) * 2.0 * (lush - 1.0) }
+    /// One row's kin score 0..1 (soft-OR across the chord: misses
+    /// multiply, so two half-kin notes recruit more than either alone
+    /// but never past 1). The shared core of `recruitWeight` and
+    /// `recruitGainMul`.
+    static func recruitKinScore(rowHz: Double, playedHz: [Double],
+                                widthCents: Double,
+                                kinExp: Double) -> Double {
         let kc = recruitKin.map { 1200.0 * log2($0.ratio) }
         let ks = recruitKin.map { pow($0.pq, -kinExp) }
-        // soft-OR across the chord: misses multiply, so two half-kin
-        // notes recruit more than either alone but never past 1
         var miss = 1.0
         for p in playedHz where p > 0 && rowHz > 0 {
             let c = 1200.0 * log2(rowHz / p)
@@ -799,21 +886,107 @@ public final class BowEngine {
                                           kinStrength: ks,
                                           widthCents: widthCents)
         }
-        let kin = 1.0 - miss
-        let t = s * 2.0            // 1 at neutral, 0 at kin-only
-        return t + (1.0 - t) * kin * kin
+        return 1.0 - miss
     }
 
-    /// Per-chunk RECRUITMENT update (render thread), bipolar around 0.5:
-    /// the selective half scores every row's kinship to the gated
-    /// pitches (soft-OR across the chord, squared at the endpoint), the
-    /// lush half boosts every row uniformly toward ×`bow_jt_sel_lush`,
-    /// and the per-row weights are pushed for the kernel to slew
-    /// (~30 ms). On the selective half a chunk with no gated note holds
-    /// the last weights, so a ring keeps the recruit pattern of the note
-    /// that excited it; the lush half needs no pitches. Back at 0.5 one
-    /// all-ones push restores the fitted taraf and the path goes quiet.
-    /// No allocation.
+    /// One row's bridge-drive weight for a set of played pitches at a
+    /// given profile position — the exact math the render thread pushes
+    /// into the kernel (minus the follower/drone exemptions). 0.5 = 1
+    /// everywhere (fitted); 0 = squared kin score (kin-only); 1 = the
+    /// EQUAL-contribution cut `√(haze/(haze+kin²))` (a unison row falls
+    /// to ~0.22, a non-kin row stays 1 — the whole bank levels at the
+    /// haze). Public for tests and offline tuning; the render path uses
+    /// precomputed tables.
+    public static func recruitWeight(rowHz: Double, playedHz: [Double],
+                                     selectivity: Double,
+                                     widthCents: Double = 30.0,
+                                     kinExp: Double = 0.7) -> Double {
+        let s = min(max(selectivity, 0.0), 1.0)
+        if abs(s - 0.5) <= 1e-12 { return 1.0 }
+        let kin = recruitKinScore(rowHz: rowHz, playedHz: playedHz,
+                                  widthCents: widthCents, kinExp: kinExp)
+        let kin2 = kin * kin
+        if s < 0.5 {
+            let t = s * 2.0
+            return t + (1.0 - t) * kin2
+        }
+        let u = (s - 0.5) * 2.0
+        let flat = (recruitHazeFloor / (recruitHazeFloor + kin2)).squareRoot()
+        return 1.0 + u * (flat - 1.0)
+    }
+
+    /// Non-resonant response floor of a jawari row relative to a unison
+    /// row (power): the haze a row rings with under full drive even when
+    /// it shares no kin interval with the played note. The model's ONE
+    /// texture constant: it sets both the flat end's per-row level (all
+    /// rows cut to it) and the compensation's smoothness on non-kin
+    /// notes (with no floor a non-kin note's model power is ~0 and the
+    /// gain would jump straight to the cap).
+    static let recruitHazeFloor = 0.05
+
+    /// The flat end's common loudness anchor: the modeled kin power of a
+    /// tonic-like note (unison + two octave rows ≈ 1 + 2·0.38). At
+    /// profile 1 every note's taraf is leveled to rows·hazeFloor + THIS
+    /// — a fixed reference, so neither the per-row contributions nor the
+    /// overall level depend on the played note.
+    static let recruitKinNominal = 1.75
+
+    /// The loudness-consistency gain for a whole bank at a given profile
+    /// position: the radiated-gain multiplier that holds the taraf's
+    /// power (incoherent model — row ring power ∝ weight² ×
+    /// (hazeFloor + kin²)), clamped [1, cap]. Below 0.5 the reference is
+    /// the note's own fitted power; above 0.5 it blends to the FIXED
+    /// common level (rows·hazeFloor + `recruitKinNominal`) so the flat
+    /// end is note-independent. The exact math the render thread pushes
+    /// through `bow_poly_jt_set_gain_mul` (minus the follower/held-drone
+    /// rows, which count as fully ringing). 1 at 0.5.
+    public static func recruitGainMul(rowsHz: [Double], playedHz: [Double],
+                                      selectivity: Double,
+                                      widthCents: Double = 30.0,
+                                      kinExp: Double = 0.7,
+                                      cap: Double = 4.0) -> Double {
+        let s = min(max(selectivity, 0.0), 1.0)
+        if abs(s - 0.5) <= 1e-12 { return 1.0 }
+        let u = max(0.0, (s - 0.5) * 2.0)
+        var pFit = 0.0, pNow = 0.0
+        var n = 0
+        for r in rowsHz where r > 0 {
+            let kin = recruitKinScore(rowHz: r, playedHz: playedHz,
+                                      widthCents: widthCents, kinExp: kinExp)
+            let kin2 = kin * kin
+            let w = recruitWeight(rowHz: r, playedHz: playedHz,
+                                  selectivity: s, widthCents: widthCents,
+                                  kinExp: kinExp)
+            pFit += recruitHazeFloor + kin2
+            pNow += w * w * (recruitHazeFloor + kin2)
+            n += 1
+        }
+        let refTop = Double(n) * recruitHazeFloor + recruitKinNominal
+        let pRef = (1.0 - u) * pFit + u * refTop
+        guard pNow > 1e-12 else { return cap }
+        return min(max((pRef / pNow).squareRoot(), 1.0), cap)
+    }
+
+    /// Per-chunk RECRUITMENT update (render thread), the contribution-
+    /// profile axis with the loudness held: every row's kinship to the
+    /// gated pitches is scored (soft-OR across the chord), its bridge-
+    /// drive weight moved toward kin² (below 0.5, the kin-only strip)
+    /// or toward the equal-contribution cut √(haze/(haze+kin²)) (above
+    /// 0.5, the flat end), and the per-row weights pushed for the
+    /// kernel to slew (~30 ms). The radiated jt gain simultaneously
+    /// holds the taraf's power (the incoherent model of
+    /// `recruitGainMul`: below 0.5 at the note's own fitted level,
+    /// above 0.5 blending to the fixed common level so the flat end is
+    /// note-independent; cap ×`bow_jt_sel_comp` — the RADIATED gain
+    /// because extra drive is drained by the graze contact). The
+    /// follower row keeps weight 1 on the selective half (it tracks the
+    /// melody) but flattens like a unison row on the flat half (nothing
+    /// should be pitch-tracking there); it and held-drone rows count as
+    /// fully ringing in the model, so the compensation never pumps a
+    /// drone. A chunk with no gated note holds the last weights + gain,
+    /// so a ring keeps the recruit pattern of the note that excited it.
+    /// Back at 0.5 one all-ones push restores the fitted taraf and the
+    /// path goes quiet. No allocation.
     private func updateRecruitment(_ pk: UnsafeMutableRawPointer) {
         guard !selRowFreqs.isEmpty else { return }
         os_unfair_lock_lock(&tiltLock)
@@ -821,21 +994,8 @@ public final class BowEngine {
         os_unfair_lock_unlock(&tiltLock)
         let neutral = abs(sel - 0.5) <= 1e-4
         if neutral, !selEngaged { return }
-        let selective = sel < 0.5 && !neutral
-        let lushU = max(0.0, (sel - 0.5) * 2.0)
-        // Lush prominence rides the RADIATED gain, not just drive: the
-        // graze contact drains a driven-harder string almost as fast as
-        // it is pushed (measured ×2 drive = +8% ring), but nothing
-        // drains output level. Same ×selLush at the top of the throw.
-        // Pushed before the selective half's hold-return so leaving the
-        // lush half never strands the boost on a silent pad.
-        let gMul = 1.0 + lushU * (selLush - 1.0)
-        if abs(gMul - selGMulPushed) > 1e-4 {
-            selGMulPushed = gMul
-            bow_poly_jt_set_gain_mul(pk, gMul)
-        }
         var np = 0
-        if selective {
+        if !neutral {
             for s in 0..<maxPoly {
                 let slot = polySnap.slots[s]
                 if slot.gate > 0.0, slot.f0Target > 0.0 {
@@ -845,10 +1005,19 @@ public final class BowEngine {
             }
             if np == 0 { return }
         }
+        let eps = Self.recruitHazeFloor
+        let t = min(sel, 0.5) * 2.0          // selective half: 0 = kin-only
+        let u = max(0.0, (sel - 0.5) * 2.0)  // flat half: 1 = equal
         var changed = false
+        // pInv: rows whose ring does not follow the weights (follower,
+        // held drones) — they enter BOTH sides of the ratio unchanged,
+        // so with a drone held the compensation relaxes toward 1
+        // instead of boosting the drone.
+        var pNow = 0.0, pFit = 0.0, pInv = 0.0
+        var nFree = 0
         for i in 0..<selRowFreqs.count {
-            var w = 1.0
-            if selective, i != jtTrackRowIdx {
+            var kin2 = 1.0
+            if !neutral, i != jtTrackRowIdx {
                 let fr = selRowFreqs[i]
                 var miss = 1.0
                 for k in 0..<np {
@@ -859,13 +1028,41 @@ public final class BowEngine {
                         widthCents: selWidthCents)
                 }
                 let kin = 1.0 - miss
-                let t = sel * 2.0
-                w = t + (1.0 - t) * kin * kin
-            } else if lushU > 0.0 {
-                w = 1.0 + lushU * (selLush - 1.0)
+                kin2 = kin * kin
+            }
+            var w = 1.0
+            if !neutral {
+                if u > 0.0 {
+                    let flat = (eps / (eps + kin2)).squareRoot()
+                    w = 1.0 + u * (flat - 1.0)
+                } else {
+                    w = t + (1.0 - t) * kin2
+                }
+            }
+            let invariant = i == jtTrackRowIdx
+                || (i < droneHeldMask.count && droneHeldMask[i])
+            if invariant {
+                pInv += eps + 1.0
+            } else {
+                nFree += 1
+                pFit += eps + kin2
+                pNow += w * w * (eps + kin2)
             }
             jtDwTargets[i] = w
             if abs(w - jtDwPushed[i]) > 1e-4 { changed = true }
+        }
+        var gMul = 1.0
+        if !neutral {
+            let refTop = Double(nFree) * eps + Self.recruitKinNominal
+            let pRef = pInv + (1.0 - u) * pFit + u * refTop
+            let pAll = pInv + pNow
+            gMul = pAll > 1e-12
+                ? min(max((pRef / pAll).squareRoot(), 1.0), selComp)
+                : selComp
+        }
+        if abs(gMul - selGMulPushed) > 1e-4 {
+            selGMulPushed = gMul
+            bow_poly_jt_set_gain_mul(pk, gMul)
         }
         if changed {
             jtDwTargets.withUnsafeBufferPointer {
@@ -877,7 +1074,7 @@ public final class BowEngine {
         selEngaged = !neutral
     }
 
-    // MARK: - Live parameters (Starpad 2026-07-24)
+    // MARK: - Live parameters (Tarabdaar 2026-07-24)
 
     /// A parameter edit staged by the control thread, applied at the next
     /// chunk boundary on the render thread. `scalars` is the freshly built
@@ -1056,6 +1253,11 @@ public final class BowEngine {
                 for i in radHP.indices { radHP[i].copyCoefficients(from: fresh) }
                 for i in radHPS.indices { radHPS[i].copyCoefficients(from: fresh) }
             }
+            // output safety limiter: plain scalar adoption (the limiter's
+            // own gain smoothing makes threshold moves click-free)
+            limThresh = min(max(bp.v("bow_lim_thresh", 0.8), 0.1), 1.0)
+            limRelCoef = 1.0 - exp(-1.0 /
+                (max(bp.v("bow_lim_rel_ms", 150.0), 5.0) * 0.001 * sr))
             liveRamping = true
         }
 
@@ -1202,7 +1404,7 @@ public final class BowEngine {
         }
     }
 
-    /// STARPAD FX (2026-08-01): stage one insert point's settings from
+    /// TARABDAAR FX (2026-08-01): stage one insert point's settings from
     /// the control thread; the render thread adopts them at the next
     /// chunk boundary (the tone-tilt pattern). All-off is byte-null.
     public func setFX(_ point: FXPoint, _ settings: FXSettings) {
@@ -1465,9 +1667,39 @@ public final class BowEngine {
         // FX rack, global point: after the whole fitted chain. A stereo
         // reverb here decorrelates the equal L/R split — deliberate.
         fxUnits[FXPoint.global.rawValue].processLR(outL, outR, n48)
+        applyLimiter(n48: n48, outL: outL, outR: outR)
     }
 
-    /// Stereo post-chain (Starpad 2026-07-23): the mid (y48) and side
+    /// The output safety limiter (see the state declaration). Linked
+    /// stereo: one gain from max(|L|, |R|), so limiting never leans the
+    /// image. Below the ceiling — and once the gain has released back to
+    /// exactly 1 — samples pass untouched (bit-exact).
+    private func applyLimiter(n48: Int, outL: UnsafeMutablePointer<Double>,
+                              outR: UnsafeMutablePointer<Double>) {
+        let clamp = min(1.0, limThresh * 1.25)
+        for i in 0..<n48 {
+            let a = max(abs(outL[i]), abs(outR[i]))
+            if a > limEnv { limEnv = a }                    // instant attack
+            else { limEnv += limRelCoef * (a - limEnv) }    // smooth release
+            if limEnv > limThresh || limGain < 1.0 {
+                let gT = limEnv > limThresh ? limThresh / limEnv : 1.0
+                limGain += limAttCoef * (gT - limGain)
+                if gT == 1.0, limGain > 0.99999 { limGain = 1.0 }
+                if limGain < 1.0 {
+                    var l = outL[i] * limGain
+                    var r = outR[i] * limGain
+                    // the ~0.2 ms gain smoothing lets a few attack
+                    // samples through hot — hard-stop them
+                    if l > clamp { l = clamp } else if l < -clamp { l = -clamp }
+                    if r > clamp { r = clamp } else if r < -clamp { r = -clamp }
+                    outL[i] = l
+                    outR[i] = r
+                }
+            }
+        }
+    }
+
+    /// Stereo post-chain (Tarabdaar 2026-07-23): the mid (y48) and side
     /// (y48S) streams each run their own radiation-chain state (same
     /// coefficients), the room adds a width-decorrelated wet pair, and
     /// L = mid + side, R = mid − side. The side and the reverb's side
@@ -1510,6 +1742,7 @@ public final class BowEngine {
         gainPrev = outGain
         // FX rack, global point (see postChain)
         fxUnits[FXPoint.global.rawValue].processLR(outL, outR, n48)
+        applyLimiter(n48: n48, outL: outL, outR: outR)
     }
 
     /// Fixture/e2e entry: render EXPLICIT kernel-rate control arrays through

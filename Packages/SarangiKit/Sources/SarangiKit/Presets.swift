@@ -46,4 +46,21 @@ public enum Presets {
         return BowParams(url: url)
     }
 
+    // MARK: - The Tanpura voice (r7 modal-contact plucked drone)
+
+    /// The bundled fitted tanpura artifact (`tanpura_live.json`, written by
+    /// the Sarangi Live exporter `scripts/export_tanpura_live.py`; ported
+    /// 2026-08-04). String-construction laws per register role, the bridge
+    /// geometry, the polarization config, the per-note pitch-calibration
+    /// cents and the body/capture EQ FIR. RECAL LAW: the cents and role
+    /// t60s are secanted at this exact physics config — regenerate the
+    /// artifact upstream-style after any physics change, never hand-edit.
+    /// nil when missing from the bundle.
+    public static func tanpuraParams() -> TanpuraParams? {
+        guard let url = Bundle.module.url(forResource: "tanpura_live", withExtension: "json") else {
+            return nil
+        }
+        return TanpuraParams(url: url)
+    }
+
 }

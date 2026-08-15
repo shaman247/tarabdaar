@@ -1,8 +1,8 @@
 # Config Reference
 
-System-level tunable parameters live in `Packages/StarpadCore/Sources/StarpadCore/Config.swift`. Tilt-binding endpoint ranges come from the target itself (`MapTarget.defaultRange` in `TiltMapping.swift`): 0–1 for a composite, the parameter's own range otherwise. See [Sensors — Dimension System](sensors.md#dimension-system-parameter-mapping) and the generated [Parameters](parameters.md) table.
+System-level tunable parameters live in `Packages/TarabdaarCore/Sources/TarabdaarCore/Config.swift`. Tilt-binding endpoint ranges come from the target itself (`MapTarget.defaultRange` in `TiltMapping.swift`): 0–1 for a composite, the parameter's own range otherwise. See [Sensors — Dimension System](sensors.md#dimension-system-parameter-mapping) and the generated [Parameters](parameters.md) table.
 
-The Mac-side **String voice** parameters are the `bow_*` keys of `ParamRegistry` — the `bowed_string.json` scalars (`SarangiKit`) plus the live bow/taraf/tone axes — all edited in the **Parameters tab** (⌘5). Physics values persist as an override dict (`StringParamStore`); the live/hybrid resting values persist in `AppController.paramValues`. The **tarab** is the editable `[StringSpec]` table on `InstrumentState` (Tarab tab ⌘2). **Composite parameters** (named 0–1 controls built from `bow_*` members) live on `AppController.composites` (Controls tab ⌘4). There is no hosted AU, no base-voice selection, no coupled-network params, and no master-FX bus (all removed 2026-07-24; the 2026-08-01 **FX tab** is a new, unrelated rack of `fx_*` registry params inside `BowEngine` — see [FX](fx.md)). See [Sound Design](sound-design.md) and [Sarangi](sarangi.md).
+The Mac-side **String voice** parameters are the `bow_*` keys of `ParamRegistry` — the `bowed_string.json` scalars (`SarangiKit`) plus the live bow/taraf/tone axes — all edited in the **Parameters tab** (⌘5). Physics values persist as an override dict (`StringParamStore`); the live/hybrid resting values persist in `AppController.paramValues`. The **tarab** is the editable `[StringSpec]` table on `InstrumentState` (Strings tab ⌘2). **Composite parameters** (named 0–1 controls built from `bow_*` members) live on `AppController.composites` (Controls tab ⌘4). There is no hosted AU, no base-voice selection, no coupled-network params, and no master-FX bus (all removed 2026-07-24; the 2026-08-01 **FX tab** is a new, unrelated rack of `fx_*` registry params inside `BowEngine` — see [FX](fx.md)). See [Sound Design](sound-design.md) and [Sarangi](sarangi.md).
 
 ## Keyboard
 
@@ -98,36 +98,36 @@ The legacy keyboard is no longer on the playing path. The playing scale is a `Pi
 
 ## String voice (Mac)
 
-The played voice is the **String kernel** (`SarangiKit.BowEngine` + `CBowKernel`, fed by `bowed_string.json`). Its parameters are the `bow_*` keys, edited in the **Parameters tab** (⌘5) over `ParamRegistry` (seven voice groups plus the four `fx_*` groups of the [FX rack](fx.md); `rebuild` rows ride a debounced off-main rebuild, `live`/`hybrid` rows apply instantly) and persisted as an override dict (`starpad.stringOverrides.v1`) plus the resting-value dict (`starpad.controlDefaults.v1`). Audition scores reach any parameter via `voiceParam` name `string.<key>` or `param.<key>`. The exhaustive per-key treatment is in [Sarangi](sarangi.md); the groups are:
+The played voice is the **String kernel** (`SarangiKit.BowEngine` + `CBowKernel`, fed by `bowed_string.json`). Its parameters are the `bow_*` keys, edited in the **Parameters tab** (⌘5) over `ParamRegistry` (seven voice groups plus the four `fx_*` groups of the [FX rack](fx.md); `rebuild` rows ride a debounced off-main rebuild, `live`/`hybrid` rows apply instantly) and persisted as an override dict (`tarabdaar.stringOverrides.v1`) plus the resting-value dict (`tarabdaar.controlDefaults.v1`). Audition scores reach any parameter via `voiceParam` name `string.<key>` or `param.<key>`. The exhaustive per-key treatment is in [Sarangi](sarangi.md); the groups are:
 
 | Group | Keys (representative) |
 |-------|-----------------------|
 | Body (formula modes) | `bow_body_*`, `bow_yinf`, `bow_kret` |
 | Bow & string | `bow_mu_*`, `bow_v0`, `bow_Zt`, `bow_gut_*`, `bow_nut_fc`, `bow_br_fc`, `bow_noise*`, `bow_tors_*`, `bow_age_*`, `bow_cr_*` |
 | Playing ranges | `bow_v_lo/hi`, `bow_live_beta_*`, `bow_live_press_*`, `bow_expr_lift`, `bow_f_cap`, `bow_live_poly` |
-| Jawari taraf | `bow_jtaraf_on`, `bow_jt_*` |
+| Jawari taraf | `bow_jt_*` (always on — no arming switch since 2026-08-02) |
 | Articulation | `bow_place_ms`, `bow_draw_*`, `bow_attack_*`, `bow_vib_*` |
 | Radiation & output | `bow_rad_*`, `bow_w`, `bow_live_trim`, `bow_rev_*`, stereo `bow_st_*` |
 | Drones | `bow_drone_*` (excitation level/envelope, drive band `bow_drone_lp_hz`/`bow_drone_hp_hz`, kin spread `bow_drone_spread` — mellow-drone rev 2026-07-26; `bow_drone_comp_cents` retired 2026-07-25 with the dedicated drone rows) |
 
 ### Sympathetic-string table (tarab) + tuning
 
-The taraf bank is a fully editable `[StringSpec]` table — each row `(degree, octave, gain, t60, enabled)`, the pitch a **scale degree + octave** of the centralized Pitch Pad scale (2026-07-25; absolute Hz is minted at resolve time on a millihertz grid against the one tonic) — edited in the **Tarab tab (⌘2)** as one flat pool via pitch/octave dropdowns (the chromatic row, the choir grouping, and the per-string ratio/Hz inputs are all gone); the rows tune the kernel's in-kernel modal-jawari taraf. (Until 2026-07-24 they also fed a second, LINEAR comb web — `bow_taraf_*`/`bow_open_*`; that web is deleted and the jawari block is the whole sympathetic response, so a row that the jawari selection doesn't pick up is now inert.) **Pitches always follow the scale — there is no opt-out** (the "Follow the Pitch Pad scale" toggle was removed 2026-07-25); the row layout regenerates when the scale's degree count changes or via the tab's "Regenerate from scale" button — `RagaTuning.buildSpecs` (one string per degree + Sa/Pa doublings + low- and upper-octave repeats; the detune chorus died with the scale-defined model, so strings sit exactly on the scale's JI grid). Editing a row, adding/removing strings, or a scale change triggers a structural rebuild. See [Sarangi](sarangi.md).
+The taraf bank is a fully editable `[StringSpec]` table — each row `(degree, octave, gain, t60, enabled)`, the pitch a **scale degree + octave** of the centralized Pitch Pad scale (2026-07-25; absolute Hz is minted at resolve time on a millihertz grid against the one tonic) — edited in the **Strings tab (⌘2)** as one flat pool via pitch/octave dropdowns (the chromatic row, the choir grouping, and the per-string ratio/Hz inputs are all gone); the rows tune the kernel's in-kernel modal-jawari taraf. (Until 2026-07-24 they also fed a second, LINEAR comb web — `bow_taraf_*`/`bow_open_*`; that web is deleted and the jawari block is the whole sympathetic response, so a row that the jawari selection doesn't pick up is now inert.) **Pitches always follow the scale — there is no opt-out** (the "Follow the Pitch Pad scale" toggle was removed 2026-07-25); the row layout regenerates when the scale's degree count changes or via the tab's "Regenerate from scale" button — `RagaTuning.buildSpecs` (one string per degree + Sa/Pa doublings + low- and upper-octave repeats; the detune chorus died with the scale-defined model, so strings sit exactly on the scale's JI grid). Editing a row, adding/removing strings, or a scale change triggers a structural rebuild. See [Sarangi](sarangi.md).
 
 ### Composite parameters
 
-Named 0–1 macros (`CompositeParam`, `AppController.composites`, persisted `starpad.compositeParams.v1`) built from `bow_*` parameter members each sweeping lo→hi as the composite rises. Ships with **Taraf Purity** (the jawari tone LP + the recruitment amount `bow_jt_sel`), **Taraf Decay**, **Tone Tilt**, **Expression** on slots 1–4. Bound to tilts in the Controls tab (⌘4) — where a tilt may equally bind a single parameter directly; audition names `stringPurity` / `stringTarafDecay` / `stringToneTilt` (slots 1–3) + generic `composite1`–`composite8`.
+Named 0–1 macros (`CompositeParam`, `AppController.composites`, persisted `tarabdaar.compositeParams.v1`) built from `bow_*` parameter members each sweeping lo→hi as the composite rises. Ships with **Taraf Purity** (the jawari tone LP + the recruitment profile `bow_jt_sel`), **Taraf Decay**, **Tone Tilt**, **Expression** on slots 1–4. Bound to tilts in the Controls tab (⌘4) — where a tilt may equally bind a single parameter directly; audition names `stringPurity` / `stringTarafDecay` / `stringToneTilt` (slots 1–3) + generic `composite1`–`composite8`.
 
 ### Preset
 
-One preset ships — **"Default (Sarangi Live) — Pilu"** (also the fresh-install default): untouched artifact physics + the generated Pilu-scale seed bank (re-aligned to the centralized Pitch Pad scale on the first push). `InstrumentState` persists to UserDefaults (`starpad.sarangiState.v8`) and exports/imports as a `.sarangi` JSON file.
+One preset ships — **"Default (Sarangi Live) — Pilu"** (also the fresh-install default): untouched artifact physics + the generated Pilu-scale seed bank (re-aligned to the centralized Pitch Pad scale on the first push). `InstrumentState` persists to UserDefaults (`tarabdaar.sarangiState.v8`) and exports/imports as a `.sarangi` JSON file.
 
 
-## Polyphonic Mode
+## Polyphony
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| `maxPolyVoices` | 16 | Maximum simultaneous voices in poly mode (iPad channel allocation). The String voice's own polyphony is `bow_live_poly` gut strings on one shared bridge (poly-as-physics). |
+| `maxPolyVoices` | 16 | Voice-slot capacity of `NoteManager.pitchChannels` and the pitch-history graph. **Not a mode**: the `polyphonicMode` toggle was deleted 2026-08-02 (no UI ever wrote it, so its branches were unreachable) and `NoteManager` only ever sounds slot 0. Playing polyphony is `PitchPadEngine`'s MPE channel round-robin — one channel per touch, no toggle. The String voice's own polyphony is `bow_live_poly` gut strings on one shared bridge (poly-as-physics). |
 
 ## Display
 

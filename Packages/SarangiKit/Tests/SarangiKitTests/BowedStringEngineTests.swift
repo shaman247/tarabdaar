@@ -151,7 +151,10 @@ final class BowedStringEngineTests: XCTestCase {
                        "bow_taraf_duck": 0.2, "bow_taraf_tap_mix": 0.3] {
             bp.num[k] = v
         }
-        let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp)
+        // …and with tarab rows on the table too (2026-08-01: rows alone
+        // must not arm the coupling web — only `bow_cpl_z` may)
+        let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp,
+                                          taraf: Self.testTaraf)
         XCTAssertTrue(t.L.isEmpty, "a web voice was built")
         for arr in [t.cs, t.cp, t.w0, t.g, t.lpA, t.wout, t.kap, t.alphaw,
                     t.jw, t.jl, t.jn, t.zi, t.zdrv, t.twt, t.chg] {
@@ -347,8 +350,12 @@ final class BowedStringEngineTests: XCTestCase {
                                                  : $0.f < $1.f }
                 jtRows = Array(jtRows.prefix(jtMax))
             }
+            // `cfg == nil` is the jt-OFF cost rung. Since 2026-08-02 there
+            // is no arming key to leave unset — the block builds whenever
+            // it has rows — so the rung passes NO rows instead.
             tables.jt = BowTables.buildJawariTables(
-                rows: jtRows, srk: sr * Double(osf), bp: bp)
+                rows: cfg == nil ? [] : jtRows,
+                srk: sr * Double(osf), bp: bp)
             let mapper = BowControlMapper()
             let engine = BowEngine(tables: tables, mapper: mapper, bp: bp,
                                    sr: sr, rfir: [],
@@ -398,11 +405,11 @@ final class BowedStringEngineTests: XCTestCase {
         // context rungs: the retired 2026-07-21 live trim and the
         // pool-less serial cost.
         let trim: [String: Double] = [
-            "bow_jtaraf_on": 1.0, "bow_jt_div": 2.0, "bow_jt_alpha": 1.5,
+            "bow_jt_div": 2.0, "bow_jt_alpha": 1.5,
             "bow_jt_J": 16.0, "bow_jt_mcap": 40.0, "bow_jt_max": 8.0,
             "bow_jt_gain": 0.3, "bow_jt_drive": 0.03]
         let ratified: [String: Double] = [
-            "bow_jtaraf_on": 1.0, "bow_jt_div": 1.0, "bow_jt_alpha": 1.3,
+            "bow_jt_div": 1.0, "bow_jt_alpha": 1.3,
             "bow_jt_J": 8.0, "bow_jt_zone": 0.006,
             "bow_jt_mcap": 64.0, "bow_jt_max": 0.0,
             "bow_jt_gain": 0.3, "bow_jt_drive": 0.03]
@@ -437,11 +444,10 @@ final class BowedStringEngineTests: XCTestCase {
             "async jt web starved far beyond the pipeline fill")
     }
 
-    /// MODAL-JAWARI live block (2026-07-21): jt-armed engine renders
-    /// finite and audibly differs from the jt-off twin under identical
-    /// MIDI (the DEFAULT-VALUE LAW sweep — bow_jtaraf_on ships 0, so
-    /// this test runs the block ON); jt-off must stay byte-identical
-    /// in behavior to a params set with no jt keys at all.
+    /// MODAL-JAWARI live block (2026-07-21): a taraf-bearing engine
+    /// renders finite and audibly differs from the row-less twin under
+    /// identical MIDI. Since 2026-08-02 there is no arming key — the only
+    /// "off" is an empty row set, which must still render the bare voice.
     func testModalJawariLiveBlock() {
         let sr = 48000.0
         func render(_ bp: BowParams, taraf: [(f: Double, gain: Double,
@@ -481,7 +487,6 @@ final class BowedStringEngineTests: XCTestCase {
         }
         let taraf = Self.testTaraf
         var on = Self.stringBP()
-        on.num["bow_jtaraf_on"] = 1.0
         on.num["bow_jt_div"] = 2.0
         on.num["bow_jt_alpha"] = 1.5
         on.num["bow_jt_J"] = 20.0
@@ -489,16 +494,29 @@ final class BowedStringEngineTests: XCTestCase {
         on.num["bow_jt_gain"] = 0.3
         on.num["bow_jt_drive"] = 0.03
         let yOn = render(on, taraf: taraf)
-        XCTAssertTrue(yOn.allSatisfy(\.isFinite), "jt-armed render not finite")
+        XCTAssertTrue(yOn.allSatisfy(\.isFinite), "taraf render not finite")
         let off = Self.stringBP()
-        let yOff = render(off, taraf: taraf)
+        let yOff = render(off, taraf: [])
         var diff = 0.0, ref = 0.0
         for i in 0..<min(yOn.count, yOff.count) {
             diff += (yOn[i] - yOff[i]) * (yOn[i] - yOff[i])
             ref += yOff[i] * yOff[i]
         }
         XCTAssertGreaterThan(diff, 1e-12 * max(ref, 1e-12),
-                             "jt block armed but output identical")
+                             "jt block built but output identical")
+    }
+
+    /// THE TARAF IS ALWAYS ON (2026-08-02): the retired `bow_jtaraf_on`
+    /// arming key must have no effect — setting it to 0 in the params
+    /// still builds the block. The only "off" is an empty row set.
+    func testRetiredArmingKeyNoLongerGatesTheTaraf() {
+        var bp = Self.stringBP()
+        bp.num["bow_jtaraf_on"] = 0.0
+        let jt = BowTables.buildJawariTables(rows: Self.testTaraf,
+                                             srk: 96000, bp: bp)
+        XCTAssertNotNil(jt, "the retired arming key still gates the taraf")
+        XCTAssertNil(BowTables.buildJawariTables(rows: [], srk: 96000, bp: bp),
+                     "no rows must still mean no block")
     }
 
     func testMapperDrivenStringMakesSound() {

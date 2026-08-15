@@ -44,7 +44,6 @@
  "bow_jt_norm": 0.0,
  "bow_jt_threads": 8.0,
  "bow_jt_zone": 0.006,
- "bow_jtaraf_on": 1.0,
  "bow_jw_R": 2.0,
  "bow_kdisp": 0.0,
  "bow_kret": 0.35,
@@ -214,5 +213,13 @@
   2.1667,
   2.25,
   3.25
- ]
+ ],
+ "bow_settle_db": 7.0,
+ "bow_settle_ms": 130.0,
+ "bow_drift_cents": 0.55,
+ "bow_drift_hz": 1.2,
+ "bow_drift_db": 0.15,
+ "bow_drift_force_db": 0.3,
+ "bow_glide_dip_db": 5.0,
+ "bow_glide_dip_rate": 900.0
 }

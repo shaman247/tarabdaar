@@ -29,8 +29,8 @@ in over USB (no double-triggering).
 
 The wiring lives in:
 
-- [`StarpadMac/IPadSimulator.swift`](../StarpadMac/IPadSimulator.swift) — owns the `NoteManager`, `MockMotionSource`, and the in-process `MIDIEngine` (constructed with `publishToCoreMIDI: false`)
-- [`StarpadMac/MockMotionSource.swift`](../StarpadMac/MockMotionSource.swift) — `MotionSource` shim with tilt/strike-force properties
+- [`TarabdaarMac/IPadSimulator.swift`](../TarabdaarMac/IPadSimulator.swift) — owns the `NoteManager`, `MockMotionSource`, and the in-process `MIDIEngine` (constructed with `publishToCoreMIDI: false`)
+- [`TarabdaarMac/MockMotionSource.swift`](../TarabdaarMac/MockMotionSource.swift) — `MotionSource` shim with tilt/strike-force properties
 
 ## The audition loop
 
@@ -63,10 +63,10 @@ stereo (overflow is flagged in the `.done`).
 
 The audition root is resolved as:
 
-1. `STARPAD_AUDITIONS_DIR` env var (overrides everything)
+1. `TARABDAAR_AUDITIONS_DIR` env var (overrides everything)
 2. `<repo>/auditions/` discovered via `#filePath` (developer debug
    builds; the source file location is meaningful)
-3. `~/Library/Application Support/Starpad/Auditions/` (last-resort
+3. `~/Library/Application Support/Tarabdaar/Auditions/` (last-resort
    fallback)
 
 **Writers must use atomic writes**: write to `<name>.json.tmp` then
@@ -118,7 +118,7 @@ The setters clamp values into the same ranges as the UI sliders.
 |-----------------------|------------------|--------|
 | `param.<key>` / `string.<key>` | per-key | **Any** parameter in `ParamRegistry` — e.g. `param.bow_jt_gain`, `param.bow_rev_mix`, `param.bow_vib_cents`. Both prefixes are equivalent (`string.` is the historical spelling). Routed through `AppController.setParamValue`, the same path the Parameters-tab sliders take, so a sweep shows in the UI and persists; `live`/`hybrid` keys apply instantly, `rebuild` keys ride a debounced engine rebuild. A key the registry doesn't know still lands as a raw artifact override. See [parameters.md](parameters.md). |
 | `drone1`..`drone3`    | press/release    | Press (`>0.5`) / release a Fret Pad drone (jawari-taraf row). |
-| `stringPurity`        | 0..1             | Taraf purity axis (composite slot 1: lush buzzy chorus → clean kin — sweeps the jawari tone LP `bow_jt_lp` down from open AND recruitment `bow_jt_sel` 1→0, from the boosted full chorus through the fitted taraf down to the played note's harmonic kin). Runtime, no rebuild. |
+| `stringPurity`        | 0..1             | Taraf purity axis (composite slot 1: full buzzy chorus → clean kin — sweeps the jawari tone LP `bow_jt_lp` down from open AND recruitment profile `bow_jt_sel` 0.5→0, from the fitted taraf down to the played note's harmonic kin at held loudness). Runtime, no rebuild. |
 | `stringTarafDecay`    | 0..1             | Taraf decay axis (composite slot 2: natural → choked). |
 | `stringToneTilt`      | -1..1            | Tone tilt axis (composite slot 3: bass → treble). |
 | `composite1`..`composite8` | 0..1        | Generic composite-parameter slots (the named 0–1 controls in the Controls tab). |
@@ -208,7 +208,7 @@ residual envelope is the natural next extension.
 
 1. Put the target at `auditions/target.wav` (a 16-bit stereo WAV; any
    sample rate works, 48 kHz is what the Mac records at).
-2. Make sure StarpadMac is running, with the preset and voice
+2. Make sure TarabdaarMac is running, with the preset and voice
    parameters set to whatever was used to record the target. (If
    different settings will give a better match, set them via
    `voiceParam` events at the head of the score.)

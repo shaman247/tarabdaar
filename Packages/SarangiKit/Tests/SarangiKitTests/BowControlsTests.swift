@@ -17,8 +17,17 @@ final class BowControlsTests: XCTestCase {
     /// upstream table-export golden — that golden went with the rest of the
     /// vendored parity machinery, 2026-07-24.)
     private func fittedBP() throws -> BowParams {
-        guard let bp = Presets.bowedStringParams() else {
+        guard var bp = Presets.bowedStringParams() else {
             throw XCTSkip("bowed_string.json not available in this bundle")
+        }
+        // These tests pin the deterministic control LAWS (gate one-pole,
+        // meend glide, loudness inversion spot values). The shipped
+        // artifact's liveness layer (settle / drift / glide dip,
+        // 2026-08-01) deliberately perturbs exactly those outputs, so the
+        // law tests run with it off — LivenessTests covers the layer.
+        for k in ["bow_settle_db", "bow_drift_cents", "bow_drift_db",
+                  "bow_drift_force_db", "bow_glide_dip_db"] {
+            bp.num.removeValue(forKey: k)
         }
         return bp
     }

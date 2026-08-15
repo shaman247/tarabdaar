@@ -85,7 +85,7 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
 /// The MELODY-FOLLOWER sympathetic string (2026-07-25): ONE special string
 /// whose pitch is not a scale degree — it live-retunes to the highest note
 /// being played (kernel-side, `bow_poly_jt_track_*`), so it always rings in
-/// sympathy with the melody. Configured in the Tarab tab with the same
+/// sympathy with the melody. Configured in the Strings tab with the same
 /// Gain / t60 / On knobs as any row; it has no degree/octave and cannot be
 /// a drone-button target (it has no stable nominal Hz). Default DISABLED —
 /// off it adds no jt row and the render is byte-identical
@@ -105,7 +105,7 @@ public struct ResolvedString: Sendable, Hashable {
     public var freq: Double
     public var gain: Double
     public var t60: Double
-    /// The Tarab tab's per-row on/off toggle.
+    /// The Strings tab's per-row on/off toggle.
     public var enabled: Bool
     public init(freq: Double, gain: Double, t60: Double, enabled: Bool = true) {
         self.freq = freq; self.gain = gain; self.t60 = t60

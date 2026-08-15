@@ -1,0 +1,728 @@
+import TarabdaarCore
+import SwiftUI
+import simd
+
+/// Game-controller monitor (Setup tab): what the paired Joy-Con is
+/// actually sending — raw stick, buttons currently down, the last raw
+/// element event, the alias-grouped element inventory — plus the live
+/// tilt values the evaluation funnel last received (Joy-Con stick and
+/// iPad report land in the same readout). Exists because controller
+/// PRESENTATIONS surprise: a lone Joy-Con names its one stick both
+/// "Left Thumbstick" and "Direction Pad", and this panel is where such
+/// aliasing becomes visible.
+struct JoyConStatusView: View {
+    @ObservedObject private var joyCon: JoyConInput
+
+    init(controller: AppController) {
+        self.joyCon = controller.joyCon
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("GAME CONTROLLER")
+                .font(.padCaption.weight(.bold))
+                .foregroundStyle(.secondary)
+            statusPanel
+            if joyCon.connectedName != nil {
+                inputsPanel
+            }
+            if joyCon.jcIMUActive {
+                joyConIMUPanels
+            }
+            bodyPanel
+            if joyCon.traceActive {
+                HStack(alignment: .top, spacing: 12) {
+                    receivedPanel
+                    accelPanel
+                }
+            }
+        }
+        .padding(20)
+    }
+
+    private var statusPanel: some View {
+        Panel(title: "Status") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(joyCon.connectedName != nil ? Color.green : .gray)
+                        .frame(width: 10, height: 10)
+                    Text(joyCon.connectedName
+                         ?? "No controller — pair one in System Settings ▸ Bluetooth")
+                        .font(.system(.body))
+                }
+                // Switch 2 Joy-Cons never appear in macOS Bluetooth
+                // settings — Tarabdaar's own BLE client owns them; this
+                // line is its whole pairing UI.
+                LabeledContent("Joy-Con 2 (BLE)") {
+                    Text(joyCon.bleStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if !joyCon.elementNames.isEmpty {
+                    // One line per physical element, aliases joined —
+                    // "Direction Pad / Left Thumbstick" is ONE element
+                    // with two names.
+                    Text("Elements: "
+                         + joyCon.elementNames.joined(separator: "  ·  "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    private var inputsPanel: some View {
+        Panel(title: "Inputs") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Text("Stick")
+                    Text(String(format: "x %+.2f   y %+.2f",
+                                joyCon.stickX, joyCon.stickY))
+                        .font(.system(.body).monospacedDigit())
+                    Text(joyCon.stickActive ? "driving tilts" : "deadzone")
+                        .font(.caption)
+                        .foregroundStyle(joyCon.stickActive
+                                         ? Color.accentColor : .secondary)
+                }
+                HStack(spacing: 6) {
+                    ForEach(JoyConInput.Control.allCases, id: \.self) { c in
+                        let down = joyCon.buttonsDown.contains(c)
+                        Text(c.rawValue)
+                            .font(.caption.weight(down ? .bold : .regular))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(RoundedRectangle(cornerRadius: 5)
+                                .fill(down ? Color.accentColor.opacity(0.8)
+                                           : Color.secondary.opacity(0.15)))
+                    }
+                }
+                LabeledContent("Last event") {
+                    Text(joyCon.lastEvent)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                // Raw HID side-channel: L/ZL come from here (the GC
+                // profile omits them); the axes are shown so their
+                // frame/signs can be verified against real motion.
+                LabeledContent("Raw HID (\(joyCon.hidStatus))") {
+                    Text(joyCon.hidReportHex)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                if !joyCon.bleIMU.isEmpty {
+                    // Joy-Con 2 motion (≈g / ≈°/s, classic scale
+                    // constants pending measurement).
+                    LabeledContent("IMU") {
+                        Text(String(format:
+                            "a %+.2f %+.2f %+.2f g   ω %+5.0f %+5.0f %+5.0f °/s",
+                            joyCon.bleIMU[0], joyCon.bleIMU[1], joyCon.bleIMU[2],
+                            joyCon.bleIMU[3], joyCon.bleIMU[4], joyCon.bleIMU[5]))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if !joyCon.hidAxes.isEmpty || joyCon.calPhase != .idle {
+                    LabeledContent("HID axes") {
+                        Text(joyCon.hidAxes
+                            .map { String(format: "%+.2f", $0) }
+                            .joined(separator: "  "))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    // Stick calibration: rest + per-direction endpoints
+                    // (asymmetric on real hardware) → tilts 0.5 / 0 / 1.
+                    HStack(spacing: 10) {
+                        switch joyCon.calPhase {
+                        case .idle:
+                            Button("Recalibrate stick") { joyCon.beginCalibration() }
+                        case .rest:
+                            Text("Hold the stick at rest (playing grip)…")
+                                .foregroundStyle(Color.accentColor)
+                        case .range:
+                            Button("Done") { joyCon.finishCalibration() }
+                            Text("Sweep a full circle along the rim, then Done")
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    .font(.caption)
+                    if !joyCon.calInfo.isEmpty {
+                        Text(joyCon.calInfo)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .font(.system(.body))
+        }
+    }
+
+    /// The ARM calibration: a guided capture — rest, then the three arm
+    /// sweeps — advanced by the Next button or the Joy-Con's dpad-up,
+    /// fitted jointly (cross-talk solved out). iPad-only: it runs on
+    /// the tilt stream; the Joy-Con is optional (dpad stepping, ZL
+    /// re-zero).
+    private var bodyPanel: some View {
+        Panel(title: "Arm calibration") {
+            VStack(alignment: .leading, spacing: 8) {
+                if joyCon.bodyCalStep == nil {
+                    HStack(spacing: 10) {
+                        Button("Calibrate arm tilts…") {
+                            joyCon.beginBodyCalibration()
+                        }
+                        if !joyCon.bodyCalInfo.isEmpty {
+                            Text(joyCon.bodyCalInfo)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    // Post-run detail: the separation summary after a
+                    // fit, the redo advice after a discard.
+                    if !joyCon.bodyCalDetail.isEmpty {
+                        Text(joyCon.bodyCalDetail)
+                            .font(.caption)
+                            .foregroundStyle(joyCon.bodyCalDetail.hasPrefix("⚠")
+                                             ? AnyShapeStyle(Color.orange)
+                                             : AnyShapeStyle(.secondary))
+                    }
+                    Text("The app's single tilt calibration: the iPad streams raw attitude and this capture learns the whole map — rest pose, movement directions and ranges (rest = 0.5 on every axis). Needs only the iPad on the arm; the Joy-Con is optional (dpad-up advances, dpad-down steps back, ZL re-zeroes the rest pose). Four phases. Start each sweep from rest and end near rest if you can — all seven rest readings are merged robustly, and a reading that isn't at rest is simply ignored, never a redo. A one-sided or duplicate sweep clears itself and repeats on the spot.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(joyCon.bodyCalInfo)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(Color.accentColor)
+                    // Per-phase verdict for the LAST completed phase:
+                    // sample count, both-ways, alignment vs earlier
+                    // sweeps — a doomed pair shows here immediately.
+                    if !joyCon.bodyCalDetail.isEmpty {
+                        Text(joyCon.bodyCalDetail)
+                            .font(.caption)
+                            .foregroundStyle(joyCon.bodyCalDetail.hasPrefix("⚠")
+                                             ? AnyShapeStyle(Color.orange)
+                                             : AnyShapeStyle(.secondary))
+                    }
+                    HStack(spacing: 10) {
+                        Button(joyCon.bodyCalStep == 3 ? "Finish" : "Next") {
+                            joyCon.advanceBodyCalibration()
+                        }
+                        Button("Redo previous") {
+                            joyCon.redoPreviousBodyCalibrationStep()
+                        }
+                        .disabled(joyCon.bodyCalStep == 0)
+                        Button("Cancel") { joyCon.cancelBodyCalibration() }
+                    }
+                    .font(.caption)
+                }
+                if !joyCon.bodyTilts.isEmpty {
+                    Text("body  " + joyCon.bodyTilts
+                        .map { String(format: "%.2f", $0) }
+                        .joined(separator: "  "))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                if joyCon.calCloud.contains(where: { !$0.isEmpty })
+                    || joyCon.calViz != nil {
+                    CalCloudView(cloud: joyCon.calCloud,
+                                 currentPhase: joyCon.bodyCalStep,
+                                 viz: joyCon.calViz,
+                                 joyCon: joyCon)
+                }
+            }
+        }
+    }
+
+    /// The Mac twin of the iPad's GYRO overlay: the same 3D attitude
+    /// trail, drawn from the TRANSMITTED values instead of the sensor —
+    /// put the two screens side by side to see what the wire does to
+    /// the motion.
+    private var receivedPanel: some View {
+        Panel(title: "Received motion (3D)") {
+            ReceivedMotionView(joyCon: joyCon)
+        }
+    }
+
+    /// The accelerometer twin — same wire, same A/B purpose against the
+    /// iPad overlay's accel half. Fixed ±0.5 g scale (velocityMaxG —
+    /// the top of the strike range; harder spikes clip briefly).
+    private var accelPanel: some View {
+        Panel(title: "Received acceleration (3D)") {
+            VectorTrailView(
+                samples: { joyCon.liveAccelTrace },
+                viewRadius: 0.5, names: ["x", "y", "z"], unit: "g",
+                caption: "raw userAcceleration as received · last 8 s · compare against the iPad overlay")
+        }
+    }
+
+    /// The Joy-Con's own IMU, from whichever transport is live —
+    /// classic: 0x30 report frames once subcommand 0x40 enables the
+    /// IMU; Joy-Con 2: every BLE notification. The magnetometer panel
+    /// (Joy-Con 2 only) appears only when non-zero data arrives, so an
+    /// absent or unverified mag block stays invisible.
+    private var joyConIMUPanels: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Panel(title: "Joy-Con gyroscope (3D)") {
+                VectorTrailView(
+                    samples: { joyCon.liveJoyConGyro },
+                    viewRadius: 360, names: ["ωx", "ωy", "ωz"], unit: "°/s",
+                    caption: "raw rotation rate, device frame · last 8 s")
+            }
+            Panel(title: "Joy-Con accelerometer (3D)") {
+                VectorTrailView(
+                    samples: { joyCon.liveJoyConAccel },
+                    viewRadius: 2, names: ["x", "y", "z"], unit: "g",
+                    caption: "raw accel, device frame · includes gravity (rest = 1 g sphere) · last 8 s")
+            }
+            if joyCon.jcMagActive {
+                Panel(title: "Joy-Con magnetometer (3D)") {
+                    VectorTrailView(
+                        samples: { joyCon.liveJoyConMag },
+                        viewRadius: 2000, names: ["mx", "my", "mz"], unit: "raw",
+                        caption: "magnetometer, raw units · Joy-Con 2 only · last 8 s")
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Received motion (3D)
+
+/// Direct replica of the iPad's on-device GYRO overlay, fed from the
+/// TRANSMITTED tilt values (the raw wire samples, pre-smoothing)
+/// instead of the sensor: the same turntable projection, age-faded
+/// trail and per-axis Δ° readouts, with the wire's 0…1 values
+/// converted back to radians (v·2−1 → ±90°). Side by side with the
+/// iPad overlay this is the transmission A/B — matching trails and
+/// Δ°s mean the wire is transparent. One expected difference: the
+/// wire's yaw is the HIGH-PASSED, bias-corrected axis, so raw yaw
+/// drift visible on the iPad and absent here is correct behaviour.
+private struct ReceivedMotionView: View {
+    /// Deliberately NOT @ObservedObject: the 60 Hz TimelineView drives
+    /// the redraws and `liveTrace` is read fresh inside each tick, so
+    /// the trail moves at the wire rate like the iPad overlay does.
+    let joyCon: JoyConInput
+
+    private static let spin = 0.3
+    private static let colors: [Color] = [.orange, .green, .cyan]
+    private static let names = ["pitch ", "roll  ", "yaw hp"]
+    /// Fixed view scale: ±30° of attitude to the frame edge, the same
+    /// constant as the iPad overlay — the two views render motion at
+    /// identical size, and the zoom no longer pumps with the trail's
+    /// extent (auto-zoom also blew sub-degree noise up into a
+    /// full-frame fuzz ball; at a fixed scale it reads as the near-
+    /// stillness it is, with the Δ° labels carrying the magnitude).
+    /// Only the scale is fixed — the view stays CENTRED on the trail
+    /// mean, since the rest pose is arbitrary.
+    private static let viewRadius = 30.0 * Double.pi / 180
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1.0 / 60.0)) { tl in
+            let pts = joyCon.liveTrace.map { s in
+                (s.raw * 2 - SIMD3<Double>(1, 1, 1)) * (.pi / 2)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Canvas { ctx, size in
+                    Self.draw(ctx, size: size, pts: pts,
+                              azimuth: tl.date.timeIntervalSinceReferenceDate
+                                  * Self.spin)
+                }
+                .frame(width: 250, height: 190)
+                .background(Color.black.opacity(0.25))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                ForEach(0..<3, id: \.self) { a in
+                    let vals = pts.map { $0[a] }
+                    let pp = ((vals.max() ?? 0) - (vals.min() ?? 0)) * 180 / .pi
+                    let cur = (vals.last ?? 0) * 180 / .pi
+                    Text(String(format: "%@ %+8.3f°  Δ%.3f°",
+                                Self.names[a], cur, pp))
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundColor(Self.colors[a])
+                }
+                Text("as received over MIDI · last 8 s · compare against the iPad's GYRO overlay")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private static func draw(_ ctx: GraphicsContext, size: CGSize,
+                             pts allPts: [SIMD3<Double>], azimuth: Double) {
+        guard allPts.count > 2 else { return }
+        let step = max(1, allPts.count / 400)
+        var pts: [SIMD3<Double>] = []
+        for i in stride(from: 0, to: allPts.count, by: step) {
+            pts.append(allPts[i])
+        }
+        if let last = allPts.last { pts.append(last) }
+
+        var c = SIMD3<Double>()
+        for p in pts { c += p }
+        c /= Double(pts.count)
+        let maxR = viewRadius
+        let half = Double(min(size.width, size.height)) / 2 - 12
+        let s = half / maxR
+        let cx = Double(size.width) / 2
+        let cy = Double(size.height) / 2
+        let cosA = cos(azimuth)
+        let sinA = sin(azimuth)
+        let cosE = cos(0.5)
+        let sinE = sin(0.5)
+
+        func project(_ p: SIMD3<Double>) -> CGPoint {
+            let d = p - c
+            let rx = d.x * cosA - d.y * sinA
+            let ry = d.x * sinA + d.y * cosA
+            return CGPoint(x: cx + rx * s,
+                           y: cy - (d.z * cosE - ry * sinE) * s)
+        }
+
+        for (axis, color) in [(SIMD3<Double>(1, 0, 0), colors[0]),
+                              (SIMD3<Double>(0, 1, 0), colors[1]),
+                              (SIMD3<Double>(0, 0, 1), colors[2])] {
+            var path = Path()
+            path.move(to: project(c - axis * maxR))
+            path.addLine(to: project(c + axis * maxR))
+            ctx.stroke(path, with: .color(color.opacity(0.3)), lineWidth: 0.5)
+        }
+
+        // Age-faded trail: drift reads as a crawling snake, noise as a
+        // fuzz ball, a clean still stream as almost nothing.
+        for i in 1..<pts.count {
+            var seg = Path()
+            seg.move(to: project(pts[i - 1]))
+            seg.addLine(to: project(pts[i]))
+            let age = Double(i) / Double(pts.count)
+            ctx.stroke(seg, with: .color(.white.opacity(0.1 + 0.6 * age)),
+                       lineWidth: 1)
+        }
+
+        if let last = pts.last {
+            let q = project(last)
+            ctx.fill(Path(ellipseIn: CGRect(x: q.x - 4, y: q.y - 4,
+                                            width: 8, height: 8)),
+                     with: .color(.yellow))
+        }
+    }
+}
+
+// MARK: - Origin-centred vector trail (3D)
+
+/// Shared origin-centred turntable trail: the received-acceleration
+/// view and the Joy-Con IMU panels. Unlike `ReceivedMotionView`
+/// (attitude, centred on the trail mean because the rest pose is
+/// arbitrary), these signals have a natural zero — strikes and turns
+/// read as excursions from the centre dot, gravity/earth-field
+/// vectors as points riding a sphere around it. Scale is FIXED
+/// (`viewRadius` in the signal's own units = frame edge), same rule
+/// as the attitude pair.
+private struct VectorTrailView: View {
+    /// Sampled fresh inside each 60 Hz timeline tick (the closure
+    /// captures the JoyConInput reference; nothing here is observed).
+    let samples: () -> [JoyConInput.RawAccelSample]
+    let viewRadius: Double
+    let names: [String]
+    let unit: String
+    let caption: String
+
+    private static let spin = 0.3
+    private static let colors: [Color] = [.orange, .green, .cyan]
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1.0 / 60.0)) { tl in
+            let pts = samples().map { $0.a }
+            VStack(alignment: .leading, spacing: 3) {
+                Canvas { ctx, size in
+                    Self.draw(ctx, size: size, pts: pts, maxR: viewRadius,
+                              azimuth: tl.date.timeIntervalSinceReferenceDate
+                                  * Self.spin)
+                }
+                .frame(width: 250, height: 190)
+                .background(Color.black.opacity(0.25))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                ForEach(0..<3, id: \.self) { a in
+                    let vals = pts.map { $0[a] }
+                    let pp = (vals.max() ?? 0) - (vals.min() ?? 0)
+                    let cur = vals.last ?? 0
+                    Text(String(format: "%@ %+9.3f %@  Δ%.3f %@",
+                                names[a], cur, unit, pp, unit))
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundColor(Self.colors[a])
+                }
+                Text(caption)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private static func draw(_ ctx: GraphicsContext, size: CGSize,
+                             pts allPts: [SIMD3<Double>], maxR: Double,
+                             azimuth: Double) {
+        guard allPts.count > 2 else { return }
+        let step = max(1, allPts.count / 400)
+        var pts: [SIMD3<Double>] = []
+        for i in stride(from: 0, to: allPts.count, by: step) {
+            pts.append(allPts[i])
+        }
+        if let last = allPts.last { pts.append(last) }
+
+        let half = Double(min(size.width, size.height)) / 2 - 12
+        let s = half / maxR
+        let cx = Double(size.width) / 2
+        let cy = Double(size.height) / 2
+        let cosA = cos(azimuth)
+        let sinA = sin(azimuth)
+        let cosE = cos(0.5)
+        let sinE = sin(0.5)
+
+        func project(_ p: SIMD3<Double>) -> CGPoint {
+            let rx = p.x * cosA - p.y * sinA
+            let ry = p.x * sinA + p.y * cosA
+            return CGPoint(x: cx + rx * s,
+                           y: cy - (p.z * cosE - ry * sinE) * s)
+        }
+
+        for (axis, color) in [(SIMD3<Double>(1, 0, 0), colors[0]),
+                              (SIMD3<Double>(0, 1, 0), colors[1]),
+                              (SIMD3<Double>(0, 0, 1), colors[2])] {
+            var path = Path()
+            path.move(to: project(-axis * maxR))
+            path.addLine(to: project(axis * maxR))
+            ctx.stroke(path, with: .color(color.opacity(0.3)), lineWidth: 0.5)
+        }
+
+        // Age-faded trail: strikes read as jabs from the origin.
+        for i in 1..<pts.count {
+            var seg = Path()
+            seg.move(to: project(pts[i - 1]))
+            seg.addLine(to: project(pts[i]))
+            let age = Double(i) / Double(pts.count)
+            ctx.stroke(seg, with: .color(.white.opacity(0.1 + 0.6 * age)),
+                       lineWidth: 1)
+        }
+
+        if let last = pts.last {
+            let q = project(last)
+            ctx.fill(Path(ellipseIn: CGRect(x: q.x - 4, y: q.y - 4,
+                                            width: 8, height: 8)),
+                     with: .color(.yellow))
+        }
+    }
+}
+
+// MARK: - Calibration sample cloud (3D)
+
+/// Rotating 3D scatter of the arm-calibration capture, live while
+/// samples stream in: the REST cluster plus the three sweep arcs in
+/// tilt space (t1/t2/t3, the iPad's raw axes). A slow turntable spin
+/// with depth-scaled dot size/opacity supplies the parallax; the white
+/// ring marks the rest cluster's centre, so how cleanly the arcs
+/// intersect at rest reads directly off the picture. Overlaid on the
+/// raw data: the CALIBRATED MODEL — three straight segments through
+/// the fitted rest point, each solved direction scaled by its lo/hi
+/// extents (what the live solve actually applies; how closely they
+/// hug the arcs is the fit quality) — and a yellow "you are here"
+/// marker at the current arm position. The view is centred on the
+/// rest cluster (else the fitted rest) and auto-scaled to the data.
+/// The capture stays on screen after the fit; the model segments show
+/// whenever a calibration exists, including right after launch.
+private struct CalCloudView: View {
+    let cloud: [[SIMD3<Double>]]
+    /// Highlight the running phase; nil (idle/after fit) draws all
+    /// phases at full strength.
+    let currentPhase: Int?
+    /// The fitted model (nil while uncalibrated).
+    let viz: JoyConInput.CalViz?
+    /// Read (not observed) for `liveArmPos` — the "you are here"
+    /// marker samples it fresh inside each 60 Hz timeline tick.
+    let joyCon: JoyConInput
+
+    private static let colors: [Color] = [.white, .orange, .green, .cyan]
+    private static let names = ["Rest", "Arm ↕", "Arm ↔", "Arm ⟲"]
+    /// Turntable rate in rad/s — one revolution ≈ 21 s.
+    private static let spin = 0.3
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            TimelineView(.periodic(from: .now, by: 1.0 / 60.0)) { tl in
+                Canvas { ctx, size in
+                    Self.draw(ctx, size: size,
+                              azimuth: tl.date.timeIntervalSinceReferenceDate
+                                  * Self.spin,
+                              cloud: cloud, currentPhase: currentPhase,
+                              viz: viz, armPos: joyCon.liveArmPos)
+                }
+            }
+            .frame(height: 230)
+            .background(Color.black.opacity(0.25))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            HStack(spacing: 12) {
+                ForEach(0..<4, id: \.self) { i in
+                    HStack(spacing: 4) {
+                        Circle().fill(Self.colors[i]).frame(width: 6, height: 6)
+                        Text(Self.names[i])
+                    }
+                }
+                if viz != nil {
+                    HStack(spacing: 4) {
+                        Rectangle().fill(Color.secondary)
+                            .frame(width: 10, height: 2)
+                        Text("fit")
+                    }
+                }
+                HStack(spacing: 4) {
+                    Circle().fill(Color.yellow).frame(width: 6, height: 6)
+                    Text("Arm now")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private static func draw(_ ctx: GraphicsContext, size: CGSize,
+                             azimuth: Double,
+                             cloud: [[SIMD3<Double>]], currentPhase: Int?,
+                             viz: JoyConInput.CalViz?, armPos: SIMD3<Double>?) {
+        let all = cloud.flatMap { $0 }
+        // The fitted model's segment endpoints participate in centring
+        // and auto-scale alongside the raw samples (so a fresh launch
+        // with no cloud still frames the model), as does the live arm
+        // marker.
+        var segments: [(a: SIMD3<Double>, b: SIMD3<Double>, phase: Int)] = []
+        if let viz {
+            for (k, axis) in viz.axes.enumerated() {
+                segments.append((viz.f0 + axis.dir * axis.lo,
+                                 viz.f0 + axis.dir * axis.hi, k + 1))
+            }
+        }
+        var extentPts = all + segments.flatMap { [$0.a, $0.b] }
+        if let armPos { extentPts.append(armPos) }
+        guard !extentPts.isEmpty else {
+            ctx.draw(Text("waiting for samples…")
+                .font(.caption).foregroundColor(.gray),
+                at: CGPoint(x: size.width / 2, y: size.height / 2))
+            return
+        }
+        // Centre on the rest cluster when it exists — that's the point
+        // the arcs are supposed to thread — else the fitted rest, else
+        // the data mean.
+        let restPts = cloud.first ?? []
+        var c: SIMD3<Double>
+        if !restPts.isEmpty {
+            c = SIMD3<Double>()
+            for p in restPts { c += p }
+            c /= Double(restPts.count)
+        } else if let viz {
+            c = viz.f0
+        } else {
+            c = SIMD3<Double>()
+            for p in extentPts { c += p }
+            c /= Double(extentPts.count)
+        }
+        var maxR = 0.02
+        for p in extentPts { maxR = max(maxR, simd_length(p - c)) }
+        let half = Double(min(size.width, size.height)) / 2 - 14
+        let s = half / maxR
+        let cx = Double(size.width) / 2
+        let cy = Double(size.height) / 2
+        let cosA = cos(azimuth)
+        let sinA = sin(azimuth)
+        let cosE = cos(0.5)
+        let sinE = sin(0.5)
+
+        func project(_ p: SIMD3<Double>) -> (x: Double, y: Double, depth: Double) {
+            let d = p - c
+            let rx = d.x * cosA - d.y * sinA
+            let ry = d.x * sinA + d.y * cosA
+            return (cx + rx * s,
+                    cy - (d.z * cosE - ry * sinE) * s,
+                    ry * cosE + d.z * sinE)
+        }
+
+        // Feature axes through the rest centre, for orientation.
+        for (axis, label) in [(SIMD3<Double>(1, 0, 0), "t1"),
+                              (SIMD3<Double>(0, 1, 0), "t2"),
+                              (SIMD3<Double>(0, 0, 1), "t3")] {
+            let a = project(c - axis * maxR)
+            let b = project(c + axis * maxR)
+            var path = Path()
+            path.move(to: CGPoint(x: a.x, y: a.y))
+            path.addLine(to: CGPoint(x: b.x, y: b.y))
+            ctx.stroke(path, with: .color(.gray.opacity(0.25)), lineWidth: 0.5)
+            ctx.draw(Text(label).font(.system(size: 8)).foregroundColor(.gray),
+                     at: CGPoint(x: b.x, y: b.y))
+        }
+
+        var dots: [(x: Double, y: Double, depth: Double, phase: Int)] = []
+        dots.reserveCapacity(all.count)
+        for (phase, pts) in cloud.enumerated() {
+            for p in pts {
+                let q = project(p)
+                dots.append((q.x, q.y, q.depth, phase))
+            }
+        }
+        if var minD = dots.first?.depth {
+            var maxD = minD
+            for d in dots {
+                minD = min(minD, d.depth)
+                maxD = max(maxD, d.depth)
+            }
+            let span = max(maxD - minD, 1e-9)
+            dots.sort { $0.depth < $1.depth }   // painter: far → near
+            for d in dots {
+                let near = (d.depth - minD) / span
+                let dim = currentPhase == nil || d.phase == currentPhase
+                    ? 1.0 : 0.5
+                let r = 1.2 + 1.6 * near
+                let color = colors[min(d.phase, colors.count - 1)]
+                    .opacity((0.3 + 0.6 * near) * dim)
+                ctx.fill(Path(ellipseIn: CGRect(x: d.x - r, y: d.y - r,
+                                                width: 2 * r, height: 2 * r)),
+                         with: .color(color))
+            }
+        }
+
+        // The fitted model: three straight segments through the fitted
+        // rest point, colored like their sweeps — the linear motion the
+        // live solve assumes. How closely they hug the raw arcs IS the
+        // fit quality.
+        for seg in segments {
+            let a = project(seg.a)
+            let b = project(seg.b)
+            var path = Path()
+            path.move(to: CGPoint(x: a.x, y: a.y))
+            path.addLine(to: CGPoint(x: b.x, y: b.y))
+            ctx.stroke(path,
+                       with: .color(colors[min(seg.phase, colors.count - 1)]
+                           .opacity(0.85)),
+                       style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+        }
+        if let viz {
+            let q = project(viz.f0)
+            ctx.fill(Path(ellipseIn: CGRect(x: q.x - 2, y: q.y - 2,
+                                            width: 4, height: 4)),
+                     with: .color(.white))
+        }
+
+        // Rest-centre ring: the target every arc should pass through.
+        if !restPts.isEmpty {
+            let q = project(c)
+            ctx.stroke(Path(ellipseIn: CGRect(x: q.x - 5, y: q.y - 5,
+                                              width: 10, height: 10)),
+                       with: .color(.white.opacity(0.9)), lineWidth: 1)
+        }
+
+        // "You are here": the live arm position, topmost.
+        if let armPos {
+            let q = project(armPos)
+            ctx.fill(Path(ellipseIn: CGRect(x: q.x - 4, y: q.y - 4,
+                                            width: 8, height: 8)),
+                     with: .color(.yellow))
+            ctx.stroke(Path(ellipseIn: CGRect(x: q.x - 4, y: q.y - 4,
+                                              width: 8, height: 8)),
+                       with: .color(.white.opacity(0.8)), lineWidth: 1)
+        }
+    }
+}

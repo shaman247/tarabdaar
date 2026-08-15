@@ -2,14 +2,14 @@
 
 ## Overview
 
-Starpad is a just-intonation instrument. There is **one configured scale** — the set of exact frequency ratios the Fret Pad is laid out from — and the tarab can follow it.
+Tarabdaar is a just-intonation instrument. There is **one configured scale** — the set of exact frequency ratios the Fret Pad is laid out from — and the tarab can follow it.
 
-- **Playing scale**. A `PitchScale` of JI ratios (`num/den` over the tonic). **Edited on StarpadMac** (the Fret Pad tab's scale list editor) and **synced to the iPad** over USB-MIDI SysEx, where it's performed — the iPad has no editor of its own. The scale spans the half-open octave `[1, 2)` and repeats up and down. Persisted as JSON via `ScaleStore` on both sides. See [Fret Pad](fret-pad.md) and [MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad).
-- **Sympathetic-string tuning** (Mac). The sarangi *tarab* is an editable `[StringSpec]` table (the **Tarab tab**) whose every row is a **scale degree + octave** of the playing scale — pitches ALWAYS follow the scale and the tonic (2026-07-25: the scale is fully centralized; there is no per-string ratio or Hz). There is no follow toggle — following is unconditional; the row *layout* regenerates when the scale's degree count changes (or via the tab's "Regenerate from scale" button), and hand edits to gains/decays/rows otherwise stand. See [Sound Design — Sympathetic strings](sound-design.md#sympathetic-strings--the-editable-bank) and [Sarangi](sarangi.md).
+- **Playing scale**. A `PitchScale` of JI ratios (`num/den` over the tonic). **Edited on TarabdaarMac** (the Fret Pad tab's scale list editor) and **synced to the iPad** over USB-MIDI SysEx, where it's performed — the iPad has no editor of its own. The scale spans the half-open octave `[1, 2)` and repeats up and down. Persisted as JSON via `ScaleStore` on both sides. See [Fret Pad](fret-pad.md) and [MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad).
+- **Sympathetic-string tuning** (Mac). The sarangi *tarab* is an editable `[StringSpec]` table (the **Strings tab**) whose every row is a **scale degree + octave** of the playing scale — pitches ALWAYS follow the scale and the tonic (2026-07-25: the scale is fully centralized; there is no per-string ratio or Hz). There is no follow toggle — following is unconditional; the row *layout* regenerates when the scale's degree count changes (or via the tab's "Regenerate from scale" button), and hand edits to gains/decays/rows otherwise stand. See [Sound Design — Sympathetic strings](sound-design.md#sympathetic-strings--the-editable-bank) and [Sarangi](sarangi.md).
 
 ## Scale Editors
 
-### Playing scale (StarpadMac Fret Pad tab → iPad)
+### Playing scale (TarabdaarMac Fret Pad tab → iPad)
 
 The playing scale is the set of `PitchPoint` ratios edited in the Fret Pad
 tab's scale list editor (`ScaleListEditor`): add/remove pitches, snap to
@@ -20,15 +20,15 @@ the performer always plays the current scale — see [MIDI & Audio — Scale syn
 The default scale is 12 just-intonation degrees (1/1 … 15/8), named in
 **sargam** — `S r R g G m M P d D n N` (2026-07-25; they read `1 · 2- · 2 …`
 before). A point's label is its name **everywhere** the app shows that pitch
-— frets, drone buttons, the Tarab tab's degree dropdown — so renaming a
+— frets, drone buttons, the Strings tab's degree dropdown — so renaming a
 degree here renames it across the app; see [Fret Pad — naming](fret-pad.md).
 Both copies of the default carry these labels: the bundled
-`StarpadMac/Default.json` that actually loads, and `PitchScale.defaultJI`,
+`TarabdaarMac/Default.json` that actually loads, and `PitchScale.defaultJI`,
 the in-code fallback for a missing resource (and the iPad's scale before the
 first sync) — **keep them in step**. Disabled pitches drop from the fret
 layout but stay listed to toggle back in.
 
-### The tonic (StarpadMac Fret Pad tab)
+### The tonic (TarabdaarMac Fret Pad tab)
 
 The tonic is the app's ONE absolute pitch — every other pitch (frets, tarab
 strings, drones) is a scale degree relative to it — and the Fret Pad toolbar
@@ -36,14 +36,16 @@ is the only place it's set. Two controls, both writing the same value
 (`PitchPadEngine.tonicMidi` + `tonicCents`, an integer note anchor plus a
 ±50 ¢ remainder):
 
-- **Hz field** (a `ScrollableField`) — type an absolute frequency
-  (`setTonic(hz:)`, 20 … 4000 Hz); this is the app's only Hz input.
-  **Scroll it** to micro-adjust in cents (`nudgeTonic(cents:)`): **1 ¢** per
-  detent, **⌥ = 0.1 ¢**, **⇧ = 10 ¢**. Deltas roll over into the note anchor
-  so `tonicCents` stays inside ±50, the range the
+- **Hz field** — type an absolute frequency (`setTonic(hz:)`, 20 … 4000 Hz);
+  this is the app's only Hz input, and the way to tune off a 12-TET note
+  (0.01 Hz ≈ 0.08 ¢ at G#3). Whatever you type splits into the anchor plus a
+  remainder inside ±50 ¢, the range the
   [scale-sync blob](midi-and-audio.md#scale-sync-mac--ipad) encodes (0.01 ¢
-  resolution).
-- **Note menu** — the pitch label ("D4") as a dropdown listing only the notes
+  resolution). It is a **plain `TextField`**: it was briefly a scroll-wheel
+  `ScrollableField` (cents per detent) and that **crashed the app** — removed
+  2026-08-02, along with `nudgeTonic(cents:)`. Don't re-add scroll-stepping
+  here.
+- **Note menu** — the pitch label ("G#3") as a dropdown listing only the notes
   **within half an octave** of the current tonic (a tritone either side, 13
   semitones, clipped to `PitchPadEngine.tonicNoteRange` = MIDI 24 … 107 =
   C1 … B7). The window **re-centers on each pick**, so walking further is
@@ -54,21 +56,21 @@ is the only place it's set. Two controls, both writing the same value
 A "+12.0¢" readout follows the two fields whenever the tonic sits off its note
 anchor (blank when exact). The iPad's tonic is read-only, mirrored over SysEx.
 
-**The tonic ALWAYS starts at D4** (`PitchPadEngine.defaultTonicMidi` = MIDI 62,
-293.665 Hz — the sarangi tonic this instrument is voiced around), every Mac
-launch. It is **deliberately not persisted**: the session tonic is a
+**The tonic ALWAYS starts at G#3** (`PitchPadEngine.defaultTonicMidi` = MIDI
+56, 207.652 Hz — was D4 until 2026-08-11), every Mac launch. It is
+**deliberately not persisted**: the session tonic is a
 per-sitting decision, and a stale restored one silently retunes the whole
 instrument, since the frets, the tarab and the drones all resolve against it.
-(A `starpad.tonicHz` UserDefaults key used to restore it — removed 2026-07-30;
+(A `tarabdaar.tonicHz` UserDefaults key used to restore it — removed 2026-07-30;
 don't reinstate it.) Everything else about the scale — the degrees, their
-labels, the layout — *is* persisted, so a session opens on your scale at D4.
+labels, the layout — *is* persisted, so a session opens on your scale at G#3.
 The iPad is unaffected: it opens on the last state the Mac pushed
 (`SyncedScaleStore`, a one-way mirror, not a preference of its own) and takes
-the Mac's D4 on the next connect.
+the Mac's G#3 on the next connect.
 
 ### Sympathetic tuning (Mac)
 
-The sympathetic strings are the editable `[StringSpec]` tarab table (Tarab tab). Every string is a scale degree + octave, so the bank always sounds pitches of the playing scale; the string layout — one string per enabled scale pitch plus doublings and octave repeats — regenerates when the scale's degree count changes. See [Sarangi](sarangi.md).
+The sympathetic strings are the editable `[StringSpec]` tarab table (Strings tab). Every string is a scale degree + octave, so the bank always sounds pitches of the playing scale; the string layout — one string per enabled scale pitch plus doublings and octave repeats — regenerates when the scale's degree count changes. See [Sarangi](sarangi.md).
 
 ## Tuning Systems
 
@@ -138,4 +140,4 @@ Key methods:
 
 ### Persistence
 
-Scale settings are encoded as JSON and stored in UserDefaults under `starpad_scale`. They load automatically when NoteManager initializes.
+Scale settings are encoded as JSON and stored in UserDefaults under `tarabdaar_scale`. They load automatically when NoteManager initializes.

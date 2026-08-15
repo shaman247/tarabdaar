@@ -4,7 +4,7 @@
 Workflow:
   1. Toggle **REC** on the Fret Pad (Mac toolbar, or the iPad toolbar's REC
      button) and play naturally. Strokes land as JSONL:
-       Mac:  ~/Library/Application Support/Starpad/FretRecordings/
+       Mac:  ~/Library/Application Support/Tarabdaar/FretRecordings/
        iPad: the app's Documents/FretRecordings/ (visible in the Files app
              and Finder's device browser — copy to the Mac to fit).
   2. `python3 tools/fretpad_fit.py report <files...> [--phrase "..."]` —

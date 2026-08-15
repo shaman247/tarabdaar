@@ -4,12 +4,12 @@ import PackageDescription
 // The sarangi String voice: the bow-friction physics kernel, its table
 // builders, the control mapper and the tarab document. Pure DSP + model — no
 // CoreAudio / AVFoundation / CoreMIDI, so it builds on both the iOS and macOS
-// Starpad targets (only macOS uses it, via StarpadCore.AudioEngine).
+// Tarabdaar targets (only macOS uses it, via TarabdaarCore.AudioEngine).
 //
 // This began as a vendored copy of the standalone model in ~/Desktop/sarangi
 // and carried that project's whole surface — a coupled bridge–body network,
 // an additive violin voice, a byte-parity mono kernel and their offline
-// goldens. Starpad played none of it. The upstream link was cut on
+// goldens. Tarabdaar played none of it. The upstream link was cut on
 // 2026-07-24 and everything that existed only to track it was deleted; what
 // is left is what the instrument actually runs. There is no re-sync
 // procedure any more — change the DSP here.

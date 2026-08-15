@@ -7,19 +7,25 @@
 3. The **Fret Pad** fills the screen below the slim toolbar; your fingers play it from above
 4. Tilting your arm controls whatever expression you've mapped (aftertouch, CCs)
 
-## First Launch: Calibration
+## Calibration: one step, on the Mac (2026-08-13)
 
-On first launch, the app guides you through a 7-step calibration capturing your arm's range of motion along 3 axes:
+The iPad needs no calibration and has no first-launch wizard — it streams
+its raw orientation continuously. The app's single tilt calibration is the
+**arm calibration** on the Mac's **Setup tab (⌘7)**, which fits the three
+arm control axes from the iPad on your forearm (no Joy-Con needed):
 
-1. **Rest** — Natural, comfortable playing position
-2. **Tilt 1: Up** — Move forearm up
-3. **Tilt 1: Down** — Move forearm down
-4. **Tilt 2: Towards** — Tilt iPad towards you
-5. **Tilt 2: Away** — Tilt iPad away from you
-6. **Tilt 3: Inward** — Rotate arm inward
-7. **Tilt 3: Outward** — Rotate arm outward
+1. **Rest** — hold the arm still in playing position
+2. **Sweep the arm up and down**
+3. **Sweep the arm inward and outward**
+4. **Rotate the arm inward and outward**
 
-Each step shows live pitch/roll/yaw readings. Tap Capture at each position. Calibration is saved and persists across launches. To recalibrate, tap "Recalibrate" in the orientation panel.
+Start each sweep from rest and end near rest if you can (an off-rest
+ending is tolerated). Advance with the panel's Next button or the
+Joy-Con's dpad-up; dpad-down redoes the previous phase; ZL re-zeroes the
+rest pose any time. The calibration persists across launches. Without
+one, the iPad's raw axes drive the tilts directly — playable, but
+uncentered ("rest" is wherever your arm actually rests). The Joy-Con
+**stick** has its own separate calibration on the same tab.
 
 ## Playing Notes
 
@@ -76,7 +82,7 @@ On the Fret Pad, expression is driven by the **global** dimensions — Tilt 1/2/
 **MIDI output parameters**: Aftertouch (channel pressure), CC74 Slide, CC1 Modwheel, CC11 Expression, CC71 Resonance, CC73 Attack, CC75 Decay. MIDI CCs are only sent when mapped to a dimension (not "None"), and are sent per-voice on each voice's MPE channel.
 
 **Available dimensions**:
-- **Tilt 1/2/3**: Arm orientation axes from calibration (global, same for all voices)
+- **Arm ↕/↔/⟲**: the iPad's tilt axes through the Mac's arm calibration (global, same for all voices; raw and uncentered if uncalibrated)
 - **Pressure**: Accelerometer strike intensity at note onset (per-note). When no parameter uses Pressure, the velocity capture delay is skipped for zero-latency note onset.
 - **Key Y**: Finger's vertical position on the key (0 = bottom, 1 = top; normalized to key height for black keys). Updated continuously as you slide.
 - **Slider 1/2**: Horizontal sliders in the channel readout, operated by the non-dominant hand. Value snaps back to a default when released.
@@ -84,13 +90,13 @@ On the Fret Pad, expression is driven by the **global** dimensions — Tilt 1/2/
 
 **Defaults**: Velocity → Pressure, Glide Speed/Compression/Amplitude/Aftertouch → Tilt 1. All others → unbound. Each binding starts as a linear 2-point curve matching the parameter's default range.
 
-The tilt values are based on your calibration, so "neutral" is wherever you calibrated your rest position.
+With an arm calibration, "neutral" is the rest pose you captured (0.5 on every axis); uncalibrated, the values are raw and uncentered.
 
 ## MIDI Setup
 
 1. Connect the iPad to the Mac via USB.
 2. On the Mac: open **Audio MIDI Setup** > **Window > Show MIDI Studio** > Enable iPad.
-3. Launch StarpadMac. The top-bar pill turns green when it sees the iPad as a MIDI source. The first Note On from the iPad plays the sarangi String voice on the Mac immediately — no settings sync, just MPE on the wire.
+3. Launch TarabdaarMac. The top-bar pill turns green when it sees the iPad as a MIDI source. The first Note On from the iPad plays the sarangi String voice on the Mac immediately — no settings sync, just MPE on the wire.
 
 The iPad also appears as a standard MPE MIDI source to any other host on the Mac (Ableton, Logic, etc.). To route to those:
 
@@ -98,7 +104,7 @@ The iPad also appears as a standard MPE MIDI source to any other host on the Mac
 2. Set your instrument's pitch bend range to **±48 semitones**.
 3. Enable **MPE mode** on the track.
 
-Starpad sends:
+Tarabdaar sends:
 - Note on/off with accelerometer-derived velocity
 - Pitch bend (continuous; glides + finger-driven pitch movement)
 - Channel pressure / aftertouch (dimension-mapped)
@@ -107,7 +113,7 @@ Starpad sends:
 ## Scale Editing (on the Mac)
 
 The iPad is **perform-only** — there's no scale editor on it. Scales are
-designed on **StarpadMac**'s Fret Pad tab (the scale list editor: add/remove/
+designed on **TarabdaarMac**'s Fret Pad tab (the scale list editor: add/remove/
 disable pitches, snap to simple fractions) and **synced to the iPad over the
 USB cable** automatically: edit a pitch on the Mac and the iPad's frets
 re-lay-out within a moment. The iPad opens on the last scale it received (and

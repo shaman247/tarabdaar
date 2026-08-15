@@ -2,7 +2,7 @@
 """Iterate analyze → render → compare → refine until convergence.
 
 Drops a candidate score into ``auditions/inbox/``, waits for the
-StarpadMac audition runner to produce ``outputs/<name>.wav`` and the
+TarabdaarMac audition runner to produce ``outputs/<name>.wav`` and the
 ``.done`` marker, then scores the candidate against the target. If the
 loudness (RMS) is too low compared to target, bumps the tilt/strike
 values and tries again. Bails after ``--max-passes`` or once the RMS

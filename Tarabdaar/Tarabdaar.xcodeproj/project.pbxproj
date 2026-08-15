@@ -1,0 +1,631 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A1000001 /* TarabdaarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001 /* TarabdaarApp.swift */; };
+		A1000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000002 /* ContentView.swift */; };
+		A1000003 /* MotionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000003 /* MotionManager.swift */; };
+		A1000004 /* TouchOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000004 /* TouchOverlayView.swift */; };
+		A1000010 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000010 /* Assets.xcassets */; };
+		A1000020 /* PitchPadView_iOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000020 /* PitchPadView_iOS.swift */; };
+		C1000001 /* TarabdaarMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000001 /* TarabdaarMacApp.swift */; };
+		C1000004 /* AppController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000004 /* AppController.swift */; };
+		C1000005 /* Views/MacMainWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000005 /* Views/MacMainWindow.swift */; };
+		C1000006 /* Views/SetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000006 /* Views/SetupView.swift */; };
+		C1000007 /* Views/LiveVisualizerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000007 /* Views/LiveVisualizerView.swift */; };
+		C1000008 /* Views/ConnectionStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000008 /* Views/ConnectionStatusView.swift */; };
+		C100000B /* Views/Panel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000B /* Views/Panel.swift */; };
+		C100000D /* Views/AudioSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000D /* Views/AudioSettingsView.swift */; };
+		C1000059 /* Views/TiltControlsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000059 /* Views/TiltControlsView.swift */; };
+		C100005A /* Views/ParametersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200005A /* Views/ParametersView.swift */; };
+		C100005B /* Views/FXView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200005B /* Views/FXView.swift */; };
+		C100000E /* CoreAudioDevices.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000E /* CoreAudioDevices.swift */; };
+		C100000F /* Views/MIDISettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000F /* Views/MIDISettingsView.swift */; };
+		C1000010 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C2000010 /* Assets.xcassets */; };
+		C1000012 /* Views/SarangiEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000012 /* Views/SarangiEditorView.swift */; };
+		C1000015 /* MockMotionSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000015 /* MockMotionSource.swift */; };
+		C1000016 /* IPadSimulator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000016 /* IPadSimulator.swift */; };
+		C1000017 /* AuditionScore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000017 /* AuditionScore.swift */; };
+		C100001C /* Default.json in Resources */ = {isa = PBXBuildFile; fileRef = C200001C /* Default.json */; };
+		C1000056 /* Views/FretPadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000056 /* Views/FretPadView.swift */; };
+		C1000057 /* StringParamStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000057 /* StringParamStore.swift */; };
+		C1000025 /* Views/StringsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000025 /* Views/StringsView.swift */; };
+		C1000051 /* SarangiStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000051 /* SarangiStore.swift */; };
+		C1000052 /* SarangiKit in Frameworks */ = {isa = PBXBuildFile; productRef = C2000052 /* SarangiKit */; };
+		C1000055 /* KeyboardNotePlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000055 /* KeyboardNotePlayer.swift */; };
+		C100005C /* JoyConInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200005C /* JoyConInput.swift */; };
+		C100005D /* Views/JoyConStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200005D /* Views/JoyConStatusView.swift */; };
+		E1000001 /* TarabdaarCore in Frameworks */ = {isa = PBXBuildFile; productRef = E2000001 /* TarabdaarCore */; };
+		E1000002 /* TarabdaarCore in Frameworks */ = {isa = PBXBuildFile; productRef = E2000002 /* TarabdaarCore */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A2000001 /* TarabdaarApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TarabdaarApp.swift; sourceTree = "<group>"; };
+		A2000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A2000003 /* MotionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionManager.swift; sourceTree = "<group>"; };
+		A2000004 /* TouchOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchOverlayView.swift; sourceTree = "<group>"; };
+		A2000010 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A2000020 /* PitchPadView_iOS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PitchPadView_iOS.swift; sourceTree = "<group>"; };
+		A3000001 /* Tarabdaar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Tarabdaar.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C2000001 /* TarabdaarMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TarabdaarMacApp.swift; sourceTree = "<group>"; };
+		C2000004 /* AppController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppController.swift; sourceTree = "<group>"; };
+		C2000005 /* Views/MacMainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MacMainWindow.swift; sourceTree = "<group>"; };
+		C2000006 /* Views/SetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SetupView.swift; sourceTree = "<group>"; };
+		C2000007 /* Views/LiveVisualizerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/LiveVisualizerView.swift; sourceTree = "<group>"; };
+		C2000008 /* Views/ConnectionStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ConnectionStatusView.swift; sourceTree = "<group>"; };
+		C200000B /* Views/Panel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Panel.swift; sourceTree = "<group>"; };
+		C200000D /* Views/AudioSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/AudioSettingsView.swift; sourceTree = "<group>"; };
+		C2000059 /* Views/TiltControlsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/TiltControlsView.swift; sourceTree = "<group>"; };
+		C200005A /* Views/ParametersView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ParametersView.swift; sourceTree = "<group>"; };
+		C200005B /* Views/FXView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/FXView.swift; sourceTree = "<group>"; };
+		C200000E /* CoreAudioDevices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreAudioDevices.swift; sourceTree = "<group>"; };
+		C200000F /* Views/MIDISettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MIDISettingsView.swift; sourceTree = "<group>"; };
+		C2000010 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		C2000012 /* Views/SarangiEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SarangiEditorView.swift; sourceTree = "<group>"; };
+		C2000015 /* MockMotionSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockMotionSource.swift; sourceTree = "<group>"; };
+		C2000016 /* IPadSimulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPadSimulator.swift; sourceTree = "<group>"; };
+		C2000017 /* AuditionScore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditionScore.swift; sourceTree = "<group>"; };
+		C200001C /* Default.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Default.json; sourceTree = "<group>"; };
+		C2000020 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C2000021 /* TarabdaarMac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TarabdaarMac.entitlements; sourceTree = "<group>"; };
+		C2000056 /* Views/FretPadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/FretPadView.swift; sourceTree = "<group>"; };
+		C2000025 /* Views/StringsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/StringsView.swift; sourceTree = "<group>"; };
+		C2000051 /* SarangiStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SarangiStore.swift; sourceTree = "<group>"; };
+		C2000055 /* KeyboardNotePlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardNotePlayer.swift; sourceTree = "<group>"; };
+		C2000057 /* StringParamStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StringParamStore.swift; sourceTree = "<group>"; };
+		C200005C /* JoyConInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoyConInput.swift; sourceTree = "<group>"; };
+		C200005D /* Views/JoyConStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/JoyConStatusView.swift; sourceTree = "<group>"; };
+		C3000001 /* TarabdaarMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TarabdaarMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A4000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E1000001 /* TarabdaarCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C4000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E1000002 /* TarabdaarCore in Frameworks */,
+				C1000052 /* SarangiKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A5000001 = {
+			isa = PBXGroup;
+			children = (
+				A5000002 /* Tarabdaar */,
+				C5000001 /* ../TarabdaarMac */,
+				A5000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A5000002 /* Tarabdaar */ = {
+			isa = PBXGroup;
+			children = (
+				A2000001 /* TarabdaarApp.swift */,
+				A2000002 /* ContentView.swift */,
+				A2000003 /* MotionManager.swift */,
+				A2000004 /* TouchOverlayView.swift */,
+				A2000020 /* PitchPadView_iOS.swift */,
+				A2000010 /* Assets.xcassets */,
+			);
+			path = Tarabdaar;
+			sourceTree = "<group>";
+		};
+		A5000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A3000001 /* Tarabdaar.app */,
+				C3000001 /* TarabdaarMac.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		C5000001 /* ../TarabdaarMac */ = {
+			isa = PBXGroup;
+			children = (
+				C2000001 /* TarabdaarMacApp.swift */,
+				C2000004 /* AppController.swift */,
+				C2000055 /* KeyboardNotePlayer.swift */,
+				C200005C /* JoyConInput.swift */,
+				C200005D /* Views/JoyConStatusView.swift */,
+				C2000005 /* Views/MacMainWindow.swift */,
+				C2000006 /* Views/SetupView.swift */,
+				C2000007 /* Views/LiveVisualizerView.swift */,
+				C2000008 /* Views/ConnectionStatusView.swift */,
+				C200000B /* Views/Panel.swift */,
+				C200000D /* Views/AudioSettingsView.swift */,
+				C2000059 /* Views/TiltControlsView.swift */,
+				C200005A /* Views/ParametersView.swift */,
+				C200005B /* Views/FXView.swift */,
+				C200000E /* CoreAudioDevices.swift */,
+				C200000F /* Views/MIDISettingsView.swift */,
+				C2000010 /* Assets.xcassets */,
+				C2000012 /* Views/SarangiEditorView.swift */,
+				C2000051 /* SarangiStore.swift */,
+				C2000057 /* StringParamStore.swift */,
+				C2000015 /* MockMotionSource.swift */,
+				C2000016 /* IPadSimulator.swift */,
+				C2000017 /* AuditionScore.swift */,
+				C2000056 /* Views/FretPadView.swift */,
+				C2000025 /* Views/StringsView.swift */,
+				C200001C /* Default.json */,
+				C2000020 /* Info.plist */,
+				C2000021 /* TarabdaarMac.entitlements */,
+			);
+			path = ../TarabdaarMac;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A6000001 /* Tarabdaar */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A8000003 /* Build configuration list for PBXNativeTarget "Tarabdaar" */;
+			buildPhases = (
+				A7000001 /* Sources */,
+				A4000001 /* Frameworks */,
+				A4000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Tarabdaar;
+			packageProductDependencies = (
+				E2000001 /* TarabdaarCore */,
+			);
+			productName = Tarabdaar;
+			productReference = A3000001 /* Tarabdaar.app */;
+			productType = "com.apple.product-type.application";
+		};
+		C6000001 /* TarabdaarMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C8000003 /* Build configuration list for PBXNativeTarget "TarabdaarMac" */;
+			buildPhases = (
+				C7000001 /* Sources */,
+				C4000001 /* Frameworks */,
+				C4000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TarabdaarMac;
+			packageProductDependencies = (
+				E2000002 /* TarabdaarCore */,
+				C2000052 /* SarangiKit */,
+			);
+			productName = TarabdaarMac;
+			productReference = C3000001 /* TarabdaarMac.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A9000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 2650;
+				TargetAttributes = {
+					A6000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					C6000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = A8000001 /* Build configuration list for PBXProject "Tarabdaar" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A5000001;
+			packageReferences = (
+				E3000001 /* XCLocalSwiftPackageReference "../Packages/TarabdaarCore" */,
+				C3000051 /* XCLocalSwiftPackageReference "../Packages/SarangiKit" */,
+			);
+			productRefGroup = A5000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A6000001 /* Tarabdaar */,
+				C6000001 /* TarabdaarMac */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A4000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000010 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C4000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C1000010 /* Assets.xcassets in Resources */,
+				C100001C /* Default.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A7000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000001 /* TarabdaarApp.swift in Sources */,
+				A1000002 /* ContentView.swift in Sources */,
+				A1000003 /* MotionManager.swift in Sources */,
+				A1000004 /* TouchOverlayView.swift in Sources */,
+				A1000020 /* PitchPadView_iOS.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C7000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C1000001 /* TarabdaarMacApp.swift in Sources */,
+				C1000004 /* AppController.swift in Sources */,
+				C1000055 /* KeyboardNotePlayer.swift in Sources */,
+				C100005C /* JoyConInput.swift in Sources */,
+				C100005D /* Views/JoyConStatusView.swift in Sources */,
+				C1000005 /* Views/MacMainWindow.swift in Sources */,
+				C1000006 /* Views/SetupView.swift in Sources */,
+				C1000007 /* Views/LiveVisualizerView.swift in Sources */,
+				C1000008 /* Views/ConnectionStatusView.swift in Sources */,
+				C100000B /* Views/Panel.swift in Sources */,
+				C100000D /* Views/AudioSettingsView.swift in Sources */,
+				C1000059 /* Views/TiltControlsView.swift in Sources */,
+				C100005A /* Views/ParametersView.swift in Sources */,
+				C100005B /* Views/FXView.swift in Sources */,
+				C100000E /* CoreAudioDevices.swift in Sources */,
+				C100000F /* Views/MIDISettingsView.swift in Sources */,
+				C1000012 /* Views/SarangiEditorView.swift in Sources */,
+				C1000051 /* SarangiStore.swift in Sources */,
+				C1000015 /* MockMotionSource.swift in Sources */,
+				C1000016 /* IPadSimulator.swift in Sources */,
+				C1000017 /* AuditionScore.swift in Sources */,
+				C1000056 /* Views/FretPadView.swift in Sources */,
+				C1000057 /* StringParamStore.swift in Sources */,
+				C1000025 /* Views/StringsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A8000010 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = WN86FWABN8;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Debug;
+		};
+		A8000011 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = WN86FWABN8;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				TARGETED_DEVICE_FAMILY = 2;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		A8000020 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Tarabdaar/Tarabdaar.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = DG59UB89RL;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Tarabdaar/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Tarabdaar;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tarabdaar.Tarabdaar;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Debug;
+		};
+		A8000021 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Tarabdaar/Tarabdaar.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = DG59UB89RL;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Tarabdaar/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Tarabdaar;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tarabdaar.Tarabdaar;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Release;
+		};
+		C8000020 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ../TarabdaarMac/TarabdaarMac.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = WN86FWABN8;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ../TarabdaarMac/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Tarabdaar;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tarabdaar.TarabdaarMac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		C8000021 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ../TarabdaarMac/TarabdaarMac.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = WN86FWABN8;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ../TarabdaarMac/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Tarabdaar;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tarabdaar.TarabdaarMac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A8000001 /* Build configuration list for PBXProject "Tarabdaar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A8000010 /* Debug */,
+				A8000011 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A8000003 /* Build configuration list for PBXNativeTarget "Tarabdaar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A8000020 /* Debug */,
+				A8000021 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C8000003 /* Build configuration list for PBXNativeTarget "TarabdaarMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C8000020 /* Debug */,
+				C8000021 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		C3000051 /* XCLocalSwiftPackageReference "../Packages/SarangiKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/SarangiKit;
+		};
+		E3000001 /* XCLocalSwiftPackageReference "../Packages/TarabdaarCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/TarabdaarCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		C2000052 /* SarangiKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C3000051 /* XCLocalSwiftPackageReference "../Packages/SarangiKit" */;
+			productName = SarangiKit;
+		};
+		E2000001 /* TarabdaarCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E3000001 /* XCLocalSwiftPackageReference "../Packages/TarabdaarCore" */;
+			productName = TarabdaarCore;
+		};
+		E2000002 /* TarabdaarCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E3000001 /* XCLocalSwiftPackageReference "../Packages/TarabdaarCore" */;
+			productName = TarabdaarCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A9000001 /* Project object */;
+}

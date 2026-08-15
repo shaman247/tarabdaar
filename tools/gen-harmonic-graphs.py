@@ -17,7 +17,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 PKG = REPO / "Packages" / "StarpadDSP"
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / "tools" / "sym-harmonics.html"
-DATA = Path("/tmp/starpad-sym-harmonics.json")
+DATA = Path("/tmp/tarabdaar-sym-harmonics.json")
 
 
 def collect():

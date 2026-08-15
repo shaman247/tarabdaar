@@ -7,13 +7,13 @@ voice is SWAM Viola — a real-time-only hosted AU with no offline renderer.
 So we close the loop through the LIVE app: each candidate is a self-contained
 audition score (set every tuned `voiceParam`, mute the tanpura, send CC11 so
 SWAM speaks, play the reference's note at its f0) dropped into
-`auditions/inbox/`; the StarpadMac `AuditionRunner` renders the COMPLETE
+`auditions/inbox/`; the TarabdaarMac `AuditionRunner` renders the COMPLETE
 post-FX mix to `auditions/outputs/<name>.wav`; we score that against the real
 sample with the tanpura `specres` metric (+ a body-resonance lock term).
 CMA-ES (the tanpura optimizer's core, no `cma` dep) tunes the sym macros +
 viola EQ + balance/FX.
 
-REQUIRES the StarpadMac app running on .swamViola with a LICENSED SWAM Viola
+REQUIRES the TarabdaarMac app running on .swamViola with a LICENSED SWAM Viola
 and the audition runner active. A smoke render guards against silent SWAM.
 
   # 0. one-time: build the per-sample reference models
@@ -853,7 +853,7 @@ def smoke(pinned):
     try:
         wav = run_score("sar_smoke", score, timeout_s=60.0)
     except Exception as e:  # noqa: BLE001
-        raise SystemExit(f"[smoke] render failed — is StarpadMac running with "
+        raise SystemExit(f"[smoke] render failed — is TarabdaarMac running with "
                          f"the audition runner? ({e})")
     if not wait_stable_wav(str(wav)):
         raise SystemExit("[smoke] render produced an empty wav (flush race / "
