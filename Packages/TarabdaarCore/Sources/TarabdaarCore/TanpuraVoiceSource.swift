@@ -35,11 +35,48 @@ public final class TanpuraVoiceSource {
         var bufR: [Double]
         var fadeL: [Double]
         var fadeR: [Double]
+        /// VOICE→TARAF tap (2026-08-19, sitar; 2026-08-21, tanpura):
+        /// when set, the render callback hands each finished block
+        /// (mono mixdown, post-crossfade) to the sink — this voice
+        /// feeds the String kernel's jt inject ring with exactly what
+        /// it radiates. Published under the state lock; the sink must
+        /// be render-thread safe (`StringVoiceSource.jtInjectWrite` is).
+        var injectSink: ((UnsafePointer<Double>, Int) -> Void)?
+        /// Per-source taraf drive (`st_taraf` / `tp_taraf`, 2026-08-21):
+        /// scales the mono mixdown BEFORE the sink, so the sitar and the
+        /// tanpura can share the one kernel inject ring at independent
+        /// levels (the kernel-side gain is just an arm flag now). 0 =
+        /// the sink is skipped entirely — nothing is written, byte-null.
+        var injectGain = 0.0
+        var monoBuf: [Double]
         init() {
             bufL = [Double](repeating: 0, count: maxFrames)
             bufR = [Double](repeating: 0, count: maxFrames)
             fadeL = [Double](repeating: 0, count: maxFrames)
             fadeR = [Double](repeating: 0, count: maxFrames)
+            monoBuf = [Double](repeating: 0, count: maxFrames)
+        }
+
+        /// Mono-mix `n` finished output frames into the sink at the
+        /// source's taraf drive, chunked to the preallocated scratch
+        /// (no render-thread allocation).
+        func feedSink(_ sink: (UnsafePointer<Double>, Int) -> Void,
+                      gain: Double,
+                      outL: UnsafePointer<Float>,
+                      outR: UnsafePointer<Float>, frames n: Int) {
+            var done = 0
+            while done < n {
+                let m = min(maxFrames, n - done)
+                monoBuf.withUnsafeMutableBufferPointer { mb in
+                    let p = mb.baseAddress!
+                    for i in 0..<m {
+                        p[i] = gain * (0.5 * (Double(outL[done + i])
+                                              + Double(outR[done + i])))
+                    }
+                    sink(p, m)
+                }
+                done += m
+            }
         }
 
         func renderMix(engine: TanpuraEngine, fading: TanpuraEngine?,
@@ -105,6 +142,8 @@ public final class TanpuraVoiceSource {
             os_unfair_lock_lock(&st.lock)
             let engine = st.engine
             let fading = st.fading
+            let sink = st.injectSink
+            let injectGain = st.injectGain
             os_unfair_lock_unlock(&st.lock)
             guard let engine, out.count > 0, let l0 = out[0].mData else {
                 for ch in 0..<out.count {
@@ -117,6 +156,10 @@ public final class TanpuraVoiceSource {
                 .assumingMemoryBound(to: Float.self)
             st.renderMix(engine: engine, fading: fading, frames: n,
                          outL: outL, outR: outR)
+            if let sink, injectGain != 0.0 {
+                st.feedSink(sink, gain: injectGain,
+                            outL: outL, outR: outR, frames: n)
+            }
             return noErr
         }
     }
@@ -129,12 +172,19 @@ public final class TanpuraVoiceSource {
         os_unfair_lock_lock(&state.lock)
         let engine = state.engine
         let fading = state.fading
+        let sink = state.injectSink
+        let injectGain = state.injectGain
         os_unfair_lock_unlock(&state.lock)
         guard let engine else { return (l, r) }
         l.withUnsafeMutableBufferPointer { lb in
             r.withUnsafeMutableBufferPointer { rb in
                 state.renderMix(engine: engine, fading: fading, frames: frames,
                                 outL: lb.baseAddress!, outR: rb.baseAddress!)
+                if let sink, injectGain != 0.0 {
+                    state.feedSink(sink, gain: injectGain,
+                                   outL: lb.baseAddress!,
+                                   outR: rb.baseAddress!, frames: frames)
+                }
             }
         }
         return (l, r)
@@ -169,6 +219,29 @@ public final class TanpuraVoiceSource {
         os_unfair_lock_lock(&state.lock)
         defer { os_unfair_lock_unlock(&state.lock) }
         return state.engine != nil
+    }
+
+    /// Install/clear the voice→taraf render tap (control thread). The
+    /// sink receives every finished output block (mono mixdown, scaled
+    /// by the inject gain) on the render thread — wire it to
+    /// `StringVoiceSource.jtInjectWrite` so this voice's radiation
+    /// charges the sarangi jt web. Both the sitar and the tanpura
+    /// instances set one; the per-source gain keeps their drives
+    /// independent on the shared kernel ring.
+    public func setInjectSink(_ sink: ((UnsafePointer<Double>, Int) -> Void)?) {
+        os_unfair_lock_lock(&state.lock)
+        state.injectSink = sink
+        os_unfair_lock_unlock(&state.lock)
+    }
+
+    /// This voice's taraf drive (`st_taraf` / `tp_taraf`), applied to
+    /// the mono mixdown BEFORE the sink (control thread). 0 = the tap
+    /// writes nothing (byte-null); the value is playing state — it
+    /// survives engine rebuilds (the tap is per-source, not per-engine).
+    public func setInjectGain(_ g: Double) {
+        os_unfair_lock_lock(&state.lock)
+        state.injectGain = max(g, 0.0)
+        os_unfair_lock_unlock(&state.lock)
     }
 
     /// The currently-published engine (brief lock) — pluck target for the
@@ -217,14 +290,47 @@ public final class TanpuraVoiceSource {
     /// build the scale-shaped-overtones transform from the SAME scale
     /// the grid mounts — all 0 (the defaults) is the physical tanpura,
     /// and the engine build is unchanged.
+    /// `registerComp` (2026-08-15, `tp_jiva_comp`): the register
+    /// calibration — per-slot jiva thread-height targets that keep every
+    /// pitch in the low-register graze regime (level buzziness + laddered
+    /// cascade; `TanpuraTables.registerCompThreadMul`). 0 = the fitted
+    /// geometry, byte-identical build.
+    /// `cascade` (2026-08-15, `tp_cascade`): slows the higher slots'
+    /// harmonic cascade toward the 104 Hz anchor's pace — a further
+    /// pitch-graded thread lift (clamped at the fitted height) plus an
+    /// HF-sustain stretch (`TanpuraTables.cascadeThreadLift` /
+    /// `.cascadeHFT60Mul`). 0 = calibration-only build.
+    /// `artifact` (2026-08-19): which fitted instrument the engine
+    /// mounts — the tanpura (default) or the SITAR (`sitar_live.json`,
+    /// the r7 model retuned to sitar1.wav; the sitar voice is a second
+    /// TanpuraVoiceSource built with `.sitar`). nil params = missing
+    /// bundle resource.
+    public enum Artifact { case tanpura, sitar }
+
     public static func buildEngine(tonicHz: Double,
                                    scaleRatios: [Double],
+                                   artifact: Artifact = .tanpura,
                                    shapeAlign: Double = 0,
                                    shapeFocus: Double = 0,
                                    shapeSpread: Double = 0,
-                                   shapeQuiet: Double = 0) -> TanpuraEngine? {
-        guard let params = Presets.tanpuraParams() else { return nil }
-        let freqs = slotFrequencies(tonicHz: tonicHz, scaleRatios: scaleRatios)
+                                   shapeQuiet: Double = 0,
+                                   registerComp: Double = 0,
+                                   cascade: Double = 0,
+                                   workers: Int = 8,
+                                   polyphony: Int = 6) -> TanpuraEngine? {
+        let loaded = artifact == .sitar ? Presets.sitarParams()
+                                        : Presets.tanpuraParams()
+        guard let params = loaded else { return nil }
+        var freqs = slotFrequencies(tonicHz: tonicHz, scaleRatios: scaleRatios)
+        if artifact == .sitar {
+            // the sitar's scale-model ladder is bench-stable to
+            // ~1.5 kHz (above it the sim can't hold enough sub-Nyquist
+            // modes to resolve the contact and the string
+            // self-oscillates — a real sitar tops out ~1.4 kHz too);
+            // higher grid slots simply don't mount, and a fret above
+            // the cap finds no slot within the 60¢ pluck tolerance
+            freqs = freqs.filter { $0 <= 1500.0 }
+        }
         guard !freqs.isEmpty else { return nil }
         let shaping: TanpuraShaping? =
             (shapeAlign > 0 || shapeFocus > 0 || shapeQuiet > 0)
@@ -232,7 +338,25 @@ public final class TanpuraVoiceSource {
                              align: shapeAlign, focus: shapeFocus,
                              spread: shapeSpread, quiet: shapeQuiet)
             : nil
-        return TanpuraEngine(params: params, frequencies: freqs,
-                             shaping: shaping)
+        let comp = min(max(registerComp, 0.0), 1.0)
+        let casc = min(max(cascade, 0.0), 1.0)
+        let threadHMul: ((Double) -> Double)? = (comp > 0 || casc > 0)
+            ? { f0 in
+                min(1.0,
+                    TanpuraTables.registerCompThreadMul(
+                        f0: f0, comp: comp, p: params)
+                    + TanpuraTables.cascadeThreadLift(
+                        f0: f0, cascade: casc, p: params))
+            } : nil
+        let engine = TanpuraEngine(params: params, frequencies: freqs,
+                                   workers: workers,
+                                   shaping: shaping,
+                                   threadHMul: threadHMul,
+                                   hfT60Mul: casc > 0 ? { f0 in
+                                       TanpuraTables.cascadeHFT60Mul(
+                                           f0: f0, cascade: casc)
+                                   } : nil)
+        engine?.setPolyphony(polyphony)
+        return engine
     }
 }

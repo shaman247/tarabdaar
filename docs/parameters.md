@@ -13,17 +13,28 @@ separate "performance parameter" or "physics scalar" category: a
 parameter is a parameter, and any of them can be bound to a tilt or added
 to a composite.
 
-Each parameter has an **apply strategy**:
+Each parameter carries two audit columns (2026-08-23):
 
-| Strategy | Meaning |
+**Scope** — who it acts on:
+
+| Scope | Meaning |
 |---|---|
-| `live` | A runtime setter on the engine — takes effect instantly. |
-| `rebuild` | A `bowed_string.json` build scalar — applied as a persisted override with a debounced off-main engine rebuild. |
-| `hybrid` | A build scalar that also has a live 0–1 scaler in the kernel. At or below the built value it applies instantly; pushing above it rebuilds. |
+| `global` | ONE shared mechanism — the bridge/body, the taraf bank, the room/FX/output chain, the shared string physics, or a control axis every note rides together. Changing it moves the whole instrument at once. |
+| `per-note` | Runs SEPARATELY for each note: every sounding note carries its own state for it (onset clock, settle/linger envelope, vibrato phase, drift walk, strike-blend window), so simultaneous notes are affected independently. The attack family is CAPTURED at the articulation edge — an edit changes subsequent onsets, never a sounding note. |
 
-The two `hybrid` parameters (jawari buzz, vibrato depth) used to appear
-**twice** — once as the build scalar and once as the live scaler under a
-different name (`bow_jaw_gain`, `bow_vibrato`). They are one knob now.
+The line follows per-note CONTROL STATE, not physics plumbing: friction
+and string-construction values are `global` even though every string
+evaluates them — they carry no per-note state and cannot differ between
+simultaneous notes.
+
+**Timing** — when a change is heard:
+
+| Timing | Meaning |
+|---|---|
+| `live` | A dedicated runtime setter — instant everywhere, including through tilt/strike bindings and composites. The right kind for continuous real-time control. |
+| `in-place` | A build scalar whose change lands on the RUNNING kernel (no rebuild, no lost ring) — but it persists as an override and flushes through a ~0.2 s debounce, in the Parameters tab and through bindings alike. Fine for set-and-listen editing; for continuous binding prefer a `live` parameter. |
+| `rebuild` | Needs a fresh engine: ~0.2 s debounce, then an off-main rebuild adopted through a crossfade. |
+| `hybrid` | Instant at or below the built headroom (a live 0–1 kernel scaler); pushing above the built value rebuilds. The two hybrids (jawari buzz, vibrato depth) used to appear twice under separate names (`bow_jaw_gain`, `bow_vibrato`) — they are one knob now. |
 
 **Composite parameters** are named 0–1 macros built from these
 parameters: each member sweeps its own low→high range as the composite
@@ -72,233 +83,275 @@ slider rather than being clamped).
 
 ### Bow stroke
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `bow_expr` | expression | 0 … 1 | 0.251 | live | Loudness of the played stroke: low = fade toward silence, high = push harder. The fitted playing median is ~0.25. |
-| `bow_press` | bow pressure | 0 … 1 | 0.562 | live | Bow force inside the playable wedge — under-pressed flautando/whistle at the low end, pressed grit at the high end. |
-| `bow_pos` | bow position (brightness) | 0 … 1 | 0.45 | live | Where the bow contacts the string: low = sul ponticello (bright/edgy near the bridge), high = sul tasto (soft/round over the fingerboard). |
-| `bow_tilt` | bow tilt | 0 … 1 | 0.331 | live | Harmonic color of the bow stroke (bow-hair tilt). The default 0.331 is the neutral 0 dB point. |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_expr` | expression | 0 … 1 | 0.251 | global | live | Loudness of the played stroke: low = fade toward silence, high = push harder. The fitted playing median is ~0.25. |
+| `bow_press` | bow pressure | 0 … 1 | 0.562 | global | live | Bow force inside the playable wedge — under-pressed flautando/whistle at the low end, pressed grit at the high end. |
+| `bow_pos` | bow position (brightness) | 0 … 1 | 0.45 | global | live | Where the bow contacts the string: low = sul ponticello (bright/edgy near the bridge), high = sul tasto (soft/round over the fingerboard). |
+| `bow_tilt` | bow tilt | 0 … 1 | 0.331 | global | live | Harmonic color of the bow stroke (bow-hair tilt). The default 0.331 is the neutral 0 dB point. |
 
 ### Body (formula modes)
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `bow_body_modes` | modes | 0 … 16 | 12 | rebuild | Analytic mode count. 0 = rigid bridge (the bare string — the pre-body 'synthy' sound). |
-| `bow_body_scale` | body size | 0.15 … 2.5 | 1 | rebuild | Scales every mode: <1 = smaller body (violin direction), >1 = larger (cello direction). 1 = built for the current tonic. |
-| `bow_body_air_ratio` | air mode ratio | 0.4 … 2.2 | 1.4 | rebuild | Lowest (air) resonance as a multiple of the open string. Under 1 (air mode BELOW the tonic) is what charges the taraf. |
-| `bow_body_q` | wood Q | 5 … 60 | 25 | rebuild | Mode sharpness: low = damp/soft wood, high = ringy/hard. |
-| `bow_body_q_air` | air Q | 4 … 30 | 12 | rebuild | Air-resonance sharpness. |
-| `bow_body_y` | mobility depth | 0 … 2 | 0.35 | rebuild | How much the bridge moves at the modes — note-to-note unevenness, wolf tendency, attack bloom. |
-| `bow_body_rad` | modal radiation | 0 … 3 | 1 | rebuild | How loudly the modes radiate (vs the direct term). |
-| `bow_body_c0` | direct radiation | 0 … 1 | 0.3 | rebuild | Non-modal (flat) radiation floor. 1 with modes 0 = the raw bridge force. |
-| `bow_yinf` | bridge give | 0 … 0.4 | 0.05 | rebuild | Broadband bridge admittance floor under the modes. |
-| `bow_kret` | body return | 0 … 0.5 | 0.35 | rebuild | Bridge motion fed back into the string (loop-cap protected). More = livelier, wolfier. |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_body_modes` | modes | 0 … 16 | 12 | global | rebuild | Analytic mode count. 0 = rigid bridge (the bare string — the pre-body 'synthy' sound). |
+| `bow_body_scale` | body size | 0.15 … 2.5 | 1 | global | in-place | Scales every mode: <1 = smaller body (violin direction), >1 = larger (cello direction). 1 = built for the current tonic. |
+| `bow_body_air_ratio` | air mode ratio | 0.4 … 2.2 | 1.4 | global | in-place | Lowest (air) resonance as a multiple of the open string. Under 1 (air mode BELOW the tonic) is what charges the taraf. |
+| `bow_body_q` | wood Q | 5 … 60 | 25 | global | in-place | Mode sharpness: low = damp/soft wood, high = ringy/hard. |
+| `bow_body_q_air` | air Q | 4 … 30 | 12 | global | in-place | Air-resonance sharpness. |
+| `bow_body_y` | mobility depth | 0 … 2 | 0.35 | global | in-place | How much the bridge moves at the modes — note-to-note unevenness, wolf tendency, attack bloom. |
+| `bow_body_rad` | modal radiation | 0 … 3 | 1 | global | in-place | How loudly the modes radiate (vs the direct term). |
+| `bow_body_c0` | direct radiation | 0 … 1 | 0.3 | global | in-place | Non-modal (flat) radiation floor. 1 with modes 0 = the raw bridge force. |
+| `bow_yinf` | bridge give | 0 … 0.4 | 0.05 | global | in-place | Broadband bridge admittance floor under the modes. |
+| `bow_kret` | body return | 0 … 0.5 | 0.35 | global | in-place | Bridge motion fed back into the string (loop-cap protected). More = livelier, wolfier. |
 
 ### Bow & string
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `bow_mu_s` | static friction | 0.4 … 1.2 | 0.8 | rebuild | Rosin stick strength (grip). |
-| `bow_mu_d` | dynamic friction | 0.1 … 0.6 | 0.3 | rebuild | Slip friction. The stick/slip GAP sets the Schelleng ceiling. |
-| `bow_v0` | friction corner | 0.05 … 0.5 | 0.2 | rebuild | Friction-curve knee: smaller = sharper corner = brighter attack edge. |
-| `bow_Zt` | torsional damping | 0 … 15 | 7.9 | rebuild | String rotation losses at the bow contact. |
-| `bow_gut_g` | gut loss | 0.985 … 1 | 0.998 | rebuild | Per-round-trip broadband loss — lower = duller, deader string. |
-| `bow_gut_fc2` | gut top (Hz) | 500 … 12000 | 3500 | rebuild | Second termination pole: the gut string's own HF ceiling. |
-| `bow_nut_fc` | nut corner (Hz) | 1000 … 12000 | 5500 | rebuild | Nut/finger termination low-pass. |
-| `bow_br_fc` | bridge corner (Hz) | 1000 … 12000 | 6750 | rebuild | Bridge termination low-pass. |
-| `bow_twang` | sitar twang | 0 … 1 | 0 | live | Grazing jawari WRAP on the PLAYED strings' bridge (the sitar's flat-bridge contact on the melody string — the taraf's bones are separate; fitted to sitar1.wav). 0 = the plain bridge, byte-exact. Rising = while an excursion tip presses the bone, the string's speaking length shortens a hair (an energy-conserving per-cycle phase modulation that pumps the harmonic cascade), and the terminations morph toward sitar hardware — brighter bridge/nut, eased release damping — so a staccato note keeps a SUSTAINED buzzy 2.5–6 kHz cluster through its ring instead of losing it in ~150 ms. The sitar1.wav match sits near 0.75 of the throw; the last quarter opens the wrap and brightness further (extended-top rev) for a hotter, more present buzz. The graze knee rides each string's own envelope, so the twang engages at ANY strike level — the consistency the fixed-geometry jawari never had — and two pitch-lock terms (termination phase restore + the fitted wrap trim) hold the twanged ring on the plain ring's pitch (±5 c wander at the extremes, a brief sitar-like onset settle at high notes). Applies live, slewed in-kernel. |
-| `bow_noise` | contact noise | 0 … 0.4 | 0.1 | rebuild | Hair-scatter noise recirculated into the friction loop. |
-| `bow_noise_dir` | direct noise | 0 … 0.4 | 0.12 | rebuild | Contact noise radiated directly (inter-harmonic air). |
-| `bow_tors_c` | torsion coupling | 0 … 0.5 | 0 | rebuild | Slip → torsional wave → returned micro-slips: period-locked harmonic HF regeneration at the source. 0 = off. |
-| `bow_tors_g` | torsion return | 0.5 … 0.98 | 0.85 | rebuild | Torsional loop reflection/loss (higher = stronger ripple). |
-| `bow_tors_ratio` | torsion speed × | 3.5 … 8 | 5.2 | rebuild | Torsional/transverse wave-speed ratio (gut ≈ 5). |
-| `bow_age_a` | contact aging | 0 … 0.9 | 0 | rebuild | Rate-and-state friction: static grip grows with stick time — a freshly-slipped contact is weak, so slips collect at one phase per period (cleaner, more locked slip pattern). 0 = off. |
-| `bow_age_ms` | aging time (ms) | 0.2 … 5 | 1.5 | rebuild | Contact re-adhesion timescale (fraction of a period = strongest phase discipline). |
-| `bow_cr_w` | contact spread | 0 … 0.5 | 0 | rebuild | Continuum contact: grip-limit spread across the hair band — partial release near the boundary (adds bow-surface flutter texture; darkens quiet mids). 0 = off. |
-| `bow_cr_ms` | release time (ms) | 0 … 0.15 | 0 | rebuild | Continuum contact: release-front crossing time (release-only; capture snaps). Large values distort the quiet duty cycle. 0 = off. |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_mu_s` | static friction | 0.4 … 1.2 | 0.8 | global | in-place | Rosin stick strength (grip). |
+| `bow_mu_d` | dynamic friction | 0.1 … 0.6 | 0.3 | global | in-place | Slip friction. The stick/slip GAP sets the Schelleng ceiling. |
+| `bow_v0` | friction corner | 0.05 … 0.5 | 0.2 | global | in-place | Friction-curve knee: smaller = sharper corner = brighter attack edge. |
+| `bow_Zt` | torsional damping | 0 … 15 | 7.9 | global | in-place | String rotation losses at the bow contact. |
+| `bow_gut_g` | gut loss | 0.985 … 1 | 0.998 | global | in-place | Per-round-trip broadband loss — lower = duller, deader string. |
+| `bow_gut_fc2` | gut top (Hz) | 500 … 12000 | 3500 | global | in-place | Second termination pole: the gut string's own HF ceiling. |
+| `bow_nut_fc` | nut corner (Hz) | 1000 … 12000 | 5500 | global | in-place | Nut/finger termination low-pass. |
+| `bow_br_fc` | bridge corner (Hz) | 1000 … 12000 | 6750 | global | in-place | Bridge termination low-pass. |
+| `bow_twang` | sitar twang | 0 … 1 | 0 | global | live | Grazing jawari WRAP on the PLAYED strings' bridge (the sitar's flat-bridge contact on the melody string — the taraf's bones are separate; fitted to sitar1.wav). 0 = the plain bridge, byte-exact. Rising = while an excursion tip presses the bone, the string's speaking length shortens a hair (an energy-conserving per-cycle phase modulation that pumps the harmonic cascade), and the terminations morph toward sitar hardware — brighter bridge/nut, eased release damping — so a staccato note keeps a SUSTAINED buzzy 2.5–6 kHz cluster through its ring instead of losing it in ~150 ms. The sitar1.wav match sits near 0.75 of the throw; the last quarter opens the wrap and brightness further (extended-top rev) for a hotter, more present buzz. The graze knee rides each string's own envelope, so the twang engages at ANY strike level — the consistency the fixed-geometry jawari never had — and two pitch-lock terms (termination phase restore + the fitted wrap trim) hold the twanged ring on the plain ring's pitch (±5 c wander at the extremes, a brief sitar-like onset settle at high notes). Applies live, slewed in-kernel. |
+| `bow_noise` | contact noise | 0 … 0.4 | 0.1 | global | in-place | Hair-scatter noise recirculated into the friction loop. |
+| `bow_noise_dir` | direct noise | 0 … 0.4 | 0.12 | global | in-place | Contact noise radiated directly (inter-harmonic air). |
+| `bow_tors_c` | torsion coupling | 0 … 0.5 | 0 | global | in-place | Slip → torsional wave → returned micro-slips: period-locked harmonic HF regeneration at the source. 0 = off. |
+| `bow_tors_g` | torsion return | 0.5 … 0.98 | 0.85 | global | in-place | Torsional loop reflection/loss (higher = stronger ripple). |
+| `bow_tors_ratio` | torsion speed × | 3.5 … 8 | 5.2 | global | in-place | Torsional/transverse wave-speed ratio (gut ≈ 5). |
+| `bow_age_a` | contact aging | 0 … 0.9 | 0 | global | in-place | Rate-and-state friction: static grip grows with stick time — a freshly-slipped contact is weak, so slips collect at one phase per period (cleaner, more locked slip pattern). 0 = off. |
+| `bow_age_ms` | aging time (ms) | 0.2 … 5 | 1.5 | global | in-place | Contact re-adhesion timescale (fraction of a period = strongest phase discipline). |
+| `bow_cr_w` | contact spread | 0 … 0.5 | 0 | global | in-place | Continuum contact: grip-limit spread across the hair band — partial release near the boundary (adds bow-surface flutter texture; darkens quiet mids). 0 = off. |
+| `bow_cr_ms` | release time (ms) | 0 … 0.15 | 0 | global | in-place | Continuum contact: release-front crossing time (release-only; capture snaps). Large values distort the quiet duty cycle. 0 = off. |
 
 ### Playing ranges
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `bow_v_lo` | speed floor | 0.02 … 0.15 | 0.065 | rebuild | Bow velocity at expression 0 (above the lift zone). |
-| `bow_v_hi` | speed ceiling | 0.1 … 0.5 | 0.23 | rebuild | Bow velocity at full expression. |
-| `bow_live_beta_lo` | pos: bridge end | 0.02 … 0.1 | 0.05 | rebuild | β at pos 0 — sul ponticello limit. |
-| `bow_live_beta_hi` | pos: tasto end | 0.12 … 0.33 | 0.24 | rebuild | β at pos 1 — sul tasto limit. |
-| `bow_live_press_under` | press-0 undershoot | 0.2 … 1 | 0.55 | rebuild | Press 0 dips to this ×fmin — the flautando/whistle edge. |
-| `bow_live_press_over` | press-1 overshoot | 1 … 1.8 | 1.25 | rebuild | Press 1 pushes to this ×fmax — the grit edge. |
-| `bow_expr_lift` | lift zone | 0 … 0.4 | 0.2 | rebuild | Expression below this fades the bow off the string entirely. |
-| `bow_f_cap` | force cap | 1 … 8 | 4 | rebuild | Hard force guard over every push (tilt/register). |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_v_lo` | speed floor | 0.02 … 0.15 | 0.065 | global | in-place | Bow velocity at expression 0 (above the lift zone). |
+| `bow_v_hi` | speed ceiling | 0.1 … 0.5 | 0.23 | global | in-place | Bow velocity at full expression. |
+| `bow_live_beta_lo` | pos: bridge end | 0.02 … 0.1 | 0.05 | global | in-place | β at pos 0 — sul ponticello limit. |
+| `bow_live_beta_hi` | pos: tasto end | 0.12 … 0.33 | 0.24 | global | in-place | β at pos 1 — sul tasto limit. |
+| `bow_live_press_under` | press-0 undershoot | 0.2 … 1 | 0.55 | global | in-place | Press 0 dips to this ×fmin — the flautando/whistle edge. |
+| `bow_live_press_over` | press-1 overshoot | 1 … 1.8 | 1.25 | global | in-place | Press 1 pushes to this ×fmax — the grit edge. |
+| `bow_expr_lift` | lift zone | 0 … 0.4 | 0.2 | global | in-place | Expression below this fades the bow off the string entirely. |
+| `bow_f_cap` | force cap | 1 … 8 | 4 | global | in-place | Hard force guard over every push (tilt/register). |
 
 ### Jawari taraf (modal contact)
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `bow_jt_gain` | level | 0 … 3 | 0.3 | rebuild | Output mix of the jawari web (the gap-law calibration landed at 0.3). |
-| `bow_jt_drive` | drive | 0.001 … 0.3 | 0.03 | rebuild | Bridge-force coupling INTO the strings — sets the graze operating point: too low = no cascade, too high = over-drained/linearized. |
-| `bow_jt_apex` | graze depth | 2e-06 … 5e-05 | 1e-05 | rebuild | Bone protrusion. The evolution lives at the grazing knee — deep press linearizes (sparkle only), too shallow never engages. |
-| `bow_jt_evolve` | evolution | 0 … 1 | 0.5 | live | Harmonic-evolution rate — the tanpura/sitar twang axis: a signed bone offset spanning graze margin ×4 … ×¼ around the fitted bone, slewed inside the kernel (~40 ms) so the bone GLIDES — tilt-sweepable without a strum. 1 = the ring always sits in the grazing band: energy cascades up the partials fast (centroid rise ~0.3 s vs ~1.2 s stock) and at ANY level — the twang is reliable, and the taraf rings a few dB hotter (a real opened jawari does too; trim with level). 0 = the string is pressed past the knee: the wrap holds, harmonics stay put, no twang. 0.5 = the fitted geometry, byte-null. Applies live. |
-| `bow_jt_tap` | radiation tap | 0.86 … 0.98 | 0.9 | rebuild | Where along the string the taraf radiates (fraction of its length; the drive tap stays fitted). Radiated harmonic k weighs |sin(k·π·tap)| — 0.90 (legacy) humps at h5 and NULLS h10, which muffles the jawari formant; toward the bridge the hump slides up (0.95 → h10, 0.97 → h16) and the fundamental falls away, voicing the ring as the classic cluster of high harmonics over quiet lows. |
-| `bow_jt_alpha` | contact law | 1 … 2 | 1.5 | rebuild | Contact stiffness exponent. 1.5 = Hertz (fast sqrt path — the live default); other values cost more CPU. |
-| `bow_jt_norm` | level norm | 0 … 1.5 | 1 | rebuild | Per-string t60-response normalization — evens the driven level across scale degrees (long-ring rows charge hotter); 0 = raw physics. |
-| `bow_jt_hcb` | contact damping | 1 … 40 | 8 | rebuild | Hysteretic damping of the string–bone contact. More = softer buzz transients (rounder force pulses, less clang); the legacy hardcoded value is 8. |
-| `bow_jt_fhf` | damping corner (Hz) | 800 … 12000 | 4000 | rebuild | Corner of the per-mode f² damping law — above it, partials die progressively faster. LOWER = warmer (the top decays in tens of ms while fundamentals sustain). Legacy 4000. |
-| `bow_jt_bst` | inharmonicity | 0 … 0.001 | 0.0002 | rebuild | Stiffness stretch of the upper partials (steel-wire dispersion). Lower = more harmonic top = less bell-metallic; legacy 2e-4 puts mode 40 ~15% sharp. |
-| `bow_jt_lp` | tone LP (Hz) | 1000 … 20000 | 20000 | live | One-pole low-pass on the radiated jawari sum ONLY (the main string is untouched). ≥ 20 kHz = bypass, bit-exact legacy. Applies live. |
-| `bow_jt_hp` | tone HP (Hz) | 0 … 4000 | 0 | live | One-pole high-pass on the radiated jawari sum ONLY — the formant voicing: quiets the taraf's fundamental band so the high-harmonic cluster (see radiation tap) carries the ring. ~1–2× the tonic leaves the twang untouched and drops the lows ~6 dB/oct below the corner. 0 = bypass, bit-exact legacy. Applies live. |
-| `bow_jt_body` | body radiation | 0 … 1 | 0 | live | Blend of the radiated jawari sum through the SAME formula-body radiation bank the played strings radiate through — the coherence lever: at 0 the taraf radiates raw (beside the instrument), at 1 it rings from the instrument's body with the voice's own formants. Shared coefficients (a body edit re-voices both), own filter state. 0 = bypass, bit-exact legacy. Applies live. |
-| `bow_jt_damp` | extra damping | 0 … 1 | 0 | live | Runtime damping of these modal rows: 0 = the natural long ring, 1 = choked within a second. Applies live — this is what the Taraf Decay composite sweeps. |
-| `bow_jt_sel` | recruitment | 0 … 1 | 0.5 | live | Which strings contribute to the taraf — the contribution PROFILE, at held loudness (2026-08-01 rework: the old top half was a pure boost and the knob read as a taraf volume). 0.5 = the fitted natural response: unison rows dominate, octaves a few dB down, fifths faint, unrelated rows only haze. Below: rows lose bridge drive by harmonic distance from the played notes until at 0 only kin rows ring; chords recruit additively (soft-OR, bounded). Above: the profile FLATTENS — resonant rows are cut toward the common haze level until at 1 every string contributes equally and the taraf's response (contributions AND level) no longer depends on what the voice plays. Loudness holds throughout via the radiated jt gain (incoherent power model; below 0.5 anchored to the note's own fitted level, above 0.5 blending to one fixed common level; cap ×`bow_jt_sel_comp` [4]). Held drones and the melody follower count as fully ringing in the model so they are never pumped, and rings already sounding are never ducked. Lattice: `bow_jt_sel_width` (cents, 30) and `bow_jt_sel_kin` (exponent, 0.7 — shared with the drone spread), bp scalars like the tilt range keys. Applies live — the Taraf Purity composite's recruitment member (purity up = kin-only). |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_jt_gain` | level | 0 … 3 | 0.3 | global | in-place | Output mix of the jawari web (the gap-law calibration landed at 0.3). |
+| `bow_jt_drive` | drive | 0.001 … 0.3 | 0.03 | global | in-place | Bridge-force coupling INTO the strings — sets the graze operating point: too low = no cascade, too high = over-drained/linearized. |
+| `bow_jt_apex` | graze depth | 2e-06 … 5e-05 | 1e-05 | global | in-place | Bone protrusion. The evolution lives at the grazing knee — deep press linearizes (sparkle only), too shallow never engages. |
+| `bow_jt_evolve` | evolution | 0 … 1 | 0.5 | global | live | Harmonic-evolution rate — the tanpura/sitar twang axis: a signed bone offset spanning graze margin ×4 … ×¼ around the fitted bone, slewed inside the kernel (~40 ms) so the bone GLIDES — tilt-sweepable without a strum. 1 = the ring always sits in the grazing band: energy cascades up the partials fast (centroid rise ~0.3 s vs ~1.2 s stock) and at ANY level — the twang is reliable, and the taraf rings a few dB hotter (a real opened jawari does too; trim with level). 0 = the string is pressed past the knee: the wrap holds, harmonics stay put, no twang. 0.5 = the fitted geometry, byte-null. Applies live. |
+| `bow_jt_tap` | radiation tap | 0.86 … 0.98 | 0.9 | global | in-place | Where along the string the taraf radiates (fraction of its length; the drive tap stays fitted). Radiated harmonic k weighs |sin(k·π·tap)| — 0.90 (legacy) humps at h5 and NULLS h10, which muffles the jawari formant; toward the bridge the hump slides up (0.95 → h10, 0.97 → h16) and the fundamental falls away, voicing the ring as the classic cluster of high harmonics over quiet lows. |
+| `bow_jt_alpha` | contact law | 1 … 2 | 1.5 | global | in-place | Contact stiffness exponent. 1.5 = Hertz (fast sqrt path — the live default); other values cost more CPU. |
+| `bow_jt_norm` | level norm | 0 … 1.5 | 1 | global | in-place | Per-string t60-response normalization — evens the driven level across scale degrees (long-ring rows charge hotter); 0 = raw physics. |
+| `bow_jt_hcb` | contact damping | 1 … 40 | 8 | global | in-place | Hysteretic damping of the string–bone contact. More = softer buzz transients (rounder force pulses, less clang); the legacy hardcoded value is 8. |
+| `bow_jt_fhf` | damping corner (Hz) | 800 … 12000 | 4000 | global | in-place | Corner of the per-mode f² damping law — above it, partials die progressively faster. LOWER = warmer (the top decays in tens of ms while fundamentals sustain). Legacy 4000. |
+| `bow_jt_bst` | inharmonicity | 0 … 0.001 | 0.0002 | global | in-place | Stiffness stretch of the upper partials (steel-wire dispersion). Lower = more harmonic top = less bell-metallic; legacy 2e-4 puts mode 40 ~15% sharp. |
+| `bow_jt_lp` | tone LP (Hz) | 1000 … 20000 | 20000 | global | live | One-pole low-pass on the radiated jawari sum ONLY (the main string is untouched). ≥ 20 kHz = bypass, bit-exact legacy. Applies live. |
+| `bow_jt_hp` | tone HP (Hz) | 0 … 4000 | 0 | global | live | One-pole high-pass on the radiated jawari sum ONLY — the formant voicing: quiets the taraf's fundamental band so the high-harmonic cluster (see radiation tap) carries the ring. ~1–2× the tonic leaves the twang untouched and drops the lows ~6 dB/oct below the corner. 0 = bypass, bit-exact legacy. Applies live. |
+| `bow_jt_body` | body radiation | 0 … 1 | 0 | global | live | Blend of the radiated jawari sum through the SAME formula-body radiation bank the played strings radiate through — the coherence lever: at 0 the taraf radiates raw (beside the instrument), at 1 it rings from the instrument's body with the voice's own formants. Shared coefficients (a body edit re-voices both), own filter state. 0 = bypass, bit-exact legacy. Applies live. |
+| `bow_jt_gov` | charge governor | 0 … 1 | 0 | global | live | Per-string governor on how much of a phrase the taraf remembers (2026-08-15). The long-ring anchor rows (Sa/Pa, 7–9 s) accumulate every note and glide: measured +8…+12 dB of extra ring when high Sa lands after a 4-note phrase vs the same note struck cold, a several-dB strike-to-strike lottery (re-excitation phase against the stored ring), and at high expression the pile-up crosses the contact knee into the loud-buzz regime (buzz share 1% → 16%). This knob sheds bridge drive into any row already ringing above the graze target (its contact-zone envelope, kernel-side), so rows saturate at their single-strike ring instead of piling up. At 1 (calibrated ref 48×apex): a resting-level solo strike is untouched BIT-EXACTLY (the envelope never crosses the target), the moderate sympathetic swell through a phrase survives (~0.2 dB moved), and the hot pile-up is what goes — 14–16 dB shed, buzz share back to ~1.5%. 0 = raw physics (bit-exact off). Held drones are never ducked (their drive adds after the shed). Graze target: `bow_jt_gov_ref` bp scalar (×apex, default 48; ~96 is a trap — it parks the ring AT the buzz-maximal graze band). Applies live. |
+| `bow_jt_damp` | extra damping | 0 … 1 | 0 | global | live | Runtime damping of these modal rows: 0 = the natural long ring, 1 = choked within a second. Applies live — this is what the Taraf Decay composite sweeps. |
+| `bow_jt_sel` | recruitment | 0 … 1 | 0.5 | global | live | Which strings contribute to the taraf — the contribution PROFILE, at held loudness (2026-08-01 rework: the old top half was a pure boost and the knob read as a taraf volume). 0.5 = the fitted natural response: unison rows dominate, octaves a few dB down, fifths faint, unrelated rows only haze. Below: rows lose bridge drive by harmonic distance from the played notes until at 0 only kin rows ring; chords recruit additively (soft-OR, bounded). Above: the profile FLATTENS — resonant rows are cut toward the common haze level until at 1 every string contributes equally and the taraf's response (contributions AND level) no longer depends on what the voice plays. Loudness holds throughout via the radiated jt gain (incoherent power model; below 0.5 anchored to the note's own fitted level, above 0.5 blending to one fixed common level; cap ×`bow_jt_sel_comp` [4]). Held drones and the melody follower count as fully ringing in the model so they are never pumped, and rings already sounding are never ducked. Lattice: `bow_jt_sel_width` (cents, 30) and `bow_jt_sel_kin` (exponent, 0.7 — shared with the drone spread), bp scalars like the tilt range keys. Applies live — the Taraf Purity composite's recruitment member (purity up = kin-only). |
 
 ### Taraf coupling (bridge load)
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `bow_cpl_z` | coupling Z | 0 … 0.1 | 0 | rebuild | TWO-WAY sympathetic coupling: each enabled tarab row becomes a silent comb string on the passive bridge junction, so the played strings feel the taraf as a load — a note at a kin pitch drains into the row and the row returns the energy through the body (the bloom a one-way drive can't make). 0 = off, bit-exact legacy. PER-ROW impedance (follows the row's gain) — the bank multiplies it: total bridge load ≈ rows × value, so what a single row tolerates over-damps a full bank (measured: 0.05 on one row = the bloom optimum, but on the 19-row default bank it drags held notes ~5 dB). The offline fit's 0.0141 was fitted AT full-bank scale — start there; ~0.03 is already a strong load. Needs a rebuild. |
-| `bow_cpl_t60` | ring scale | 0.2 … 2 | 1 | rebuild | Scale on each row's own t60 for its coupling comb (capped 8 s): how long the bridge holds absorbed energy before it has all returned or dissipated. 1 = the row's tabled decay — the physical default (the comb IS the same string the jt row models). |
-| `bow_cpl_damp` | HF damping | 0 … 1 | 0.019 | rebuild | Frequency-dependent loop damping of the coupling combs — upper partials couple and die faster, matching real string damping. Default = the offline fit's web value (0.019). |
-| `bow_cpl_bright` | bandwidth | 0 … 1 | 0.8 | rebuild | Coupling bandwidth: loop low-pass corner 1.4–7.4 kHz. Above the corner the taraf stops exchanging energy with the bridge. Default = the offline fit's web brightness (0.80 ≈ 6.2 kHz). |
-| `bow_cpl_inharm` | inharmonicity | 0 … 0.6 | 0.1 | rebuild | Stiffness dispersion of the coupling combs (steel-string upper partials run sharp), matching the jt rows' bst stretch in spirit. Default = the offline fit's web value (0.1). |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_cpl_z` | coupling Z | 0 … 0.1 | 0 | global | rebuild | TWO-WAY sympathetic coupling: each enabled tarab row becomes a silent comb string on the passive bridge junction, so the played strings feel the taraf as a load — a note at a kin pitch drains into the row and the row returns the energy through the body (the bloom a one-way drive can't make). 0 = off, bit-exact legacy. PER-ROW impedance (follows the row's gain) — the bank multiplies it: total bridge load ≈ rows × value, so what a single row tolerates over-damps a full bank (measured: 0.05 on one row = the bloom optimum, but on the 19-row default bank it drags held notes ~5 dB). The offline fit's 0.0141 was fitted AT full-bank scale — start there; ~0.03 is already a strong load. Needs a rebuild. |
+| `bow_cpl_t60` | ring scale | 0.2 … 2 | 1 | global | rebuild | Scale on each row's own t60 for its coupling comb (capped 8 s): how long the bridge holds absorbed energy before it has all returned or dissipated. 1 = the row's tabled decay — the physical default (the comb IS the same string the jt row models). |
+| `bow_cpl_damp` | HF damping | 0 … 1 | 0.019 | global | rebuild | Frequency-dependent loop damping of the coupling combs — upper partials couple and die faster, matching real string damping. Default = the offline fit's web value (0.019). |
+| `bow_cpl_bright` | bandwidth | 0 … 1 | 0.8 | global | rebuild | Coupling bandwidth: loop low-pass corner 1.4–7.4 kHz. Above the corner the taraf stops exchanging energy with the bridge. Default = the offline fit's web brightness (0.80 ≈ 6.2 kHz). |
+| `bow_cpl_inharm` | inharmonicity | 0 … 0.6 | 0.1 | global | rebuild | Stiffness dispersion of the coupling combs (steel-string upper partials run sharp), matching the jt rows' bst stretch in spirit. Default = the offline fit's web value (0.1). |
 
 ### Articulation
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `bow_place_ms` | place (ms) | 0 … 120 | 35 | rebuild | Bow-set hold before the draw: force on, velocity 0 (static stick). 0 = instant legacy attack. |
-| `bow_draw_ms` | draw (ms) | 5 … 200 | 60 | rebuild | Velocity rise for a GENTLE (legato) attack — the pre-Helmholtz crunch window. |
-| `bow_draw_min_ms` | sharp draw (ms) | 3 … 60 | 8 | rebuild | Velocity rise for a maximally SHARP attack: a hard-press onset draws this fast (accent/martelé). |
-| `bow_attack_bite` | attack bite | 0 … 4 | 2 | rebuild | How hard a sharp onset over-forces: the high force under a fast velocity onset drives the friction loop's own upper-harmonic multi-slip burst. 0 = off (plain place-then-draw). Sharpness = press above the threshold. |
-| `bow_attack_bite_ms` | bite decay (ms) | 10 … 200 | 60 | rebuild | How long the onset over-force lasts before settling into the steady note. |
-| `bow_attack_thresh` | bite threshold | 0 … 1 | 0.5 | rebuild | Press below this = legato (no bite); above it the attack sharpens toward the full bite at press 1. |
-| `bow_vib_cents` | vibrato depth (¢) | 0 … 60 | 25 built · rests at 0× the built value | hybrid | Finger-vibrato peak depth in cents at the vibrato rate. 0 = none (the resting default). Up to the built depth this applies instantly; above it the engine rebuilds. |
-| `bow_vib_hz` | vibrato rate (Hz) | 3 … 9 | 5.5 | rebuild | Vibrato frequency (real players ~5–7 Hz). |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_place_ms` | place (ms) | 0 … 120 | 35 | per-note | in-place | Bow-set hold before the draw: force on, velocity 0 (static stick). 0 = instant legacy attack. |
+| `bow_draw_ms` | draw (ms) | 5 … 200 | 60 | per-note | in-place | Velocity rise for a GENTLE (legato) attack — the pre-Helmholtz crunch window. |
+| `bow_draw_min_ms` | sharp draw (ms) | 3 … 60 | 60 | per-note | in-place | Velocity rise for a maximally SHARP attack: a hard onset draws this fast (accent/martelé). Untouched it follows the gentle draw time (no speedup); the offline fit played accents at ~8 ms. |
+| `bow_attack_bite` | attack bite | 0 … 4 | 0 | per-note | in-place | How hard a sharp onset over-forces: the high force under a fast velocity onset drives the friction loop's own upper-harmonic multi-slip burst — the violin-attack consonant. 0 = off (plain place-then-draw); 1–2 with a low threshold gives martelé accents. Sharpness = press above the threshold, or strike velocity when armed. |
+| `bow_attack_bite_ms` | bite decay (ms) | 10 … 200 | 60 | per-note | in-place | How long the onset over-force lasts before settling into the steady note. |
+| `bow_attack_thresh` | bite threshold | 0 … 1 | 0.5 | per-note | in-place | Press below this = legato (no bite); above it the attack sharpens toward the full bite at press 1. The pads hold press ~0.56, so lowering this sharpens EVERY onset. |
+| `bow_attack_fms` | sharp force ramp (ms) | 2 … 60 | 15 | per-note | in-place | Force rise of a maximally SHARP attack (velocity-leads-force martelé mechanics: the bow moves at once, the force ramps in over this time). Was a fixed constant; registered 2026-08-19. |
+| `bow_attack_vel` | velocity sharpness | 0 … 1 | 0 | per-note | in-place | How much the ONSET STRIKE VELOCITY sharpens the attack: sharpness = max(press law, this × velocity 0…1). Makes articulation per-note — tap hard = martelé bite, place gently = legato draw. Velocity comes from the iPad's accelerometer strike estimate (or MIDI/audition velocity); 0 = off (the historic press-only law). |
+| `bow_vib_cents` | vibrato depth (¢) | 0 … 60 | 25 built · rests at 0× the built value | per-note | hybrid | Finger-vibrato peak depth in cents at the vibrato rate. 0 = none (the resting default). Up to the built depth this applies instantly; above it the engine rebuilds. |
+| `bow_vib_hz` | vibrato rate (Hz) | 3 … 9 | 5.5 | per-note | in-place | Vibrato frequency (real players ~5–7 Hz). |
+
+### Strike blend
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `ctl_strike_window` | blend window (s) | 0.25 … 8 | 2 | per-note | live | How long a note takes to hand the accelerometer measure from its Strike bindings to its Acceleration bindings: at onset the Strike side applies fully, by this many seconds the Acceleration side does — linear in between, per note (a new note never resets a sounding note's window). Also sets the iPad strike scope's white→cyan onset fade. |
 
 ### Liveness
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `bow_settle_db` | onset settle (dB) | 0 … 12 | 7 | rebuild | How far the bow eases down after a fresh attack: the friction loop alone overshoots ~+7 dB over the sustainable level for ~0.5 s; this trims the stroke onto SWAM's ~+2 dB settle. Zero through the place+draw window, so the staccato bite is untouched. 0 = off. |
-| `bow_settle_ms` | settle decay (ms) | 30 … 500 | 130 | rebuild | Exponential time constant of the post-onset ease-down (starts where the draw ends). |
-| `bow_drift_cents` | drift depth (¢) | 0 … 8 | 0.55 | rebuild | Slow random pitch wander of a held note (bounded random walk, NOT vibrato) — the finger/bow life of a sustain. The body slope turns it into decorrelated per-harmonic shimmer; the fitted sarangi body is steep (~3 dB/¢ at D4), so a little goes far. 0 = the old dead-flat sustain. |
-| `bow_drift_hz` | drift bandwidth (Hz) | 0.2 … 6 | 1.2 | rebuild | Bandwidth of all three liveness walks (pitch, level, force). SWAM's sustain motion lives at 0.5–2.5 Hz — well below vibrato rate. |
-| `bow_drift_db` | level drift (dB) | 0 … 3 | 0.15 | rebuild | Direct bow-velocity wander (dB std) on top of what the pitch drift already does to the level. |
-| `bow_drift_force_db` | force drift (dB) | 0 … 4 | 0.3 | rebuild | Bow-force wander (dB std): slow timbre motion — brightness breathes without the level moving much. |
-| `bow_glide_dip_db` | glide dip (dB) | 0 … 12 | 5 | rebuild | Legato bow lightening: the bow eases while the pitch is MOVING (full depth on velocity, 0.3× on force), reproducing SWAM's 3.5–9 dB transition dips. The dip follows the sounding-pitch slew, so drift/vibrato never trigger it. 0 = off. |
-| `bow_glide_dip_rate` | dip half-rate (¢/s) | 100 … 5000 | 900 | rebuild | Pitch slew at which the glide dip reaches half depth. A fret-to-fret legato step sweeps ~1500 ¢/s; slow meend ~200 ¢/s gets a gentle ~1 dB. |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_settle_db` | onset settle (dB) | 0 … 12 | 7 | per-note | in-place | How far the bow eases down after a fresh attack: the friction loop alone overshoots ~+7 dB over the sustainable level for ~0.5 s; this trims the stroke onto SWAM's ~+2 dB settle. Zero through the place+draw window, so the staccato bite is untouched. 0 = off. |
+| `bow_settle_ms` | settle decay (ms) | 30 … 500 | 130 | per-note | in-place | Exponential time constant of the post-onset ease-down (starts where the draw ends). |
+| `bow_settle_sharp` | sharp settle exemption | 0 … 1 | 0 | per-note | in-place | How much a SHARP attack is exempted from the settle: depth × (1 − this × sharpness). At 1 a full-sharp (martelé) staccato keeps its level while gentle sustains keep the fitted settle balance. 0 = off (every attack settles equally). |
+| `bow_drift_cents` | drift depth (¢) | 0 … 8 | 0.55 | per-note | in-place | Slow random pitch wander of a held note (bounded random walk, NOT vibrato) — the finger/bow life of a sustain. The body slope turns it into decorrelated per-harmonic shimmer; the fitted sarangi body is steep (~3 dB/¢ at D4), so a little goes far. 0 = the old dead-flat sustain. |
+| `bow_drift_hz` | drift bandwidth (Hz) | 0.2 … 6 | 1.2 | per-note | in-place | Bandwidth of all three liveness walks (pitch, level, force). SWAM's sustain motion lives at 0.5–2.5 Hz — well below vibrato rate. |
+| `bow_drift_db` | level drift (dB) | 0 … 3 | 0.15 | per-note | in-place | Direct bow-velocity wander (dB std) on top of what the pitch drift already does to the level. |
+| `bow_drift_force_db` | force drift (dB) | 0 … 4 | 0.3 | per-note | in-place | Bow-force wander (dB std): slow timbre motion — brightness breathes without the level moving much. |
+| `bow_glide_dip_db` | glide dip (dB) | 0 … 12 | 5 | per-note | in-place | Legato bow lightening: the bow eases while the pitch is MOVING (full depth on velocity, 0.3× on force), reproducing SWAM's 3.5–9 dB transition dips. The dip follows the sounding-pitch slew, so drift/vibrato never trigger it. 0 = off. |
+| `bow_glide_dip_rate` | dip half-rate (¢/s) | 100 … 5000 | 900 | per-note | in-place | Pitch slew at which the glide dip reaches half depth. A fret-to-fret legato step sweeps ~1500 ¢/s; slow meend ~200 ¢/s gets a gentle ~1 dB. |
+
+### Fret linger
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_linger_decay` | expression decay (s) | 0 … 60 | 8 | per-note | in-place | Time constant of the expression ease-down while the finger rests on a fret without moving. The note fades toward the linger floor; a vertical stroke along the fret brings it back. 0 = no decay (lingering holds full expression). |
+| `bow_linger_floor` | linger floor | 0 … 1 | 0 | per-note | in-place | Where the lingering note's expression settles, as a fraction of the played expression. 0 = all the way down (with an expression-lift zone the bow eventually lifts to silence); 1 = no audible decay. |
+| `bow_linger_recharge` | recharge time (s) | 0.05 … 2 | 0.35 | per-note | in-place | How fast a vertical finger stroke restores things: expression back to the base value, the auto-vibrato back to none. Small = a single stroke snaps the note awake; large = it swells back gradually. |
+| `bow_linger_speed` | full-drive speed (band/s) | 0.05 … 2 | 0.35 | per-note | in-place | Vertical finger speed (in fret-band heights per second, smoothed ~100 ms) at which the recharge reaches full strength. Slower movement recharges proportionally less. |
+| `bow_avib_cents` | auto-vib depth (¢) | 0 … 60 | 30 | per-note | in-place | Peak depth of the y-position auto-vibrato at the OUTER end of the note's home fret (the end away from the pad's centre-line — the fret's wavy tail). Notes are born vibrato-free and grow toward the y-set ceiling over the growth time; the fret's inner portion (the dead zone) gives none, and a note that didn't snap to a fret has no ceiling at all. 0 = the feature off. Independent of the aftertouch vibrato (bow_vib_cents). |
+| `bow_avib_hz` | auto-vib rate (Hz) | 3 … 9 | 5.2 | per-note | in-place | Rate of the auto-vibrato (real players ~5–7 Hz). |
+| `bow_avib_grow` | auto-vib growth (s) | 0.3 … 10 | 2.5 | per-note | in-place | Time constant of the vibrato's rise while the finger rests: the note starts plain and the vibrato blooms toward the y-set ceiling. |
+| `bow_avib_dead` | inner dead zone | 0 … 0.95 | 0.7 | per-note | in-place | Fraction of the fret's length, from its INNER end (toward the pad's centre-line), that stays vibrato-free — the landing zone for plain notes. Depth then ramps to full at the fret's outer end (its wavy tail). The surfaces mark the default 0.7 split on the frets; the marking does not follow edits to this value. |
 
 ### Radiation & output
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `bow_rad_hp` | radiation HP (Hz) | 50 … 600 | 200 | rebuild | A finite radiator can't radiate below its size — butter-2 high-pass corner. |
-| `bow_rad_lp` | radiation LP (Hz) | 500 … 16000 | 8000 | rebuild | Air/skin HF absorption — one-pole corner. |
-| `bow_w` | excitation level | 0.2 … 2.5 | 1.196 | rebuild | Bridge-force weight (pre-radiation drive). |
-| `bow_live_trim` | output trim | 0.01 … 0.5 | 0.175 | rebuild | Final level (matched to the Sarangi Live instrument). |
-| `bow_lim_thresh` | limiter ceiling | 0.1 … 1 | 0.8 | rebuild | Output safety limiter (2026-08-01): linked-stereo peak ceiling at the very end of the chain (after global FX). Below it, samples pass bit-exact; above, instant-attack gain riding with the release below. Exists for the coherent kin peaks (hard-struck Sa/Pa: voice + jt ring + coupling return add in phase) and the ±16 dB expression axis. For evening the CAUSE, see bow_jt_norm — long-ring anchor rows charge hotter. |
-| `bow_lim_rel_ms` | limiter release (ms) | 20 … 500 | 150 | rebuild | Release time of the output safety limiter's gain recovery. Shorter pumps on sustained hot material; longer ducks the wash noticeably after a peak. |
-| `bow_rev_mix` | room mix | 0 … 0.3 | 0.08 | rebuild | Room level. The wet pair is width-decorrelated (see room width); the L+R fold-down stays pan-invariant. 0 = bone dry. |
-| `bow_rev_rt60` | room decay (s) | 0.2 … 2 | 1 | rebuild | Room reverberation time. |
-| `bow_rev_width` | room width | 0 … 1 | 0.8 | rebuild | L/R decorrelation of the room tail — a real room's reverberant field differs at the two ears. Cancels in the mono fold-down. 0 = the old mono room. |
-| `bow_st_width` | instrument width | 0 … 1 | 0.2 | rebuild | THE width law (2026-08-01 unification): the whole instrument — played voice, taraf wash, drones, bow noise — heard from TWO observation points. A dense diffuse-field difference bank above the Schroeder crossover, so lows stay identical in L and R (one centred instrument) while the upper spectrum decorrelates the way a real instrument's does between two ears. Measured at the 0.2 default: melody interaural coherence ~0.9 at 4-8 kHz, the bare wash ~0.3-0.4, balance within ±0.8 dB. Not a pan: zero net lean by construction; cancels in the mono fold-down. Replaces the retired per-source pans (bow_st_spread / bow_st_played, disarmed legacy staging). 0 = point radiator (mono-in-place). |
-| `bow_st_spread` | taraf pan spread (legacy) | 0 … 1 | 0 | rebuild | LEGACY svara staging, disarmed by default since the 2026-08-01 width unification (which replaced per-source placement with the one instrument-width law): each jawari row panned to its own fixed place around the tonic (spread·sin(2π·pc)). Kept for A/B against bow_st_width; pending removal. Mono fold-down invariant. |
-| `bow_st_played` | bow-noise pan spread (legacy) | 0 … 0.5 | 0 | rebuild | LEGACY per-voice bow-noise placement (the played string's position on the bridge), disarmed by default since the 2026-08-01 width unification. Kept for A/B; pending removal. Mono fold-down invariant. |
-| `bow_tone_tilt` | tone tilt (bass–treble) | -1 … 1 | 0 | live | Overall spectral tilt: −1 = bass-biased, 0 = flat, +1 = treble-biased. A complementary shelf pair on the whole voice before the room. Applies live — the Tone Tilt composite sweeps this. |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_rad_hp` | radiation HP (Hz) | 50 … 600 | 200 | global | in-place | A finite radiator can't radiate below its size — butter-2 high-pass corner. |
+| `bow_rad_lp` | radiation LP (Hz) | 500 … 16000 | 8000 | global | in-place | Air/skin HF absorption — one-pole corner. |
+| `bow_w` | excitation level | 0.2 … 2.5 | 1.196 | global | in-place | Bridge-force weight (pre-radiation drive). |
+| `bow_gain` | master gain | 0 … 2 | 1 | global | live | Performance volume of the WHOLE radiated instrument — played voice, taraf ring and room together — on top of the fitted calibration trim. Expression drives the bow (the played string only), so the ringing taraf keeps the total level up; this is the knob that actually moves it. 1 = the calibrated level. INSTANT (a dedicated 25 ms-ramped engine setter — no rebuild, no debounce), so bind it to a tilt or the Strike/Acceleration pair for real-time volume control. The safety limiter still guards the ceiling. |
+| `bow_live_trim` | output trim | 0.01 … 0.5 | 0.175 | global | in-place | Final level (matched to the Sarangi Live instrument) — the CALIBRATION half; use master gain above for performance volume. |
+| `bow_lim_thresh` | limiter ceiling | 0.1 … 1 | 0.8 | global | in-place | Output safety limiter (2026-08-01): linked-stereo peak ceiling at the very end of the chain (after global FX). Below it, samples pass bit-exact; above, instant-attack gain riding with the release below. Exists for the coherent kin peaks (hard-struck Sa/Pa: voice + jt ring + coupling return add in phase) and the ±16 dB expression axis. For evening the CAUSE, see bow_jt_norm — long-ring anchor rows charge hotter. |
+| `bow_lim_rel_ms` | limiter release (ms) | 20 … 500 | 150 | global | in-place | Release time of the output safety limiter's gain recovery. Shorter pumps on sustained hot material; longer ducks the wash noticeably after a peak. |
+| `bow_rev_mix` | room mix | 0 … 0.3 | 0.08 | global | in-place | Room level. The wet pair is width-decorrelated (see room width); the L+R fold-down stays pan-invariant. 0 = bone dry. |
+| `bow_rev_rt60` | room decay (s) | 0.2 … 2 | 1 | global | rebuild | Room reverberation time. |
+| `bow_rev_width` | room width | 0 … 1 | 0.8 | global | in-place | L/R decorrelation of the room tail — a real room's reverberant field differs at the two ears. Cancels in the mono fold-down. 0 = the old mono room. |
+| `bow_st_width` | instrument width | 0 … 1 | 0.2 | global | rebuild | THE width law (2026-08-01 unification): the whole instrument — played voice, taraf wash, drones, bow noise — heard from TWO observation points. A dense diffuse-field difference bank above the Schroeder crossover, so lows stay identical in L and R (one centred instrument) while the upper spectrum decorrelates the way a real instrument's does between two ears. Measured at the 0.2 default: melody interaural coherence ~0.9 at 4-8 kHz, the bare wash ~0.3-0.4, balance within ±0.8 dB. Not a pan: zero net lean by construction; cancels in the mono fold-down. Replaces the retired per-source pans (bow_st_spread / bow_st_played, disarmed legacy staging). 0 = point radiator (mono-in-place). |
+| `bow_st_spread` | taraf pan spread (legacy) | 0 … 1 | 0 | global | rebuild | LEGACY svara staging, disarmed by default since the 2026-08-01 width unification (which replaced per-source placement with the one instrument-width law): each jawari row panned to its own fixed place around the tonic (spread·sin(2π·pc)). Kept for A/B against bow_st_width; pending removal. Mono fold-down invariant. |
+| `bow_st_played` | bow-noise pan spread (legacy) | 0 … 0.5 | 0 | global | rebuild | LEGACY per-voice bow-noise placement (the played string's position on the bridge), disarmed by default since the 2026-08-01 width unification. Kept for A/B; pending removal. Mono fold-down invariant. |
+| `bow_tone_tilt` | tone tilt (bass–treble) | -1 … 1 | 0 | global | live | Overall spectral tilt: −1 = bass-biased, 0 = flat, +1 = treble-biased. A complementary shelf pair on the whole voice before the room. Applies live — the Tone Tilt composite sweeps this. |
 
 ### Tanpura
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `tp_gain` | output gain | 0 … 0.1 | 0.02 | live | The tanpura voice's output trim, applied after its fitted body EQ and before its calibration room. The 0.02 default IS the artifact's fitted trim (tanpura_live.json `gain`) — keep the two in step when the artifact regenerates. |
-| `tp_drone_level` | drone pluck level | 0 … 2 | 1 | live | Scales the drone buttons' tanpura pluck displacement (1 = the role's fitted pluck at velocity 100). Only the tanpura drone mode reads it; the legacy sympathetic drones keep their own bow_drone_* calibration. |
-| `tp_drone_cycle` | drone re-pluck period (s) | 0 … 8 | 2.5 | live | While a drone button stays held, the tanpura re-plucks its string every this many seconds — the strumming hand. Below 0.1 s the cycle is off (a press is then a single pluck; the string still rings for its full t60 either way). Applies live, mid-hold. |
-| `tp_pluck_level` | played pluck level | 0 … 2 | 1 | live | Scales the fret-note tanpura plucks when the tanpura is the MAIN instrument (velocity still shapes each pluck on top). Inert while the String voice is the played instrument. |
-| `tp_rel_t60` | note-off release t60 (s) | 0.05 … 3 | 0.4 | live | Main-instrument note-off decay (2026-08-05): a HELD fret note rings at the string's natural rate, a released one decays to −60 dB in this many seconds — a finger stop, not a hard damp (the jawari buzz cuts at note-off, the pitch rings down). Drone-button strings never read it (release = ring out, their nature). |
-| `tp_shape_align` | scale-shape: overtone retune | 0 … 1 | 0 | live | SCALE-SHAPED OVERTONES (2026-08-05) — the altered tanpura: retunes each partial (modes 3+; 1–2 pin the pitch) toward the nearest scale pitch class, by this fraction of the distance. Full pull inside an 80 ¢ capture window, tapering to nothing by 160 ¢ — so harmonic 5 lands on komal ga (~71 ¢) and harmonic 7 on n, while partials in a pentatonic gap stay harmonic. 0 = the physical string. Applies through a DEBOUNCED full tanpura rebuild (~seconds, 750 ms after the drag settles) — not instant. |
-| `tp_shape_focus` | scale-shape: sustain focus | 0 … 1 | 0 | live | Tilts sustain toward scale-aligned partials: each mode's t60 is scaled by its post-retune proximity to the scale (a 30 ¢ gaussian kernel — aligned = full ring, a 71 ¢-off partial at focus 1 keeps ~6% of its t60, floored at 5% — thinned, never killed). Because the jawari keeps re-pumping every mode, the cascade EVOLVES toward the scale over the note's life rather than being statically EQ'd. Debounced rebuild like tp_shape_align. |
-| `tp_shape_quiet` | scale-shape: misaligned quiet | 0 … 1 | 0 | live | Turns down the RADIATED level of partials that don't align with the scale (post-retune, same 30 ¢ proximity kernel as tp_shape_focus): each mode's output projection is scaled toward silence — at 1 an off-scale partial is inaudible. Unlike tp_shape_focus this changes NO dynamics: the mode still rings at full energy and keeps trading energy through the jawari contact, it is simply heard less — a per-partial fader, where focus is a per-partial damper. Debounced rebuild like tp_shape_align. |
-| `tp_shape_spread` | scale-shape: retune spread | 0 … 1 | 0 | live | Decorrelates the retune per string: a deterministic per-string/per-mode jitter scales the pull fraction (0 = every string corrected identically — shared partials lock to exact 0-beat, which can go organ-static; 1 = pulls vary 0–100%, restoring slow shimmer between strings). Inert unless tp_shape_align > 0. Debounced rebuild like tp_shape_align. |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `tp_gain` | output gain | 0 … 0.1 | 0.02 | global | live | The tanpura voice's output trim, applied after its fitted body EQ and before its calibration room. The 0.02 default IS the artifact's fitted trim (tanpura_live.json `gain`) — keep the two in step when the artifact regenerates. |
+| `tp_drone_level` | drone pluck level | 0 … 2 | 1 | global | live | Scales the drone buttons' tanpura pluck displacement (1 = the role's fitted pluck at velocity 100). Only the tanpura drone mode reads it; the legacy sympathetic drones keep their own bow_drone_* calibration. |
+| `tp_drone_cycle` | drone re-pluck period (s) | 0 … 8 | 2.5 | global | live | While a drone button stays held, the tanpura re-plucks its string every this many seconds — the strumming hand. Below 0.1 s the cycle is off (a press is then a single pluck; the string still rings for its full t60 either way). Applies live, mid-hold. |
+| `tp_pluck_level` | played pluck level | 0 … 2 | 1 | global | live | Scales the fret-note tanpura plucks when the tanpura is the MAIN instrument (velocity still shapes each pluck on top). Inert while the String voice is the played instrument. |
+| `tp_rel_t60` | note-off release t60 (s) | 0.05 … 3 | 0.4 | per-note | live | Main-instrument note-off decay (2026-08-05): a HELD fret note rings at the string's natural rate, a released one decays to −60 dB in this many seconds — a finger stop, not a hard damp (the jawari buzz cuts at note-off, the pitch rings down). Drone-button strings never read it (release = ring out, their nature). |
+| `tp_pluck_touch` | pluck isolation | 0 … 1 | 0 | global | live | How isolated each pluck is from the string's ringing past. At 0 (the physical default) a pluck lands ON TOP of whatever is still ringing — pluck-to-pluck phase alignment then decides the level and buzz (measured: +7 dB energy build-up under dense re-plucking, 5× buzz-energy swings), the tanpura's untamed side. Above 0, every pluck is a SEPARATE STRING: the ringing string moves to the history bank (full jawari simulation at its own pitch, its ring scaled by this value — 1 = it rings on in full) and the new pluck starts from settled state, so attacks are always consistent. tp_poly sets how many history strings stay alive; note that same-pitch strings still sum in the air — their slowly drifting phases beat like a jodi pair, which is the physics of two real strings, not a defect. A note-off-released string never resurrects. Applies to drone AND main-instrument plucks, live, at the next pluck. |
+| `tp_poly` | history string bank | 0 … 16 | 6 | global | live | The size of the tanpura's history bank: how many previous plucks keep ringing as REAL strings (full jawari simulation each — their cascades keep developing) before the oldest is retired to a cheap linear ring-out (natural decay, no further jawari re-pumping) and, below audibility, culled. Each live history string costs about one string's worth of CPU; raise it for dense strumming on a strong machine, lower it if the overload watchdog complains. 0 = no history strings at all: the previous ring goes straight to the linear ring-out with its low partials restarted by the new pluck (the most consistent-volume, least-CPU mode). Only read when pluck isolation (tp_pluck_touch) is above 0. Applies live. |
+| `tp_pluck_drive` | pluck contact drive | 0.25 … 4 | 1 | global | live | The mellow↔buzzy axis at constant loudness: how hard the pluck drives the string into the jawari bone, decoupled from the note's level (the pluck displacement scales by this and the string's output trim by its inverse, together, at the pluck). The jawari contact is a power law, so engagement depth IS the buzz conversion — below 1 the same note rings cleaner and darker, above 1 it buzzes brighter and the cascade develops faster. 1 = the calibrated instrument (bit-exact). Applies live, at the next pluck (drone and main-instrument). |
+| `tp_taraf` | sympathetic taraf drive | 0 … 8 | 4 | global | live | How strongly the tanpura's output drives the sarangi taraf (the modal-jawari web — the Strings tab's rows), as though the tanpura were strung into the bowed instrument: drone-button plucks (and main-instrument tanpura notes) charge the web sympathetically and it rings back through the String voice's body. Same inject ring as the sitar's st_taraf, at its own level (kernel drive, shaped by the voice→taraf FX insert like any drive). 0 = no coupling (byte-exact String-voice parity). The web only rings while the String voice is armed — it always is. |
+| `tp_jiva_comp` | register jawari calibration | 0 … 1 | 1 | global | live | Per-pitch jiva (jawari thread) calibration. The fitted thread geometry gives the LOW register its sustained graze — the slow, laddered harmonic cascade; higher strings extrapolate that geometry, fall off the bone, and ring clean/dark (measured: buzz energy drops from ~15% at low Sa to <1% an octave up, and no pluck level restores the regime — quiet stays dead, loud slams the whole cascade in ~0.2 s). This retargets each string's thread height the way a player adjusts the cotton thread per string: at 1 every pitch keeps low Sa's buzziness and laddered cascade (bench-measured targets, pitch cost under a cent); at 0 the fitted geometry is untouched. Edits schedule a debounced full tanpura rebuild (seconds of CPU), like the scale-shape trio. |
+| `tp_cascade` | register cascade slowing | 0 … 1 | 1 | global | live | Slows the higher strings' harmonic cascade toward low Sa's unhurried pace. Even register-calibrated, higher pitches develop their overtone ladder faster in real time (the jawari converts on every graze pass, and passes come at the string's frequency — measured: mid harmonics arriving in 0.2 s at an octave up vs 2 s at low Sa). This raises each higher string's jiva thread a touch further toward the fitted height (a gentler graze — the instant harmonic jump becomes a ~1 s bloom) and lets its upper partials ring longer to keep the buzz level (both graded by pitch, zero at and below the 104 Hz anchor). At 1 the octave-up ladder matches low Sa's character; at 0 only the base calibration applies. Edits schedule the debounced full tanpura rebuild, like tp_jiva_comp. |
+| `tp_shape_align` | scale-shape: overtone retune | 0 … 1 | 0 | global | live | SCALE-SHAPED OVERTONES (2026-08-05) — the altered tanpura: retunes each partial (modes 3+; 1–2 pin the pitch) toward the nearest scale pitch class, by this fraction of the distance. Full pull inside an 80 ¢ capture window, tapering to nothing by 160 ¢ — so harmonic 5 lands on komal ga (~71 ¢) and harmonic 7 on n, while partials in a pentatonic gap stay harmonic. 0 = the physical string. Applies through a DEBOUNCED full tanpura rebuild (~seconds, 750 ms after the drag settles) — not instant. |
+| `tp_shape_focus` | scale-shape: sustain focus | 0 … 1 | 0 | global | live | Tilts sustain toward scale-aligned partials: each mode's t60 is scaled by its post-retune proximity to the scale (a 30 ¢ gaussian kernel — aligned = full ring, a 71 ¢-off partial at focus 1 keeps ~6% of its t60, floored at 5% — thinned, never killed). Because the jawari keeps re-pumping every mode, the cascade EVOLVES toward the scale over the note's life rather than being statically EQ'd. Debounced rebuild like tp_shape_align. |
+| `tp_shape_quiet` | scale-shape: misaligned quiet | 0 … 1 | 0 | global | live | Turns down the RADIATED level of partials that don't align with the scale (post-retune, same 30 ¢ proximity kernel as tp_shape_focus): each mode's output projection is scaled toward silence — at 1 an off-scale partial is inaudible. Unlike tp_shape_focus this changes NO dynamics: the mode still rings at full energy and keeps trading energy through the jawari contact, it is simply heard less — a per-partial fader, where focus is a per-partial damper. Debounced rebuild like tp_shape_align. |
+| `tp_shape_spread` | scale-shape: retune spread | 0 … 1 | 0 | global | live | Decorrelates the retune per string: a deterministic per-string/per-mode jitter scales the pull fraction (0 = every string corrected identically — shared partials lock to exact 0-beat, which can go organ-static; 1 = pulls vary 0–100%, restoring slow shimmer between strings). Inert unless tp_shape_align > 0. Debounced rebuild like tp_shape_align. |
+
+### Sitar
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `st_gain` | output gain | 0 … 0.1 | 0.015186 | global | live | The sitar voice's output trim, applied before its calibration room (the body weighting is baked per mode — the scale-model radiation law). The 0.015186 default IS the artifact's fitted trim (sitar_live.json `gain`, calibrated so a velocity-100 sitar pluck peaks like a tanpura drone pluck) — keep the two in step when the artifact regenerates. |
+| `st_pluck_level` | played pluck level | 0 … 2 | 1 | global | live | Scales the fret-note sitar plucks when the sitar is the MAIN instrument (velocity still shapes each pluck on top). Inert otherwise. |
+| `st_rel_t60` | note-off release t60 (s) | 0.05 … 3 | 0.15 | per-note | live | Note-off decay: a HELD fret note rings at the string's natural rate, a released one decays to −60 dB in this many seconds — a finger lift off the fret. Shorter than the tanpura's default: sitar lines articulate. |
+| `st_pluck_touch` | pluck isolation | 0 … 1 | 1 | global | live | Same axis as tp_pluck_touch (0 = each pluck rides the ringing past; above 0 the old ring moves to a history string and the new pluck starts settled). Defaults to 1 for the sitar: fret runs re-pluck at NEW pitches, and isolation keeps the previous note's tail at its own pitch instead of retuning history with the glide. |
+| `st_poly` | history string bank | 0 … 16 | 4 | global | live | How many previous sitar plucks keep ringing as REAL strings (full jawari simulation each) before the oldest retires to the cheap linear ring-out. Same machinery as tp_poly; only read when st_pluck_touch is above 0. |
+| `st_pluck_drive` | pluck contact drive | 0.25 … 4 | 1 | global | live | The mellow↔buzzy axis at constant loudness — how hard the pluck drives the string into the jawari bridge, decoupled from level (same mechanism as tp_pluck_drive). 1 = the fitted sitar (bit-exact). Applies at the next pluck. |
+| `st_taraf` | sympathetic taraf drive | 0 … 8 | 4 | global | live | How strongly the sitar's output drives the sarangi taraf (the modal-jawari web — the Strings tab's rows ARE the sitar's sympathetic strings). The rendered sitar signal feeds the web's bridge drive alongside the String voice's own (kernel inject ring, shaped by the voice→taraf FX insert like any drive). 0 = no halo (byte-exact String-voice parity). The web only rings while the String voice is armed — it always is. |
 
 ### FX — voice → taraf
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `fx_drive_eq_on` | EQ on | 0 … 1 | 0 | live | Enable the 10-band graphic EQ at this point — the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched. Toggling glides the bands to/from flat (click-free). |
-| `fx_drive_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_rev_on` | reverb on | 0 … 1 | 0 | live | Enable the reverb at this point — the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched. Toggling glides the wet level (click-free). |
-| `fx_drive_rev_type` | reverb type | 0 … 1 | 0 | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
-| `fx_drive_rev_mix` | reverb mix | 0 … 1 | 0.3 | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
-| `fx_drive_rev_size` | reverb size | 0 … 1 | 0.93 | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
-| `fx_drive_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `fx_drive_eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the 10-band graphic EQ at this point — the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched. Toggling glides the bands to/from flat (click-free). |
+| `fx_drive_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_drive_rev_on` | reverb on | 0 … 1 | 0 | global | live | Enable the reverb at this point — the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched. Toggling glides the wet level (click-free). |
+| `fx_drive_rev_type` | reverb type | 0 … 1 | 0 | global | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
+| `fx_drive_rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
+| `fx_drive_rev_size` | reverb size | 0 … 1 | 0.93 | global | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
+| `fx_drive_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | global | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
 
 ### FX — voice
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `fx_voice_eq_on` | EQ on | 0 … 1 | 0 | live | Enable the 10-band graphic EQ at this point — the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain. Toggling glides the bands to/from flat (click-free). |
-| `fx_voice_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_rev_on` | reverb on | 0 … 1 | 0 | live | Enable the reverb at this point — the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain. Toggling glides the wet level (click-free). |
-| `fx_voice_rev_type` | reverb type | 0 … 1 | 0 | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
-| `fx_voice_rev_mix` | reverb mix | 0 … 1 | 0.3 | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
-| `fx_voice_rev_size` | reverb size | 0 … 1 | 0.93 | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
-| `fx_voice_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `fx_voice_eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the 10-band graphic EQ at this point — the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain. Toggling glides the bands to/from flat (click-free). |
+| `fx_voice_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_voice_rev_on` | reverb on | 0 … 1 | 0 | global | live | Enable the reverb at this point — the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain. Toggling glides the wet level (click-free). |
+| `fx_voice_rev_type` | reverb type | 0 … 1 | 0 | global | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
+| `fx_voice_rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
+| `fx_voice_rev_size` | reverb size | 0 … 1 | 0.93 | global | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
+| `fx_voice_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | global | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
 
 ### FX — taraf
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `fx_taraf_eq_on` | EQ on | 0 … 1 | 0 | live | Enable the 10-band graphic EQ at this point — the sympathetic web's own radiated output (drones included), before the shared radiation chain. Toggling glides the bands to/from flat (click-free). |
-| `fx_taraf_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_rev_on` | reverb on | 0 … 1 | 0 | live | Enable the reverb at this point — the sympathetic web's own radiated output (drones included), before the shared radiation chain. Toggling glides the wet level (click-free). |
-| `fx_taraf_rev_type` | reverb type | 0 … 1 | 0 | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
-| `fx_taraf_rev_mix` | reverb mix | 0 … 1 | 0.3 | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
-| `fx_taraf_rev_size` | reverb size | 0 … 1 | 0.93 | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
-| `fx_taraf_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `fx_taraf_eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the 10-band graphic EQ at this point — the sympathetic web's own radiated output (drones included), before the shared radiation chain. Toggling glides the bands to/from flat (click-free). |
+| `fx_taraf_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_taraf_rev_on` | reverb on | 0 … 1 | 0 | global | live | Enable the reverb at this point — the sympathetic web's own radiated output (drones included), before the shared radiation chain. Toggling glides the wet level (click-free). |
+| `fx_taraf_rev_type` | reverb type | 0 … 1 | 0 | global | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
+| `fx_taraf_rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
+| `fx_taraf_rev_size` | reverb size | 0 … 1 | 0.93 | global | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
+| `fx_taraf_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | global | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
 
 ### FX — global
 
-| Key | Name | Range | Default | Apply | Description |
-|---|---|---|---|---|---|
-| `fx_global_eq_on` | EQ on | 0 … 1 | 0 | live | Enable the 10-band graphic EQ at this point — the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level). Toggling glides the bands to/from flat (click-free). |
-| `fx_global_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_rev_on` | reverb on | 0 … 1 | 0 | live | Enable the reverb at this point — the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level). Toggling glides the wet level (click-free). |
-| `fx_global_rev_type` | reverb type | 0 … 1 | 0 | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
-| `fx_global_rev_mix` | reverb mix | 0 … 1 | 0.3 | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
-| `fx_global_rev_size` | reverb size | 0 … 1 | 0.93 | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
-| `fx_global_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `fx_global_eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the 10-band graphic EQ at this point — the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level). Toggling glides the bands to/from flat (click-free). |
+| `fx_global_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `fx_global_rev_on` | reverb on | 0 … 1 | 0 | global | live | Enable the reverb at this point — the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level). Toggling glides the wet level (click-free). |
+| `fx_global_rev_type` | reverb type | 0 … 1 | 0 | global | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
+| `fx_global_rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
+| `fx_global_rev_size` | reverb size | 0 … 1 | 0.93 | global | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
+| `fx_global_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | global | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
 

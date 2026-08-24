@@ -27,7 +27,17 @@ public enum Config {
     /// floor. 128 frames ≈ 2.7 ms; the inline sarangi model needs <1 ms of a
     /// buffer, so this leaves comfortable headroom below the 512-frame default.
     /// Applied at engine start; clamped to the device's allowed range.
+    /// Used on SOLID transports only (built-in, USB, Thunderbolt, …) — see
+    /// `jitterProneOutputBufferFrames`.
     public static let preferredOutputBufferFrames: UInt32 = 128
+    /// Output IO buffer for JITTER-PRONE transports — monitor audio over the
+    /// video link (DisplayPort/HDMI: packetized, clock recovered monitor-side),
+    /// Bluetooth, AirPlay. Those cannot sustain the ~3 ms callback cadence of
+    /// the low buffer: measured 2026-08-17 on an AORUS FO32U2P over DisplayPort,
+    /// every voice crackled at 128 frames while the same render was clean on
+    /// the headphone DAC. 512 frames ≈ 11.6 ms — fine for monitor speakers,
+    /// which are not a performance monitor.
+    public static let jitterProneOutputBufferFrames: UInt32 = 512
     public static let frequencySmoothing: Double = 0.002  // per-sample coefficient (~11ms smoothing)
     public static let attackCoefficient: Double = 0.05    // envelope attack (~2ms)
     public static let releaseCoefficient: Double = 0.9993 // envelope release (~50ms)
@@ -42,6 +52,13 @@ public enum Config {
     // MARK: - Velocity mapping
     public static let velocityMinG: Double = 0.01  // softest tap acceleration
     public static let velocityMaxG: Double = 0.5   // hardest tap acceleration
+    /// TRAILING accel window a fret-pad onset scans for its strike spike
+    /// (`MotionSource.strikeVelocity01` — 2026-08-19). Backward-looking:
+    /// UIKit touch delivery lags the physical impact ~10–25 ms, so the
+    /// spike is usually already buffered and the onset never waits (the
+    /// deleted 2026-07-24 capture delayed note-on `velocityDelay` instead).
+    /// Must stay under `accelBufferDuration`.
+    public static let velocityLookback: TimeInterval = 0.05
 
 
     // MARK: - Sliders

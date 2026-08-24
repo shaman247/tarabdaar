@@ -106,6 +106,37 @@ void bow_poly_jt_track_target(void *vst, double hz);
 void bow_poly_jt_set_lp(void *vst, double a);
 void bow_poly_jt_set_damp_t60(void *vst, double t60);
 
+/* jt CHARGE GOVERNOR (Tarabdaar 2026-08-15, `bow_jt_gov`): per-row AGC
+   on the bridge drive into the jt strings — a row whose ring already
+   exceeds the graze target sheds incoming drive by ref/env, so the
+   long-t60 anchor rows saturate at their single-strike ring instead of
+   accumulating a whole phrase (the loud-buzz pile-up on kin notes).
+   amt 0..1 = strength (0 = byte-null); refDisp = target contact-zone
+   ring displacement in meters (apex scale), converted per row to a
+   velocity bound refDisp·wd1 on a ~60 ms peak envelope of the zone
+   velocity. Held-drone drive is added after the shed and never ducked.
+   Drone-setter contract (plain scalar writes; the jt tick reads). */
+void bow_poly_jt_set_gov(void *vst, double amt, double refDisp);
+
+/* jt QUIESCENCE GATE (Tarabdaar 2026-08-17, `bow_jt_gate`): the idle-CPU
+   gate — a row whose peak LOW-MODE momentum stays below refDisp·wd1
+   for ~30 ms with no bridge drive above its wake bound and no drone
+   drive freezes IN PLACE (static wrap kept — no re-settle strum on
+   wake) and skips its whole modal tick, radiating exact 0; drive
+   wakes it. Low modes are the meter: the wrap's high-mode tick-rate
+   micro limit-cycle never rests, so zone velocity / raw radiated
+   level cannot gate. refDisp = floor ring displacement in meters
+   (apex scale, the jtGovRef convention); <= 0 disarms and wakes every
+   row (byte-null). Drone-setter contract. _gate_asleep = rows
+   currently sleeping (telemetry/tests; any thread). */
+void bow_poly_jt_set_gate(void *vst, double refDisp);
+int bow_poly_jt_gate_asleep(void *vst);
+/* gate probe telemetry: out = {asleep rows, total rows, max ring/floor
+   ratio, max drive/eps ratio, drone-hot 0/1} since the last read
+   (ratios reset on read; >1 names the condition blocking sleep). Any
+   thread. */
+void bow_poly_jt_gate_probe(void *vst, double out[5]);
+
 /* jt tone HP (Tarabdaar 2026-07-26): one-pole high-pass on the radiated jt
    sum, applied AFTER the tone LP inside the same output walk — the
    jawari-formant voicing (quiets the taraf's fundamental band under the
@@ -252,6 +283,24 @@ void bow_poly_process2(void *vst, int n, int stride, const double *f0, const dou
    fused path's rounding BIT-EXACTLY; outJt NULL is verbatim legacy
    (bow_poly_process2 wraps it). */
 void bow_poly_set_drive_fx(void *vst, void (*fn)(void *ctx, double *buf, int n), void *ctx);
+
+/* TARABDAAR SITAR→TARAF INJECT (2026-08-19). A second voice's rendered
+   output drives the modal-jawari web sympathetically — the sitar main
+   instrument's taraf halo. SPSC ring, mono, kernel rate:
+
+   bow_poly_jt_inject_write — call from the OTHER voice's render callback
+   with its block (mono mixdown). Drops the block when the ring is full
+   (consumer stalled).
+
+   bow_poly_jt_inject_gain — drive scale (control thread; allocates the
+   ring on the first non-zero call — never call on an audio thread).
+
+   The kernel mixes available ring samples into the recorded jt drive
+   right before the drive-FX hook, so the voice→taraf FX insert shapes
+   the injected drive too. Never calling these, zero gain, or an empty
+   ring is byte-null (TarafRemovalParityTests' guarantee holds). */
+void bow_poly_jt_inject_gain(void *vst, double g);
+void bow_poly_jt_inject_write(void *vst, const double *x, int n);
 void bow_poly_process3(void *vst, int n, int stride, const double *f0, const double *vb, const double *fb, const double *beta, const double *gate, const double *xv, double *out, double *outS, double *outJt, double *outJtS);
 
 #endif

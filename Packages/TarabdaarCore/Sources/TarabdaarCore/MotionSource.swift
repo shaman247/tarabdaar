@@ -42,8 +42,49 @@ public protocol MotionSource: AnyObject {
     /// given motion-clock timestamp. Called ~20ms after a touch begins
     /// to map the accelerometer spike to a MIDI velocity.
     func peakAccelSince(timestamp: TimeInterval) -> PeakResult
+
+    /// STRIKE-SCALE ENVELOPE 0…1 (2026-08-23) — the continuous form of
+    /// the strike measure: `strikeScale01` of the accel magnitude through
+    /// a fast-attack / slow-decay tracker, maintained at the source's own
+    /// sample rate so taps between report ticks are never missed. The 60
+    /// Hz tick streams it as the PERF_STATE `strike` byte → the Mac's
+    /// `.strike` control dimension. A real protocol requirement (not just
+    /// an extension member) so existential access reaches the concrete
+    /// tracker; sources without an accelerometer inherit the 0 default.
+    var strikeLevel: Double { get }
 }
 
 public extension MotionSource {
     var rawAccel: [Double] { [0, 0, 0] }
+    var strikeLevel: Double { 0 }   // sources without an accelerometer
+
+    /// ONSET STRIKE VELOCITY 0…1 at a touch onset (2026-08-19 — the
+    /// revived accelerometer estimate, now consumed by the String voice's
+    /// `bow_attack_vel` velocity→sharpness law): the peak acceleration
+    /// magnitude over the TRAILING `Config.velocityLookback` window,
+    /// mapped log-scale across [`velocityMinG`, `velocityMaxG`] — the
+    /// same law the deleted 2026-07-24 capture used, but backward-looking:
+    /// UIKit delivers a touch ~10–25 ms after the physical impact, so the
+    /// chassis spike is usually already in the 200 Hz ring buffer and the
+    /// onset never waits (the old design delayed note-on 20 ms instead).
+    /// `now` must be in the motion clock's domain (seconds since boot —
+    /// `CACurrentMediaTime()` matches). Below `velocityMinG` (a gentle
+    /// placement, or no motion data at all) this reads 0 = legato.
+    func strikeVelocity01(at now: TimeInterval) -> Double {
+        Self.strikeScale01(
+            peakAccelSince(timestamp: now - Config.velocityLookback)
+                .magnitude)
+    }
+
+    /// The strike LAW as a pure map: acceleration magnitude (g) → 0…1,
+    /// log-scale across [`velocityMinG`, `velocityMaxG`], 0 at or below
+    /// the floor. Shared by the onset estimate above and the iPad's
+    /// persistent strike scope (2026-08-23), so the scope's 0–127 trace
+    /// always reads exactly what a tap at that magnitude would send.
+    static func strikeScale01(_ g: Double) -> Double {
+        guard g > Config.velocityMinG else { return 0.0 }
+        let clamped = min(g, Config.velocityMaxG)
+        return log(clamped / Config.velocityMinG)
+            / log(Config.velocityMaxG / Config.velocityMinG)
+    }
 }

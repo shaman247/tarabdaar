@@ -322,8 +322,9 @@ public enum JoyConTiltSysEx {
                               wrist1: Double, wrist2: Double,
                               stickLive: Bool, bodyLive: Bool,
                               connected: Bool) -> [UInt8] {
+        // Axes −1…+1 (the 2026-08-18 convention) → the legacy 0…127 wire.
         func b(_ v: Double) -> UInt8 {
-            UInt8(max(0.0, min(1.0, v)) * 127.0 + 0.5)
+            UInt8((max(-1.0, min(1.0, v)) + 1) / 2 * 127.0 + 0.5)
         }
         return [0xF0, nonCommercialID, subtype,
                 b(stickX), b(stickY), b(wrist1), b(wrist2),
@@ -335,50 +336,80 @@ public enum JoyConTiltSysEx {
         guard bytes.count >= 7, bytes.first == 0xF0, bytes.last == 0xF7,
               bytes[1] == nonCommercialID, bytes[2] == subtype
         else { return nil }
+        // Legacy 7-bit axes decode to the −1…+1 display convention.
+        func ax(_ b: UInt8) -> Double { Double(b) / 127.0 * 2.0 - 1.0 }
         if bytes.count == 9 {
-            return JoyConTiltDisplay(stickX: Double(bytes[3]) / 127.0,
-                                     stickY: Double(bytes[4]) / 127.0,
-                                     wrist1: Double(bytes[5]) / 127.0,
-                                     wrist2: Double(bytes[6]) / 127.0,
+            return JoyConTiltDisplay(stickX: ax(bytes[3]),
+                                     stickY: ax(bytes[4]),
+                                     wrist1: ax(bytes[5]),
+                                     wrist2: ax(bytes[6]),
                                      stickLive: bytes[7] & 1 != 0,
                                      bodyLive: bytes[7] & 2 != 0,
                                      connected: bytes[7] & 4 != 0)
         }
         guard bytes.count == 7 else { return nil }
-        return JoyConTiltDisplay(stickX: Double(bytes[3]) / 127.0,
-                                 stickY: Double(bytes[4]) / 127.0,
-                                 wrist1: 0.5, wrist2: 0.5,
+        return JoyConTiltDisplay(stickX: ax(bytes[3]),
+                                 stickY: ax(bytes[4]),
+                                 wrist1: 0, wrist2: 0,
                                  stickLive: bytes[5] != 0,
                                  bodyLive: false,
                                  connected: false)
     }
 }
 
-/// One Joy-Con display frame (all values 0…1): the stick axes and the
-/// two calibrated wrist body axes, with liveness flags for the panes —
-/// plus `connected` (2026-08-13), the one field the iPad ACTS on: while
-/// a Joy-Con is attached to the Mac its arrows play the drones, so both
+/// One Mac→iPad tilt display frame (all values −1…+1, centre 0 — the
+/// app-wide tilt convention since 2026-08-18): the Joy-Con stick
+/// axes, the three wrist attitude axes (the Joy-Con's fused
+/// pitch/roll/yaw, 2026-08-18), and the three Mac-evaluated ARM axes
+/// (the iPad tilts after the arm-calibration solve — `armLive` says a
+/// calibration is driving them; without one the iPad's own raw square
+/// is already the truth). Liveness flags dim the panes — plus
+/// `connected` (2026-08-13), the one field the iPad ACTS on: while a
+/// Joy-Con is attached to the Mac its arrows play the drones, so both
 /// surfaces hide their drone buttons.
 public struct JoyConTiltDisplay: Equatable {
     public var stickX: Double
     public var stickY: Double
     public var wrist1: Double
     public var wrist2: Double
+    public var wrist3: Double
+    public var arm1: Double
+    public var arm2: Double
+    public var arm3: Double
     public var stickLive: Bool
     public var bodyLive: Bool
+    public var armLive: Bool
     public var connected: Bool
+    /// The Mac's `ctl_strike_window` blend window (s), relayed so the
+    /// iPad scope's white→cyan onset fade tracks the window that
+    /// actually governs the strike→acceleration blend (TLP v7). 2.0
+    /// when never received (link down, legacy sender).
+    public var strikeWindowS: Double
 
     public init(stickX: Double, stickY: Double, wrist1: Double,
                 wrist2: Double, stickLive: Bool, bodyLive: Bool,
-                connected: Bool) {
+                connected: Bool, wrist3: Double = 0, arm1: Double = 0,
+                arm2: Double = 0, arm3: Double = 0,
+                armLive: Bool = false, strikeWindowS: Double = 2.0) {
         self.stickX = stickX
         self.stickY = stickY
         self.wrist1 = wrist1
         self.wrist2 = wrist2
+        self.wrist3 = wrist3
+        self.arm1 = arm1
+        self.arm2 = arm2
+        self.arm3 = arm3
         self.stickLive = stickLive
         self.bodyLive = bodyLive
+        self.armLive = armLive
         self.connected = connected
+        self.strikeWindowS = strikeWindowS
     }
+
+    /// The at-rest/no-link display: everything centred and dim.
+    public static let idle = JoyConTiltDisplay(
+        stickX: 0, stickY: 0, wrist1: 0, wrist2: 0,
+        stickLive: false, bodyLive: false, connected: false)
 }
 
 // MARK: - iPad SysEx receiver
@@ -415,10 +446,14 @@ public final class ScaleSyncReceiver: ObservableObject {
     /// iPad's own motion owns the tilts. The axes are display-only;
     /// `connected` is the one field the surface acts on (drone buttons
     /// hide while a controller plays the drones).
-    @Published public private(set) var joyConTilt =
-        JoyConTiltDisplay(stickX: 0.5, stickY: 0.5, wrist1: 0.5,
-                          wrist2: 0.5, stickLive: false, bodyLive: false,
-                          connected: false)
+    @Published public private(set) var joyConTilt = JoyConTiltDisplay.idle
+
+    /// The Mac's fret-linger display stream (LINGER_STATE, 2026-08-18):
+    /// per-touch expression charge + auto-vibrato depth/ceiling as the
+    /// Mac's filter actually evaluates them, keyed by WIRE touch id
+    /// (match via `PitchPadEngine.wireId(forTouch:)`). Display-only,
+    /// nothing persists; cleared on link drop.
+    @Published public private(set) var linger: [LingerTouchDisplay] = []
 
     /// Fired on the main thread with each decoded state (scale + tonic +
     /// margin). The receiver also persists it via `SyncedScaleStore`.
@@ -601,5 +636,36 @@ public final class ScaleSyncReceiver: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.joyConTilt = tilt
         }
+    }
+
+    public func applyLinger(_ touches: [LingerTouchDisplay]) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.linger != touches else { return }
+            self.linger = touches
+        }
+    }
+}
+
+/// One touch's Mac-evaluated linger envelopes, decoded to 0…1 for the
+/// iPad's overlay: expression charge (1 = full, falling as the note
+/// lingers), auto-vibrato depth, and the y-set ceiling it grows toward.
+public struct LingerTouchDisplay: Equatable, Sendable {
+    public let id: UInt16
+    public let charge: Double
+    public let vib: Double
+    public let vibCeil: Double
+
+    public init(id: UInt16, charge: Double, vib: Double, vibCeil: Double) {
+        self.id = id
+        self.charge = charge
+        self.vib = vib
+        self.vibCeil = vibCeil
+    }
+
+    public init(_ t: TLPLingerTouch) {
+        id = t.id
+        charge = Double(t.charge) / 255.0
+        vib = Double(t.vib) / 255.0
+        vibCeil = Double(t.vibCeil) / 255.0
     }
 }

@@ -208,4 +208,215 @@ final class TanpuraEngineTests: XCTestCase {
         XCTAssertGreaterThan(back, preRelease * 0.2,
                              "re-pluck after release stayed quiet")
     }
+
+    /// Register calibration law (2026-08-15, `tp_jiva_comp`): fitted
+    /// geometry below 104 Hz and at comp 0 (exactly 1.0 — byte-null),
+    /// the measured 156 Hz node, monotone non-increasing thread height
+    /// across the register with a floor above the lower-regime cliff,
+    /// and linear comp blending.
+    func testRegisterCompLaw() throws {
+        let p = try params()
+        XCTAssertEqual(TanpuraTables.registerCompThreadMul(
+            f0: 300, comp: 0, p: p), 1.0)
+        XCTAssertEqual(TanpuraTables.registerCompThreadMul(
+            f0: 104, comp: 1, p: p), 1.0)
+        XCTAssertEqual(TanpuraTables.registerCompThreadMul(
+            f0: 80, comp: 1, p: p), 1.0)
+        // measured node: 156 Hz targets the thread top 8.25 μm above
+        // the apex → mul (8.25 + 20.25)/30 at the fitted geometry
+        XCTAssertEqual(TanpuraTables.registerCompThreadMul(
+            f0: 156, comp: 1, p: p), 0.95, accuracy: 1e-6)
+        var prev = 1.0
+        var f = 104.0
+        while f < 900 {
+            let m = TanpuraTables.registerCompThreadMul(f0: f, comp: 1,
+                                                        p: p)
+            XCTAssertLessThanOrEqual(m, prev + 1e-12,
+                                     "law not monotone at \(f)")
+            XCTAssertGreaterThan(m, 0.75, "law under the floor at \(f)")
+            prev = m
+            f *= 1.03
+        }
+        let full = TanpuraTables.registerCompThreadMul(f0: 208, comp: 1,
+                                                       p: p)
+        let half = TanpuraTables.registerCompThreadMul(f0: 208, comp: 0.5,
+                                                       p: p)
+        XCTAssertEqual(half, (1.0 + full) / 2.0, accuracy: 1e-9)
+
+        // cascade slowing (tp_cascade): zero at/below the anchor and at
+        // cascade 0; the measured 208 Hz values (+0.75 μm thread lift =
+        // +0.025 mul at the fitted 30 μm thread, HF t60 ×2); monotone
+        // with pitch
+        XCTAssertEqual(TanpuraTables.cascadeThreadLift(
+            f0: 104, cascade: 1, p: p), 0.0)
+        XCTAssertEqual(TanpuraTables.cascadeThreadLift(
+            f0: 300, cascade: 0, p: p), 0.0)
+        XCTAssertEqual(TanpuraTables.cascadeHFT60Mul(f0: 104, cascade: 1),
+                       1.0)
+        XCTAssertEqual(TanpuraTables.cascadeThreadLift(
+            f0: 208, cascade: 1, p: p), 0.025, accuracy: 1e-6)
+        XCTAssertEqual(TanpuraTables.cascadeHFT60Mul(f0: 208, cascade: 1),
+                       2.0, accuracy: 1e-9)
+        XCTAssertGreaterThan(TanpuraTables.cascadeThreadLift(
+            f0: 262, cascade: 1, p: p),
+                             TanpuraTables.cascadeThreadLift(
+            f0: 208, cascade: 1, p: p))
+    }
+
+    /// Pluck touch + pluck drive (2026-08-15) — the consistency and
+    /// character knobs:
+    ///  - touch 1 (string-bank rework): the previous note migrates to
+    ///    a history clone and keeps ringing (FULL simulation) through
+    ///    the re-pluck — the post-re-pluck window carries tail + fresh
+    ///    attack, clearly outweighing a fresh attack alone; with
+    ///    polyphony 0 the history goes to the split ghost instead
+    ///    (low partials restarted → head level near the fresh pluck);
+    ///    the pile-up stays finite and decays. At touch 0 (legacy)
+    ///    the pluck rides the ring and the phase alignment makes
+    ///    re-plucks differ audibly (the measured 5× buzz / +7 dB
+    ///    accumulation variance).
+    ///  - drive 1 is BIT-EXACT with the fitted pluck; drive ≠ 1 changes
+    ///    the contact engagement at compensated output level — high
+    ///    drive must render BRIGHTER (spectral-slope proxy) and low
+    ///    drive darker, while the ring level stays in the fitted
+    ///    ballpark (the 1/drive gain ride).
+    func testPluckTouchAndDrive() throws {
+        let p = try params()
+        let n = 4096
+        func make() throws -> TanpuraEngine {
+            guard let e = TanpuraEngine(params: p, frequencies: [110.0],
+                                        workers: 1)  // sync: deterministic
+            else { throw XCTSkip("engine build failed") }
+            return e
+        }
+        func render(_ e: TanpuraEngine, blocks: Int) -> [Double] {
+            var acc = [Double]()
+            var l = [Double](repeating: 0, count: n)
+            var r = [Double](repeating: 0, count: n)
+            for _ in 0..<blocks {
+                l.withUnsafeMutableBufferPointer { lb in
+                    r.withUnsafeMutableBufferPointer { rb in
+                        e.render(frames: n, outL: lb.baseAddress!,
+                                 outR: rb.baseAddress!)
+                    }
+                }
+                acc.append(contentsOf: l)
+            }
+            return acc
+        }
+        func rms(_ x: ArraySlice<Double>) -> Double {
+            sqrt(x.reduce(0) { $0 + $1 * $1 } / Double(max(x.count, 1)))
+        }
+        func relDiff(_ a: [Double], _ b: [Double]) -> Double {
+            let d = zip(a, b).map(-)
+            return rms(d[...]) / max(rms(a[...]), 1e-12)
+        }
+        let ringBlocks = 16   // ~1.37 s between plucks
+        let winBlocks = 12    // ~1 s comparison window after each pluck
+
+        // touch 1, default bank: the previous note keeps ringing as a
+        // REAL history string through the re-pluck — the head of the
+        // post-re-pluck window (tail + fresh attack) clearly outweighs
+        // a fresh attack alone
+        let eT = try make()
+        eT.pluck(slot: 0, velocity: 100, touch: 1.0)
+        _ = render(eT, blocks: ringBlocks)
+        eT.pluck(slot: 0, velocity: 100, touch: 1.0)
+        let after = render(eT, blocks: winBlocks)
+        let eF = try make()
+        eF.pluck(slot: 0, velocity: 100, touch: 1.0)
+        let fresh = render(eF, blocks: winBlocks)
+        let head = Int(0.3 * p.sr)
+        let carry = rms(after[..<head]) / max(rms(fresh[..<head]), 1e-12)
+        XCTAssertGreaterThan(carry, 1.2,
+                             "previous note truncated at re-pluck "
+                             + "(carry \(carry))")
+        XCTAssertLessThan(carry, 4.5, "re-pluck head blew up (\(carry))")
+        // pile a third pluck on and let it ring: history strings stay
+        // finite and the pile-up decays
+        _ = render(eT, blocks: ringBlocks - winBlocks)
+        eT.pluck(slot: 0, velocity: 100, touch: 1.0)
+        let tail = render(eT, blocks: winBlocks * 4)
+        XCTAssertTrue(tail.allSatisfy { $0.isFinite })
+        let tHead = rms(tail[..<(tail.count / 4)])
+        let tTail = rms(tail[(3 * tail.count / 4)...])
+        XCTAssertLessThan(tTail, tHead,
+                          "string-bank pile-up not decaying "
+                          + "(\(tTail) vs \(tHead))")
+
+        // polyphony 0: no history strings — the old ring goes to the
+        // SPLIT ghost (low partials restarted by the fresh pluck), so
+        // the re-pluck head sits closer to a fresh attack than the
+        // full history string does
+        let eZ = try make()
+        eZ.setPolyphony(0)
+        eZ.pluck(slot: 0, velocity: 100, touch: 1.0)
+        _ = render(eZ, blocks: ringBlocks)
+        eZ.pluck(slot: 0, velocity: 100, touch: 1.0)
+        let afterZ = render(eZ, blocks: winBlocks)
+        let carryZ = rms(afterZ[..<head])
+            / max(rms(fresh[..<head]), 1e-12)
+        XCTAssertLessThan(carryZ, carry,
+                          "poly-0 split ghost should carry less than a "
+                          + "full history string (\(carryZ) vs \(carry))")
+        XCTAssertGreaterThan(carryZ, 0.6,
+                             "poly-0 re-pluck collapsed (\(carryZ))")
+
+        // touch 0 (legacy): the same schedule differs pluck-to-pluck
+        // (the phase lottery — byte-identical to the pre-ghost path)
+        let eL = try make()
+        eL.pluck(slot: 0, velocity: 100)
+        _ = render(eL, blocks: ringBlocks)
+        eL.pluck(slot: 0, velocity: 100)
+        let l2 = render(eL, blocks: winBlocks)
+        _ = render(eL, blocks: ringBlocks - winBlocks)
+        eL.pluck(slot: 0, velocity: 100)
+        let l3 = render(eL, blocks: winBlocks)
+        let legacyDiff = relDiff(l2, l3)
+        XCTAssertGreaterThan(legacyDiff, 0.15,
+                             "legacy re-plucks should vary "
+                             + "(\(legacyDiff))")
+
+        // drive 1 = the fitted pluck, bit-exact
+        let eA = try make()
+        eA.pluck(slot: 0, velocity: 100)
+        let ref = render(eA, blocks: winBlocks)
+        let eB = try make()
+        eB.pluck(slot: 0, velocity: 100, drive: 1.0)
+        let one = render(eB, blocks: winBlocks)
+        XCTAssertEqual(relDiff(ref, one), 0.0,
+                       "drive 1 must be bit-exact with the default")
+
+        // drive up/down: brighter/darker at compensated level.
+        // brightness proxy: first-difference RMS over RMS (spectral
+        // slope) on the second half of the window (the developed ring).
+        func bright(_ x: [Double]) -> Double {
+            let h = Array(x[(x.count / 2)...])
+            var d = [Double](repeating: 0, count: h.count - 1)
+            for i in 1..<h.count { d[i - 1] = h[i] - h[i - 1] }
+            return rms(d[...]) / max(rms(h[...]), 1e-12)
+        }
+        func ringRMS(_ x: [Double]) -> Double { rms(x[(x.count / 2)...]) }
+        let eHi = try make()
+        eHi.pluck(slot: 0, velocity: 100, drive: 2.8)
+        let hi = render(eHi, blocks: winBlocks)
+        let eLo = try make()
+        eLo.pluck(slot: 0, velocity: 100, drive: 0.35)
+        let lo = render(eLo, blocks: winBlocks)
+        XCTAssertTrue(hi.allSatisfy { $0.isFinite })
+        XCTAssertTrue(lo.allSatisfy { $0.isFinite })
+        XCTAssertGreaterThan(bright(hi), bright(ref),
+                             "high drive should brighten the ring")
+        XCTAssertLessThan(bright(lo), bright(ref),
+                          "low drive should darken the ring")
+        for (name, x) in [("high", hi), ("low", lo)] {
+            let r = ringRMS(x) / max(ringRMS(ref), 1e-12)
+            XCTAssertGreaterThan(r, 0.35,
+                                 "\(name)-drive ring level fell out of the "
+                                 + "compensated ballpark (\(r))")
+            XCTAssertLessThan(r, 2.8,
+                              "\(name)-drive ring level blew past the "
+                              + "compensated ballpark (\(r))")
+        }
+    }
 }

@@ -138,6 +138,41 @@ final class LivenessTests: XCTestCase {
         XCTAssertEqual(a.fb, b.fb)
     }
 
+    /// SETTLE EXEMPTION (2026-08-19, `bow_settle_sharp`): a SHARP attack
+    /// keeps its level — depth × (1 − settleSharp·sharpness) — while a
+    /// gentle attack keeps the fitted ease-down. 0 = bit-null.
+    func testSettleSharpExemption() {
+        func trace(press: Double, extra: [String: Double]) -> [Double] {
+            let m = BowControlMapper()
+            m.setAxis(press: press)
+            m.midi(0x90, 69, 100)
+            var f = BowControlFilter(bp: bp(extra), srk: srk)
+            return run(m, &f, seconds: 0.8).vb
+        }
+        let settle: [String: Double] = ["bow_settle_db": 6.0,
+                                        "bow_settle_ms": 130.0]
+        let exempt = settle.merging(["bow_settle_sharp": 1.0]) { $1 }
+        // Full-sharp attack (press 1 over the default 0.5 threshold =
+        // sharpness 1): the exemption cancels the settle EXACTLY —
+        // bit-identical to a settle-free build.
+        XCTAssertEqual(trace(press: 1.0, extra: exempt),
+                       trace(press: 1.0, extra: [:]),
+                       "a full-sharp attack must keep its level")
+        // Gentle attack (press below the threshold = sharpness 0): the
+        // fitted settle runs untouched.
+        XCTAssertEqual(trace(press: 0.4, extra: exempt),
+                       trace(press: 0.4, extra: settle),
+                       "a gentle attack must keep the fitted settle")
+        XCTAssertNotEqual(trace(press: 0.4, extra: exempt),
+                          trace(press: 0.4, extra: [:]),
+                          "the settle must still act on gentle attacks")
+        // 0 = bit-null against the absent key.
+        XCTAssertEqual(trace(press: 1.0,
+                             extra: settle.merging(["bow_settle_sharp": 0.0]) { $1 }),
+                       trace(press: 1.0, extra: settle),
+                       "bow_settle_sharp 0 must equal the absent key")
+    }
+
     /// reset() rewinds the RNG: a panic-then-replay produces the same take.
     func testResetReproducible() {
         let params = bp(["bow_drift_cents": 2.0, "bow_settle_db": 6.0,

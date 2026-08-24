@@ -36,6 +36,24 @@ class MotionManager: ObservableObject, MotionSource {
     // Peak detection for display
     private var peakDecay: Double = 0.0
 
+    /// STRIKE-SCALE ENVELOPE (2026-08-23, MotionSource requirement): the
+    /// continuous 0…1 strike measure the `.strike` control dimension
+    /// rides — `strikeScale01(magnitude)` through a fast-attack /
+    /// slow-decay tracker, evolved HERE at the full 200 Hz so a tap
+    /// between 60 Hz report ticks still registers at height. Decay in the
+    /// log-mapped domain (≈ linear-in-dB fall, τ 150 ms): fast enough to
+    /// articulate repeated taps, slow enough that a sustained shake reads
+    /// as a plateau. Not @Published — read by the 60 Hz tick.
+    private(set) var strikeLevel: Double = 0.0
+    private let strikeLevelDecay =
+        exp(-1.0 / (Config.motionUpdateRate * 0.15))
+
+    /// Strike-ENVELOPE history (~8 s at 200 Hz) for the scope's overlay —
+    /// the smoothed control signal the `.strike`/`.acceleration`
+    /// dimensions actually see, drawn over the raw trace. Same
+    /// ring/polling contract as `accelHistory3D`: not @Published.
+    private(set) var strikeHistory: [(t: TimeInterval, level: Double)] = []
+
     /// Raw attitude history (last ~8 s at 200 Hz) for the on-device
     /// raw-motion overlay — the sensor's own values BEFORE the yaw
     /// high-pass, the 14-bit quantization and the MIDI wire, so
@@ -154,6 +172,15 @@ class MotionManager: ObservableObject, MotionSource {
             }
             self.recentPeakAccel = self.peakDecay
 
+            // Strike-scale envelope for the `.strike`/`.acceleration`
+            // dimensions, historied for the scope's overlay.
+            self.strikeLevel = max(Self.strikeScale01(mag),
+                                   self.strikeLevel * self.strikeLevelDecay)
+            self.strikeHistory.append((motion.timestamp, self.strikeLevel))
+            if self.strikeHistory.count > 1700 {
+                self.strikeHistory.removeFirst(self.strikeHistory.count - 1600)
+            }
+
             // Append to timestamped buffer for touch correlation
             let sample = AccelSample(timestamp: motion.timestamp, magnitude: mag)
             self.accelBuffer.append(sample)
@@ -167,6 +194,43 @@ class MotionManager: ObservableObject, MotionSource {
                 self.accelHistory.removeFirst(self.accelHistory.count - self.historyLength)
             }
         }
+    }
+
+    // MARK: - Note activity (strike-scope coloring, 2026-08-23)
+
+    /// Melody-note activity timeline for the toolbar strike scope: the
+    /// fret-pad surface reports each sounding touch's begin/end, and the
+    /// scope colors every trace bin by whether a note sounded THEN and how
+    /// recently the last onset fired (white at onset → cyan over ~1 s;
+    /// gray while silent). Id-keyed so a touch that never became a note
+    /// (out-of-band, drones) can't unbalance the count. Deliberately NOT
+    /// @Published — the scope polls at 30 Hz like `accelHistory3D`.
+    /// Main-thread only (touch handlers + the poll).
+    private(set) var noteActivity: [(t: TimeInterval, active: Int)] = []
+    private(set) var noteOnsets: [TimeInterval] = []
+    private var soundingNoteIds: Set<Int> = []
+
+    func noteBegan(_ id: Int, at t: TimeInterval) {
+        guard soundingNoteIds.insert(id).inserted else { return }
+        noteActivity.append((t, soundingNoteIds.count))
+        noteOnsets.append(t)
+        trimNoteActivity(now: t)
+    }
+
+    func noteEnded(_ id: Int, at t: TimeInterval) {
+        guard soundingNoteIds.remove(id) != nil else { return }
+        noteActivity.append((t, soundingNoteIds.count))
+        trimNoteActivity(now: t)
+    }
+
+    private func trimNoteActivity(now: TimeInterval) {
+        let cutoff = now - 12.0        // scope window + fade + slack
+        // Keep one event at/before the cutoff as the baseline state for
+        // bins older than the newest surviving event.
+        while noteActivity.count > 1, noteActivity[1].t <= cutoff {
+            noteActivity.removeFirst()
+        }
+        noteOnsets.removeAll { $0 < cutoff }
     }
 
     /// Returns the peak accelerometer magnitude since a given timestamp,

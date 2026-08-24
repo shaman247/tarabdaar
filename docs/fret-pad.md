@@ -64,21 +64,30 @@ Onset snap handles note starts; **`FretDragAssist`**
 (`Packages/TarabdaarCore/Sources/TarabdaarCore/FretDragAssist.swift`) handles the
 rest of the stroke. Musical premise: when the player **stops or changes
 direction** near a scale pitch, that inflection was intended to be *on* the
-pitch; while moving quickly they're gliding and must be left alone.
+pitch; while the finger is moving — at **any** tempo — they're gliding and
+must be left alone.
 
 It's a **gated magnetic correction**, continuous by construction. Each touch
 carries one slew-filtered `correction` (log2 units);
 `played = field + onsetOffset + correction`, and the correction eases toward
 the nearest qualifying fret at a rate = **gate × proximity × settle**:
 
-- **gate = min(1, max(stationarity, turnGain·impulse))** — stationarity is
-  smoothed |dx/dt| through a smoothstep (fitted: 1 below 59 px/s, 0 above
-  375 px/s; τ 26 ms) and handles stops and slow turns. Fast connected
-  playing turns in ~30 ms — no speed average can dip in time — so a
-  causally-detected **direction flip** (deadbanded dx sign change, ~one
-  event of latency) fires an impulse that holds the gate open while it
-  decays (fitted: turnGain 2.0, turnTau 26 ms → gate pinned at 1 for ~18 ms
-  then decaying).
+- **gate = min(1, max(stopped, turnGain·impulse))** — "stopped" is a
+  genuine **stop detector** (2026-08-17): the touch must dwell within
+  `stillRadiusPx` (2 px) of a still anchor for `stopDwellMin` (100 ms)
+  before the gate starts opening, ramping to 1 over `stopDwellRamp`
+  (150 ms). A sustained drag — however slow — keeps leaving the still disc
+  and restarting the dwell clock, so the magnet never touches a glide and
+  pitch simply follows the finger; jitter wanders inside the disc, so rests
+  still engage it. (The original gate was smoothed |dx/dt| through a fitted
+  59/375 px/s smoothstep — it read a ~120 px/s glide as ~90% *stationary*
+  and pulled slow glides toward every approaching fret. The fitted speed
+  estimate survives, but only bounding the receding check and the
+  correction shed below.) Fast connected playing turns in ~30 ms — too
+  fast for any dwell — so a causally-detected **direction flip**
+  (deadbanded dx sign change, ~one event of latency) fires an impulse that
+  holds the gate open while it decays (fitted: turnGain 2.0, turnTau 26 ms
+  → gate pinned at 1 for ~18 ms then decaying).
 - **proximity** — the fret must be within the **assist basin** =
   `radiusScale` × Snap (fitted 1.75× = 42 px at the 24 px default Snap —
   fast landings are far sloppier than onsets; the onset snap stays at 1×),
@@ -90,6 +99,16 @@ the nearest qualifying fret at a rate = **gate × proximity × settle**:
 - **settle** — fitted τ 5 ms, but the rate that actually governs is the hard
   **slew cap ≈ 1500 ¢/s** on the correction (inside natural meend speeds):
   **smoothness is guaranteed by construction**, whatever the constants.
+
+**Every touch is born stopped** (2026-08-18; legato-only the day before): a
+fresh finger isn't moving until it actually moves, so the dwell gate starts
+fully open at onset — a sloppy landing, staccato tap and legato strike
+alike, snaps onto the fret immediately (still slew-capped, ~30–50 ms for a
+typical 30 ¢ landing error) instead of waiting out the stop dwell. The
+first ≥`stillRadiusPx` of movement re-anchors and shuts the gate, so a
+touch that turns into a glide is left alone from its first events — and the
+documented approach-path starts (above/below a fret's extent, or in open
+space) have no magnet candidate at all, so nothing pulls them.
 
 A candidate the touch is **actively receding from** (moving away, smoothed
 speed above the stationary floor) exerts **no pull** — the magnet corrects
@@ -158,10 +177,11 @@ thresholds define "truth" and are deliberately not fitted.
 **Fit provenance (2026-07-16, iPad):** 8 repetitions of the connected phrase
 *p n d n p d m p g* (~145 ms/note), pulled off the device with
 `xcrun devicectl device copy from … --domain-type appDataContainer`. **Note
-(2026-08-01): the escape/decay rules (receding candidates pull nothing;
-moving touches shed the carried correction) postdate every recording to
-date — pre-change recordings replay under the new rules and show elevated
-parity, so re-record before trusting a fit.** Findings
+(2026-08-01/2026-08-17): the escape/decay rules (receding candidates pull
+nothing; moving touches shed the carried correction) and the stopped-gate
+change (dwell inside a still disc opens the magnet, not smoothed speed)
+postdate every recording to date — pre-change recordings replay under the
+new rules and show elevated parity, so re-record before trusting a fit.** Findings
 baked into the current constants: raw landings were 29¢ mean / 62¢ p90 off
 (overshooting past the note 45/64 times), half beyond the old 1× radius —
 hence `radiusScale`; the speed gate never opened at this tempo — hence the
@@ -169,12 +189,108 @@ flip impulse; scoring is perceptual (error weighted by inverse *output*-pitch
 velocity around each turn; transparency = per-segment std of the correction,
 excluding a 120 ms post-turn guard). Result: landing error 39.7¢ → 29.3¢,
 transit warping ≈ 2¢. Caveats: the recording covers fast connected playing
-only — slow-glide/vibrato feel is extrapolated (the high fitted
-`speedCeiling` makes slow glides sticky near frets) — **and it was made on
+only — slow-glide/vibrato feel is extrapolated (the fitted speed-smoothstep
+gate made slow glides sticky near frets, which the 2026-08-17 stopped gate
+removed structurally) — **and it was made on
 the old pitch-mapped ribbon** (the assist basin was ≈75¢ in log-pitch; it's
 now the same 42 px in screen space). Old (v1) recordings still load — the
 fitter derives fret x from the old mapping — but record fresh sessions on
 the free-fret surface and refit.
+
+## Fret linger & y-depth auto-vibrato (2026-08-18)
+
+The fret is a control surface, not just a pitch: **where the finger sits
+along the fret, and whether it keeps moving, shape the note's life**. Two
+per-note envelopes run in `BowControlFilter` (String voice only — a
+tanpura pluck decays on its own):
+
+- **Linger decay** — a finger resting on a fret without moving slowly
+  loses expression: the played expression is scaled by
+  `floor + (1−floor)·charge`, where the charge starts at 1 on every
+  articulation and eases toward 0 with `bow_linger_decay` (default 8 s
+  time constant; floor 0, so a parked note eventually fades out through
+  the expression-lift zone). **Stroking the finger vertically along the
+  fret recharges it** toward the base value with `bow_linger_recharge`
+  (0.35 s) — the movement drive is the vertical speed in band-heights/s,
+  smoothed ~100 ms, reaching full strength at `bow_linger_speed`
+  (0.35 band/s).
+- **Auto-vibrato** — every note is born vibrato-free and grows one over
+  time (`bow_avib_grow`, 2.5 s) toward a ceiling set by the touch's
+  **position within its HOME FRET's vertical extent** (the fret snapped
+  at onset; the ceiling axis was briefly the whole pad band — moved to
+  the fret itself the same day). The fret is split **asymmetrically
+  toward the pad's edge (2026-08-20)**: the `bow_avib_dead` = 0.7
+  fraction of the fret from its **inner end** (the end toward the pad's
+  vertical centre-line) is the vibrato-free landing zone, and depth
+  ramps to full (`bow_avib_cents`, 30 ¢ at `bow_avib_hz` 5.2 Hz) at the
+  fret's **outer end** — the top 30% for frets in the pad's upper half,
+  the bottom 30% for frets at or below the centre (shared
+  `fretOuterEndIsTop`; the wire's `fretY` is already outward-oriented
+  by the surfaces). Both surfaces **mark the zone on the fret itself**:
+  the outer 30% of each fret line draws as a subtle wavy tail
+  (`fretLinePoints` — the marking sits at the 0.7 default and does not
+  track edits to `bow_avib_dead`). **An unsnapped (approach/fretless)
+  onset has no home fret and gets no auto-vibrato at all** — expression
+  decay still runs off the band y. The same vertical movement that
+  recharges expression **returns the vibrato to its no-vibrato birth
+  state**; when the finger rests again, the bloom restarts toward
+  wherever the finger now sits on the fret. The home fret is fixed at
+  onset (drags never re-snap, and the note's fret identity shouldn't
+  wander mid-stroke).
+
+Both envelopes are first-order at kernel rate — smooth by construction, no
+zipper, and any fresh articulation (retrigger, legato re-point) resets them
+to full expression / no vibrato. All eight knobs live in the Parameters
+tab's **Fret linger** group and apply in place.
+
+**Scope — only touches that report a fret-band y engage any of this.** The
+two fret surfaces pass their band-normalized y with every onset and drag,
+plus the within-fret y for snapped onsets; both travel per touch in the
+`PERF_STATE` frame (TLP **v4/v5**: `posY` + `fretY` bytes, each behind a
+validity flag — see [MIDI & Audio](midi-and-audio.md)). The Mac keyboard,
+audition scores, external MIDI and the whole `.midi` mapper path carry no
+y and stay bit-exact on the legacy path (`FretLingerTests` pins this, and
+`TarafRemovalParityTests` still passes untouched). The iPad evaluates
+nothing, as always — it just streams the positions.
+
+**The iPad shows the state at a glance (2026-08-18 evening; merged into
+ONE ring 2026-08-20).** The per-touch indicator ring IS the linger
+display — no extra rings: it is an **expression gauge** (a bright arc
+from 12 o'clock whose sweep is the charge — full circle = full
+expression, shrinking as the note lingers, refilling as the finger
+strokes the fret, over a faint full track) that **turns wavy with the
+vibrato** — the arc's wave height is the current depth (a smooth arc
+means none, the waves swell as the vibrato blooms) while the faint track
+wobbles at the **ceiling** amplitude, showing where the finger's spot on
+the fret will take it. The
+numbers are NOT recomputed on the iPad: the Mac streams the envelopes it
+is actually evaluating as `LINGER_STATE` frames (~20 Hz poll of the
+engine, wire-id keyed — the same "display what actually drives it"
+round-trip as the Joy-Con arm axes), so parameter edits on the Mac are
+reflected exactly and the overlay can never drift from the sound. The Mac
+preview pad has no such overlay (play it with sound up).
+
+**Onset strike ripple (2026-08-20).** The same indicator also receipts
+the accelerometer strike estimate ([sensors.md](sensors.md)): at every
+onset a white impact ring expands from the touch ring and fades over
+~0.5 s, its reach, brightness and stroke weight all scaled by the
+estimate — a hard tap throws a bright wide wave, a gentle placement
+barely whispers (a faint ripple at estimate 0 still confirms "read:
+soft"). **The number (2026-08-20, same day):** the estimate is also
+printed beside the ring for the note's whole life — MIDI scale 0–127,
+the vocabulary sensors.md's typical-tap table speaks (soft ~1–30,
+medium ~50–80, hard ~100–127; `bow_attack_vel` sees value/127) — and on
+release it survives as a **fading ghost for ~1 s**, so a staccato tap's
+reading doesn't vanish with the finger: the display exists to calibrate
+one's strike, and staccato is exactly where that matters. This is the
+LOCAL estimate drawn at capture time (the exact
+value that rode the wire's velocity byte into `bow_attack_vel`), not a
+Mac round-trip — unlike the linger overlay there is nothing Mac-side to
+drift from, since the byte is consumed as sent. Because a staccato
+touch may never move again after its onset, the indicator model runs a
+short ~15 Hz redraw ticker (`.common` runloop mode) while a ripple or
+ghost is decaying; it dies with them. No motion source (previews) = no
+ripple, no number.
 
 ## Layout
 
@@ -499,6 +615,18 @@ for offline relaunch; if the iPad has never synced, `ContentView` falls back
 to `FretArrangement.defaultArrangement` built from the synced scale so the
 surface is playable, not blank). The synced `marginPixels` carries the Mac
 Fret Pad's **Snap** distance while this layout is active.
+
+**Per-touch indicator (2026-08-17, iPad only):** every play touch draws a
+ring around the finger — amber at onset (every touch is born stopped) and
+whenever the drag assist's stop detector holds (`FretDragAssist.Output.
+stopGate`), cooling to cyan while the finger glides —
+and, whenever the sounding pitch differs ≥1 ¢ from the raw field pitch
+under the finger (onset snap and/or magnet correction), a readout above the
+ring shows `original → corrected`, both named in the scale's own vocabulary
+with signed cents offsets (e.g. `R−18¢ → R`). Display-only
+(`TouchIndicatorModel` + `TouchIndicatorLayerIOS` in
+`PitchPadView_iOS.swift`, fed from the touch handlers and the 60 Hz settle
+timer; publishes stop once a hold settles).
 
 The iPad surface is **always perform mode** (no gridlines, labels, or
 handles; ghosts styled like base frets) and **fully multitouch** — each finger

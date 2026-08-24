@@ -533,15 +533,37 @@ public final class PitchPadEngine: ObservableObject {
     /// fractional MIDI (`tonicFractionalMidi + 12·log2(ratio)`) — no
     /// nearest-semitone pinning, no note+bend split, no MPE channel: the
     /// wire's state frame carries onset and exact pitch atomically.
-    public func noteOn(touchId: Int, ratio: Double, weights: [String: Double] = [:]) {
+    /// `y` is the touch's fret-band position (0…1 top→bottom) when the
+    /// surface knows one — it rides the outbound frame and drives the
+    /// Mac-evaluated fret-linger expression decay. `fretY` is the OUTWARD
+    /// position within the touch's HOME fret's vertical extent (snapped
+    /// onsets only; 0 = the fret's end toward the pad's centre-line, 1 =
+    /// its outer end) — the auto-vibrato ceiling axis.
+    /// nil (the keyboard, scripts, unsnapped onsets for `fretY`) keeps the
+    /// corresponding legacy behavior.
+    /// `velocity01` — per-note ONSET STRIKE VELOCITY 0…1 (2026-08-19: the
+    /// iPad's accelerometer estimate; consumed on the Mac by the String
+    /// voice's `bow_attack_vel` velocity→sharpness law). nil = the flat
+    /// `velocity` constant, the historic behavior.
+    public func noteOn(touchId: Int, ratio: Double,
+                       weights: [String: Double] = [:], y: Double? = nil,
+                       fretY: Double? = nil, velocity01: Double? = nil) {
         let r = clampRatio(ratio)
         currentRatio[touchId] = r
         touchWeights[touchId] = weights
         let pitchSemis = tonicFractionalMidi + 12.0 * log2(r)
         playState.touchOn(touchId, pitchSemis: pitchSemis,
-                          velocity: Double(velocity) / 127.0)
+                          velocity: velocity01 ?? Double(velocity) / 127.0,
+                          posY: y, fretY: fretY)
         sounding.ratio = r
         refreshSoundingWeights()
+    }
+
+    /// The wire id the outbound state assigned to a live touch — the key
+    /// the Mac's LINGER_STATE display frames use, so the iPad overlay can
+    /// match them back to its on-screen touches. nil once released.
+    public func wireId(forTouch touchId: Int) -> UInt16? {
+        playState.wireId(for: touchId)
     }
 
     /// Recompute the published fill weights as the per-seed max across all
@@ -560,7 +582,11 @@ public final class PitchPadEngine: ObservableObject {
     /// the outbound state (change-gated inside) — continuity is the Mac
     /// smoother's job, and the wire carries at most one fresh frame per
     /// sender tick regardless of how fast the finger reports.
-    public func glide(touchId: Int, ratio: Double, weights: [String: Double]? = nil) {
+    /// `y`/`fretY` nil = leave the touch's stored positions unchanged (the
+    /// assist's settle ticks glide the pitch without fresh y knowledge).
+    public func glide(touchId: Int, ratio: Double,
+                      weights: [String: Double]? = nil, y: Double? = nil,
+                      fretY: Double? = nil) {
         guard currentRatio[touchId] != nil else { return }
         let r = clampRatio(ratio)
         currentRatio[touchId] = r
@@ -572,7 +598,8 @@ public final class PitchPadEngine: ObservableObject {
             refreshSoundingWeights()
         }
         playState.touchGlide(touchId,
-                             pitchSemis: tonicFractionalMidi + 12.0 * log2(r))
+                             pitchSemis: tonicFractionalMidi + 12.0 * log2(r),
+                             posY: y, fretY: fretY)
         sounding.ratio = r
     }
 

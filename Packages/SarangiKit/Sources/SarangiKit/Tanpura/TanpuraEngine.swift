@@ -44,7 +44,8 @@ public final class TanpuraEngine: @unchecked Sendable {
     /// pending note events (sync path: audio thread drains; pool
     /// path: producers serialize through this lock into the kernel's
     /// SPSC event ring). op mirrors tanpura_event2: 0 = pluck,
-    /// 1 = bend ratio, 2 = release rate.
+    /// 1 = glide bend, 2 = release rate, 3 = pluck touch,
+    /// 4 = pluck drive, 6 = pre-pluck bend.
     private struct Ev { var slot: Int; var op: Int32; var val: Double }
     private let evLock = OSAllocatedUnfairLock(initialState: [Ev]())
     private var pooled = false
@@ -76,8 +77,14 @@ public final class TanpuraEngine: @unchecked Sendable {
     /// applied per slot at table build (nil = the physical tanpura).
     /// The slot's seed is its frequency in mHz — stable across grid
     /// rebuilds, so `spread`'s per-string jitter is reproducible.
+    /// `threadHMul` (2026-08-15, register calibration): per-slot jiva
+    /// thread-height multiplier by sounding Hz (nil = fitted geometry).
+    /// `hfT60Mul` (same day, cascade slowing): per-slot HF-damping
+    /// stretch by sounding Hz (nil = fitted t60 law).
     public init?(params: TanpuraParams, frequencies: [Double],
-                 workers: Int = 8, shaping: TanpuraShaping? = nil) {
+                 workers: Int = 8, shaping: TanpuraShaping? = nil,
+                 threadHMul: ((Double) -> Double)? = nil,
+                 hfT60Mul: ((Double) -> Double)? = nil) {
         let freqs = frequencies.filter { $0 > 0 }
         guard !freqs.isEmpty else { return nil }
         p = params
@@ -101,7 +108,9 @@ public final class TanpuraEngine: @unchecked Sendable {
             let t = TanpuraTables.buildNote(
                 f0Sounding: f0, cents: cents, p: params,
                 shaping: shaping,
-                slotSeed: UInt64((f0 * 1000.0).rounded()))
+                slotSeed: UInt64((f0 * 1000.0).rounded()),
+                threadHMul: threadHMul?(f0) ?? 1.0,
+                hfT60Mul: hfT60Mul?(f0) ?? 1.0)
             // implicit array->pointer bridging (valid for the call;
             // the kernel deep-copies every table at mount)
             tanpura_mount(ctx, Int32(i), Int32(t.M), Int32(t.J),
@@ -111,11 +120,11 @@ public final class TanpuraEngine: @unchecked Sendable {
                           t.phiO, t.dq,
                           t.gTh, t.thBase, t.thH,
                           t.thF, t.thQ, t.thK,
-                          params.kc, params.alpha, params.hcB,
+                          t.kc, params.alpha, params.hcB,
                           t.deep, t.dt, 1.0,
                           params.pol.g,
                           params.pol.thDeg * Double.pi / 180.0,
-                          params.pol.rt,
+                          t.polRt,
                           Int32((params.rampCycles ?? 0.0) * srSim
                                 / f0))
             tanpura_set_oversample(ctx, Int32(i),
@@ -154,8 +163,26 @@ public final class TanpuraEngine: @unchecked Sendable {
     /// own event ahead of the pluck, so it also NORMALIZES a slot a
     /// previous note left bent (the default 1.0 is a no-op kernel-side
     /// when the slot is already unbent).
+    /// `touch` (2026-08-15; STRING-BANK rework same day): above 0,
+    /// each pluck is a SEPARATE STRING — the ringing string migrates
+    /// to a history clone (full jawari simulation at its own frozen
+    /// pitch, scaled by `touch`; 1 = rings on in full) and the pluck
+    /// lands on settled state. The kernel keeps the N most recently
+    /// played strings alive (`setPolyphony`); overflow evicts the
+    /// oldest into its owner's linear ghost bank, and polyphony 0
+    /// skips clones entirely (spectral-split ghost — the previous
+    /// behavior). 0 = legacy: the pluck rides the ringing string and
+    /// the phase lottery decides the character.
+    /// `drive` (1 = the fitted pluck, bit-exact) plucks the string
+    /// `drive`-times harder into the jawari while the slot's output
+    /// gain rides 1/drive — the mellow↔buzzy contact-engagement axis
+    /// at the calibrated radiated level (the SAV contact is a power
+    /// law, so engagement depth IS the buzz conversion). Both ride
+    /// the same event stream as the pluck, so they are
+    /// sample-synchronous with it.
     public func pluck(slot: Int, velocity: Int, scale: Double = 1.0,
-                      bendRatio: Double = 1.0) {
+                      bendRatio: Double = 1.0, touch: Double = 0.0,
+                      drive: Double = 1.0) {
         guard slot >= 0, slot < slotFrequencies.count else { return }
         let f0 = slotFrequencies[slot]
         let v = max(1, min(127, velocity))
@@ -167,12 +194,19 @@ public final class TanpuraEngine: @unchecked Sendable {
         if pooled {
             // the lock serializes producers into the kernel's SPSC ring
             evLock.withLock { _ in
-                tanpura_event2(ctx, Int32(slot), 1, bendRatio)
+                tanpura_event2(ctx, Int32(slot), 3, touch)
+                tanpura_event2(ctx, Int32(slot), 4, drive)
+                // op 6, not op 1: a PRE-PLUCK bend — when the pitch
+                // changes, the ringing string migrates to its clone
+                // BEFORE the retune, so history keeps its own pitch
+                tanpura_event2(ctx, Int32(slot), 6, bendRatio)
                 tanpura_event2(ctx, Int32(slot), 0, amp)
             }
         } else {
             evLock.withLock {
-                $0.append(Ev(slot: slot, op: 1, val: bendRatio))
+                $0.append(Ev(slot: slot, op: 3, val: touch))
+                $0.append(Ev(slot: slot, op: 4, val: drive))
+                $0.append(Ev(slot: slot, op: 6, val: bendRatio))
                 $0.append(Ev(slot: slot, op: 0, val: amp))
             }
         }
@@ -214,6 +248,15 @@ public final class TanpuraEngine: @unchecked Sendable {
         }
     }
 
+    /// The string bank's size: how many history strings (previous
+    /// plucks, full jawari simulation each) stay alive before the
+    /// oldest is evicted to the linear ghost tier. 0 = no history
+    /// strings (evict straight to the ghost). Thread-safe, applies
+    /// immediately.
+    public func setPolyphony(_ n: Int) {
+        tanpura_set_poly(ctx, Int32(n))
+    }
+
     public func allNotesOff() {
         if pooled {
             evLock.withLock { _ in tanpura_event(ctx, -1, 0.0) }
@@ -245,6 +288,9 @@ public final class TanpuraEngine: @unchecked Sendable {
                 switch e.op {
                 case 1: tanpura_bend(ctx, Int32(e.slot), e.val)
                 case 2: tanpura_release(ctx, Int32(e.slot), e.val)
+                case 3: tanpura_set_touch(ctx, Int32(e.slot), e.val)
+                case 4: tanpura_set_drive(ctx, Int32(e.slot), e.val)
+                case 6: tanpura_prepluck_bend(ctx, Int32(e.slot), e.val)
                 default: tanpura_pluck(ctx, Int32(e.slot), e.val)
                 }
             }

@@ -70,9 +70,40 @@ int tanpura_active_count(void *ctx);
    with rendering). */
 void tanpura_bend(void *ctx, int slot, double ratio);
 void tanpura_release(void *ctx, int slot, double rate);
+/* pluck isolation + pluck drive (Tarabdaar 2026-08-15; STRING-BANK
+   rework, same day). touch 0..1: stored per slot; at each pluck
+   above 0, the ringing string MIGRATES to a history clone — a
+   separate string with the full jawari simulation, frozen at its
+   own pitch, its ring scaled by touch (1 = survives in full) — and
+   the pluck lands on settled state (0 = legacy ride-the-ring). The
+   kernel keeps the N most recently played strings (tanpura_set_poly,
+   0..16, default 6); overflow evicts the OLDEST clone into its
+   owner's linear ghost bank (full band; spectral-split above 2*f0
+   only when the evictee shares the plucked slot, whose fresh
+   fundamental replaces it in the same instant), poly 0 skips clones
+   entirely (split-ghost handoff — no history strings). A releasing
+   (note-off) string is never resurrected into the ghost. The pluck
+   bundle sends op 6 (pre-pluck bend) rather than op 1: a pitch
+   change migrates the old string BEFORE the primary retunes; glide
+   bends (op 1) retune the primary only and never migrate. drive
+   (clamped
+   0.05..20, 1 = fitted, bit-exact): each subsequent pluck drives
+   the string drive-times harder into the jawari while the slot's
+   output gain rides 1/drive — contact engagement (mellow<->buzzy)
+   decoupled from radiated level. Modal slots only (the FD path
+   keeps its round-21 fdTouch instead). Same sync-path contract as
+   bend/release; pool path rides ops 3/4. */
+void tanpura_set_touch(void *ctx, int slot, double touch);
+void tanpura_set_drive(void *ctx, int slot, double drive);
+void tanpura_prepluck_bend(void *ctx, int slot, double ratio);
+/* string-bank size: live history strings before ghost eviction
+   (0..16; atomic store, callable any time from any thread) */
+void tanpura_set_poly(void *ctx, int n);
 /* generalized note event, SPSC like tanpura_event: op 0 = note
-   (val = amp; < 0 damps, slot -1 damps all), op 1 = bend (val =
-   ratio), op 2 = release (val = rate 1/s, 0 = held) */
+   (val = amp; < 0 damps, slot -1 damps all), op 1 = glide bend
+   (val = ratio), op 2 = release (val = rate 1/s, 0 = held),
+   op 3 = pluck touch (val 0..1), op 4 = pluck drive (val 0.05..20),
+   op 6 = pre-pluck bend (val = ratio; migrates history first) */
 void tanpura_event2(void *ctx, int slot, int op, double val);
 
 /* render n mono samples, ADDING into out (caller zeros) — the SYNC

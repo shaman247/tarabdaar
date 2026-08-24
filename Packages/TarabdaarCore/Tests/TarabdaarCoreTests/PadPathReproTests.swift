@@ -12,8 +12,12 @@ final class PadPathReproTests: XCTestCase {
             case on(UInt16), glide(UInt16, Double), off(UInt16), allOff, drone(Int, Bool)
         }
         var calls: [Call] = []
-        func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) { calls.append(.on(id)) }
-        func touchGlide(_ id: UInt16, pitchSemis: Double) { calls.append(.glide(id, pitchSemis)) }
+        func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double,
+                     posY: Double?, fretY: Double?) { calls.append(.on(id)) }
+        func touchGlide(_ id: UInt16, pitchSemis: Double, posY: Double?,
+                        fretY: Double?) {
+            calls.append(.glide(id, pitchSemis))
+        }
         func touchOff(_ id: UInt16) { calls.append(.off(id)) }
         func touchesAllOff() { calls.append(.allOff) }
         func setDronePressed(_ index: Int, _ pressed: Bool) { calls.append(.drone(index, pressed)) }
@@ -50,11 +54,15 @@ final class PadPathReproTests: XCTestCase {
         final class MapperSink: LinkPerformanceSink {
             let mapper = BowControlMapper()
             init() { mapper.setSlotLimit(4) }
-            func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) {
-                mapper.touchOn(id, pitchSemis: pitchSemis, velocity: velocity)
+            func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double,
+                         posY: Double?, fretY: Double?) {
+                mapper.touchOn(id, pitchSemis: pitchSemis, velocity: velocity,
+                               posY: posY, fretY: fretY)
             }
-            func touchGlide(_ id: UInt16, pitchSemis: Double) {
-                mapper.touchGlide(id, pitchSemis: pitchSemis)
+            func touchGlide(_ id: UInt16, pitchSemis: Double, posY: Double?,
+                            fretY: Double?) {
+                mapper.touchGlide(id, pitchSemis: pitchSemis, posY: posY,
+                                  fretY: fretY)
             }
             func touchOff(_ id: UInt16) { mapper.touchOff(id) }
             func touchesAllOff() { mapper.touchAllOff() }

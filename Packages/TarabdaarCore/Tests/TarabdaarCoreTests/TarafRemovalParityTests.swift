@@ -137,6 +137,33 @@ final class TarafRemovalParityTests: XCTestCase {
     /// the new render matches the previous reference to float32 precision
     /// (max delta 5.6e-9 — the side is antisymmetric by construction),
     /// and the L/R deltas are exactly equal-and-opposite.
+    /// RE-BLESSED 2026-08-18 (deliberately) for the DAMPED SETTLE
+    /// (8d1ea0dd475b17c8b0675eef5459d3464387d8452bf7d136e459bb4c7c3b9e5a
+    /// was the prior hash): the build pre-roll now renders with the
+    /// taraf choked (t60 50 ms, `setJtSettleDamp`) and restores the
+    /// natural ring (byte-null momentum scalar) before publish, so the
+    /// q0 relax chime dies inside the discarded blocks instead of
+    /// asymptoting at ~-50 dBFS and riding out ~10 s after launch —
+    /// publish peak fell to -93 dBFS and `settleBlocks` dropped 5 → 3
+    /// (~60% of the old rebuild latency). This render starts from that
+    /// silent, settled state: the phrase itself is untouched physics,
+    /// but every sample moves because the residual chime under it is
+    /// gone.
+    /// RE-BLESSED 2026-08-17 (deliberately) for the QUIESCENCE GATE at
+    /// its baked 40 dB floor
+    /// (afa6e932569f98fd136fcc11f88ab87862740fd47ca6930d414dc047b49ead19
+    /// was the prior hash): the idle-CPU gate freezes jt rows resting
+    /// below the floor, and at 40 dB the phrase's opening 50 ms of
+    /// silence sleeps the quietest rows — the truncated sub-floor tail
+    /// moves samples near the first note-on by ~7e-4 (≈ −60 dBFS, the
+    /// woken rows resume their frozen static wrap). The gate at its
+    /// earlier 60 dB floor was verified hash-identical under the prior
+    /// reference (no row slept inside this phrase); 40 is baked because
+    /// a PRESSED resting bone (`bow_jt_evolve` → 0) sustains a steady
+    /// low-mode limit cycle ABOVE the 60 dB floor (stock rig ×3.34,
+    /// hot-gain rig ×6.6 — sub-audible, but it held the whole web awake
+    /// at idle). `bow_jt_gate` 0 (the escape hatch) still renders the
+    /// raw physics.
     /// RE-BLESSED 2026-08-01 (deliberately) for the COHERENCE rev
     /// (a17280cf3ba3d655fba14a675259696430235db2385c94e5e72cab7c6c484625):
     /// the generated bank's CROWD t60s shortened ~×0.6 (the three drone
@@ -163,7 +190,7 @@ final class TarafRemovalParityTests: XCTestCase {
     /// (eac0460aac9194bc899fd3c918278e139b1a474722eb7fe1014eb528417d923c,
     /// captured at commit 19fe7f4 with `bow_taraf_Z` 0 / `bow_open_Z` 0).
     private static let referenceSHA256 =
-        "afa6e932569f98fd136fcc11f88ab87862740fd47ca6930d414dc047b49ead19"
+        "4b445c635c9ca9cf2956fb4d64200766150fd182ad0b4304fc784ab221232fca"
 
     func testDefaultMatchesTheSilencedWebReference() throws {
         let y = try render()

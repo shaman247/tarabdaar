@@ -90,7 +90,112 @@ Python render's C source) at 96 kHz, decimated to 48 kHz, with:
   its sum was added after the body solve — so the melody carried the
   body formants and the wash didn't, which is a large part of why the
   taraf read as a separate backing chorus rather than the same
-  instrument,
+  instrument. **The charge governor (2026‑08‑15):** `bow_jt_gov`
+  (`.live`, 0…1, default 0 = byte‑null, kernel
+  `bow_poly_jt_set_gov`) — the taraf's accumulation tamer. Measured
+  (`TarafVarianceBench`, TarabdaarCore, skip‑gated on
+  `TARAF_BENCH_DIR`/`_HOT`/`_GOV`): the long‑t60 anchor rows (Sa
+  0.95/7 s, low Sa 0.95/9 s, low Pa 0.85/8 s — consonant with
+  everything by design) accumulate a whole phrase, so high Sa lands
+  +8…+12 dB hotter after four notes than struck cold (Pa +4…+6 dB, a
+  non‑kin degree +1…+2), re‑excitation phase against the stored ring
+  makes it a several‑dB strike‑to‑strike lottery (`p += dt·Fd·phiD`
+  on ringing state — the tanpura pluck lottery's twin), and at high
+  expression the pile‑up crosses the contact knee into the hard‑buzz
+  regime (early‑ring buzz share 1 % → 14–16 %, only after a phrase —
+  the "randomly very loud with buzz on Pa/high Sa" report). The
+  `bow_jt_norm` output law can't reach this: it trims `phiO`
+  (radiation) while the drive side `phiD` scales with raw row gain,
+  so the anchors charge internally regardless. The governor is a
+  per‑row AGC at the CAUSE: each row tracks a ~60 ms peak envelope
+  of its contact‑zone velocity, and drive into a row ringing above
+  the graze target (`bow_jt_gov_ref` bp scalar × apex → per‑row
+  velocity bound via mode‑1 rate) is shed by ref/env — the ring
+  saturates at its single‑strike level instead of piling up. Applied
+  BEFORE the drone‑noise add (held drones are never ducked);
+  recruitment weights compose upstream. 0 is bit‑exact; the startup
+  resting push arms nothing (`TarafGovernorTests`). **Calibration
+  (gov sweep, ref 12/24/48/96/192):** the shipped ref **48** is the
+  knee — a resting‑level solo strike renders BIT‑IDENTICALLY at
+  gov 1 (its envelope never crosses the target), the moderate CC64
+  phrase swell on Pa moves ~0.2 dB, while the hot phrase→high‑Sa
+  pile‑up sheds 14–16 dB and its buzz share falls 16 % → ~1.5 %
+  (hot solos compress gently, −41.2 → −45.9 dB, buzz 6.1 → 1.8 %).
+  TRAP: ref ~96 parks the ring AT the buzz‑maximal graze band
+  (buzz share 28 %, WORSE than ungoverned — the band is where the
+  cascade lives; hold the ring there and it buzzes continuously).
+  12–24 over‑govern (solo −13…−6 dB). Re‑run the sweep after any
+  bone/apex refit, don't interpolate. The sympathetic swell through
+  a phrase is real sarangi behaviour — the knob dials how much the
+  taraf remembers, it doesn't delete the physics. **The quiescence
+  gate (2026‑08‑17):** `bow_jt_gate` (a **bp scalar like
+  `bow_jt_gov_ref`, NOT a registry parameter** — always on at the
+  baked default **40** dB below the graze apex; a 0 override in
+  tests/auditions is the bit‑exact raw‑physics escape hatch; kernel
+  `bow_poly_jt_set_gate`) — the idle‑CPU gate. The jt web is a constant‑cost simulation: every row
+  ticks its whole mode stack (up to `bow_jt_mcap` 64 modes) at the jt
+  rate whether ringing or silent, so the idle app burns the full web
+  cost — measured ~350 % CPU across the `bow_jt_threads` 8 workers
+  plus the async dispatcher with nothing playing. Armed, a row whose
+  peak LOW‑MODE momentum rests below the floor (`10^(−gate/20)` ×
+  apex × mode‑1 rate, the governor's velocity‑bound convention) for
+  ~30 ms of consecutive jt ticks with no bridge drive above its wake
+  bound and no drone drive goes to sleep **in place**: its state is
+  FROZEN, never zeroed — `jtQ` holds the settled static wrap against
+  the bone, and zeroing it would strum the re‑settle on wake — and
+  the whole modal tick is skipped (output truncates from sub‑floor to
+  exact 0). The low modes (first ≤ 6) are the ONE workable meter: the
+  wrap is a dynamic equilibrium — a tick‑rate micro limit‑cycle
+  against the bone that never rests — so the contact‑zone velocity
+  (constant ~0.6 at rest, right under the governor's ~1.0 graze
+  scale) and the raw radiated sample (constant ~5e‑3 per row) both
+  sit on standing baselines, while the audible ring lives in the
+  first modes, which rest 3+ decades below ring scale. The
+  consecutive‑tick hold means single‑tick |p| dips at the mode
+  cycle's zero crossings can't fake quiet. Wake: bridge drive above
+  the per‑row bound (the force that could ring the low modes back to
+  the floor within ~one mode‑1 period of resonant driving —
+  conservative, precomputed at arm time) or ANY drone drive (pluck
+  boost included) resumes the frozen state instantly, so the first
+  note of a phrase meets a fully live taraf;
+  `bow_poly_jt_set_evolve` wakes everyone on a MATERIAL bone move (a
+  row sleeping through a real glide would meet the moved bone as a
+  step) — change‑gated with a dead‑band (2% of jtDeep = 5% of apex)
+  against the target the sleepers were frozen under, because a live
+  tilt/stick binding streams the setter at sensor rate. **The
+  evolve‑binding trap (2026‑08‑17):** every APPLIED evolve change
+  physically moves the bone, and zero‑mean sensor jitter pumping the
+  bone keeps the resting rows' low modes above the gate floor —
+  measured: a Joy‑Con stick‑Y → `bow_jt_evolve` binding held all 19
+  rows awake at idle (the full pre‑gate burn back, plus HAL overload
+  on a DisplayPort output). Fixed at the choke point:
+  `BowEngine.setJtEvolve` has a cumulative 0.005 dead‑band against
+  the last APPLIED value — jitter never accumulates past it, a real
+  sweep does (its ≤0.5% staircase rides the kernel's ~40 ms slew;
+  `JtEvolveSweepTests` unchanged). Guard:
+  `TarafGateTests.testEvolveJitterSpamDoesNotHoldWebAwake`. Held
+  drones never sleep. **The floor is baked at 40 dB — the PRESSED‑BONE finding
+  (2026‑08‑17):** a resting bone pressed past the knee
+  (`bow_jt_evolve` toward 0 = negative lift) sustains a steady
+  LOW‑mode limit cycle at rest — measured: stock rig at evolve 0
+  parks at ×3.34 of a 60 dB floor (5/19 rows ever sleep), a hot‑gain
+  22‑row rig at ×6.6 (≈ −43.6 dB re apex velocity, reported
+  inaudible) — so the original 60 dB floor never closed on pressed
+  rigs and the whole web stayed awake at idle. 40 sleeps both with
+  ≥2× margin; deeper than ~75 dB sits under even the neutral‑bone
+  resting baseline and never closes. Measured at the bake: 10 of 19
+  rows asleep after 1 s of silence, the rest within ~10 s; a 20 s
+  idle offline render fell 45 s → 5 s wall (~9× less CPU).
+  `TarafRemovalParityTests` was deliberately RE‑BLESSED for the
+  40 dB floor (the quietest rows sleep in its phrase's opening
+  silence; ~7e‑4 sample moves near the first onset — the 60 dB
+  floor had been verified hash‑identical under the prior
+  reference).
+  Asleep count:
+  `bow_poly_jt_gate_asleep` → `BowEngine.jtGateAsleep()`. Guards:
+  `TarafGateTests` (the default sleeps at idle and wakes on a
+  strike, the 0 override truly disarms, and the woken strike keeps
+  the ungated ring),
 - the **taraf bridge‑coupling web** (2026‑08‑01, the coherence rev's
   TWO‑WAY fix): one SILENT linear comb per enabled tarab row back on
   the passive wave junction (`bow_cpl_*`, group "Taraf coupling";
@@ -236,6 +341,12 @@ Python render's C source) at 96 kHz, decimated to 48 kHz, with:
      ~0.5 s off‑main before returning (chime −26 dB, below the tail
      floor; also primes the async‑jt FIFO). Deliberately NOT in
      `BowEngine.init` — parity fixtures need renders from t = 0.
+     **2026‑08‑18: the DAMPED SETTLE superseded pre‑roll length tuning**
+     — the taraf is choked (t60 50 ms) through the discarded blocks and
+     restored byte‑exactly before publish, so the chime dies at the
+     cause instead of asymptoting at ~−50 dBFS: publish peak −93 dBFS
+     at the shipped 3 settle blocks (was 5), and the launch is silent
+     (see [Sound Design](sound-design.md), rebuild cost).
   3. **Tone tilt** (CC72: 0 = bass bias, 64 = flat, 127 = treble bias):
      a complementary low/high shelf pair (∓/± `bow_tilt_eq_db` 9 dB at
      `bow_tilt_eq_lo` 300 Hz / `bow_tilt_eq_hi` 2400 Hz) over the whole
@@ -305,10 +416,26 @@ Python render's C source) at 96 kHz, decimated to 48 kHz, with:
   locked to THAT (the two rings agree), not to nominal,
 - an **analytic Schelleng press envelope** (wedge‑relative force mapping),
   place‑then‑draw articulation with attack bite, aftertouch vibrato, and
-  **self‑calibrated intonation** (two‑stage pitch‑correction tables),
+  **self‑calibrated intonation** (two‑stage pitch‑correction tables).
+  **Attack sharpness has TWO drives (2026‑08‑19):** the press law (onset
+  press above `bow_attack_thresh` — the pads hold press ~0.56, so
+  lowering the threshold sharpens every onset) and the **onset strike
+  velocity** (`bow_attack_vel`: sharpness = max(press law, key ×
+  velocity 0…1) — per‑note articulation: tap hard = martelé bite +
+  `bow_draw_min_ms` fast draw + `bow_attack_fms` velocity‑leads‑force
+  ramp, place gently = the legato draw; velocity comes from the iPad's
+  accelerometer estimate ([sensors.md](sensors.md)) or MIDI/audition
+  velocity, and the key at its 0 default keeps the historic press‑only
+  law bit‑exact — the velocity byte was carried but discarded before).
+  Everything in the Articulation group acts on FRESH attacks only —
+  glides are held notes/legato steals and never re‑articulate, so glide
+  character is untouched by construction,
 - the **sustain‑liveness layer** (2026‑08‑01, fitted to clean SWAM Violin 3
   captures): a post‑onset settle (`bow_settle_db`) that eases the stroke off
-  its capture overshoot, three seeded Ornstein–Uhlenbeck walks
+  its capture overshoot (since 2026‑08‑19 `bow_settle_sharp` exempts a
+  SHARP attack from it — depth × (1 − key × sharpness) — so an accented
+  staccato holds its level while gentle sustains keep the fitted
+  balance; 0 = bit‑null), three seeded Ornstein–Uhlenbeck walks
   (`bow_drift_*`) that give a held note its slow pitch/level/timbre wander,
   and a glide‑rate bow lightening (`bow_glide_dip_db`) that articulates
   legato transitions — measurements and traps in

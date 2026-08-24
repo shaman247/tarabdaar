@@ -497,6 +497,14 @@ private struct FretPadSurface: View {
     /// `2^(fieldLog + snapOffsetLog)`, so the snapped pitch is exact at the
     /// onset point and finger movement glides relative to it.
     @State private var snapOffsetLog: Double = 0
+    /// The snapped fret's vertical extent, captured at onset — the
+    /// auto-vibrato ceiling axis is the finger's OUTWARD position within
+    /// it (`fretY`: 0 at the end toward the band's centre-line, 1 at the
+    /// outer end; `outerIsTop` fixes the orientation, from the shared
+    /// `fretOuterEndIsTop`). nil for unsnapped onsets: no home fret, no
+    /// auto-vibrato.
+    @State private var homeFretExtent:
+        (top: CGFloat, bottom: CGFloat, outerIsTop: Bool)? = nil
     /// Drag assist ("magnetic" intonation at stops/turns — see
     /// `FretDragAssist`). The timer drives the settle while the mouse is
     /// held still (no drag events arrive then).
@@ -563,9 +571,13 @@ private struct FretPadSurface: View {
                         let dim = !perform && p.isGhost
                         let hue = pitchColor(forRatio: p.ratio, lightness: 0.82,
                                              chroma: 0.20).opacity(dim ? 0.45 : 1.0)
+                        // Straight over the inner dead zone, a wavy tail
+                        // over the outer auto-vibrato zone (shared
+                        // `fretLinePoints` — the iPad draws the same).
                         var line = Path()
-                        line.move(to: CGPoint(x: p.x, y: p.topY))
-                        line.addLine(to: CGPoint(x: p.x, y: p.bottomY))
+                        line.addLines(fretLinePoints(x: p.x, topY: p.topY,
+                                                     bottomY: p.bottomY,
+                                                     bandHeight: band.height))
                         ctx.stroke(line, with: .color(hue), lineWidth: dim ? 1 : 1.5)
                         if !perform {
                             if !p.isGhost {
@@ -695,16 +707,23 @@ private struct FretPadSurface: View {
             snapOffsetLog = log2(hit.ratio) - fieldLog
             onsetLog = log2(hit.ratio)
             weights = [hit.id: 1.0]
+            homeFretExtent = (hit.topY, hit.bottomY,
+                              fretOuterEndIsTop(topY: hit.topY,
+                                                bottomY: hit.bottomY,
+                                                bandHeight: size.height))
         } else {
             snapOffsetLog = 0
             onsetLog = fieldLog
             weights = [:]
+            homeFretExtent = nil
         }
 
         let touch = nextTouchId()
         activeTouchId = touch
         let now = CACurrentMediaTime()
-        engine.noteOn(touchId: touch, ratio: pow(2.0, onsetLog), weights: weights)
+        engine.noteOn(touchId: touch, ratio: pow(2.0, onsetLog), weights: weights,
+                      y: clamp01(Double(pt.y / size.height)),
+                      fretY: fretRelativeY(pt))
 
         assist.setContext(placements: placements, snapDistance: snapDistance)
         assist.begin(touchId: touch, x: pt.x, y: pt.y,
@@ -737,7 +756,10 @@ private struct FretPadSurface: View {
                            "settleTau": assist.settleTau,
                            "radiusScale": assist.radiusScale,
                            "turnGain": assist.turnGain,
-                           "turnTau": assist.turnTau])
+                           "turnTau": assist.turnTau,
+                           "stillRadiusPx": assist.stillRadiusPx,
+                           "stopDwellMin": assist.stopDwellMin,
+                           "stopDwellRamp": assist.stopDwellRamp])
     }
 
     /// 60 Hz settle loop while a play touch is down. Captures only the class
@@ -812,7 +834,9 @@ private struct FretPadSurface: View {
         let out = assist.move(touchId: touch, x: pt.x, y: pt.y,
                               uncorrectedLog: fieldLog + snapOffsetLog, time: now)
         engine.glide(touchId: touch, ratio: pow(2.0, out.log2Pitch),
-                     weights: out.weights)
+                     weights: out.weights,
+                     y: clamp01(Double(pt.y / size.height)),
+                     fretY: fretRelativeY(pt))
         recorder.sample(touchId: touch, x: pt.x, y: pt.y,
                         u: fieldLog + snapOffsetLog, o: out.log2Pitch, time: now)
     }
@@ -836,6 +860,16 @@ private struct FretPadSurface: View {
         moveOffsetX = 0
         moveOffsetY = 0
         snapOffsetLog = 0
+        homeFretExtent = nil
+    }
+
+    /// The finger's OUTWARD position within the home fret's vertical
+    /// extent (0 = the fret's end toward the band's centre-line, 1 = its
+    /// outer end), nil when the onset didn't snap to a fret.
+    private func fretRelativeY(_ pt: CGPoint) -> Double? {
+        guard let e = homeFretExtent, e.bottom > e.top else { return nil }
+        let t = clamp01(Double((pt.y - e.top) / (e.bottom - e.top)))
+        return e.outerIsTop ? 1 - t : t
     }
 
     /// Right-click deletes a (base) fret. Disabled in perform mode.

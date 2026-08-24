@@ -59,6 +59,7 @@ __pycache__/
 # Local-only working areas
 _archive/
 auditions/
+auditions-ci/
 
 # Media & render artifacts (asset-catalog images are re-included below)
 *.png

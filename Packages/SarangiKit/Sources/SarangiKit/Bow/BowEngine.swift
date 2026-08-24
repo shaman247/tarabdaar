@@ -219,6 +219,20 @@ public final class BowEngine {
     private var filters: [BowControlFilter] = []
     private var lastSerial: [UInt32] = []
     private var slotSilent: [Bool] = []
+    /// FRET LINGER display export (2026-08-18): one entry per sounding
+    /// linger-active touch slot, refreshed by the render thread after each
+    /// poly chunk's control fill (in-place writes into the preallocated
+    /// buffer — no audio-thread allocation) and copied out by
+    /// `lingerDisplay()` for the Mac→iPad LINGER_STATE feed.
+    public struct LingerTouchState: Sendable, Equatable {
+        public var id: UInt16 = 0
+        public var charge = 1.0
+        public var vib = 0.0
+        public var vibCeil = 0.0
+    }
+    private var lingerDisplayLock = os_unfair_lock()
+    private var lingerBuf: [LingerTouchState] = []
+    private var lingerCount = 0
     private var polySnap: BowControlMapper.PolySnapshot
 
     /// `rfir` = the 48 kHz radiation FIR taps (empty ⇒ flat), `eLp` = the
@@ -303,6 +317,8 @@ public final class BowEngine {
         for i in filters.indices { filters[i].seedDrift(UInt64(i)) }
         lastSerial = [UInt32](repeating: 0, count: nPoly)
         slotSilent = [Bool](repeating: false, count: nPoly)
+        lingerBuf = [LingerTouchState](repeating: LingerTouchState(),
+                                       count: nPoly)
         mapper.setSlotLimit(nPoly)
 
         let t = tables
@@ -421,6 +437,46 @@ public final class BowEngine {
                 if ev != 0.5 {
                     bow_poly_jt_set_evolve(
                         pk, jtApexRef * (1.0 - pow(4.0, 1.0 - 2.0 * ev)))
+                }
+                jtEvolveApplied = ev   // dead-band reference (setJtEvolve)
+                // CHARGE GOVERNOR (2026-08-15): the graze target in
+                // apex units (`bow_jt_gov_ref`, bp scalar like the tilt
+                // range keys); a bp resting value arms it at build (the
+                // audition/test `string.bow_jt_gov` route; the app's
+                // live push arrives on top). 0 = byte-null. Default 48
+                // = the calibrated knee (TarafVarianceBench gov sweep):
+                // a resting-level solo strike renders bit-identically
+                // (env never crosses ref) while the hot phrase pile-up
+                // sheds 14-16 dB and its buzz share falls 16% -> ~1.5%.
+                // TRAP: ~96 holds the ring AT the buzz-maximal graze
+                // band (buzz share WORSE than ungoverned) - if this is
+                // retuned, re-run the sweep, don't interpolate.
+                jtGovRefDisp = jtApexRef * bp.v("bow_jt_gov_ref", 48.0)
+                let gov = bp.v("bow_jt_gov", 0.0)
+                if gov > 0 {
+                    bow_poly_jt_set_gov(pk, min(gov, 1.0), jtGovRefDisp)
+                }
+                // QUIESCENCE GATE (2026-08-17): sleep floor in dB below
+                // the graze apex — rows resting sub-floor freeze in
+                // place and skip their modal tick (the idle-CPU gate;
+                // idle burned ~350% CPU across the jt workers without
+                // it). ALWAYS ON, not a user parameter. Default 40:
+                // a PRESSED resting bone (bow_jt_evolve toward 0 —
+                // negative lift) sustains a steady LOW-mode limit
+                // cycle at rest — measured stock rig at evolve 0:
+                // x3.34 of the 60 dB floor, never closes; the user's
+                // hot-gain rig: x6.6 (= -43.6 dB re apex velocity,
+                // reported inaudible). 40 sleeps both with >=2x
+                // margin and truncates ~3.6 dB above that inaudible
+                // level. Deeper floors (>~75) sit under even the
+                // neutral-bone resting baseline and never close.
+                // `bow_jt_gate` stays a bp scalar (gov_ref style) so
+                // tests/auditions can override; 0 = the bit-exact
+                // raw-physics escape hatch.
+                let gate = bp.v("bow_jt_gate", 40.0)
+                if gate > 0 {
+                    bow_poly_jt_set_gate(
+                        pk, jtApexRef * pow(10.0, -gate / 20.0))
                 }
                 // MELODY FOLLOWER (2026-07-25): arm the tracked row and
                 // send it to the tonic; renderPolyChunk retargets it to
@@ -740,6 +796,26 @@ public final class BowEngine {
     /// instrument's body instead of beside it. 0 = bypass (byte-exact
     /// legacy). Plain kernel scalar write (the drone-setter contract);
     /// the kernel slews ~30 ms.
+    /// SITAR→TARAF INJECT gain (2026-08-19): scales another voice's
+    /// rendered output into this kernel's jt drive — the sitar main
+    /// instrument's sympathetic halo rides the same modal-jawari web
+    /// the played gut strings charge. Control thread only (the first
+    /// non-zero call allocates the kernel-side ring); 0 with nothing
+    /// ever written is byte-null (the parity guarantee holds).
+    public func setJtInjectGain(_ g: Double) {
+        guard let pk = pkernel else { return }
+        bow_poly_jt_inject_gain(pk, g)
+    }
+
+    /// SITAR→TARAF INJECT write (2026-08-19): append the other voice's
+    /// mono block to the kernel's SPSC inject ring. Call from that
+    /// voice's render callback (this is the ONE BowEngine entry point
+    /// meant for a foreign render thread); a full ring drops the block.
+    public func jtInjectWrite(_ x: UnsafePointer<Double>, _ n: Int) {
+        guard let pk = pkernel else { return }
+        bow_poly_jt_inject_write(pk, x, Int32(n))
+    }
+
     public func setJtBody(_ mix01: Double) {
         guard let pk = pkernel else { return }
         bow_poly_jt_set_body(pk, min(max(mix01, 0.0), 1.0))
@@ -756,11 +832,59 @@ public final class BowEngine {
     public func setJtEvolve(_ e01: Double) {
         guard let pk = pkernel else { return }
         let e = min(max(e01, 0.0), 1.0)
+        // Cumulative DEAD-BAND (2026-08-17): a live tilt/stick binding
+        // streams this setter at sensor rate, and every applied change
+        // MOVES THE BONE — zero-mean sensor jitter mechanically pumps
+        // the resting taraf's low modes above the quiescence-gate floor
+        // and holds the whole web awake at idle (measured: a Joy-Con
+        // stick-Y → bow_jt_evolve binding, ±0.4% jitter → 0 rows ever
+        // slept). Compare against the last APPLIED value, not the last
+        // push: jitter never accumulates past the band, a real sweep
+        // does — its ≤0.5% staircase is smoothed by the kernel's ~40 ms
+        // slew (JtEvolveSweepTests still pins the click-free sweep).
+        if abs(e - jtEvolveApplied) < 0.005 { return }
+        jtEvolveApplied = e
         bow_poly_jt_set_evolve(pk, jtApexRef * (1.0 - pow(4.0, 1.0 - 2.0 * e)))
     }
+    /// Last evolve 0…1 actually forwarded to the kernel (dead-band ref).
+    private var jtEvolveApplied = 0.5
     /// Graze-margin reference (`bow_jt_apex` at build) for the evolution
     /// map above.
     private var jtApexRef = 1.0e-5
+
+    /// CHARGE GOVERNOR 0…1 (base parameter `bow_jt_gov`): per-row AGC on
+    /// the bridge drive into the jt strings — a row ringing above the
+    /// graze target (`bow_jt_gov_ref` × apex, resolved at build) sheds
+    /// incoming drive, so the long-t60 anchor rows saturate at their
+    /// single-strike ring instead of accumulating a whole phrase (the
+    /// Pa / high-Sa loud-buzz pile-up). 0 = bypass (byte-exact legacy).
+    /// Plain kernel scalar write (the drone-setter contract).
+    public func setJtGov(_ amt01: Double) {
+        guard let pk = pkernel else { return }
+        bow_poly_jt_set_gov(pk, min(max(amt01, 0.0), 1.0), jtGovRefDisp)
+    }
+    /// Graze-target displacement (meters) resolved at build from
+    /// `bow_jt_gov_ref` × `bow_jt_apex` (48 × 1e-5 at the shipped fit).
+    private var jtGovRefDisp = 4.8e-4
+
+    /// Rows currently asleep under the quiescence gate (`bow_jt_gate`
+    /// bp scalar, ALWAYS ON at 40 dB below the graze apex — not a user
+    /// parameter; 0 override = the bit-exact escape hatch) —
+    /// telemetry/tests.
+    public func jtGateAsleep() -> Int {
+        guard let pk = pkernel else { return 0 }
+        return Int(bow_poly_jt_gate_asleep(pk))
+    }
+    /// Gate probe telemetry — (asleep rows, max ring/floor ratio, max
+    /// drive/wake-bound ratio, drone-hot) since the last read. A ratio
+    /// > 1 names the condition currently blocking sleep.
+    public func jtGateProbe() -> (asleep: Int, total: Int, ringR: Double,
+                                  driveR: Double, droneHot: Bool) {
+        guard let pk = pkernel else { return (0, 0, 0, 0, false) }
+        var o = [Double](repeating: 0, count: 5)
+        bow_poly_jt_gate_probe(pk, &o)
+        return (Int(o[0]), Int(o[1]), o[2], o[3], o[4] > 0.5)
+    }
 
     /// SITAR TWANG 0…1 (base parameter `bow_twang`): the played strings'
     /// grazing bridge fold — 0 = the plain bridge (byte-exact legacy),
@@ -784,6 +908,22 @@ public final class BowEngine {
         guard let pk = pkernel else { return }
         bow_poly_set_twang_shape(pk, kneeR, depth, relMs, rollSmp,
                                  bright, ring, gut)
+    }
+
+    /// SETTLE DAMP (2026-08-18): direct, unsmoothed taraf t60 override,
+    /// used ONLY inside the build-time settle pre-roll — chokes the q0
+    /// relax chime inside the discarded blocks so the engine publishes
+    /// silent (the anchors' natural 7–9 s tails would otherwise ride out
+    /// audibly for ~10 s). t60 <= 0 restores the natural ring EXACTLY
+    /// (`jtDampMul` is a pure per-tick momentum scalar; 0 = byte-null —
+    /// the wrap's static q settles under contact regardless, damping
+    /// only kills the oscillation faster). Never call on a published
+    /// engine — the runtime axis is `setTarafDamp` (smoothed), and its
+    /// chunk-rate smoother only pushes on CHANGE, so it cannot fight
+    /// this inside the pre-roll while the axis rests at 0.
+    public func setJtSettleDamp(t60: Double) {
+        guard let pk = pkernel else { return }
+        bow_poly_jt_set_damp_t60(pk, t60)
     }
 
     /// TARAF DAMPING amount 0..1 (base parameter `bow_jt_damp`): 0 = the
@@ -1099,13 +1239,55 @@ public final class BowEngine {
     public func seedLiveGains() {
         liveGainCur = (trim: outGain, mix: reverb.mix, width: reverb.width)
         liveGainTarget = liveGainCur
+        os_unfair_lock_lock(&tiltLock)
+        trimBase = outGain            // build-time trim = the fitted base
+        os_unfair_lock_unlock(&tiltLock)
     }
+
+    /// MASTER GAIN (`bow_gain`, .live 2026-08-23): the performance volume
+    /// of the WHOLE radiated instrument — multiplies the fitted trim at
+    /// the same ramped output gain (~25 ms glide, chunk-capped), with NO
+    /// bp push, NO rebuild and NO debounce, so a tilt/strike binding
+    /// sweeps it in real time. Runtime playing state (the bow_jt_damp
+    /// pattern): `StringVoiceSource` caches it and re-applies across
+    /// rebuilds; the bp dict never carries the key. Control-thread safe —
+    /// the render thread picks the change up at the next chunk
+    /// (`applyPendingLive`).
+    public func setMasterGain(_ g: Double) {
+        let gg = max(g, 0.0)
+        os_unfair_lock_lock(&tiltLock)
+        if abs(gg - masterGain) > 1e-12 {
+            masterGain = gg
+            masterGainDirty = true
+            liveRampArmed = true      // first chunk after the change ramps
+        }
+        os_unfair_lock_unlock(&tiltLock)
+    }
+
+    /// Master-gain state, all under `tiltLock`: the current factor, the
+    /// render-thread pickup flag, and the FITTED trim base (bp's
+    /// bow_live_trim, pre-gain) — kept separate so gain moves need no bp
+    /// and bp pushes compare in BASE terms (the no-op-push chunk-cap
+    /// guard must not fire just because gain ≠ 1).
+    private var masterGain = 1.0
+    private var masterGainDirty = false
+    private var trimBase = 1.0
 
     /// `tables` (stage 3) additionally reloads the BODY modal bank and the
     /// modal-jawari coefficients in place. Pass nil to move scalars only.
     /// The kernel refuses a reload whose shape moved, in which case the
     /// engine keeps its current tables — the caller must rebuild, and
     /// `ParamRegistry.inPlaceKeys` is what guarantees that never happens.
+    /// The current per-touch linger envelope state (display feed for the
+    /// LINGER_STATE frame). Thread-safe; allocation happens on the caller,
+    /// never the render thread.
+    public func lingerDisplay() -> [LingerTouchState] {
+        os_unfair_lock_lock(&lingerDisplayLock)
+        let out = Array(lingerBuf[0..<lingerCount])
+        os_unfair_lock_unlock(&lingerDisplayLock)
+        return out
+    }
+
     public func setLiveParams(bp: BowParams, scalars: [Double],
                               tables: BowKernelTables? = nil) {
         guard scalars.count == 61 else { return }
@@ -1117,12 +1299,16 @@ public final class BowEngine {
         // no-op push before this check). Coefficient reloads need no ramp
         // — swapping filter coefficients while keeping state is
         // click-free — so a tables-only edit does not arm it either.
-        let gains = (trim: bp.v("bow_live_trim", outGain),
-                     mix: bp.v("bow_rev_mix", reverb.mix),
+        // The trim is compared in BASE terms (pre master-gain) against
+        // `trimBase` — the applied trim is base × masterGain, but gain
+        // moves travel their own path (`setMasterGain`) and must not make
+        // every bp push look like a trim change.
+        let gains = (mix: bp.v("bow_rev_mix", reverb.mix),
                      width: bp.v("bow_rev_width", reverb.width))
         os_unfair_lock_lock(&tiltLock)
+        let baseTrim = bp.v("bow_live_trim", trimBase)
         let ramped = scalars != liveScalarsTarget
-            || abs(gains.trim - liveGainTarget.trim) > 1e-12
+            || abs(baseTrim - trimBase) > 1e-12
             || abs(gains.mix - liveGainTarget.mix) > 1e-12
             || abs(gains.width - liveGainTarget.width) > 1e-12
         if !ramped, tables == nil, pendingLive == nil {
@@ -1221,7 +1407,18 @@ public final class BowEngine {
         os_unfair_lock_lock(&tiltLock)
         let pending = pendingLive
         pendingLive = nil
+        let gainDirty = masterGainDirty
+        masterGainDirty = false
+        let gain = masterGain
+        let base = trimBase
         os_unfair_lock_unlock(&tiltLock)
+
+        // Master-gain-only change (a bound axis moving): retarget the
+        // trim glide without any bp push.
+        if gainDirty, pending == nil {
+            liveGainTarget.trim = base * gain
+            liveRamping = true
+        }
 
         if let (bp, scalars, tables) = pending {
             liveScalarsTarget = scalars
@@ -1234,7 +1431,11 @@ public final class BowEngine {
             for i in filters.indices { filters[i].updateLiveParams(bp: bp) }
             filter.updateLiveParams(bp: bp)
             if let t = tables { reloadCoefficients(t) }
-            liveGainTarget = (trim: bp.v("bow_live_trim", outGain),
+            let newBase = bp.v("bow_live_trim", base)
+            os_unfair_lock_lock(&tiltLock)
+            trimBase = newBase
+            os_unfair_lock_unlock(&tiltLock)
+            liveGainTarget = (trim: newBase * gain,
                               mix: bp.v("bow_rev_mix", reverb.mix),
                               width: bp.v("bow_rev_width", reverb.width))
             // Radiation corners: coefficients move, filter STATE stays, so
@@ -1261,7 +1462,10 @@ public final class BowEngine {
             liveRamping = true
         }
 
-        guard liveRamping, !liveScalarsTarget.isEmpty else { return }
+        // (Gains can ramp before any scalar push has ever happened — a
+        // master-gain move on a fresh engine — so empty scalar history no
+        // longer blocks the glide; the kernel push below stays guarded.)
+        guard liveRamping else { return }
         // ~25 ms one-pole glide, same shape as the taraf-axis smoother.
         let a = 1.0 - exp(-Double(n48) / (0.025 * sr))
         var settled = true
@@ -1290,9 +1494,11 @@ public final class BowEngine {
         outGain = liveGainCur.trim
         reverb.mix = liveGainCur.mix
         reverb.width = liveGainCur.width
-        liveScalarsCur.withUnsafeBufferPointer { sp in
-            if let pk = pkernel {
-                bow_poly_set_scalars(pk, sp.baseAddress!, Int32(sp.count))
+        if !liveScalarsCur.isEmpty {
+            liveScalarsCur.withUnsafeBufferPointer { sp in
+                if let pk = pkernel {
+                    bow_poly_set_scalars(pk, sp.baseAddress!, Int32(sp.count))
+                }
             }
         }
         if settled {
@@ -1532,7 +1738,12 @@ public final class BowEngine {
                                         f0Target: slot.f0Target, gate: slot.gate,
                                         expr: polySnap.expr, press: polySnap.press,
                                         pos: polySnap.pos, tiltDb: polySnap.tiltDb,
-                                        vib: polySnap.vib)
+                                        vib: polySnap.vib,
+                                        onVel: slot.onVel,
+                                        lingerOn: slot.lingerOn,
+                                        lingerFretY: slot.lingerFretY,
+                                        lingerTravel: slot.lingerTravel,
+                                        onEvt: slot.onEvt)
                                     let o = s * slotStride
                                     filters[s].fill(
                                         snapshot: snap, n: nk,
@@ -1549,6 +1760,23 @@ public final class BowEngine {
                 }
             }
         }
+        // Linger display export: the just-filled per-slot envelope state
+        // for every sounding linger-active touch. In-place writes into the
+        // preallocated buffer under a brief lock — no allocation here.
+        os_unfair_lock_lock(&lingerDisplayLock)
+        lingerCount = 0
+        for s in 0..<maxPoly {
+            let slot = polySnap.slots[s]
+            guard slot.lingerOn, slot.gate > 0.0,
+                  lingerCount < lingerBuf.count else { continue }
+            lingerBuf[lingerCount] = LingerTouchState(
+                id: slot.lingerId,
+                charge: filters[s].lingerCharge,
+                vib: filters[s].avibDepth,
+                vibCeil: filters[s].avibCeil)
+            lingerCount += 1
+        }
+        os_unfair_lock_unlock(&lingerDisplayLock)
         // FX rack: adopt staged settings + advance smoothers (chunk rate).
         // The voice/taraf inserts split the kernel's buses (bit-exact when
         // idle — each jt term lands exactly once, so bus + bus reproduces

@@ -125,10 +125,12 @@ final class TarabLinkTests: XCTestCase {
         final class Sink: LinkPerformanceSink {
             var ons: [(UInt16, Double)] = []
             var offs: [UInt16] = []
-            func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) {
+            func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double,
+                         posY: Double?, fretY: Double?) {
                 ons.append((id, pitchSemis))
             }
-            func touchGlide(_ id: UInt16, pitchSemis: Double) {}
+            func touchGlide(_ id: UInt16, pitchSemis: Double, posY: Double?,
+                            fretY: Double?) {}
             func touchOff(_ id: UInt16) { offs.append(id) }
             func touchesAllOff() {}
             func setDronePressed(_ index: Int, _ pressed: Bool) {}

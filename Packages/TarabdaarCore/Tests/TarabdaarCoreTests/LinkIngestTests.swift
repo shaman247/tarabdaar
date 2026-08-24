@@ -18,11 +18,21 @@ final class LinkIngestTests: XCTestCase {
             case drone(Int, Bool)
         }
         var calls: [Call] = []
-        func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) {
+        /// posY/fretY per on/glide call, parallel histories (nil = not
+        /// carried).
+        var ys: [Double?] = []
+        var fretYs: [Double?] = []
+        func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double,
+                     posY: Double?, fretY: Double?) {
             calls.append(.on(id, pitchSemis, velocity))
+            ys.append(posY)
+            fretYs.append(fretY)
         }
-        func touchGlide(_ id: UInt16, pitchSemis: Double) {
+        func touchGlide(_ id: UInt16, pitchSemis: Double, posY: Double?,
+                        fretY: Double?) {
             calls.append(.glide(id, pitchSemis))
+            ys.append(posY)
+            fretYs.append(fretY)
         }
         func touchOff(_ id: UInt16) { calls.append(.off(id)) }
         func touchesAllOff() { calls.append(.allOff) }
@@ -98,6 +108,38 @@ final class LinkIngestTests: XCTestCase {
         XCTAssertEqual(sink2.calls, [.on(1, 60, 1.0), .off(1)])
     }
 
+    func testPosYOnlyChangeFiresGlideAndYLessTouchesCarryNil() {
+        let sink = RecordingSink()
+        let ingest = LinkIngest(sink: sink)
+        // A y-carrying touch: onset delivers posY AND fretY…
+        var t = touch(1, pitch: 60)
+        t.flags = TLPTouch.flagPosYValid | TLPTouch.flagFretYValid
+        t.posY = 51                       // 0.2 of the band
+        t.fretY = 128                     // halfway out along the fret
+        ingest.apply(frame(seq: 1, touches: [t]))
+        XCTAssertEqual(sink.calls, [.on(1, 60, 1.0)])
+        XCTAssertEqual(sink.ys, [51.0 / 255.0])
+        XCTAssertEqual(sink.fretYs, [128.0 / 255.0])
+        sink.calls.removeAll(); sink.ys.removeAll(); sink.fretYs.removeAll()
+        // …and a vertical move (same pitch, new ys) must still reach the
+        // sink — it recharges the linger envelopes.
+        t.posY = 204
+        t.fretY = 250
+        ingest.apply(frame(seq: 2, touches: [t]))
+        XCTAssertEqual(sink.calls, [.glide(1, 60)])
+        XCTAssertEqual(sink.ys, [204.0 / 255.0])
+        XCTAssertEqual(sink.fretYs, [250.0 / 255.0])
+        sink.calls.removeAll(); sink.ys.removeAll(); sink.fretYs.removeAll()
+        // Unchanged ys = no call (heartbeat-safe).
+        ingest.apply(frame(seq: 3, touches: [t]))
+        XCTAssertEqual(sink.calls, [])
+        // A y-less touch delivers nil throughout (legacy behavior key).
+        ingest.apply(frame(seq: 4, touches: [t, touch(2, pitch: 64)]))
+        XCTAssertEqual(sink.calls, [.on(2, 64, 1.0)])
+        XCTAssertEqual(sink.ys, [nil])
+        XCTAssertEqual(sink.fretYs, [nil])
+    }
+
     func testDroneMaskEdges() {
         let sink = RecordingSink()
         let ingest = LinkIngest(sink: sink)
@@ -119,8 +161,8 @@ final class LinkIngestTests: XCTestCase {
         ingest.onTiltAxis = { tilts.append(($0, $1)) }
         ingest.apply(frame(seq: 1, touches: [], tilt: (0, -32767, 32767)))
         XCTAssertEqual(tilts.count, 3)
-        XCTAssertEqual(tilts[0].1, 0.5, accuracy: 1e-4)
-        XCTAssertEqual(tilts[1].1, 0.0, accuracy: 1e-9)
+        XCTAssertEqual(tilts[0].1, 0.0, accuracy: 1e-4)
+        XCTAssertEqual(tilts[1].1, -1.0, accuracy: 1e-9)
         XCTAssertEqual(tilts[2].1, 1.0, accuracy: 1e-9)
         tilts.removeAll()
         ingest.apply(frame(seq: 2, touches: [], tilt: (0, -32767, 32767)))

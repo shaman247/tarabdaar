@@ -135,6 +135,82 @@ final class FretDragAssistTests: XCTestCase {
                        "carried correction sheds during the glide")
     }
 
+    /// The stopped-gate rule (2026-08-17): a slow drag must track the finger
+    /// — the magnet engages only when the finger actually stops. The old
+    /// speed-smoothstep gate read a slow glide (~80–120 px/s) as stationary
+    /// and pulled the whole approach toward each fret.
+    func testSlowGlideTracksFingerAndStopSnaps() {
+        let placements = makePlacements()
+        let s = fret("S", in: placements)
+        let shuddha = fret("R", in: placements)
+        let y = (shuddha.topY + shuddha.bottomY) / 2   // inside R's and S's extents
+
+        let assist = FretDragAssist()
+        assist.setContext(placements: placements, snapDistance: snapDistance)
+        var t = 0.0
+        let start = CGPoint(x: s.x, y: y)
+        assist.begin(touchId: 1, x: start.x, y: start.y,
+                     uncorrectedLog: fretFieldLog(at: start, placements: placements)!,
+                     time: t)
+        // Slow glide S → R, ending 10 px short: pitch follows the finger
+        // exactly — no pull from the approaching fret while moving.
+        var maxDev = 0.0
+        for p in line(from: start, to: CGPoint(x: shuddha.x - 10, y: y),
+                      pxPerSec: 80) {
+            t += 1.0 / 60.0
+            let f = fretFieldLog(at: p, placements: placements)!
+            let out = assist.move(touchId: 1, x: p.x, y: p.y,
+                                  uncorrectedLog: f, time: t).log2Pitch
+            maxDev = max(maxDev, abs(out - f))
+        }
+        XCTAssertLessThan(maxDev * 1200, 3,
+                          "slow glide must track the finger, not the frets")
+        // The finger stops: the rest engages the magnet and settles on R.
+        let played = hold(assist, seconds: 0.6, t: &t)
+        XCTAssertEqual(played * 1200, log2(shuddha.ratio) * 1200, accuracy: 2,
+                       "a stopped finger settles on the nearest fret")
+    }
+
+    /// Every touch is born stopped (2026-08-18): a fresh finger isn't
+    /// moving until it actually moves, so a sloppy landing — staccato tap
+    /// or legato strike alike — snaps onto the fret immediately instead of
+    /// waiting out the stop dwell. Movement then shuts the gate (the
+    /// slow-glide and shed tests guard that side).
+    func testTapBornStoppedSnapsImmediately() {
+        let placements = makePlacements()
+        let s = fret("S", in: placements)
+        let shuddha = fret("R", in: placements)
+        let y = (shuddha.topY + shuddha.bottomY) / 2
+        let landing = CGPoint(x: shuddha.x - 20, y: y)  // inside the 42 px basin
+        let f = fretFieldLog(at: landing, placements: placements)!
+        let rCents = log2(shuddha.ratio) * 1200
+
+        func settledCents(legatoHold: Bool) -> Double {
+            let assist = FretDragAssist()
+            assist.setContext(placements: placements, snapDistance: snapDistance)
+            var t = 0.0
+            if legatoHold {
+                assist.begin(touchId: 1, x: s.x, y: y,
+                             uncorrectedLog: log2(s.ratio), time: t)
+            }
+            assist.begin(touchId: 2, x: landing.x, y: landing.y,
+                         uncorrectedLog: f, time: t)
+            var out = f
+            for _ in 0..<5 {                 // ~80 ms of settle ticks
+                t += 1.0 / 60.0
+                for (id, o) in assist.tick(time: t) where id == 2 {
+                    out = o.log2Pitch
+                }
+            }
+            return out * 1200
+        }
+
+        XCTAssertEqual(settledCents(legatoHold: false), rCents, accuracy: 2,
+                       "solo staccato tap snaps onto R within ~80 ms")
+        XCTAssertEqual(settledCents(legatoHold: true), rCents, accuracy: 2,
+                       "legato strike snaps onto R within ~80 ms")
+    }
+
     /// A stationary touch with no qualifying fret keeps its correction
     /// frozen — a deliberate microtonal hold must not drift.
     func testStationaryHoldStaysFrozen() {

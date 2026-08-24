@@ -214,6 +214,50 @@ typedef struct {
     double *envE, *envEw;       /* per-mode damping envelopes hypot(ca,cb) */
     double relMul;              /* per-internal-sample release multiplier
                                    (1 = held/natural ring) */
+    /* ---- PLUCK ISOLATION + PLUCK DRIVE (Tarabdaar 2026-08-15; the
+       STRING-BANK rework, same day). The isolation value (op 3,
+       `iso`) makes each pluck a SEPARATE STRING: at the pluck the
+       primary slot's ringing state MIGRATES to a free CLONE slot
+       (full jawari simulation continues there at the old pitch —
+       the clone freezes copies of the 11 bend-mutable tables and
+       aliases the rest), and the pluck lands on settled state. The
+       kernel keeps the N most-recently-played strings alive
+       (c->polyMax clones, global); overflow evicts the OLDEST clone
+       into its owner's linear ghost bank ("decay without the full
+       jawari simulation" — the pile-up tier), and auto-idle culls
+       below audibility. iso scales how much of the old string's
+       ring survives the migration (1 = in full). iso 0 = legacy:
+       the pluck rides the ringing primary. `drive` scales the pluck
+       displacement while gain rides gain0/drive — contact
+       engagement vs radiated level, decoupled. ---- */
+    double iso;                 /* pluck isolation (op 3; 0 = legacy) */
+    int justMigrated;           /* pre-pluck bend already migrated */
+    int isClone;                /* clone: owns only state + frozen
+                                   tables; everything else aliased */
+    int owner;                  /* clone: primary slot index */
+    long long seq;              /* clone: pluck sequence (LRU key) */
+    double drive;
+    double gain0;               /* mount output gain (gain = gain0/drive) */
+    /* ---- GHOST BANK (Tarabdaar 2026-08-15): the previous notes'
+       ring-out. A deviation state that rotates through the SAME
+       per-mode damping envelopes as the live string (correct pitches
+       and t60s, full natural decay) but skips zone/contact/thread —
+       the demoted-string law applied to old notes, so a slot's whole
+       history of re-plucks costs one linear bank. Ghosts are LINEAR,
+       so every handoff superposes exactly into the one bank. Tables
+       are frozen at the first handoff (composed to OUTPUT rate:
+       R_out = R_in^ovs) so a later bend retunes only the live
+       string, not the ringing history. gGain freezes the output
+       trim of the first handoff; later handoffs at a different live
+       gain are pre-scaled by gain/gGain (linearity), so drive edits
+       never step the ghost tail. ---- */
+    int ghostOn;
+    double *gq, *gp, *gqw, *gpw;            /* deviation state */
+    double *gca, *gcb, *gwd, *giwd;         /* frozen v-bank rotation */
+    double *gcaw, *gcbw, *gwdw, *giwdw;     /* frozen w-bank rotation */
+    double gcg, gsg;                        /* frozen pol mix (output rate) */
+    double gGain;
+    double ghost_env;
     int demoted;                /* TAIL DEMOTION (perf, 2026-08-03e):
                                    below inaudibility the grazing-knee
                                    converts ~nothing (the knee law) —
@@ -239,8 +283,13 @@ static int tp_sav_contact(tp_slot *s, const float *beff,
 typedef struct tp_ctx tp_ctx;
 typedef struct { tp_ctx *c; int idx; } tp_warg;
 
+#define TP_CLONES 16            /* string-bank clone pool (>= max poly) */
+
 struct tp_ctx {
-    int nslots;
+    int nslots;                  /* user slots + TP_CLONES */
+    int nUser;                   /* mounted (pluckable) slots */
+    long long pluckSeq;          /* global pluck counter (clone LRU) */
+    int polyMax;                 /* live history strings (atomic-ish) */
     tp_slot *s;
     int deep_budget;             /* sync path: 3; pool path: huge */
     long resets;                 /* divergence-guard resets (telemetry) */
@@ -259,7 +308,7 @@ struct tp_ctx {
     pthread_cond_t cvW, cvD;
     int gen, done, wPer, wN;     /* worker job state */
     double *wBuf;                /* per-worker accumulation buffers */
-    int actList[64], actN;       /* active slots, HEAVY-FIRST */
+    int actList[96], actN;       /* active slots+clones, HEAVY-FIRST */
     int wCursor;                 /* work-stealing cursor (atomic) */
     int overN;                   /* controller streak (unused) */
     long lastUr;                 /* underrun-feedback watermark */
@@ -275,15 +324,55 @@ struct tp_ctx {
 void *tanpura_create(int nslots)
 {
     tp_ctx *c = (tp_ctx *)calloc(1, sizeof(tp_ctx));
-    c->nslots = nslots;
-    c->s = (tp_slot *)calloc((size_t)nslots, sizeof(tp_slot));
+    c->nUser = nslots;
+    c->nslots = nslots + TP_CLONES;
+    c->polyMax = 6;
+    c->s = (tp_slot *)calloc((size_t)c->nslots, sizeof(tp_slot));
     c->deep_budget = 3;
+    /* clone pool: state + frozen-table buffers sized for any owner
+       (TP_MAXM); everything else aliases the owner at migration */
+    for (int i = nslots; i < c->nslots; i++) {
+        tp_slot *s = &c->s[i];
+        s->isClone = 1;
+        s->used = 1;
+        s->active = 0;
+#define TPA(x, n) s->x = (double *)calloc((size_t)(n), sizeof(double))
+        TPA(q, TP_MAXM); TPA(p, TP_MAXM);
+        TPA(qw, TP_MAXM); TPA(pw, TP_MAXM);
+        TPA(ca, TP_MAXM); TPA(cb, TP_MAXM);
+        TPA(wd, TP_MAXM); TPA(iwd, TP_MAXM);
+        TPA(caw, TP_MAXM); TPA(cbw, TP_MAXM);
+        TPA(wdw, TP_MAXM); TPA(iwdw, TP_MAXM);
+        TPA(svKq, TP_MAXM); TPA(svKp, TP_MAXM);
+        TPA(svG, TP_MAXJ * TP_MAXJ);
+#undef TPA
+    }
     return c;
+}
+
+void tanpura_set_poly(void *vc, int n)
+{
+    tp_ctx *c = (tp_ctx *)vc;
+    if (n < 0) n = 0;
+    if (n > TP_CLONES) n = TP_CLONES;
+    __atomic_store_n(&c->polyMax, n, __ATOMIC_RELAXED);
 }
 
 static void tp_slot_free(tp_slot *s)
 {
     if (!s->used) return;
+    if (s->isClone) {
+        /* clones own only their state + frozen bend-mutable tables;
+           everything else aliases the owner — never free it here */
+#define TPCF(x) free(s->x); s->x = 0
+        TPCF(q); TPCF(p); TPCF(qw); TPCF(pw);
+        TPCF(ca); TPCF(cb); TPCF(wd); TPCF(iwd);
+        TPCF(caw); TPCF(cbw); TPCF(wdw); TPCF(iwdw);
+        TPCF(svKq); TPCF(svKp); TPCF(svG);
+#undef TPCF
+        s->used = 0;
+        return;
+    }
 #define TPF(x) free(s->x); s->x = 0
     TPF(fdU); TPF(fdUp); TPF(fdB); TPF(fdPsh); TPF(fdScr);
     TPF(fdUeq);
@@ -297,6 +386,9 @@ static void tp_slot_free(tp_slot *s)
     TPF(phi_o); TPF(dq); TPF(q0); TPF(q); TPF(p); TPF(qw); TPF(pw);
     TPF(svKq); TPF(svKp); TPF(svG);
     TPF(wd0); TPF(wdw0); TPF(envE); TPF(envEw);
+    TPF(gq); TPF(gp); TPF(gqw); TPF(gpw);
+    TPF(gca); TPF(gcb); TPF(gwd); TPF(giwd);
+    TPF(gcaw); TPF(gcbw); TPF(gwdw); TPF(giwdw);
 #undef TPF
     s->used = 0;
 }
@@ -432,6 +524,24 @@ void tanpura_mount(void *vc, int slot, int M, int J,
     memset(s->svBud, 0, sizeof(s->svBud));
     s->cg = cos(pol_g * dt); s->sg = sin(pol_g * dt);
     s->av = cos(pol_th); s->aw = sin(pol_th);
+    s->drive = 1.0;
+    s->gain0 = gain;
+    s->ghostOn = 0;
+    s->ghost_env = 0.0;
+    s->gcg = 1.0; s->gsg = 0.0;
+    s->gGain = gain;
+    s->gq = (double *)calloc((size_t)M, sizeof(double));
+    s->gp = (double *)calloc((size_t)M, sizeof(double));
+    s->gqw = (double *)calloc((size_t)M, sizeof(double));
+    s->gpw = (double *)calloc((size_t)M, sizeof(double));
+    s->gca = (double *)calloc((size_t)M, sizeof(double));
+    s->gcb = (double *)calloc((size_t)M, sizeof(double));
+    s->gwd = (double *)calloc((size_t)M, sizeof(double));
+    s->giwd = (double *)calloc((size_t)M, sizeof(double));
+    s->gcaw = (double *)calloc((size_t)M, sizeof(double));
+    s->gcbw = (double *)calloc((size_t)M, sizeof(double));
+    s->gwdw = (double *)calloc((size_t)M, sizeof(double));
+    s->giwdw = (double *)calloc((size_t)M, sizeof(double));
     s->rt = pol_rt;
     s->gth = tp_dup(g_th, J);
     s->thBase = th_base; s->thH = th_h;
@@ -826,11 +936,279 @@ static void tp_voice_cap(tp_ctx *c, int keep)
 
 /* note-on: activate + add the angled pluck (amp in metres, TOTAL
    displacement; the v/w split is the mount's pol_th) */
+/* GHOST HANDOFF (Tarabdaar 2026-08-15; string-bank rework): move
+   `frac` of SRC's ringing deviation into DST's linear ghost bank.
+   Under the string bank this is the PILE-UP tier only: it runs when
+   the clone pool overflows (oldest history string evicted, full
+   band) or when polyMax is 0 (no history strings at all — then
+   `split` keeps only the partials above 2*f0, because the incoming
+   same-slot pluck replaces the fundamental in the same instant; a
+   full-band handoff there measured a 3.6-4.1 dB re-pluck level
+   lottery from same-frequency phase summing). Ghost tables freeze
+   from SRC (composed to output rate), so the evicted note keeps its
+   own pitch; a releasing (note-off) string is finger-stopped and is
+   never resurrected into the ghost. */
+static void tp_ghost_handoff(tp_slot *dst, tp_slot *src, double frac,
+                             int split)
+{
+    if (!(frac > 0.0) || !src->active || src->is_fd || dst->is_fd)
+        return;
+    if (frac > 1.0) frac = 1.0;
+    const double keep = 1.0 - frac;
+    const int M = src->M;
+    const int toGhost = src->relMul >= 1.0;
+    if (toGhost && !dst->ghostOn) {
+        /* freeze SRC's dynamics, composed to output rate:
+           R_out = R_in^ovs — same wd, envelope E^ovs, so the ghost
+           decays exactly as the live string would have */
+        const int ovs = src->ovs > 1 ? src->ovs : 1;
+        for (int k = 0; k < M; k++) {
+            double a = src->ca[k], b2 = src->cb[k];
+            double aw = src->caw[k], bw = src->cbw[k];
+            for (int i = 1; i < ovs; i++) {
+                const double na = a * src->ca[k] - b2 * src->cb[k];
+                b2 = a * src->cb[k] + b2 * src->ca[k];
+                a = na;
+                const double nw = aw * src->caw[k] - bw * src->cbw[k];
+                bw = aw * src->cbw[k] + bw * src->caw[k];
+                aw = nw;
+            }
+            dst->gca[k] = a; dst->gcb[k] = b2;
+            dst->gcaw[k] = aw; dst->gcbw[k] = bw;
+            dst->gwd[k] = src->wd[k]; dst->giwd[k] = src->iwd[k];
+            dst->gwdw[k] = src->wdw[k]; dst->giwdw[k] = src->iwdw[k];
+            dst->gq[k] = 0.0; dst->gp[k] = 0.0;
+            dst->gqw[k] = 0.0; dst->gpw[k] = 0.0;
+        }
+        {
+            double a = src->cg, b2 = src->sg;
+            const int ovs2 = src->ovs > 1 ? src->ovs : 1;
+            for (int i = 1; i < ovs2; i++) {
+                const double na = a * src->cg - b2 * src->sg;
+                b2 = a * src->sg + b2 * src->cg;
+                a = na;
+            }
+            dst->gcg = a; dst->gsg = b2;
+        }
+        dst->gGain = src->gain;
+        dst->ghostOn = 1;
+    }
+    /* superpose (linear): a handoff at a different gain pre-scales
+       so it renders at the frozen gGain identically */
+    const double gs = !toGhost ? 0.0
+        : (dst->gGain != 0.0 ? frac * src->gain / dst->gGain : frac);
+    const double w1 = src->wd[0];
+    if (src->demoted) {
+        /* demoted q already holds the deviation from q0 */
+        for (int k = 0; k < M; k++) {
+            double wk = 1.0;
+            if (split) {
+                wk = (src->wd[k] / w1 - 2.0) * 0.5;
+                if (wk < 0.0) wk = 0.0;
+                if (wk > 1.0) wk = 1.0;
+            }
+            const double g2 = gs * wk;
+            dst->gq[k] += g2 * src->q[k];
+            dst->gp[k] += g2 * src->p[k];
+            dst->gqw[k] += g2 * src->qw[k];
+            dst->gpw[k] += g2 * src->pw[k];
+            src->q[k] *= keep; src->p[k] *= keep;
+            src->qw[k] *= keep; src->pw[k] *= keep;
+        }
+    } else {
+        for (int k = 0; k < M; k++) {
+            double wk = 1.0;
+            if (split) {
+                wk = (src->wd[k] / w1 - 2.0) * 0.5;
+                if (wk < 0.0) wk = 0.0;
+                if (wk > 1.0) wk = 1.0;
+            }
+            const double g2 = gs * wk;
+            dst->gq[k] += g2 * (src->q[k] - src->q0[k]);
+            dst->gp[k] += g2 * src->p[k];
+            dst->gqw[k] += g2 * src->qw[k];
+            dst->gpw[k] += g2 * src->pw[k];
+            src->q[k] = src->q0[k] + keep * (src->q[k] - src->q0[k]);
+            src->p[k] *= keep; src->qw[k] *= keep; src->pw[k] *= keep;
+        }
+        for (int j = 0; j < src->J; j++) {
+            src->svPsi[j] = src->svPsi0[j]
+                + keep * (src->svPsi[j] - src->svPsi0[j]);
+            src->svEta[j] = src->svEta0[j]
+                + keep * (src->svEta[j] - src->svEta0[j]);
+            src->svBud[j] = src->svBud0[j]
+                + keep * (src->svBud[j] - src->svBud0[j]);
+            src->Fw[j] *= (float)keep;
+        }
+    }
+    src->thz *= keep; src->thv *= keep;
+    if (toGhost) dst->ghost_env = 1.0;
+}
+
+/* PLUCK DRIVE (Tarabdaar 2026-08-15): the mellow<->buzzy axis at
+   constant loudness. The SAV contact is a power law (kc*em^alpha),
+   so how hard the string is driven into the jawari sets the buzz
+   conversion — measured on the shipped voice: pluck level 0.25->2
+   moved the attack centroid 2357->3269 Hz. Drive scales the pluck
+   displacement by D and the slot's OUTPUT gain by 1/D, both applied
+   sample-synchronously at the pluck: the note keeps its calibrated
+   level while the contact sees a x D deeper (or shallower)
+   engagement. D 1 is a strict no-op (gain untouched — bit-exact).
+   NOTE: a drive EDIT between re-plucks of a still-ringing slot
+   steps the old tail's level by Dold/Dnew at the pluck instant —
+   with pluck touch active the tail is damped there anyway. */
+static void tp_apply_drive(tp_slot *s, double d)
+{
+    if (d < 0.05) d = 0.05;
+    if (d > 20.0) d = 20.0;
+    s->drive = d;
+}
+
+/* STRING-BANK MIGRATION (Tarabdaar 2026-08-15): move the primary's
+   ringing string onto a free clone — the old note keeps its FULL
+   jawari simulation at its own (frozen) pitch while the primary is
+   reset for the incoming pluck. The clone freezes copies of the 11
+   bend-mutable tables (so later glides retune only the primary) and
+   aliases everything else; `iso` scales how much of the old ring
+   survives. When the pool is full past polyMax, the globally OLDEST
+   clone is evicted into its owner's ghost bank first (split only if
+   that owner is the slot being re-plucked — its fundamental gets
+   replaced in the same instant). polyMax 0 skips clones entirely:
+   the primary hands off straight to its own ghost (split). */
+static void tp_migrate(tp_ctx *c, int slot, double iso)
+{
+    tp_slot *s = &c->s[slot];
+    const int poly = __atomic_load_n(&c->polyMax, __ATOMIC_RELAXED);
+    if (poly <= 0) {
+        tp_ghost_handoff(s, s, 1.0, 1);
+        goto reset_primary;
+    }
+    {
+        tp_slot *cl = 0;
+        int liveClones = 0;
+        tp_slot *oldest = 0;
+        for (int i = c->nUser; i < c->nslots; i++) {
+            tp_slot *t = &c->s[i];
+            if (!t->active) { if (!cl) cl = t; continue; }
+            liveClones++;
+            if (!oldest || t->seq < oldest->seq) oldest = t;
+        }
+        if (!cl || liveClones >= poly) {
+            if (!oldest) return;            /* cannot happen */
+            tp_ghost_handoff(&c->s[oldest->owner], oldest, 1.0,
+                             oldest->owner == slot);
+            oldest->active = 0;
+            cl = oldest;
+        }
+        /* ---- copy the string onto the clone ---- */
+        const int M = s->M, J = s->J;
+        cl->M = M; cl->J = J;
+        cl->owner = slot;
+        cl->seq = ++c->pluckSeq;
+        cl->is_fd = 0;
+        /* frozen bend-mutable tables */
+        memcpy(cl->ca, s->ca, sizeof(double) * (size_t)M);
+        memcpy(cl->cb, s->cb, sizeof(double) * (size_t)M);
+        memcpy(cl->wd, s->wd, sizeof(double) * (size_t)M);
+        memcpy(cl->iwd, s->iwd, sizeof(double) * (size_t)M);
+        memcpy(cl->caw, s->caw, sizeof(double) * (size_t)M);
+        memcpy(cl->cbw, s->cbw, sizeof(double) * (size_t)M);
+        memcpy(cl->wdw, s->wdw, sizeof(double) * (size_t)M);
+        memcpy(cl->iwdw, s->iwdw, sizeof(double) * (size_t)M);
+        memcpy(cl->svKq, s->svKq, sizeof(double) * (size_t)M);
+        memcpy(cl->svKp, s->svKp, sizeof(double) * (size_t)M);
+        memcpy(cl->svG, s->svG, sizeof(double) * (size_t)J * J);
+        /* aliased read-only tables (bend never touches these) */
+        cl->ca4 = s->ca4; cl->cb4 = s->cb4;
+        cl->ca2 = s->ca2; cl->cb2 = s->cb2;
+        cl->cas = s->cas; cl->cbs = s->cbs;
+        cl->Phi = s->Phi; cl->phiF = s->phiF;
+        cl->Phif = s->Phif; cl->phiFf = s->phiFf;
+        cl->b = s->b; cl->gth = s->gth;
+        cl->Gf = s->Gf; cl->G4f = s->G4f;
+        cl->gdf = s->gdf; cl->gd4f = s->gd4f;
+        cl->G2f = s->G2f; cl->gd2f = s->gd2f;
+        cl->phi_o = s->phi_o; cl->dq = s->dq; cl->q0 = s->q0;
+        cl->wd0 = s->wd0; cl->wdw0 = s->wdw0;
+        cl->envE = s->envE; cl->envEw = s->envEw;
+        /* scalars */
+        cl->kc = s->kc; cl->alpha = s->alpha; cl->hcB = s->hcB;
+        cl->deep = s->deep; cl->dt = s->dt; cl->gain = s->gain;
+        cl->cg = s->cg; cl->sg = s->sg;
+        cl->av = s->av; cl->aw = s->aw; cl->rt = s->rt;
+        cl->thBase = s->thBase; cl->thH = s->thH;
+        cl->thCa = s->thCa; cl->thCb = s->thCb;
+        cl->thWd = s->thWd; cl->thM = s->thM;
+        cl->ovs = s->ovs; cl->rampN = s->rampN;
+        cl->forceDeep = s->forceDeep; cl->pen0 = s->pen0;
+        cl->costEma = s->costEma;
+        cl->bendRatio = s->bendRatio;
+        /* state */
+        memcpy(cl->q, s->q, sizeof(double) * (size_t)M);
+        memcpy(cl->p, s->p, sizeof(double) * (size_t)M);
+        memcpy(cl->qw, s->qw, sizeof(double) * (size_t)M);
+        memcpy(cl->pw, s->pw, sizeof(double) * (size_t)M);
+        memcpy(cl->Fw, s->Fw, sizeof(cl->Fw));
+        memcpy(cl->svPsi, s->svPsi, sizeof(cl->svPsi));
+        memcpy(cl->svEta, s->svEta, sizeof(cl->svEta));
+        memcpy(cl->svBud, s->svBud, sizeof(cl->svBud));
+        memcpy(cl->svPsi0, s->svPsi0, sizeof(cl->svPsi0));
+        memcpy(cl->svEta0, s->svEta0, sizeof(cl->svEta0));
+        memcpy(cl->svBud0, s->svBud0, sizeof(cl->svBud0));
+        cl->thz = s->thz; cl->thv = s->thv;
+        cl->rampLeft = s->rampLeft;
+        cl->rampAmp = s->rampAmp; cl->rampPrev = s->rampPrev;
+        cl->relMul = s->relMul;
+        cl->demoted = s->demoted;
+        cl->idle_env = s->idle_env;
+        cl->envPrev = 0.0; cl->stagn = 0;
+        cl->ghostOn = 0; cl->ghost_env = 0.0;
+        cl->active = 1;
+        /* iso < 1: only that much of the old ring survives */
+        if (iso < 1.0) {
+            for (int k = 0; k < M; k++) {
+                if (cl->demoted) { cl->q[k] *= iso; }
+                else cl->q[k] = cl->q0[k]
+                    + iso * (cl->q[k] - cl->q0[k]);
+                cl->p[k] *= iso; cl->qw[k] *= iso; cl->pw[k] *= iso;
+            }
+            cl->thz *= iso; cl->thv *= iso;
+        }
+    }
+reset_primary:
+    memcpy(s->q, s->q0, sizeof(double) * (size_t)s->M);
+    memset(s->p, 0, sizeof(double) * (size_t)s->M);
+    memset(s->qw, 0, sizeof(double) * (size_t)s->M);
+    memset(s->pw, 0, sizeof(double) * (size_t)s->M);
+    memset(s->Fw, 0, sizeof(s->Fw));
+    memcpy(s->svPsi, s->svPsi0, sizeof(s->svPsi));
+    memcpy(s->svEta, s->svEta0, sizeof(s->svEta));
+    memcpy(s->svBud, s->svBud0, sizeof(s->svBud));
+    s->thz = 0.0; s->thv = 0.0;
+    s->demoted = 0;
+    s->rampLeft = 0;
+    s->relMul = 1.0;
+}
+
 void tanpura_pluck(void *vc, int slot, double amp)
 {
     tp_ctx *c = (tp_ctx *)vc;
     tp_slot *s = &c->s[slot];
-    if (!s->used) return;
+    if (!s->used || s->isClone) return;
+    /* pluck isolation (op 3 stored `iso`): the ringing string becomes
+       a SEPARATE history string before the new pluck lands (unless a
+       pre-pluck bend already migrated it at its old pitch) */
+    if (!s->is_fd && s->iso > 0.0 && s->active && !s->justMigrated)
+        tp_migrate(c, slot, s->iso);
+    s->justMigrated = 0;
+    /* pluck drive: deeper (or shallower) contact engagement at the
+       calibrated radiated level (gain0/1.0 == gain0 exactly, so
+       drive 1 leaves the mount gain bit-identical). Modal slots
+       only — mount_fd never initializes drive/gain0. */
+    if (!s->is_fd && s->drive > 0.0) {
+        amp *= s->drive;
+        s->gain = s->gain0 / s->drive;
+    }
     if (s->demoted) {
         for (int k = 0; k < s->M; k++) s->q[k] += s->q0[k];
         memcpy(s->svPsi, s->svPsi0, sizeof(s->svPsi));
@@ -841,7 +1219,8 @@ void tanpura_pluck(void *vc, int slot, double amp)
     if (!s->active) {
         /* waking from idle: state is the settled wrap (or decayed
            back to it); make that exact so long-idle drift never
-           accumulates */
+           accumulates. A damped slot's ghost is stale — silence it
+           (the empty->active handoff re-zeros the arrays). */
         memcpy(s->q, s->q0, sizeof(double) * (size_t)s->M);
         memset(s->p, 0, sizeof(double) * (size_t)s->M);
         memset(s->qw, 0, sizeof(double) * (size_t)s->M);
@@ -851,6 +1230,8 @@ void tanpura_pluck(void *vc, int slot, double amp)
         memcpy(s->svEta, s->svEta0, sizeof(s->svEta));
         memcpy(s->svBud, s->svBud0, sizeof(s->svBud));
         s->demoted = 0;
+        s->ghostOn = 0;
+        s->ghost_env = 0.0;
         s->active = 1;
     }
     if (s->is_fd) {
@@ -885,13 +1266,20 @@ void tanpura_pluck(void *vc, int slot, double amp)
     tp_voice_cap(c, slot);
 }
 
-/* hard-stop a slot (all-notes-off) */
+/* hard-stop a slot (all-notes-off): the primary, its history
+   clones, and its ghost bank */
 void tanpura_damp(void *vc, int slot)
 {
     tp_ctx *c = (tp_ctx *)vc;
     tp_slot *s = &c->s[slot];
     if (!s->used) return;
     s->active = 0;
+    s->ghostOn = 0;
+    s->ghost_env = 0.0;
+    if (!s->isClone)
+        for (int i = c->nUser; i < c->nslots; i++)
+            if (c->s[i].active && c->s[i].owner == slot)
+                c->s[i].active = 0;
 }
 
 /* LIVE RETUNE (Tarabdaar 2026-08-05): rescale every mode's rotation
@@ -988,6 +1376,51 @@ void tanpura_release(void *vc, int slot, double rate)
     tp_slot *s = &c->s[slot];
     if (!s->used) return;
     tp_apply_release(s, rate);
+}
+
+/* pluck isolation: set how much of the ringing string becomes a
+   separate history string at each subsequent pluck (string-bank
+   rework — stored, consumed by the pluck/pre-pluck-bend ops; sync
+   path, the pool path rides event op 3) */
+void tanpura_set_touch(void *vc, int slot, double touch)
+{
+    tp_ctx *c = (tp_ctx *)vc;
+    if (slot < 0 || slot >= c->nUser) return;
+    tp_slot *s = &c->s[slot];
+    if (!s->used) return;
+    s->iso = touch < 0.0 ? 0.0 : (touch > 1.0 ? 1.0 : touch);
+}
+
+/* pre-pluck bend (op 6): a re-pluck landing at a DIFFERENT pitch —
+   migrate the ringing string first (its clone freezes at the old
+   pitch), then retune the primary for the incoming pluck. Glide
+   bends (op 1 / tanpura_bend) never migrate: they retune the
+   primary only, and the history clones keep their frozen pitch. */
+void tanpura_prepluck_bend(void *vc, int slot, double ratio)
+{
+    tp_ctx *c = (tp_ctx *)vc;
+    if (slot < 0 || slot >= c->nUser) return;
+    tp_slot *s = &c->s[slot];
+    if (!s->used || s->is_fd) return;
+    if (s->iso > 0.0 && s->active) {
+        double rr = ratio < 0.25 ? 0.25 : (ratio > 4.0 ? 4.0 : ratio);
+        if (rr != s->bendRatio) {
+            tp_migrate(c, slot, s->iso);
+            s->justMigrated = 1;
+        }
+    }
+    tp_apply_bend(s, ratio);
+}
+
+/* set the pluck drive applied at each subsequent pluck (sync path;
+   the pool path rides event op 4) */
+void tanpura_set_drive(void *vc, int slot, double drive)
+{
+    tp_ctx *c = (tp_ctx *)vc;
+    if (slot < 0 || slot >= c->nslots) return;
+    tp_slot *s = &c->s[slot];
+    if (!s->used) return;
+    tp_apply_drive(s, drive);
 }
 
 int tanpura_active_count(void *vc)
@@ -1215,7 +1648,7 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
     const double dt = s->dt, dt4 = dt / 4.0;
     float uf[TP_MAXJ], udf[TP_MAXJ], wl[TP_MAXJ], bf[TP_MAXJ];
     double qs[TP_MAXM], ps[TP_MAXM];
-    double peak = 0.0;
+    double peak = 0.0, gpeak = 0.0;
     int went_deep = 0;
     const int rt_on = s->rt > 0.0;
     const int th_on = s->thH > 0.0;
@@ -1367,6 +1800,49 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
             out[t] += o;
             double ao = fabs(o);
             if (ao > peak) peak = ao;
+            if (s->ghostOn) {
+                /* GHOST BANK: one output-rate linear rotation per
+                   bank (frozen tables) + the frozen pol mix — the
+                   previous notes ringing out at their own pitches
+                   and t60s, no contact */
+                double og = 0.0;
+                {
+                    double *restrict q = s->gq, *restrict pp = s->gp;
+                    double *restrict qw = s->gqw, *restrict pw = s->gpw;
+                    const double *restrict ca = s->gca,
+                                 *restrict cb = s->gcb,
+                                 *restrict wd = s->gwd,
+                                 *restrict iw = s->giwd,
+                                 *restrict caw = s->gcaw,
+                                 *restrict cbw = s->gcbw,
+                                 *restrict wdw = s->gwdw,
+                                 *restrict iww = s->giwdw,
+                                 *restrict po = s->phi_o;
+                    for (int k = 0; k < M; k++) {
+                        double qk = q[k], pk = pp[k];
+                        q[k] = ca[k] * qk + cb[k] * (pk * iw[k]);
+                        pp[k] = -cb[k] * (wd[k] * qk) + ca[k] * pk;
+                        qk = qw[k]; pk = pw[k];
+                        qw[k] = caw[k] * qk + cbw[k] * (pk * iww[k]);
+                        pw[k] = -cbw[k] * (wdw[k] * qk) + caw[k] * pk;
+                        og += po[k] * pp[k];
+                    }
+                    if (s->gsg != 0.0) {
+                        for (int k = 0; k < M; k++) {
+                            const double qv = q[k], qh = qw[k];
+                            q[k] = s->gcg * qv + s->gsg * qh;
+                            qw[k] = -s->gsg * qv + s->gcg * qh;
+                            const double pv = pp[k], ph = pw[k];
+                            pp[k] = s->gcg * pv + s->gsg * ph;
+                            pw[k] = -s->gsg * pv + s->gcg * ph;
+                        }
+                    }
+                }
+                og *= s->gGain;
+                out[t] += og;
+                const double ag = fabs(og);
+                if (ag > gpeak) gpeak = ag;
+            }
         }
       }
     }
@@ -1375,6 +1851,8 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
         if (!isfinite(s->p[k]) || !isfinite(s->q[k])
             || !isfinite(s->pw[k]) || fabs(s->q[k]) > 0.05) fin = 0;
     if (!isfinite(s->thz) || !isfinite(s->thv)) fin = 0;
+    if (s->ghostOn && (!isfinite(s->gp[0]) || !isfinite(s->gq[M - 1])))
+        fin = 0;
     if (!fin) {
         memcpy(s->q, s->q0, sizeof(double) * (size_t)M);
         memset(s->p, 0, sizeof(double) * (size_t)M);
@@ -1387,30 +1865,40 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
         s->demoted = 0;
         s->thz = 0.0; s->thv = 0.0;
         s->rampLeft = 0;
+        s->ghostOn = 0;
+        s->ghost_env = 0.0;
         s->active = 0;
         __atomic_add_fetch(&((tp_ctx *)c)->resets, 1,
                            __ATOMIC_RELAXED);
         return went_deep;
+    }
+    if (s->ghostOn) {
+        s->ghost_env = gpeak > s->ghost_env ? gpeak
+                                            : s->ghost_env * 0.98;
+        if (s->ghost_env < 1e-3) s->ghostOn = 0;
     }
     s->idle_env = peak > s->idle_env ? peak : s->idle_env * 0.98;
     /* auto-idle at MUSICAL silence (~-86 dBFS post gain+FIR), not
        1e-7: the float contact limit cycle floors ~1e-4, so a 1e-7
        bar meant slots NEVER idled and cost accumulated with every
        note ever played (2026-08-03 choppy-under-polyphony bug) */
-    if (s->idle_env < 1e-3) s->active = 0;
+    if (s->idle_env < 1e-3 && !s->ghostOn) s->active = 0;
     /* STAGNATION idle (2026-08-03b): under-resolved contact can
        floor at a quiet limit cycle ABOVE the level bar (measured
        -55 dB at 587 Hz/M150 — inaudible post-chain, but a permanent
        96k solve). Compare against a ~2 s-old envelope reference —
        the floor env WOBBLES a few % block-to-block, so a
        per-block no-decay test never fires; the long-window trend
-       does. Quiet + <1 dB decay per window = stuck floor: cull. */
+       does. Quiet + <1 dB decay per window = stuck floor: cull.
+       (A live ghost holds the slot active either way — the ring-out
+       must finish; the ghost is linear and cannot stagnate.) */
     if (++s->stagn >= 180) {
         /* bar 1e-2 (-40 dB kernel ~= -74 dBFS post-chain): the
            highest measured stuck floors (-43 dB at 880 Hz) must
            qualify; the cut lands well under perception */
         if (s->idle_env < 1e-2 && s->envPrev > 0.0
-            && s->idle_env > 0.89 * s->envPrev) s->active = 0;
+            && s->idle_env > 0.89 * s->envPrev && !s->ghostOn)
+            s->active = 0;
         s->envPrev = s->idle_env;
         s->stagn = 0;
     }
@@ -1453,63 +1941,29 @@ static void tp_drain_events(tp_ctx *c)
         const double amp = c->evAmp[i];
         if (slot < 0) {
             if (op == 0)
-                for (int k = 0; k < c->nslots; k++) c->s[k].active = 0;
+                for (int k = 0; k < c->nslots; k++) {
+                    c->s[k].active = 0;
+                    c->s[k].ghostOn = 0;
+                    c->s[k].ghost_env = 0.0;
+                }
         } else if (slot < c->nslots && c->s[slot].used) {
             tp_slot *s = &c->s[slot];
             if (op == 1) { tp_apply_bend(s, amp); continue; }
             if (op == 2) { tp_apply_release(s, amp); continue; }
-            if (amp < 0.0) { s->active = 0; continue; }
-            if (s->is_fd) {
-                if (s->fdTouch < 1.0) {
-                    /* finger touch-damp (round 21): blend toward the
-                       WRAP equilibrium — never zero, the string must
-                       stay seated on the bone */
-                    for (int i = 0; i <= s->fdN; i++) {
-                        s->fdU[i] = s->fdUeq[i]
-                            + s->fdTouch * (s->fdU[i] - s->fdUeq[i]);
-                        s->fdUp[i] = s->fdUeq[i]
-                            + s->fdTouch * (s->fdUp[i] - s->fdUeq[i]);
-                    }
-                }
-                s->rampLeft = s->rampN > 0 ? s->rampN : 1;
-                s->rampAmp = amp;
-                s->rampPrev = 0.0;
-                s->idle_env = 1.0;
-                s->active = 1;
+            if (op == 3) {
+                s->iso = amp < 0.0 ? 0.0 : (amp > 1.0 ? 1.0 : amp);
                 continue;
             }
-            if (s->demoted) {
-                for (int k = 0; k < s->M; k++) s->q[k] += s->q0[k];
-                memcpy(s->svPsi, s->svPsi0, sizeof(s->svPsi));
-                memcpy(s->svEta, s->svEta0, sizeof(s->svEta));
-                memcpy(s->svBud, s->svBud0, sizeof(s->svBud));
-                s->demoted = 0;
+            if (op == 4) { tp_apply_drive(s, amp); continue; }
+            if (op == 6) {
+                tanpura_prepluck_bend((void *)c, slot, amp);
+                continue;
             }
-            if (!s->active) {
-                memcpy(s->q, s->q0, sizeof(double) * (size_t)s->M);
-                memset(s->p, 0, sizeof(double) * (size_t)s->M);
-                memset(s->qw, 0, sizeof(double) * (size_t)s->M);
-                memset(s->pw, 0, sizeof(double) * (size_t)s->M);
-                memset(s->Fw, 0, sizeof(s->Fw));
-                memcpy(s->svPsi, s->svPsi0, sizeof(s->svPsi));
-                memcpy(s->svEta, s->svEta0, sizeof(s->svEta));
-                memcpy(s->svBud, s->svBud0, sizeof(s->svBud));
-                s->active = 1;
-            }
-            if (s->rampN > 0) {
-                s->rampLeft = s->rampN;
-                s->rampAmp = amp;
-                s->rampPrev = 0.0;
-            } else {
-                for (int k = 0; k < s->M; k++) {
-                    s->q[k] += s->av * amp * s->dq[k];
-                    s->qw[k] += s->aw * amp * s->dq[k];
-                }
-            }
-            s->idle_env = 1.0;
-            s->relMul = 1.0;
-            c->lastPluck = slot;
-            tp_voice_cap(c, slot);
+            if (amp < 0.0) { tanpura_damp((void *)c, slot); continue; }
+            /* op 0 note: same body as the sync entry point
+               (migration, drive, fd ramp, demote-promotion,
+               injection, cap) */
+            tanpura_pluck((void *)c, slot, amp);
         }
     }
     c->evR = r;

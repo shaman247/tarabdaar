@@ -278,4 +278,62 @@ final class BowControlsTests: XCTestCase {
         XCTAssertEqual(fbvb(bp0), fbvb(bpNull),
                        "bite keys are not bit-null at bow_attack_bite 0")
     }
+
+    /// ONSET VELOCITY → SHARPNESS (2026-08-19, `bow_attack_vel`): with the
+    /// key armed, a hard STRIKE sharpens the attack exactly like a hard
+    /// press (bite transient + fast draw) even when the press sits below
+    /// the threshold — per-note articulation. With the key absent the
+    /// velocity byte is inert: bit-identical traces at any velocity (the
+    /// historic no-velocity-axis behavior, the golden/parity contract).
+    func testVelocitySharpness() {
+        var bp = BowedStringEngineTests.stringBP()
+        bp.num["bow_place_ms"] = 15.0
+        bp.num["bow_draw_ms"] = 40.0
+        bp.num["bow_draw_min_ms"] = 8.0
+        bp.num["bow_attack_bite"] = 2.0
+        bp.num["bow_attack_bite_ms"] = 60.0
+        bp.num["bow_attack_thresh"] = 0.5
+        bp.num["bow_f_cap"] = 12.0          // headroom so the bite isn't capped
+        var bpVel = bp
+        bpVel.num["bow_attack_vel"] = 1.0
+
+        // press 0.4 = BELOW the threshold: the press law alone says legato,
+        // so any sharpness below comes from the strike velocity.
+        func trace(vel: UInt8, _ b: BowParams)
+            -> (fbPeak: Double, fbSettled: Double, vb30: Double, vbEnd: Double,
+                fb: [Double], vb: [Double]) {
+            let mapper = BowControlMapper()
+            var filter = BowControlFilter(bp: b, srk: srk)
+            mapper.setAxis(expr: 0.7, press: 0.4, pos: 0.45)
+            mapper.midi(0x90, 60, vel)
+            let s = run(mapper, &filter, seconds: 0.4)
+            let settled = Array(s.fb.suffix(Int(0.05 * srk))).max()!
+            return (s.fb.max()!, settled, s.vb[Int(0.030 * srk) - 1],
+                    s.vb.last!, s.fb, s.vb)
+        }
+
+        let hard = trace(vel: 127, bpVel)   // sharp = 1.0 from velocity
+        XCTAssertGreaterThan(hard.fbPeak / hard.fbSettled, 1.6,
+                             "hard strike must over-force (bite) below the press threshold")
+        XCTAssertGreaterThan(hard.vb30, 0.95 * hard.vbEnd,
+                             "hard strike must be fully drawn by 30 ms")
+
+        let soft = trace(vel: 5, bpVel)     // sharp ≈ 0.04 — near-legato
+        XCTAssertLessThan(soft.fbPeak / soft.fbSettled, 1.15,
+                          "gentle placement must NOT bite")
+        XCTAssertLessThan(soft.vb30, 0.5 * soft.vbEnd,
+                          "gentle placement must still be drawing at 30 ms")
+
+        // BIT-NULL: key absent → velocity changes nothing (bit-exact), and
+        // an explicit 0 matches the absent key.
+        let a127 = trace(vel: 127, bp)
+        let a5 = trace(vel: 5, bp)
+        XCTAssertEqual(a127.fb, a5.fb, "velocity must be inert with bow_attack_vel absent")
+        XCTAssertEqual(a127.vb, a5.vb)
+        var bpZero = bp
+        bpZero.num["bow_attack_vel"] = 0.0
+        let z127 = trace(vel: 127, bpZero)
+        XCTAssertEqual(z127.fb, a127.fb, "bow_attack_vel 0 must equal the absent key")
+        XCTAssertEqual(z127.vb, a127.vb)
+    }
 }

@@ -331,13 +331,17 @@ final class RebuildCostTests: XCTestCase {
                           "the crossfade window overruns the realtime budget")
     }
 
-    /// The settle pre-roll was shortened because the crossfade fades a
-    /// fresh engine in from silence across the same window the jawari chime
-    /// lives in. The honest check is an A/B: publishing with the shortened
-    /// pre-roll must not be audibly louder than publishing with the old
-    /// 6-block one. (An absolute bar would be wrong here — during a
-    /// crossfade BOTH engines are idling into the output, so the floor is
-    /// naturally ~2x a single engine's.)
+    /// Publishing a freshly built engine must be SILENT. Historically this
+    /// was a relative A/B (short pre-roll vs the old 6-block one) because
+    /// the chime asymptoted at ~-50 dBFS and no affordable pre-roll could
+    /// do better. The DAMPED SETTLE (2026-08-18) killed the chime at the
+    /// cause — the taraf is choked while the discarded blocks render, so
+    /// the q0 relax dies inside them and the anchors' 7-9 s tails never
+    /// ride out — which makes an ABSOLUTE bar meaningful for the first
+    /// time: publish peak (both engines idling through the crossfade) at
+    /// or below -80 dBFS. Measured at the bake: -102 dBFS with 5 settle
+    /// blocks, -110 with 6 (noise floor; the old relative 2 dB tolerance
+    /// became a meaningless ratio of two near-zeros and was retired).
     func testShortPreRollIsNoLouderOnPublishThanTheOldLongOne() throws {
         func publishPeak(settle: Int) throws -> Double {
             let saved = StringVoiceSource.settleBlocks
@@ -372,11 +376,12 @@ final class RebuildCostTests: XCTestCase {
             long, 20 * log10(max(long, 1e-9)),
             StringVoiceSource.settleBlocks, short,
             20 * log10(max(short, 1e-9))))
-        // Tolerance is 2 dB: the pre-roll's residual asymptotes near
-        // -50 dBFS, so the shortened one lands ~1 dB above the old value.
-        let deltaDb = 20 * log10(max(short, 1e-9) / max(long, 1e-9))
-        XCTAssertLessThan(deltaDb, 2.0,
-                          "the shortened pre-roll chimes \(deltaDb) dB louder "
-                          + "on publish than the old one — raise settleBlocks")
+        XCTAssertLessThan(20 * log10(max(long, 1e-9)), -80,
+                          "even the LONG pre-roll publishes audibly — the "
+                          + "damped settle is not choking the chime")
+        XCTAssertLessThan(20 * log10(max(short, 1e-9)), -80,
+                          "the shipped pre-roll publishes above -80 dBFS — "
+                          + "the damped settle is not choking the chime "
+                          + "(or settleBlocks fell below what the choke needs)")
     }
 }

@@ -370,6 +370,53 @@ public func fretPlacements(arrangement: FretArrangement,
     return out
 }
 
+// MARK: - Auto-vibrato zone (fret linger)
+
+/// Which end of a fret is its **outer** end — the auto-vibrato zone (the
+/// wire's `fretY` runs 0 at the inner end → 1 at the outer end). Frets
+/// whose centre sits in the band's upper half open **upward** (top 30%);
+/// frets at or below the band's centre-line open **downward**. Shared by
+/// both surfaces so the zone marking, the streamed `fretY` and the Mac
+/// preview can never disagree.
+public func fretOuterEndIsTop(topY: CGFloat, bottomY: CGFloat,
+                              bandHeight: CGFloat) -> Bool {
+    (topY + bottomY) / 2 < bandHeight / 2
+}
+
+/// Fraction of a fret's length, from its INNER (band-centre-side) end,
+/// with no auto-vibrato — the surfaces' zone marking. Mirrors the shipped
+/// default of `bow_avib_dead` (the Mac's parameter is the live truth; the
+/// drawing does not track edits to it).
+public let fretVibratoDeadFraction: CGFloat = 0.7
+
+/// The fret's line as a polyline: a straight run over the dead zone, then
+/// a **wavy tail** over the outer vibrato zone — the "slight indicator"
+/// both surfaces draw (the wave grows toward the tip, echoing the touch
+/// ring's wavy vibrato display). Falls back to the plain segment for
+/// degenerate extents.
+public func fretLinePoints(x: CGFloat, topY: CGFloat, bottomY: CGFloat,
+                           bandHeight: CGFloat) -> [CGPoint] {
+    let h = bottomY - topY
+    guard h > 1 else {
+        return [CGPoint(x: x, y: topY), CGPoint(x: x, y: bottomY)]
+    }
+    let outerIsTop = fretOuterEndIsTop(topY: topY, bottomY: bottomY,
+                                       bandHeight: bandHeight)
+    let zone = h * (1 - fretVibratoDeadFraction)
+    let boundary = outerIsTop ? topY + zone : bottomY - zone
+    let amp: CGFloat = 2.0
+    let cycles: CGFloat = 2.5
+    var pts = [CGPoint(x: x, y: outerIsTop ? bottomY : topY),
+               CGPoint(x: x, y: boundary)]
+    let steps = 24
+    for i in 1...steps {
+        let t = CGFloat(i) / CGFloat(steps)     // 0 boundary → 1 outer tip
+        let y = outerIsTop ? boundary - t * zone : boundary + t * zone
+        pts.append(CGPoint(x: x + amp * t * sin(t * cycles * 2 * .pi), y: y))
+    }
+    return pts
+}
+
 // MARK: - Pitch field
 
 /// Frets closer together than this (px) count as one **column** for the

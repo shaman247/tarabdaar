@@ -28,7 +28,7 @@ struct TiltControlsView: View {
                 Text("TILT CONTROLS")
                     .font(.padCaption.weight(.bold))
                     .foregroundStyle(.secondary)
-                Text("Each control axis drives any set of composites or single parameters between the endpoints of its range slider, in the target's own units (left = fully one way, right = fully the other; rest sits halfway). \u{201C}From center\u{201D} holds the low endpoint through the resting half and sweeps only past neutral. Five axes (2026-08-13): Arm \u{2195}/\u{2194}/\u{27F2} are the iPad's tilt axes through the guided arm calibration (Setup tab; rest = 0.5, sweep extremes = 0/1) — uncalibrated they carry raw pitch/roll/yaw, uncentered; Stick X/Y are the Joy-Con stick. The Mac evaluates all bindings, so edits take effect immediately.")
+                Text("Each control axis drives any set of composites or single parameters between the endpoints of its range slider, in the target's own units (left = fully one way, right = fully the other; rest sits halfway). \u{201C}From center\u{201D} holds the low endpoint through the resting half and sweeps only past neutral. Five axes (2026-08-13): Arm \u{2195}/\u{2194}/\u{27F2} are the iPad's tilt axes through the guided arm calibration (Setup tab; every axis runs \u{2212}1\u{2026}+1 with rest = 0, sweep extremes = \u{00B1}1) — uncalibrated they carry raw pitch/roll/yaw, uncentered; Stick X/Y are the Joy-Con stick. The Mac evaluates all bindings, so edits take effect immediately.")
                     .font(.padCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

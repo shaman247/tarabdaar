@@ -53,6 +53,9 @@ final class TanpuraVoiceTests: XCTestCase {
         XCTAssertEqual(keys, ["tp_gain", "tp_drone_level",
                               "tp_drone_cycle", "tp_pluck_level",
                               "tp_rel_t60",
+                              "tp_pluck_touch", "tp_pluck_drive",
+                              "tp_poly", "tp_taraf",
+                              "tp_jiva_comp", "tp_cascade",
                               "tp_shape_align", "tp_shape_focus",
                               "tp_shape_quiet", "tp_shape_spread"])
         for spec in group!.params {
@@ -66,6 +69,32 @@ final class TanpuraVoiceTests: XCTestCase {
         XCTAssertEqual(ParamRegistry.spec("tp_drone_cycle")!.def, 2.5)
         XCTAssertEqual(ParamRegistry.spec("tp_pluck_level")!.def, 1.0)
         XCTAssertEqual(ParamRegistry.spec("tp_rel_t60")!.def, 0.4)
+        // touch rests at 0 (legacy ride-the-ring pluck) and drive at 1
+        // (fitted contact engagement, bit-exact) — the startup default
+        // push must not change the calibrated instrument
+        XCTAssertEqual(ParamRegistry.spec("tp_pluck_touch")!.def, 0.0)
+        XCTAssertEqual(ParamRegistry.spec("tp_pluck_drive")!.def, 1.0)
+        // the string bank's default must match AudioEngine's storage
+        // AND the kernel's tanpura_create default (all 6)
+        XCTAssertEqual(ParamRegistry.spec("tp_poly")!.def, 6.0)
+        // the taraf coupling ships ON (2026-08-21: the tanpura plays as
+        // though strung into the bowed instrument — its plucks charge
+        // the jt web) at the sitar's audition-calibrated drive (the two
+        // artifacts' output trims are pluck-peak-matched, so st_taraf's
+        // measured 4.0 transfers); 0 must remain reachable (byte-null
+        // String parity path), and the default must match AudioEngine's
+        // `tanpuraTarafDrive` storage
+        XCTAssertEqual(ParamRegistry.spec("tp_taraf")!.def, 4.0)
+        XCTAssertEqual(ParamRegistry.spec("tp_taraf")!.lo, 0.0)
+        // the register calibration ships ON (2026-08-15, user-requested:
+        // every pitch defaults to low Sa's buzziness/cascade) — the
+        // AudioEngine storage inits to the same 1.0 so the startup
+        // default push schedules no rebuild
+        XCTAssertEqual(ParamRegistry.spec("tp_jiva_comp")!.def, 1.0)
+        // cascade slowing likewise ships ON (2026-08-15: higher notes
+        // must ladder at low Sa's pace by default); AudioEngine storage
+        // inits to the same 1.0
+        XCTAssertEqual(ParamRegistry.spec("tp_cascade")!.def, 1.0)
         // the shaping trio rests at 0 = the PHYSICAL tanpura (buildEngine
         // then skips the transform entirely, and the startup default push
         // must not schedule a seconds-long rebuild)

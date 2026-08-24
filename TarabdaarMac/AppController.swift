@@ -77,13 +77,11 @@ final class AppController: ObservableObject {
 
     /// Which voice the played (fret) notes drive (2026-08-04): the String
     /// bowed voice (default) or the tanpura, which plucks the nearest scale
-    /// pitch at the exact bent onset. Persisted; Live tab picker.
-    @Published var mainInstrument: AudioEngine.MainInstrument =
-        AudioEngine.MainInstrument(rawValue: UserDefaults.standard
-            .string(forKey: "tarabdaar.mainInstrument.v1") ?? "") ?? .string {
+    /// pitch at the exact bent onset. NOT persisted (2026-08-20) — every
+    /// launch starts on the String bowed voice; presets can still switch it.
+    /// Live tab picker.
+    @Published var mainInstrument: AudioEngine.MainInstrument = .string {
         didSet {
-            UserDefaults.standard.set(mainInstrument.rawValue,
-                                      forKey: "tarabdaar.mainInstrument.v1")
             audio.setMainInstrument(mainInstrument)
         }
     }
@@ -129,6 +127,29 @@ final class AppController: ObservableObject {
     /// heartbeat duplicate-drop for the uncalibrated passthrough.
     private var lastRawArmTilt: [Double?] = [nil, nil, nil]
 
+    /// THE STRIKE→ACCELERATION BLEND (2026-08-23). The `.strike` and
+    /// `.acceleration` dimensions share ONE measurement (the PERF_STATE
+    /// strike byte); their bindings are evaluated JOINTLY in
+    /// `evaluateStrikeBlend` — per target, (1−w)·strike + w·accel with w
+    /// ramping 0→1 over the 2 s per-note window (`StrikeBlendWindow`,
+    /// newest-sounding-note rule) and an unbound side reading as the
+    /// target's default. Neither axis may be fed through `applyTiltAxis`
+    /// (double-apply). Everything below `strikeLock`: the window, the
+    /// last measurement, and the per-target change gate.
+    static let strikeAxisIndex =
+        ControlAxes.dims.firstIndex(of: .strike) ?? 5
+    static let accelAxisIndex =
+        ControlAxes.dims.firstIndex(of: .acceleration) ?? 6
+    private let strikeLock = NSLock()
+    private var strikeWindow = StrikeBlendWindow(windowS: 2.0)
+    private var strikeMeasure = 0.0        // last wire value 0…1
+    private var lastBlendOut: [MapTarget: Double] = [:]
+    /// 30 Hz re-evaluation while strike/accel bindings exist: the WEIGHT
+    /// keeps moving through the note window even when the measurement is
+    /// still (the wire is change-gated, so measurement events alone would
+    /// freeze the blend mid-slide).
+    private var strikeTimer: DispatchSourceTimer?
+
     private func rebuildTiltEvalSnapshot() {
         var byAxis: [[(MapTarget, DimensionBinding)]] =
             Array(repeating: [], count: ControlAxes.dims.count)
@@ -142,12 +163,95 @@ final class AppController: ObservableObject {
         compositeLock.lock()
         tiltEvalByAxis = byAxis
         compositeLock.unlock()
+        // Strike/accel blend: forget the change gate (an edit must
+        // re-apply even if the value lands where it was) and run the
+        // 30 Hz weight timer only while the pair has bindings.
+        let strikeActive = !(byAxis[Self.strikeAxisIndex].isEmpty
+                             && byAxis[Self.accelAxisIndex].isEmpty)
+        strikeLock.lock()
+        lastBlendOut.removeAll()
+        strikeLock.unlock()
+        updateStrikeTimer(active: strikeActive)
     }
 
-    /// Apply one control-axis value (axis 0…5, 0…1 normalized): evaluate each
+    private func updateStrikeTimer(active: Bool) {
+        if active, strikeTimer == nil {
+            let t = DispatchSource.makeTimerSource(
+                queue: .global(qos: .userInitiated))
+            t.schedule(deadline: .now(), repeating: 1.0 / 30.0,
+                       leeway: .milliseconds(5))
+            t.setEventHandler { [weak self] in self?.evaluateStrikeBlend() }
+            t.resume()
+            strikeTimer = t
+        } else if !active, let t = strikeTimer {
+            t.cancel()
+            strikeTimer = nil
+        }
+    }
+
+    /// Evaluate the Strike/Acceleration pair against the shared
+    /// measurement: for every target bound on EITHER dimension, output =
+    /// (1−w)·strikeOut + w·accelOut — a side without a binding evaluates
+    /// to the target's DEFAULT (registry default for a parameter, 0 =
+    /// rest for a composite), which is what turns "expression [0, 1] on
+    /// Strike, unbound on Acceleration (default 0.4)" into the
+    /// interpolated range [0.2, 0.7] at w = 0.5. Change-gated per target
+    /// so the always-on timer applies nothing once the blend settles.
+    /// Runs on the link thread (measurement/gate events) and the blend
+    /// timer (weight motion); downstream applies are MIDI-thread-safe.
+    private func evaluateStrikeBlend() {
+        compositeLock.lock()
+        let sBind = tiltEvalByAxis[Self.strikeAxisIndex]
+        let aBind = tiltEvalByAxis[Self.accelAxisIndex]
+        compositeLock.unlock()
+        guard !sBind.isEmpty || !aBind.isEmpty else { return }
+        var sBy: [MapTarget: DimensionBinding] = [:]
+        for (t, b) in sBind { sBy[t] = b }
+        var aBy: [MapTarget: DimensionBinding] = [:]
+        for (t, b) in aBind { aBy[t] = b }
+        func defaultOut(_ t: MapTarget) -> Double {
+            switch t.kind {
+            case .composite: return 0.0    // composite rest convention
+            case .param(let key): return paramDefault(key)
+            }
+        }
+        strikeLock.lock()
+        let m = strikeMeasure
+        let w = strikeWindow.weight(at: ProcessInfo.processInfo.systemUptime)
+        var changed: [(MapTarget, Double)] = []
+        for target in Set(sBy.keys).union(aBy.keys) {
+            let s = sBy[target].map { $0.evaluate(m) } ?? defaultOut(target)
+            let a = aBy[target].map { $0.evaluate(m) } ?? defaultOut(target)
+            let v = (1.0 - w) * s + w * a
+            if let prev = lastBlendOut[target], abs(prev - v) < 1e-9 {
+                continue
+            }
+            lastBlendOut[target] = v
+            changed.append((target, v))
+        }
+        strikeLock.unlock()
+        guard !changed.isEmpty else { return }
+        var rebuild: [String: Double] = [:]
+        for (target, v) in changed {
+            switch target.kind {
+            case .composite(let slot):
+                applyComposite(slot: slot, value: v)
+            case .param(let key):
+                if let pending = applyParamToVoice(key, v) {
+                    rebuild[key] = pending
+                }
+            }
+        }
+        queueRebuildValues(rebuild)
+    }
+
+    /// Apply one control-axis value (axis 0…5, value −1…+1 with rest 0 —
+    /// the app-wide tilt convention since 2026-08-18): evaluate each
     /// bound target's transfer curve in the target's native units and
     /// drive it — a composite through `applyComposite`, a single parameter
-    /// through the unified apply. Called on the MIDI thread (all
+    /// through the unified apply. The persisted curves keep their 0…1
+    /// x-domain (axis −1…+1 ↔ x 0…1), so saved bindings needed no
+    /// migration. Called on the MIDI thread (all
     /// downstream paths are thread-safe).
     /// Relay the Joy-Con-side axis values to the iPad's toolbar squares —
     /// the Mac's latest-wins JOYCON_STATE frame. The link paces and
@@ -158,18 +262,27 @@ final class AppController: ObservableObject {
     /// the state push (acting as state, not display).
     private func sendJoyConDisplay(force: Bool = false) {
         let s = lastStickAxes
+        strikeLock.lock()
+        let win = strikeWindow.windowS
+        strikeLock.unlock()
         link.setJoyConState(JoyConTiltDisplay(
             stickX: s.0, stickY: s.1,
-            wrist1: lastBodyWrist?.0 ?? 0.5,
-            wrist2: lastBodyWrist?.1 ?? 0.5,
-            stickLive: abs(s.0 - 0.5) > 0.02 || abs(s.1 - 0.5) > 0.02,
-            bodyLive: lastBodyWrist != nil,
-            connected: joyCon.connectedName != nil), force: force)
+            wrist1: lastWristTilt?.0 ?? 0,
+            wrist2: lastWristTilt?.1 ?? 0,
+            stickLive: abs(s.0) > 0.04 || abs(s.1) > 0.04,
+            bodyLive: lastWristTilt != nil,
+            connected: joyCon.connectedName != nil,
+            wrist3: lastWristTilt?.2 ?? 0,
+            arm1: lastArmAxes?.0 ?? 0,
+            arm2: lastArmAxes?.1 ?? 0,
+            arm3: lastArmAxes?.2 ?? 0,
+            armLive: lastArmAxes != nil,
+            strikeWindowS: win), force: force)
     }
 
     /// The iPad raw-tilt funnel. With an arm calibration, the solve
-    /// consumes the report and drives axes 0–2 (rest = 0.5); without one,
-    /// the raw axes pass straight through, uncentered. The duplicate-drop
+    /// consumes the report and drives axes 0–2 (rest = 0, extremes ±1);
+    /// without one, the raw axes pass straight through, uncentered. The duplicate-drop
     /// guards the in-process CC path (LinkIngest change-gates the wire
     /// path already; a second gate is harmless).
     private func handleRawTilt(_ axis: Int, _ value: Double) {
@@ -182,14 +295,15 @@ final class AppController: ObservableObject {
         }
     }
 
-    private func applyTiltAxis(_ axis: Int, _ value01: Double) {
+    private func applyTiltAxis(_ axis: Int, _ value: Double) {
         guard axis >= 0, axis < ControlAxes.dims.count else { return }
         compositeLock.lock()
         let bindings = tiltEvalByAxis[axis]
         compositeLock.unlock()
+        let curveX = (value + 1) / 2                     // −1…+1 → curve 0…1
         var rebuild: [String: Double] = [:]
         for (target, binding) in bindings {
-            let out = binding.evaluate(value01)          // native units
+            let out = binding.evaluate(curveX)           // native units
             switch target.kind {
             case .composite(let slot):
                 applyComposite(slot: slot, value: out)
@@ -410,6 +524,20 @@ final class AppController: ObservableObject {
     @discardableResult
     func applyParamToVoice(_ key: String, _ value: Double) -> Double? {
         guard let spec = ParamRegistry.spec(key) else { return nil }
+        // Control-layer key: the strike→acceleration blend window — not a
+        // voice parameter. Updates the window, forces a blend
+        // re-evaluation (the change gate clears), and relays the new
+        // value to the iPad's scope fade over JOYCON_STATE.
+        if key == "ctl_strike_window" {
+            strikeLock.lock()
+            strikeWindow.windowS = max(value, 0.05)
+            lastBlendOut.removeAll()
+            strikeLock.unlock()
+            DispatchQueue.main.async { [weak self] in
+                self?.sendJoyConDisplay(force: true)
+            }
+            return nil
+        }
         switch spec.apply {
         case .live:
             audio.setStringControlParam(key, value)
@@ -431,16 +559,22 @@ final class AppController: ObservableObject {
 
     // jt overload watchdog (see start())
     private var jtStatsTimer: Timer?
+    private var lingerPushTimer: Timer?
 
     /// Joy-Con drone strum (main queue only): bumped on every L
     /// press/release so a stale scheduled stagger press can't fire.
     private var droneStrumGen = 0
-    /// Latest Joy-Con axis values for the iPad display relay (main
-    /// queue): wrist = calibrated body axes 3/4, nil while the body
-    /// solve isn't driving.
-    private var lastStickAxes: (Double, Double) = (0.5, 0.5)
-    private var lastBodyWrist: (Double, Double)?
+    /// Latest axis values for the iPad display relay (main queue):
+    /// stick = Joy-Con stick, wrist = the Joy-Con's fused attitude
+    /// (nil until the fusion runs / after detach), arm = the
+    /// arm-calibration solve's three calibrated iPad tilts (nil while
+    /// no calibration is driving — the iPad's own raw square is the
+    /// truth then).
+    private var lastStickAxes: (Double, Double) = (0, 0)
+    private var lastWristTilt: (Double, Double, Double)?
+    private var lastArmAxes: (Double, Double, Double)?
     private var lastJtDrops = 0.0
+    private var jtGateLogTicks = 0
     private var lastJtFlat = 0.0
     private var lastRenderOverruns: UInt64 = 0
 
@@ -586,6 +720,27 @@ final class AppController: ObservableObject {
         ingest.onAccel = { [weak self] x, y, z in
             self?.joyCon.feedAccel(x, y, z)
         }
+        // The strike envelope (TLP v6): the measurement behind the
+        // `.strike`/`.acceleration` pair. Change-gated in LinkIngest;
+        // the 30 Hz blend timer keeps the WEIGHT moving between events.
+        ingest.onStrike = { [weak self] v in
+            guard let self else { return }
+            self.strikeLock.lock()
+            self.strikeMeasure = v
+            self.strikeLock.unlock()
+            self.evaluateStrikeBlend()
+        }
+        // Note-lifecycle edges anchor the per-note blend windows (a
+        // retrigger re-anchors its id; releases fall back to the
+        // survivor's own un-reset age).
+        ingest.onTouchGate = { [weak self] id, on in
+            guard let self else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            self.strikeLock.lock()
+            if on { self.strikeWindow.noteOn(id, at: now) }
+            else { self.strikeWindow.noteOff(id) }
+            self.strikeLock.unlock()
+        }
         // TarabLink: inbound TLP SysEx from MIDIInput's reassembler;
         // outbound through the same wired-first SysEx send the legacy
         // blobs used ("iPad" name match; BLE bypasses the filter inside).
@@ -602,8 +757,15 @@ final class AppController: ObservableObject {
             self?.ingest.apply(frame)
         }
         link.onLinkDrop = { [weak self] in
+            guard let self else { return }
             NSLog("Tarabdaar: link stale — releasing everything held")
-            self?.ingest.linkDidDrop()
+            self.ingest.linkDidDrop()
+            // No more frames: the strike measurement rests at 0 (the
+            // gate edges above already cleared the blend anchors).
+            self.strikeLock.lock()
+            self.strikeMeasure = 0
+            self.strikeLock.unlock()
+            self.evaluateStrikeBlend()
         }
         link.onEvent = { [weak self] event in
             switch event {
@@ -665,6 +827,16 @@ final class AppController: ObservableObject {
             self.applyTiltAxis(0, t1)
             self.applyTiltAxis(1, t2)
             self.applyTiltAxis(2, t3)
+            // Mirror the calibrated arm axes to the iPad's arm square
+            // (main thread — armTick hops before calling; the link
+            // paces the actual sends).
+            self.lastArmAxes = (t1, t2, t3)
+            self.sendJoyConDisplay()
+        }
+        joyCon.onWristAttitude = { [weak self] wrist in
+            guard let self else { return }
+            self.lastWristTilt = wrist
+            self.sendJoyConDisplay()
         }
         joyCon.onStickAxes = { [weak self] x01, y01 in
             guard let self else { return }
@@ -690,7 +862,7 @@ final class AppController: ObservableObject {
                     self.audio.setDronePressed(1, pressed)
                 }
             case .dpadRight: self.audio.setDronePressed(2, pressed)
-            case .shoulder1:
+            case .l:
                 // Strum: the three drone buttons staggered like a
                 // tanpura sweep; release rings them out. The generation
                 // counter keeps a quick tap's release from leaving a
@@ -709,11 +881,16 @@ final class AppController: ObservableObject {
                 } else {
                     for i in 0..<3 { self.audio.setDronePressed(i, false) }
                 }
-            case .shoulder2:
+            case .zl:
                 // ZL re-zeroes the body axes: the CURRENT pose becomes
                 // rest (0.5 across all four).
                 guard pressed else { return }
                 self.joyCon.recenterBody()
+            case .sl, .sr, .stickClick, .minus, .capture:
+                // Unassigned — SL/SR freed by the 2026-08-21 shoulder
+                // split, the misc inputs surfaced the same day; all
+                // visible in the panel chips.
+                break
             case .dpadUp:
                 // Advances a running body calibration (no-op otherwise)
                 // so the controller hand can step phases alone.
@@ -734,6 +911,23 @@ final class AppController: ObservableObject {
         joyCon.start()
         // (sendJoyConDisplay below relays the stick + wrist axes to the
         // iPad's toolbar squares.)
+        // Fret-linger display feed (2026-08-18): poll the String voice's
+        // per-touch envelope state at 20 Hz and relay it as LINGER_STATE
+        // frames, so the iPad's touch overlay shows the expression charge
+        // and auto-vibrato the Mac is ACTUALLY evaluating (no client-side
+        // replica to drift from the live parameters). The link dedupes —
+        // an unchanged (usually empty) poll never reaches the wire.
+        lingerPushTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 20.0,
+                                               repeats: true) { [weak self] _ in
+            guard let self else { return }
+            func b(_ v: Double) -> UInt8 {
+                UInt8(min(max(v, 0.0), 1.0) * 255.0 + 0.5)
+            }
+            self.link.setLingerState(self.audio.lingerDisplay().map {
+                TLPLingerTouch(id: $0.id, charge: b($0.charge),
+                               vib: b($0.vib), vibCeil: b($0.vibCeil))
+            })
+        }
         // jt overload watchdog: the String voice's async jawari web drops
         // drive blocks / flat-fills when it misses its realtime budget —
         // audible clicking. Log only when the counters GROW.
@@ -751,6 +945,26 @@ final class AppController: ObservableObject {
                     // engine rebuilt — counters reset
                     self.lastJtDrops = s.drops
                     self.lastJtFlat = s.flat
+                }
+            }
+            // quiescence-gate probe (2026-08-17): names what blocks the
+            // idle web from sleeping — ring×N = rows still ringing above
+            // the floor, drive×N = bridge drive above the wake bound,
+            // "drone" = jt drone drive held. Ratios are the period's max;
+            // > 1 blocks. Logged only while any row is awake.
+            let g = self.audio.stringVoiceJtGateProbe()
+            let awake = g.map { $0.total > 0 && $0.asleep < $0.total } ?? false
+            // the first ~30 s log unconditionally (startup diagnosis:
+            // distinguishes "all asleep" from "voice/gate not armed");
+            // after that only while any row is awake.
+            if self.jtGateLogTicks < 6 || awake {
+                self.jtGateLogTicks += 1
+                if let g {
+                    NSLog("Tarabdaar: jt gate — asleep=%d/%d ring×%.2f drive×%.2f%@",
+                          g.asleep, g.total, g.ringR, g.driveR,
+                          g.droneHot ? " drone" : "")
+                } else {
+                    NSLog("Tarabdaar: jt gate — no String voice")
                 }
             }
             // main-callback deadline: overruns glitch at the DEVICE (the
@@ -856,6 +1070,10 @@ final class AppController: ObservableObject {
            last.ratios == ratios { return }
         lastTanpuraSync = (tonic, ratios)
         audio.rebuildTanpura(tonic: tonic, scaleRatios: ratios)
+        // the sitar mounts the same JI grid from its own artifact —
+        // rebuildSitar no-ops until the voice has been armed (first
+        // switch to the Sitar main instrument)
+        audio.rebuildSitar(tonic: tonic, scaleRatios: ratios)
     }
 
     // MARK: - Fret layouts (Fret Pad tab's Layout menu)
@@ -1327,6 +1545,14 @@ final class AppController: ObservableObject {
         // Composite parameters (drive the same member sweeps the tilts
         // do; the legacy names map onto the default slots — stringToneTilt
         // keeps its historical -1…1 range):
+        // Main instrument (2026-08-19, the sitar): 0 = String,
+        // 1 = Tanpura, 2 = Sitar — lets a score audition the plucked
+        // voices (the sitar arms + builds on first switch: give the
+        // score a few seconds before its first note).
+        case "instrument":
+            let all: [AudioEngine.MainInstrument] = [.string, .tanpura, .sitar]
+            let i = Int(value.rounded())
+            if all.indices.contains(i) { mainInstrument = all[i] }
         case "stringPurity":     applyComposite(slot: 0, value: clamp(value, 0, 1))
         case "stringTarafDecay": applyComposite(slot: 1, value: clamp(value, 0, 1))
         case "stringToneTilt":   applyComposite(slot: 2, value: (clamp(value, -1, 1) + 1) / 2)

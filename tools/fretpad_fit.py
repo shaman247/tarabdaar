@@ -49,7 +49,10 @@ import numpy as np
 # its wider basin and the direction-flip impulse (assist radius = radiusScale
 # × Snap; onset snap stays at 1×).
 DEFAULTS = dict(speedFloor=25.0, speedCeiling=180.0, speedTau=0.045,
-                settleTau=0.08, radiusScale=1.0, turnGain=0.0, turnTau=0.06)
+                settleTau=0.08, radiusScale=1.0, turnGain=0.0, turnTau=0.06,
+                # Stopped-detector gate (2026-08-17): dwell inside a still
+                # disc opens the magnet; speed no longer does.
+                stillRadiusPx=2.0, stopDwellMin=0.10, stopDwellRamp=0.15)
 TURN_DEADBAND = 0.7         # px — dx smaller than this doesn't flip direction
 SLEW_CAP = 1500.0 / 1200.0  # log2/s — hard cap on correction slew (smoothness
                             # by construction, independent of fitted params)
@@ -152,6 +155,9 @@ def replay(stroke, params):
     stau, ctau = params["speedTau"], params["settleTau"]
     turn_gain = params.get("turnGain", 0.0)
     turn_tau = params.get("turnTau", 0.06)
+    still_r = params.get("stillRadiusPx", 2.0)
+    dwell_min = params.get("stopDwellMin", 0.10)
+    dwell_ramp = params.get("stopDwellRamp", 0.15)
     frets = stroke["frets"]
     radius = stroke["radius"] * params.get("radiusScale", 1.0)
     moves = stroke["moves"]
@@ -166,6 +172,10 @@ def replay(stroke, params):
     impulse = 0.0
     dx_sign = 0
     last_x, last_y, last_u = moves[0, 1], moves[0, 2], moves[0, 3]
+    anchor_x, anchor_y = last_x, last_y
+    # Every touch is born stopped — the dwell gate starts fully open and
+    # the first movement re-anchors it (mirrors FretDragAssist.begin).
+    still_start = -(dwell_min + dwell_ramp)
     last_move = last_update = 0.0
     T, U, O = [], [], []
     for t, idx, is_tick in nodes:
@@ -187,7 +197,12 @@ def replay(stroke, params):
             last_x, last_y, last_u = x, moves[idx, 2], moves[idx, 3]
             last_move = t
         last_update = t
-        w = smoothstep((ceil - speed) / (ceil - floor))
+        # Stopped-detector gate (mirrors FretDragAssist, 2026-08-17): the
+        # touch must dwell within the still disc before the magnet engages;
+        # a sustained drag keeps re-anchoring and the gate stays shut.
+        if math.hypot(last_x - anchor_x, last_y - anchor_y) > still_r:
+            anchor_x, anchor_y, still_start = last_x, last_y, t
+        w = smoothstep((t - still_start - dwell_min) / dwell_ramp)
         gate = min(1.0, max(w, turn_gain * impulse))
         cand, d, cx = candidate(frets, radius, last_x, last_y)
         # A receding candidate (moving away, speed above the stationary
@@ -454,6 +469,10 @@ def total_loss(strokes, params, all_labels):
 
 
 def fit(strokes, all_labels, fast=False):
+    # speedFloor/speedCeiling only bound the receding check and the shed
+    # movement gate since the 2026-08-17 stopped-detector gate — the magnet
+    # itself is opened by the still-disc dwell (stillRadiusPx/stopDwellMin,
+    # with stopDwellRamp refined by the coordinate descent below).
     grid = dict(
         speedFloor=[15, 30],
         speedCeiling=[150, 300],
@@ -462,26 +481,29 @@ def fit(strokes, all_labels, fast=False):
         radiusScale=[1.0, 1.75, 2.5],
         turnGain=[0.0, 1.0, 2.0],
         turnTau=[0.04, 0.08, 0.12],
+        stillRadiusPx=[1.5, 3.0],
+        stopDwellMin=[0.08, 0.15],
+        stopDwellRamp=[0.15],
     )
     if fast:
         grid = {k: v[:2] for k, v in grid.items()}
+    keys = list(grid)
     best, best_loss = None, float("inf")
-    for f in grid["speedFloor"]:
-        for c in grid["speedCeiling"]:
-            if c < f + 20:
-                continue
-            for st in grid["speedTau"]:
-                for se in grid["settleTau"]:
-                    for rs in grid["radiusScale"]:
-                        for tgn in grid["turnGain"]:
-                            for tt in grid["turnTau"]:
-                                p = dict(speedFloor=f, speedCeiling=c,
-                                         speedTau=st, settleTau=se,
-                                         radiusScale=rs, turnGain=tgn,
-                                         turnTau=tt)
-                                loss = total_loss(strokes, p, all_labels)["loss"]
-                                if loss < best_loss:
-                                    best, best_loss = p, loss
+
+    def sweep(i, p):
+        nonlocal best, best_loss
+        if i == len(keys):
+            if p["speedCeiling"] < p["speedFloor"] + 20:
+                return
+            loss = total_loss(strokes, dict(p), all_labels)["loss"]
+            if loss < best_loss:
+                best, best_loss = dict(p), loss
+            return
+        for v in grid[keys[i]]:
+            p[keys[i]] = v
+            sweep(i + 1, p)
+
+    sweep(0, {})
     for _ in range(3):
         for key in best:
             for mul in (0.8, 1.25):
@@ -499,8 +521,9 @@ def parity(stroke):
     """Replay under the RECORDED params and compare to what Swift played.
     NOTE: recordings made before the 2026-08-01 escape/decay change (no pull
     from a receding candidate; moving touches shed the carried correction)
-    replay under the NEW rules and will show elevated parity — re-record
-    before trusting a fit."""
+    or the 2026-08-17 stopped-detector gate (dwell inside a still disc opens
+    the magnet; smoothed speed no longer does) replay under the NEW rules
+    and will show elevated parity — re-record before trusting a fit."""
     params = {**DEFAULTS, **stroke["params"]}
     T, U, O = replay(stroke, params)
     ev = stroke["events"]
@@ -574,6 +597,9 @@ def cmd_fit(paths, tokens=None, fast=False, snap_px=None):
     print(f"    public var radiusScale: Double = {best.get('radiusScale', 1.0):.2f}")
     print(f"    public var turnGain: Double = {best.get('turnGain', 0.0):.2f}")
     print(f"    public var turnTau: Double = {best.get('turnTau', 0.06):.3f}")
+    print(f"    public var stillRadiusPx: Double = {best.get('stillRadiusPx', 2.0):.1f}")
+    print(f"    public var stopDwellMin: Double = {best.get('stopDwellMin', 0.10):.2f}")
+    print(f"    public var stopDwellRamp: Double = {best.get('stopDwellRamp', 0.15):.2f}")
 
 
 def cmd_selftest():

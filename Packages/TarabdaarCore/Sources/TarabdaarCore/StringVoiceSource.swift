@@ -155,11 +155,14 @@ public final class StringVoiceSource {
     private var jtLpHz = 0.0
     private var jtHpHz = 0.0
     private var jtBody = 0.0
+    private var jtGov = 0.0
     private var tarafDamp = 0.0
     private var toneTilt = 0.0
+    private var masterGain = 1.0  // bow_gain neutral = the calibrated level
     private var tarafSel = 0.5    // bow_jt_sel neutral = the fitted profile
     private var jtEvolve = 0.5    // bow_jt_evolve neutral = fitted bone
     private var twang = 0.0       // bow_twang 0 = plain bridge (byte-null)
+    private var jtInjectGain = 0.0  // inject-ring arm: 0 = no foreign drive (byte-null)
 
     /// Radiated-jt tone LP corner (`bow_jt_lp`, runtime path; Hz,
     /// <= 0 = the build-time state). Control-thread safe.
@@ -180,6 +183,41 @@ public final class StringVoiceSource {
     public func setJtBody(_ mix01: Double) {
         jtBody = min(max(mix01, 0.0), 1.0)
         currentEngine()?.setJtBody(jtBody)
+    }
+
+    /// Taraf charge governor 0..1 (`bow_jt_gov`): 0 = raw physics, 1 =
+    /// each row's ring saturates at its single-strike level (the phrase
+    /// pile-up in the long-t60 anchors is shed at the bridge drive).
+    /// Control-thread safe.
+    public func setJtGov(_ amt01: Double) {
+        jtGov = min(max(amt01, 0.0), 1.0)
+        currentEngine()?.setJtGov(jtGov)
+    }
+
+    /// Rows currently asleep under the quiescence gate (always on at
+    /// build via the `bow_jt_gate` bp scalar; 0 with the voice unarmed
+    /// or the gate override-disabled) — telemetry/tests. Safe from any
+    /// thread.
+    public func jtGateAsleep() -> Int {
+        currentEngine()?.jtGateAsleep() ?? 0
+    }
+
+    /// Gate probe telemetry (see `BowEngine.jtGateProbe`). Safe from any
+    /// thread; nil with the voice unarmed.
+    public func jtGateProbe() -> (asleep: Int, total: Int, ringR: Double,
+                                  driveR: Double, droneHot: Bool)? {
+        currentEngine()?.jtGateProbe()
+    }
+
+    /// Master gain (`bow_gain`, .live 2026-08-23): the performance volume
+    /// of the whole radiated instrument, multiplying the fitted trim at
+    /// the engine's ramped output gain — instant (~25 ms glide), no
+    /// rebuild, no debounce, so tilt/strike bindings sweep it in real
+    /// time. Runtime playing state: cached here and re-applied across
+    /// rebuilds. Control-thread safe.
+    public func setMasterGain(_ g: Double) {
+        masterGain = max(g, 0.0)
+        currentEngine()?.setMasterGain(masterGain)
     }
 
     /// Taraf damping 0..1 (`bow_jt_damp`): 0 = natural ring, 1 = choked
@@ -220,6 +258,31 @@ public final class StringVoiceSource {
     public func setTwang(_ amt01: Double) {
         twang = min(max(amt01, 0.0), 1.0)
         currentEngine()?.setTwang(twang)
+    }
+
+    /// Voice→taraf inject-ring gain (2026-08-19): mixes foreign voices'
+    /// rendered output into the jt web's bridge drive — their
+    /// sympathetic halo IS the sarangi taraf. Since 2026-08-21 the
+    /// per-voice levels (`st_taraf` / `tp_taraf`) scale at each
+    /// source's tap, so this is just the shared arm (1 while any
+    /// source drives, else 0). Control-thread safe (the kernel ring
+    /// allocates on the first non-zero push); 0, or armed with nothing
+    /// written, stays byte-null.
+    public func setJtInjectGain(_ g: Double) {
+        jtInjectGain = max(g, 0.0)
+        currentEngine()?.setJtInjectGain(jtInjectGain)
+    }
+
+    /// Voice→taraf inject write — the ONE render-thread entry point:
+    /// a foreign voice's node callback appends its mono block to the
+    /// current engine's kernel ring (brief state lock, same as the
+    /// render callback's engine fetch). A mid-rebuild write lands on
+    /// the incoming engine only; the fading one's wash just decays.
+    public func jtInjectWrite(_ x: UnsafePointer<Double>, _ n: Int) {
+        os_unfair_lock_lock(&state.lock)
+        let engine = state.engine
+        os_unfair_lock_unlock(&state.lock)
+        engine?.jtInjectWrite(x, n)
     }
 
     // FX rack (2026-08-01): the four insert points' settings, kept here —
@@ -338,11 +401,14 @@ public final class StringVoiceSource {
             if jtLpHz > 0 { engine.setJtToneLp(hz: jtLpHz) }
             if jtHpHz > 0 { engine.setJtToneHp(hz: jtHpHz) }
             if jtBody > 0 { engine.setJtBody(jtBody) }
+            if jtGov > 0 { engine.setJtGov(jtGov) }
             if tarafDamp != 0 { engine.setTarafDamp(tarafDamp) }
             if toneTilt != 0 { engine.setToneTilt(toneTilt) }
+            if masterGain != 1.0 { engine.setMasterGain(masterGain) }
             if tarafSel != 0.5 { engine.setTarafSelectivity(tarafSel) }
             if jtEvolve != 0.5 { engine.setJtEvolve(jtEvolve) }
             if twang > 0 { engine.setTwang(twang) }
+            if jtInjectGain > 0 { engine.setJtInjectGain(jtInjectGain) }
             for point in FXPoint.allCases
                 where fxSettings[point.rawValue] != FXSettings() {
                 engine.setFX(point, fxSettings[point.rawValue])
@@ -429,13 +495,19 @@ public final class StringVoiceSource {
     /// Discarded blocks of settle pre-roll before a freshly built engine
     /// is published (4096 frames each, ~85 ms of audio). See the note at
     /// the pre-roll itself — this is the dominant cost of a rebuild, so it
-    /// is kept to the minimum the crossfade can finish off.
+    /// is kept to the minimum the choke needs.
     /// 4 → 5 (2026-07-25): the scale-defined bank rings the doubling
     /// strings in EXACT unison with their mid-choir twins (no detune any
     /// more), so the publish chime stacks coherently and decays slower —
-    /// four blocks left it ~2.8 dB above the old 6-block floor
-    /// (`testShortPreRollIsNoLouderOnPublishThanTheOldLongOne`).
-    static var settleBlocks = 5
+    /// four blocks left it ~2.8 dB above the old 6-block floor.
+    /// 5 → 3 (2026-08-18, the DAMPED SETTLE): with the taraf choked
+    /// through the pre-roll the chime dies inside the discarded blocks
+    /// instead of asymptoting at ~-50 dBFS — measured publish peak
+    /// (stock rig, through the crossfade): 1 block -80 dBFS, 2 -88,
+    /// 3 -93, 5 -102. Three keeps ~13 dB under the -80 bar
+    /// (`testShortPreRollIsNoLouderOnPublishThanTheOldLongOne`) for
+    /// hotter-than-stock rigs, at ~60% of the old rebuild latency.
+    static var settleBlocks = 3
 
     /// IN-PLACE PARAMETER PUSH (2026-07-24): apply an edit to the RUNNING
     /// engine instead of building a new one. Recomputes the kernel's
@@ -620,6 +692,9 @@ public final class StringVoiceSource {
                                reverbWidth: bp.v("bow_rev_width", 0.6),
                                fpMask: nil,
                                maxPoly: Int(bp.v("bow_live_poly", 8.0).rounded()))
+        // Trim = the fitted calibration only. The performance master
+        // volume (`bow_gain`, .live) is runtime state — `setEngine`
+        // re-applies the cached value once the engine mounts.
         engine.outGain = bp.v("bow_live_trim", 0.05)
         engine.seedLiveGains()   // ramp starts from the built values
         // (Drone-button excitation scalars — bow_drone_level/_onset/
@@ -649,6 +724,22 @@ public final class StringVoiceSource {
         // what is left after a few blocks is the jt web's steady idle
         // floor, not a decaying transient. The real fix would be upstream
         // (a q0 that does not leave the web charged at t = 0).
+        // DAMPED SETTLE (2026-08-18): the upstream fix the LENGTH note
+        // wished for. The chime is the q0 relax — the analytic static
+        // wrap is not an exact equilibrium of the discrete contact, so
+        // the web rings when ticking starts, and the anchors' 7–9 s
+        // natural tails meant no affordable pre-roll could absorb it
+        // (it asymptoted at ~-50 dBFS and rode out audibly for ~10 s
+        // after publish). Choking the taraf HARD while the discarded
+        // blocks render lets the contact settle the wrap to its true
+        // discrete equilibrium with the oscillation killed, then the
+        // natural ring is restored EXACTLY (a pure momentum scalar,
+        // 0 = byte-null) before the engine is published: silent
+        // publish, and the quiescence gate closes on the web within
+        // ~30 ms instead of ~10 s. Measured (RebuildCostTests):
+        // publish peak -50 dBFS (undamped asymptote) → -93 dBFS at the
+        // shipped 3 settle blocks.
+        engine.setJtSettleDamp(t60: 0.05)
         var prL = [Double](repeating: 0, count: 4096)
         var prR = [Double](repeating: 0, count: 4096)
         for _ in 0..<settleBlocks {
@@ -659,6 +750,7 @@ public final class StringVoiceSource {
                 }
             }
         }
+        engine.setJtSettleDamp(t60: 0)   // natural ring back (byte-null)
         return engine
     }
 }

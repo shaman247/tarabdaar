@@ -16,6 +16,22 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     case tilt4          = 7    // wrist up/down — RETIRED (wrist axes removed 2026-08-13)
     case stickX         = 8    // Joy-Con stick
     case stickY         = 9
+    /// The accelerometer STRIKE/ACCELERATION pair (2026-08-23, split same
+    /// day): BOTH ride the same measurement — the continuous 0…1
+    /// strike-scale measure (`MotionSource.strikeScale01` through the
+    /// iPad's fast-attack/~150 ms-decay tracker), streamed as the
+    /// PERF_STATE `strike` byte (TLP v6) — and what separates them is
+    /// TIME SINCE THE NOTE STARTED: per target, the applied value blends
+    /// (1−w)·Strike + w·Acceleration with w ramping 0→1 over the 2 s
+    /// note window (`StrikeBlendWindow`; an unbound side reads as the
+    /// target's default). Strike = the onset's voice, Acceleration = the
+    /// sustained gesture's. UNIPOLAR: rest (silence) sits at the curve's
+    /// LEFT end (x 0), a hard strike at x 1 — unlike the tilts, whose
+    /// rest is the centre. (`accelPressure` above is the RETIRED
+    /// per-note onset value from the old keyboard; these are the live
+    /// global axes.)
+    case strike         = 10
+    case acceleration   = 11
     case none           = -1
 
     public var label: String {
@@ -26,6 +42,8 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
         case .tilt4:         return "Wrist ↕ (retired)"
         case .stickX:        return "Stick X"
         case .stickY:        return "Stick Y"
+        case .strike:        return "Strike"
+        case .acceleration:  return "Acceleration"
         case .accelPressure: return "Pressure"
         case .keyY:          return "Key Y"
         case .slider1:       return "Slider 1"
@@ -43,6 +61,8 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
         case .tilt4:         return "W↕"
         case .stickX:        return "SX"
         case .stickY:        return "SY"
+        case .strike:        return "St"
+        case .acceleration:  return "Ac"
         case .accelPressure: return "Pr"
         case .keyY:          return "Y"
         case .slider1:       return "S1"
@@ -60,6 +80,7 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     /// The real dimensions (excludes .none).
     public static let real: [InputDimension] = [
         .tilt1, .tilt2, .tilt3, .tilt4, .stickX, .stickY,
+        .strike, .acceleration,
         .accelPressure, .keyY, .slider1, .slider2,
     ]
 }
@@ -167,8 +188,12 @@ public struct MapTarget: Hashable {
 // MARK: - Binding Model
 
 /// A control point on a dimension-to-parameter transfer curve.
+/// `x` is the PERSISTED curve domain, 0…1 — the live axis value is
+/// −1…+1 (rest 0) since 2026-08-18 and callers map it to this domain
+/// ((v+1)/2) before evaluating, so saved bindings and presets never
+/// needed migrating.
 public struct ControlPoint: Codable, Equatable {
-    public var x: Double  // 0..1 normalized input
+    public var x: Double  // 0..1 normalized input (axis −1…+1 ↔ x 0…1)
     public var y: Double  // output in parameter's native units
 
     public init(x: Double, y: Double) {
@@ -315,8 +340,8 @@ public struct DimensionMapping: Codable, Equatable {
         var m: [String: ParameterMapping] = [:]
         // Default tilt→composite bindings (slots map to the shipped
         // `CompositeParam.defaults()`): the resting device (tilt
-        // calibrated-neutral = 0.5 normalized) must keep the default
-        // sound. Purity/decay use a 3-point curve that stays 0 through
+        // calibrated-neutral = axis 0 = curve x 0.5) must keep the
+        // default sound. Purity/decay use a 3-point curve that stays 0 through
         // neutral and sweeps past it; tone tilt is linear (neutral ≈ flat);
         // Expression (slot 3) is linear full-throw so rest lands on the
         // fitted median. Endpoints are the composite's native 0…1.

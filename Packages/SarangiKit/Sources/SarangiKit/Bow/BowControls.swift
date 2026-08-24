@@ -99,6 +99,12 @@ public final class BowControlMapper: @unchecked Sendable {
         var serial: UInt32 = 0
         var lastOn: UInt64 = 0
         var lastOff: UInt64 = 0
+        /// ONSET VELOCITY (2026-08-19): the strike velocity 0…1 of the
+        /// slot's most recent articulation — MIDI d2/127 or the touch
+        /// frame's velocity byte. Consumed by `BowControlFilter` only when
+        /// `bow_attack_vel` > 0 (velocity → attack sharpness); the default
+        /// 0 keeps the historic no-velocity-axis behavior bit-exact.
+        var onVel: Double = 0.0
     }
 
     // ---- control-thread state (locked) ----
@@ -116,6 +122,19 @@ public final class BowControlMapper: @unchecked Sendable {
     /// touch id. Entries survive release while any slot still references
     /// the id (a ringing string needs its pitch); pruned once unreferenced.
     private var touchPitch: [UInt16: Double] = [:]
+    /// FRET LINGER (2026-08-18): fret-band y (0…1 top→bottom) per touch id,
+    /// present only for touches whose producer reported one (the fret
+    /// surfaces; keyboard/scripts don't — those keep the legacy behavior).
+    /// `touchYTravel` accumulates |Δy| between snapshots — the render side
+    /// consumes it as the vertical-movement drive that recharges expression
+    /// and resets the auto-vibrato. `touchFretY` is the OUTWARD position
+    /// within the touch's HOME fret's vertical extent (0 = the end nearest
+    /// the pad's centre-line, 1 = the outer end) — the auto-vibrato ceiling
+    /// axis; absent (unsnapped/fretless touches) reads as 0 = no
+    /// auto-vibrato. All pruned alongside `touchPitch`.
+    private var touchY: [UInt16: Double] = [:]
+    private var touchYTravel: [UInt16: Double] = [:]
+    private var touchFretY: [UInt16: Double] = [:]
     /// TARABDAAR MPE: pitch bend is PER CHANNEL (semitones) — each Pitch Pad
     /// finger bends only its own note. A single-channel controller uses
     /// index 0 and behaves exactly like the upstream global bend.
@@ -163,7 +182,7 @@ public final class BowControlMapper: @unchecked Sendable {
         slotLimit = lim
     }
 
-    private func noteOn(key: SlotKey) {
+    private func noteOn(key: SlotKey, vel: Double) {
         evt += 1
         held.removeAll { $0 == key }
         held.append(key)
@@ -171,6 +190,7 @@ public final class BowControlMapper: @unchecked Sendable {
         // re-bow a string already carrying this note
         for i in 0..<lim where slots[i].gateOn && slots[i].key == key {
             slots[i].lastOn = evt
+            slots[i].onVel = vel
             return
         }
         var ring = -1
@@ -181,6 +201,7 @@ public final class BowControlMapper: @unchecked Sendable {
         if ring >= 0 {
             slots[ring].gateOn = true
             slots[ring].lastOn = evt
+            slots[ring].onVel = vel
             return
         }
         let anyGated = (0..<lim).contains { slots[$0].gateOn }
@@ -198,6 +219,7 @@ public final class BowControlMapper: @unchecked Sendable {
             slots[i].gateOn = true
             slots[i].used = true
             slots[i].lastOn = evt
+            slots[i].onVel = vel
             return
         }
         // chord: a fresh string — unused slot, else longest-released,
@@ -226,6 +248,7 @@ public final class BowControlMapper: @unchecked Sendable {
         slots[i].gateOn = true
         slots[i].used = true
         slots[i].lastOn = evt
+        slots[i].onVel = vel
     }
 
     private func noteOff(key: SlotKey) {
@@ -258,6 +281,9 @@ public final class BowControlMapper: @unchecked Sendable {
             if case .touch(let id) = s.key { live.insert(id) }
         }
         touchPitch = touchPitch.filter { live.contains($0.key) }
+        touchY = touchY.filter { live.contains($0.key) }
+        touchYTravel = touchYTravel.filter { live.contains($0.key) }
+        touchFretY = touchFretY.filter { live.contains($0.key) }
     }
 
     /// Same event map as the voice (ViolinVoiceControl): note on/off (poly
@@ -273,7 +299,7 @@ public final class BowControlMapper: @unchecked Sendable {
         defer { os_unfair_lock_unlock(&lock) }
         switch kind {
         case 0x90 where d2 > 0:
-            noteOn(key: .midi(note: d1, ch: ch))
+            noteOn(key: .midi(note: d1, ch: ch), vel: Double(d2) / 127.0)
         case 0x80, 0x90:
             noteOff(key: .midi(note: d1, ch: ch))
         case 0xE0:
@@ -308,23 +334,46 @@ public final class BowControlMapper: @unchecked Sendable {
     /// Note-on from a TarabLink state frame. `pitchSemis` is fractional
     /// MIDI (69.0 = A440) at full Double resolution — no note+bend split.
     /// Slot allocation / stealing / the mono meend law are IDENTICAL to
-    /// the MIDI path (same `noteOn(key:)`). `velocity` is accepted for
-    /// wire symmetry; the mapper has no velocity axis today (the MIDI path
-    /// ignores it too beyond the >0 gate).
-    public func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) {
-        _ = velocity
+    /// the MIDI path (same `noteOn(key:vel:)`). `velocity` (0…1) is the
+    /// ONSET STRIKE VELOCITY (2026-08-19): stored per slot and consumed
+    /// by the filter's `bow_attack_vel` law (velocity → attack
+    /// sharpness); with that key at its 0 default the value is inert —
+    /// the historic no-velocity-axis behavior, bit-exact.
+    /// `posY` = the touch's fret-band y (0…1), nil for producers without
+    /// one — a y-less touch never engages the fret-linger machinery.
+    /// `fretY` = the OUTWARD position within the touch's home fret's
+    /// extent (0 = the fret's end nearest the pad's centre-line, 1 = its
+    /// outer end — the surfaces orient it), nil for unsnapped/fretless
+    /// onsets — those get no auto-vibrato (expression decay still runs
+    /// off posY).
+    public func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double,
+                        posY: Double? = nil, fretY: Double? = nil) {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
         touchPitch[id] = pitchSemis
-        noteOn(key: .touch(id: id))
+        if let y = posY {
+            touchY[id] = min(max(y, 0.0), 1.0)
+            touchYTravel[id] = 0.0
+        } else {
+            touchY.removeValue(forKey: id)
+            touchYTravel.removeValue(forKey: id)
+        }
+        if let fy = fretY {
+            touchFretY[id] = min(max(fy, 0.0), 1.0)
+        } else {
+            touchFretY.removeValue(forKey: id)
+        }
+        noteOn(key: .touch(id: id), vel: min(max(velocity, 0.0), 1.0))
         pruneTouchPitchLocked()
     }
 
     /// Pitch update for a live touch. Just writes the target — the render
     /// side's 9 Hz meend smoother provides continuity (this REPLACES the
     /// old 60 Hz bend re-send loop as the glide mechanism). Unknown ids
-    /// are ignored (stale frame after a release).
-    public func touchGlide(_ id: UInt16, pitchSemis: Double) {
+    /// are ignored (stale frame after a release). A `posY` change also
+    /// accumulates vertical travel — the linger recharge drive.
+    public func touchGlide(_ id: UInt16, pitchSemis: Double,
+                           posY: Double? = nil, fretY: Double? = nil) {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
         // Only LIVE touches glide. touchPitch alone is not liveness — an
@@ -332,6 +381,17 @@ public final class BowControlMapper: @unchecked Sendable {
         // must not bend a ringing string.
         guard held.contains(.touch(id: id)) else { return }
         touchPitch[id] = pitchSemis
+        if let y = posY {
+            let clamped = min(max(y, 0.0), 1.0)
+            if let old = touchY[id] {
+                touchYTravel[id] = (touchYTravel[id] ?? 0.0)
+                    + abs(clamped - old)
+            }
+            touchY[id] = clamped
+        }
+        if let fy = fretY {
+            touchFretY[id] = min(max(fy, 0.0), 1.0)
+        }
     }
 
     /// Note-off (bow lift) for a touch; the string keeps ringing on its
@@ -372,16 +432,42 @@ public final class BowControlMapper: @unchecked Sendable {
         var gate: Double
         var expr: Double, press: Double, pos: Double, tiltDb: Double
         var vib: Double = 0.0              // aftertouch vibrato depth 0..1
+        /// Onset strike velocity 0…1 of the slot's current articulation —
+        /// read by the filter ONLY at a fresh-attack edge, and only when
+        /// `bow_attack_vel` > 0 (default 0 = the legacy press-only law).
+        var onVel: Double = 0.0
+        // FRET LINGER (2026-08-18): per-slot inputs to the linger/auto-vib
+        // envelopes. `lingerOn` false (every .midi slot, and any touch
+        // without a reported y) leaves the filter's legacy path bit-exact.
+        // `lingerFretY` is FRET-relative and OUTWARD-oriented (0 = the
+        // home fret's end nearest the pad's centre-line = no auto-vibrato;
+        // 1 = its outer end = full; unsnapped touches read as 0).
+        var lingerOn = false
+        var lingerFretY = 0.0              // outward within-fret y 0…1
+        var lingerTravel = 0.0             // band |Δy| accumulated since snap
+        var onEvt: UInt64 = 0              // articulation stamp (resets linger)
     }
 
     /// One voice slot as the render thread sees it. `serial` identifies the
     /// physical string generation: a change means "a fresh gut string was
     /// mounted on this slot" — the engine zeroes the kernel string state and
-    /// snaps the slot's pitch smoother onto the new note.
+    /// snaps the slot's pitch smoother onto the new note. The linger fields
+    /// mirror `Snapshot`'s (see there); `onEvt` is the slot's `lastOn` event
+    /// stamp — any fresh articulation bumps it, and the filter resets its
+    /// linger envelopes when it changes.
     public struct SlotSnapshot: Sendable {
         public var f0Target: Double = 440.0
         public var gate: Double = 0.0
         public var serial: UInt32 = 0
+        /// Onset strike velocity 0…1 (see `Snapshot.onVel`).
+        public var onVel: Double = 0.0
+        public var lingerOn = false
+        public var lingerFretY = 0.0
+        public var lingerTravel = 0.0
+        public var onEvt: UInt64 = 0
+        /// The wire touch id behind a linger-active slot (display export:
+        /// the LINGER_STATE frames key by it). 0 when lingerOn is false.
+        public var lingerId: UInt16 = 0
     }
 
     /// Poly snapshot into a preallocated buffer (render thread; no
@@ -429,6 +515,21 @@ public final class BowControlMapper: @unchecked Sendable {
         return best
     }
 
+    /// The linger fields of a slot key: present only for .touch keys whose
+    /// producer reported a fret-band y. CONSUMES the accumulated vertical
+    /// travel (one reader per mapper — the engine's per-block snapshot).
+    /// `fretY` falls back to 0 (the fret's inner end = no auto-vibrato)
+    /// for touches without a home fret. Callers hold the lock.
+    private func lingerFieldsLocked(_ s: Slot)
+        -> (on: Bool, fretY: Double, travel: Double, evt: UInt64, id: UInt16) {
+        guard case .touch(let id) = s.key, touchY[id] != nil else {
+            return (false, 0.0, 0.0, s.lastOn, 0)
+        }
+        let travel = touchYTravel[id] ?? 0.0
+        touchYTravel[id] = 0.0
+        return (true, touchFretY[id] ?? 0.0, travel, s.lastOn, id)
+    }
+
     public func snapshotPoly(into snap: inout PolySnapshot) {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
@@ -441,10 +542,14 @@ public final class BowControlMapper: @unchecked Sendable {
         let lim = min(slotLimit, snap.slots.count)
         for i in 0..<lim {
             let s = slots[i]
+            let lg = lingerFieldsLocked(s)
             snap.slots[i] = SlotSnapshot(
                 f0Target: f0TargetLocked(s.key),
                 gate: s.gateOn ? 1.0 : 0.0,
-                serial: s.serial)
+                serial: s.serial,
+                onVel: s.onVel,
+                lingerOn: lg.on, lingerFretY: lg.fretY,
+                lingerTravel: lg.travel, onEvt: lg.evt, lingerId: lg.id)
         }
         for i in lim..<snap.slots.count {
             snap.slots[i].gate = 0.0
@@ -463,9 +568,12 @@ public final class BowControlMapper: @unchecked Sendable {
         let f0 = f0TargetLocked(s.key)
         let tdb = BowControlMapper.tiltMinDb
             + tilt01 * (BowControlMapper.tiltMaxDb - BowControlMapper.tiltMinDb)
+        let lg = lingerFieldsLocked(s)
         return Snapshot(f0Target: f0, gate: s.gateOn ? 1.0 : 0.0,
                         expr: expr, press: press, pos: pos, tiltDb: tdb,
-                        vib: vibAT)
+                        vib: vibAT, onVel: s.onVel,
+                        lingerOn: lg.on, lingerFretY: lg.fretY,
+                        lingerTravel: lg.travel, onEvt: lg.evt)
     }
 }
 
@@ -505,6 +613,18 @@ public struct BowControlFilter: Sendable {
     // own physics, no injected noise). attackBite 0 = off (legato draw).
     var drawMinS: Double, attackBite: Double
     var attackBiteTau: Double, attackThresh: Double
+    // ONSET VELOCITY → SHARPNESS (2026-08-19): the strike velocity 0…1
+    // (touch frame byte / MIDI d2) ALSO sharpens the attack — sharpness =
+    // max(press law, attackVel·velocity). Press stays the deliberate
+    // articulation axis; velocity makes it per-note (tap hard = martelé,
+    // place gently = the legato draw). attackVel 0 = bit-null (the
+    // historic press-only law — velocity was never consumed before).
+    var attackVel: Double
+    // SETTLE EXEMPTION (2026-08-19): a SHARP attack keeps its level —
+    // the post-onset settle depth is scaled by (1 − settleSharp·sharp),
+    // so accented staccato holds its bite while calm sustains keep the
+    // fitted settle balance. settleSharp 0 = bit-null.
+    var settleSharp: Double
     // player vibrato (aftertouch): depth vibCents at vibHz, applied to the
     // SOUNDING pitch post-smoother (finger motion). vibCents 0 = off.
     var vibCents: Double, vibHz: Double
@@ -539,6 +659,30 @@ public struct BowControlFilter: Sendable {
     var glideDipDb: Double, glideDipRate: Double
     var aDrift = 1.0, driftGain = 0.0   // OU pole + unit-variance step gain
     var aDipAtt = 0.0, aDipRel = 0.0    // dip smoother poles
+    // FRET LINGER + Y-DEPTH AUTO-VIBRATO (2026-08-18): active only for
+    // touch slots whose producer reported a fret-band y (`snap.lingerOn`)
+    // — every .midi slot, the keyboard and the audition scores stay on the
+    // legacy path bit-exact. Two per-slot envelopes evolved per sample:
+    //   * charge (1 at articulation) — decays toward 0 with lingerDecayS
+    //     while the finger is STILL; vertical movement drives it back to 1
+    //     with lingerRechargeS. Expression is scaled by
+    //     floor + (1-floor)·charge, so a lingering note eases down and a
+    //     stroke of the finger along the fret swells it back.
+    //   * auto-vib depth (0 at articulation) — grows toward the y-set
+    //     maximum with avibGrowS while still (the ceiling axis is the
+    //     touch's position within its HOME FRET's vertical extent, v5:
+    //     the fret's centre = none, its ends = full; unsnapped/fretless
+    //     touches have no home fret and get none), and vertical movement
+    //     returns it to 0 with lingerRechargeS. Depth rides avibCents at
+    //     avibHz on the sounding pitch, exactly like the aftertouch
+    //     vibrato.
+    // The movement drive is the |Δy| travel per snapshot converted to
+    // band-heights/s, smoothed ~100 ms, normalized by lingerSpeedRef.
+    var lingerDecayS: Double, lingerFloor: Double
+    var lingerRechargeS: Double, lingerSpeedRef: Double
+    var avibCents: Double, avibHz: Double
+    var avibGrowS: Double, avibDead: Double
+    var aMove = 0.0                     // movement-speed smoother pole
     let pitchKnots: [Double], pitchCentsTab: [Double]
     let pitchRefLog2: Double
     let pitchKnotsA: [Double]?, pitchCentsA: [Double]?
@@ -556,6 +700,17 @@ public struct BowControlFilter: Sendable {
     var ouPitch = 0.0, ouLevel = 0.0, ouForce = 0.0
     var dipDb = 0.0
     var lastLf = 0.0, lastLfValid = false
+    // linger state (per slot): expression charge, auto-vib depth/phase,
+    // smoothed vertical speed, and the articulation stamp that resets them.
+    // `lingerCharge`/`avibDepth`/`avibCeil` are public-readable — the
+    // engine exports them per render block as the LINGER_STATE display
+    // feed (the iPad's overlay shows what is actually evaluated here).
+    public private(set) var lingerCharge = 1.0
+    public private(set) var avibDepth = 0.0
+    public private(set) var avibCeil = 0.0
+    var avibPhase = 0.0
+    var lingerSpd = 0.0
+    var lastOnEvt: UInt64 = 0
     var prev: BowControlMapper.Snapshot?
     var primed = false
     /// A fresh string was mounted on this slot: the next fill must capture
@@ -597,20 +752,31 @@ public struct BowControlFilter: Sendable {
         attackBiteTau = max(bp.v("bow_attack_bite_ms", 60.0), 5.0) / 1000.0
         attackFms = max(bp.v("bow_attack_fms", 15.0), 2.0) / 1000.0
         attackThresh = bp.v("bow_attack_thresh", 0.5)
+        attackVel = min(max(bp.v("bow_attack_vel", 0.0), 0.0), 1.0)
         vibCents = bp.v("bow_vib_cents", 0.0)
         vibHz = bp.v("bow_vib_hz", 5.5)
         settleDb = bp.v("bow_settle_db", 0.0)
         settleTauS = max(bp.v("bow_settle_ms", 150.0), 10.0) / 1000.0
+        settleSharp = min(max(bp.v("bow_settle_sharp", 0.0), 0.0), 1.0)
         driftCents = bp.v("bow_drift_cents", 0.0)
         driftDb = bp.v("bow_drift_db", 0.0)
         driftForceDb = bp.v("bow_drift_force_db", 0.0)
         driftHz = min(max(bp.v("bow_drift_hz", 1.4), 0.05), 10.0)
         glideDipDb = bp.v("bow_glide_dip_db", 0.0)
         glideDipRate = max(bp.v("bow_glide_dip_rate", 900.0), 1.0)
+        lingerDecayS = bp.v("bow_linger_decay", 8.0)
+        lingerFloor = min(max(bp.v("bow_linger_floor", 0.0), 0.0), 1.0)
+        lingerRechargeS = max(bp.v("bow_linger_recharge", 0.35), 0.02)
+        lingerSpeedRef = max(bp.v("bow_linger_speed", 0.35), 0.01)
+        avibCents = bp.v("bow_avib_cents", 30.0)
+        avibHz = bp.v("bow_avib_hz", 5.2)
+        avibGrowS = max(bp.v("bow_avib_grow", 2.5), 0.05)
+        avibDead = min(max(bp.v("bow_avib_dead", 0.7), 0.0), 0.95)
         aDrift = exp(-2.0 * Double.pi * driftHz / srk)
         driftGain = sqrt(max(1.0 - aDrift * aDrift, 0.0) * 3.0)
         aDipAtt = exp(-1.0 / (0.015 * srk))
         aDipRel = exp(-1.0 / (0.12 * srk))
+        aMove = exp(-1.0 / (0.1 * srk))
         // TWO-COMPONENT correction when the String artifact carries it
         // (corr = A(f0) bare-loop absolute + B(f0/tonic) body residual);
         // the sarangi bow has neither and keeps the legacy 220 table
@@ -666,16 +832,26 @@ public struct BowControlFilter: Sendable {
         attackBiteTau = max(bp.v("bow_attack_bite_ms", 60.0), 5.0) / 1000.0
         attackFms = max(bp.v("bow_attack_fms", 15.0), 2.0) / 1000.0
         attackThresh = bp.v("bow_attack_thresh", 0.5)
+        attackVel = min(max(bp.v("bow_attack_vel", 0.0), 0.0), 1.0)
         vibCents = bp.v("bow_vib_cents", 0.0)
         vibHz = bp.v("bow_vib_hz", 5.5)
         settleDb = bp.v("bow_settle_db", 0.0)
         settleTauS = max(bp.v("bow_settle_ms", 150.0), 10.0) / 1000.0
+        settleSharp = min(max(bp.v("bow_settle_sharp", 0.0), 0.0), 1.0)
         driftCents = bp.v("bow_drift_cents", 0.0)
         driftDb = bp.v("bow_drift_db", 0.0)
         driftForceDb = bp.v("bow_drift_force_db", 0.0)
         driftHz = min(max(bp.v("bow_drift_hz", 1.4), 0.05), 10.0)
         glideDipDb = bp.v("bow_glide_dip_db", 0.0)
         glideDipRate = max(bp.v("bow_glide_dip_rate", 900.0), 1.0)
+        lingerDecayS = bp.v("bow_linger_decay", 8.0)
+        lingerFloor = min(max(bp.v("bow_linger_floor", 0.0), 0.0), 1.0)
+        lingerRechargeS = max(bp.v("bow_linger_recharge", 0.35), 0.02)
+        lingerSpeedRef = max(bp.v("bow_linger_speed", 0.35), 0.01)
+        avibCents = bp.v("bow_avib_cents", 30.0)
+        avibHz = bp.v("bow_avib_hz", 5.2)
+        avibGrowS = max(bp.v("bow_avib_grow", 2.5), 0.05)
+        avibDead = min(max(bp.v("bow_avib_dead", 0.7), 0.0), 0.95)
         aDrift = exp(-2.0 * Double.pi * driftHz / srk)
         driftGain = sqrt(max(1.0 - aDrift * aDrift, 0.0) * 3.0)
     }
@@ -698,6 +874,19 @@ public struct BowControlFilter: Sendable {
     @inline(__always) func attackSharpOf(_ press: Double) -> Double {
         min(max((press - attackThresh) / max(1.0 - attackThresh, 1e-6),
                 0.0), 1.0)
+    }
+
+    /// Onset sharpness of a fresh attack: the press law, sharpened by the
+    /// strike velocity when `bow_attack_vel` is armed (whichever is
+    /// sharper wins — a hard press OR a hard tap bites). attackVel 0
+    /// reproduces `attackSharpOf(press)` exactly (bit-null).
+    @inline(__always) func attackSharpAt(press: Double, onVel: Double)
+        -> Double {
+        var s = attackSharpOf(press)
+        if attackVel > 1e-9 {
+            s = max(s, min(attackVel * min(max(onVel, 0.0), 1.0), 1.0))
+        }
+        return s
     }
 
     @inline(__always) func interpKnots(_ x: Double, _ kn: [Double],
@@ -760,6 +949,18 @@ public struct BowControlFilter: Sendable {
         primed = true
         dipDb = 0.0                  // a pitch SNAP is not a glide
         lastLfValid = false
+        resetLinger()                // a fresh string is a fresh articulation
+    }
+
+    /// Fresh articulation: full expression, no vibrato yet, movement
+    /// history cleared. Fired by `notePrime` and by any `onEvt` bump
+    /// (retrigger / legato re-point on a kept string).
+    private mutating func resetLinger() {
+        lingerCharge = 1.0
+        avibDepth = 0.0
+        avibCeil = 0.0
+        avibPhase = 0.0
+        lingerSpd = 0.0
     }
 
     /// Per-slot fill (the poly engine snapshots the mapper ONCE and hands
@@ -780,7 +981,8 @@ public struct BowControlFilter: Sendable {
             gateState = 0.0
             if snap.gate > 0.5 {                       // born mid-attack
                 placeClock = 0.0
-                attackSharp = attackSharpOf(snap.press)
+                attackSharp = attackSharpAt(press: snap.press,
+                                            onVel: snap.onVel)
             }
             prev = snap
             primed = true
@@ -795,9 +997,31 @@ public struct BowControlFilter: Sendable {
         if snap.gate > 0.5,
            freshMount || (prev?.gate ?? 0.0) <= 0.5 {
             placeClock = 0.0
-            attackSharp = attackSharpOf(snap.press)
+            attackSharp = attackSharpAt(press: snap.press,
+                                        onVel: snap.onVel)
         }
         freshMount = false
+        // FRET LINGER: any fresh articulation on this slot (retrigger, or a
+        // legato re-point that keeps the string) restores full expression
+        // and the no-vibrato state. Bit-null for .midi slots — their state
+        // is never read.
+        if snap.onEvt != lastOnEvt {
+            lastOnEvt = snap.onEvt
+            resetLinger()
+        }
+        let lingerActive = snap.lingerOn
+            && (lingerDecayS > 1e-6 || avibCents > 1e-9)
+        // Accumulated |Δy| this snapshot → band-heights/s over the block.
+        let spdInst = lingerActive ? snap.lingerTravel * srk / Double(n) : 0.0
+        // Outward within-fret y → the auto-vibrato ceiling: the dead zone
+        // is the `avibDead` fraction of the HOME fret from its INNER end
+        // (the end toward the pad's centre-line — the surfaces orient
+        // fretY outward); depth then ramps to full at the fret's outer
+        // end. Unsnapped touches read 0 = none.
+        let yOff = min(max(snap.lingerFretY, 0.0), 1.0)
+        let avibMax = max(yOff - avibDead, 0.0) / max(1.0 - avibDead, 1e-6)
+        if lingerActive { avibCeil = avibMax }
+        let avibW = 2.0 * Double.pi * avibHz / srk
         let p = prev ?? snap
         let vRef = 0.75 * vHi
         let dtk = 1.0 / srk
@@ -832,6 +1056,35 @@ public struct BowControlFilter: Sendable {
                     vibOct += driftCents * ouPitch / 1200.0
                 }
             }
+            // fret linger: evolve the expression charge and the auto-vib
+            // depth. Stillness decays the charge (the note eases down) and
+            // grows the depth toward the y-set ceiling; vertical movement
+            // (the drive) recharges expression and returns the vibrato to
+            // its no-vibrato birth state. First-order in both directions —
+            // smooth by construction.
+            var exprScale = 1.0
+            if lingerActive {
+                lingerSpd = (1.0 - aMove) * spdInst + aMove * lingerSpd
+                let drive = min(lingerSpd / lingerSpeedRef, 1.0)
+                if lingerDecayS > 1e-6 {
+                    lingerCharge += (drive * (1.0 - lingerCharge) / lingerRechargeS
+                        - (1.0 - drive) * lingerCharge / lingerDecayS) * dtk
+                    lingerCharge = min(max(lingerCharge, 0.0), 1.0)
+                    exprScale = lingerFloor + (1.0 - lingerFloor) * lingerCharge
+                }
+                if avibCents > 1e-9 {
+                    avibDepth += ((1.0 - drive) * (avibMax - avibDepth) / avibGrowS
+                        - drive * avibDepth / lingerRechargeS) * dtk
+                    avibDepth = min(max(avibDepth, 0.0), 1.0)
+                    avibPhase += avibW
+                    if avibPhase > 2.0 * Double.pi {
+                        avibPhase -= 2.0 * Double.pi
+                    }
+                    if avibDepth > 1e-6 {
+                        vibOct += avibCents * avibDepth * sin(avibPhase) / 1200.0
+                    }
+                }
+            }
             // glide lightening drive: sounding-pitch slew in cents/s
             if glideDipDb > 1e-9 {
                 let r = lastLfValid ? abs(lf0B - lastLf) * 1200.0 * srk : 0.0
@@ -858,7 +1111,10 @@ public struct BowControlFilter: Sendable {
             // connective strokes that charge the joda lattice (measured
             // −3–4 dB @125–250 on fast material).
             var vb: Double
-            let e01 = min(max(expr, 0.0), 1.0)
+            // exprScale is exactly 1.0 whenever the linger is inactive, so
+            // this multiply is bit-null on the legacy paths.
+            let exprEff = expr * exprScale
+            let e01 = min(max(exprEff, 0.0), 1.0)
             let eDyn = exprLift > 1e-6 && exprLift < 1.0
                 ? min(max((e01 - exprLift) / (1.0 - exprLift), 0.0), 1.0)
                 : e01
@@ -923,7 +1179,7 @@ public struct BowControlFilter: Sendable {
             // form of the offline control_track's "expr axis reaches true
             // silence at 0".  exprLift = 0 keeps the legacy always-on bow.
             if exprLift > 1e-6 {
-                let lift = min(1.0, max(0.0, expr) / exprLift)
+                let lift = min(1.0, max(0.0, exprEff) / exprLift)
                 fb *= lift
                 vb *= lift
             }
@@ -959,11 +1215,18 @@ public struct BowControlFilter: Sendable {
             var vbDb = driftDb * ouLevel
             var fbDb = driftForceDb * ouForce
             if settleDb > 1e-9 {
+                // SETTLE EXEMPTION (2026-08-19): a sharp attack keeps its
+                // level — depth scaled by (1 − settleSharp·sharp). The
+                // guard keeps settleSharp 0 bit-exact (no new arithmetic
+                // on the legacy path).
+                let sDb = settleSharp > 1e-9
+                    ? settleDb * max(1.0 - settleSharp * attackSharp, 0.0)
+                    : settleDb
                 let t0 = max(placeS + drawS, 0.02)
                 if placeClock < t0 + 6.0 * settleTauS {
                     let us = min(max(placeClock / t0, 0.0), 1.0)
                     let shape = us * us * (3.0 - 2.0 * us)
-                    vbDb -= settleDb * shape
+                    vbDb -= sDb * shape
                         * exp(-max(placeClock - t0, 0.0) / settleTauS)
                 }
             }
@@ -996,5 +1259,7 @@ public struct BowControlFilter: Sendable {
         ouForce = 0.0
         dipDb = 0.0
         lastLfValid = false
+        resetLinger()
+        lastOnEvt = 0
     }
 }

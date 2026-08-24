@@ -10,8 +10,18 @@ final class TLPCodecTests: XCTestCase {
         var list: [TLPTouch] = []
         for i in 0..<touches {
             let pitch: Float = 60.0 + Float(i) * 1.01
+            // Every other touch carries a fret-band y (v4); every third
+            // also a within-fret y (v5).
+            let hasY = i % 2 == 0
+            let hasFretY = i % 3 == 0
+            var flags: UInt8 = 0
+            if hasY { flags |= TLPTouch.flagPosYValid }
+            if hasFretY { flags |= TLPTouch.flagFretYValid }
             list.append(TLPTouch(id: UInt16(i * 7 + 1), onsetSeq: UInt8(i),
                                  velocity: UInt8(200 - i), pressure: UInt8(i * 3),
+                                 flags: flags,
+                                 posY: hasY ? UInt8(i * 20) : 0,
+                                 fretY: hasFretY ? UInt8(255 - i * 9) : 0,
                                  pitch: pitch))
         }
         return TLPPerfState(
@@ -19,7 +29,7 @@ final class TLPCodecTests: XCTestCase {
             stateSeq: 0xBEEF, timestampUs: 0xDEAD_BEEF,
             tiltX: -32767, tiltY: 0, tiltZ: 32767,
             accelX: 1234, accelY: -32767, accelZ: 32767,
-            droneMask: 0b101, touches: list)
+            droneMask: 0b101, strike: 0xA7, touches: list)
     }
 
     private var sampleFrames: [TLPFrame] {
@@ -27,9 +37,22 @@ final class TLPCodecTests: XCTestCase {
             .perfState(samplePerf(touches: 0)),
             .perfState(samplePerf(touches: 5)),
             .perfState(samplePerf(touches: 10)),
+            .lingerState(TLPLingerState(stateSeq: 7, timestampUs: 99,
+                                        touches: [])),
+            .lingerState(TLPLingerState(
+                stateSeq: 8, timestampUs: 100,
+                touches: [TLPLingerTouch(id: 0x1234, charge: 200, vib: 30,
+                                         vibCeil: 255),
+                          TLPLingerTouch(id: 9, charge: 0, vib: 0,
+                                         vibCeil: 0)])),
             .joyConState(TLPJoyConState(
                 flags: TLPJoyConState.flagConnected, stateSeq: 1,
                 timestampUs: 42, stickX: 0, stickY: 255, wrist1: 127, wrist2: 128)),
+            .joyConState(TLPJoyConState(
+                flags: TLPJoyConState.flagArmLive | TLPJoyConState.flagBodyLive,
+                stateSeq: 2, timestampUs: 43, stickX: 128, stickY: 128,
+                wrist1: 0, wrist2: 255, wrist3: 1, arm1: 254, arm2: 2,
+                arm3: 200, strikeWin: 40)),      // v7: 2 s in 50 ms units
             .event(seq: 0, .hello(minVer: 1, maxVer: 1, role: .pad)),
             .event(seq: 1, .hello(minVer: 1, maxVer: 3, role: .host)),
             .event(seq: 999, .ping(id: 7, t1: 123_456)),
@@ -51,9 +74,32 @@ final class TLPCodecTests: XCTestCase {
     }
 
     func testPerfStateWireSize() {
-        // Header 22 B (16 + the v2 accel fields) + 10 B per touch.
-        XCTAssertEqual(TLPFrame.perfState(samplePerf(touches: 0)).encode().count, 22)
-        XCTAssertEqual(TLPFrame.perfState(samplePerf(touches: 5)).encode().count, 72)
+        // Header 23 B (16 + the v2 accel fields + the v6 strike byte)
+        // + 12 B per touch (10 + the v4 posY byte + the v5 fretY byte).
+        XCTAssertEqual(TLPFrame.perfState(samplePerf(touches: 0)).encode().count, 23)
+        XCTAssertEqual(TLPFrame.perfState(samplePerf(touches: 5)).encode().count, 83)
+    }
+
+    func testLingerStateWireSize() {
+        // Type + header 9 B, + 5 B per touch.
+        let empty = TLPLingerState(stateSeq: 1, timestampUs: 0, touches: [])
+        XCTAssertEqual(TLPFrame.lingerState(empty).encode().count, 9)
+        let two = TLPLingerState(stateSeq: 1, timestampUs: 0, touches: [
+            TLPLingerTouch(id: 1, charge: 255, vib: 0, vibCeil: 128),
+            TLPLingerTouch(id: 2, charge: 10, vib: 200, vibCeil: 255)])
+        XCTAssertEqual(TLPFrame.lingerState(two).encode().count, 19)
+    }
+
+    func testTouchPosY01AndFretY01() {
+        XCTAssertNil(TLPTouch(id: 1, onsetSeq: 0, velocity: 0, posY: 128,
+                              pitch: 60).posY01)
+        XCTAssertNil(TLPTouch(id: 1, onsetSeq: 0, velocity: 0, fretY: 128,
+                              pitch: 60).fretY01)
+        let t = TLPTouch(id: 1, onsetSeq: 0, velocity: 0,
+                         flags: TLPTouch.flagPosYValid | TLPTouch.flagFretYValid,
+                         posY: 255, fretY: 0, pitch: 60)
+        XCTAssertEqual(t.posY01 ?? -1, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(t.fretY01 ?? -1, 0.0, accuracy: 1e-12)
     }
 
     func testTruncationNeverDecodes() {
@@ -77,7 +123,7 @@ final class TLPCodecTests: XCTestCase {
     func testUnknownTypesRejected() {
         XCTAssertNil(TLPFrame.decode([0x00]))
         XCTAssertNil(TLPFrame.decode([0x2A, 0x00, 0x00]))       // unknown event
-        XCTAssertNil(TLPFrame.decode([0x42, 0x00, 0x00, 0x00])) // unknown state
+        XCTAssertNil(TLPFrame.decode([0x43, 0x00, 0x00, 0x00])) // unknown state
         XCTAssertNil(TLPFrame.decode([0x60, 0x00]))
     }
 

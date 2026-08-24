@@ -66,14 +66,22 @@ struct LiveVisualizerView: View {
             Picker("", selection: $controller.mainInstrument) {
                 Text("String (bowed)").tag(AudioEngine.MainInstrument.string)
                 Text("Tanpura (plucked)").tag(AudioEngine.MainInstrument.tanpura)
+                Text("Sitar (plucked)").tag(AudioEngine.MainInstrument.sitar)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 320)
+            .frame(maxWidth: 420)
             if controller.mainInstrument == .tanpura {
                 Text(controller.audio.isTanpuraArmed
-                     ? "Fret notes pluck the tanpura at the nearest scale pitch; strings ring out on their own (no note-off)."
+                     ? "Fret notes pluck the tanpura at the nearest scale pitch; strings ring out on their own (no note-off). Its ring drives the Strings-tab taraf sympathetically (tp_taraf)."
                      : "Tanpura is still mounting its strings — silent until the build lands.")
+                    .font(.padCaption)
+                    .foregroundStyle(.secondary)
+            }
+            if controller.mainInstrument == .sitar {
+                Text(controller.audio.isSitarArmed
+                     ? "Fret notes pluck the sitar at the exact bent pitch; its ring drives the Strings-tab taraf sympathetically (st_taraf)."
+                     : "Sitar is still mounting its strings — silent until the build lands.")
                     .font(.padCaption)
                     .foregroundStyle(.secondary)
             }

@@ -249,17 +249,19 @@ public class NoteManager: ObservableObject {
     /// a per-note dimension is mapped to a global parameter.
     private var lastActiveVoiceIndex: Int = 0
 
-    /// Returns 0..1 normalized value for a dimension, resolved for a specific voice.
+    /// Returns the normalized value for a dimension, resolved for a
+    /// specific voice: tilts are −1…+1 (rest 0, the app-wide tilt
+    /// convention since 2026-08-18), everything else 0…1.
     /// For per-note dimensions, pass `voiceIndex` to get that voice's value;
     /// if omitted, falls back to `lastActiveVoiceIndex`.
     public func normalizedDimension(for dim: InputDimension, voiceIndex: Int? = nil) -> Double {
         switch dim {
         case .tilt1:
-            return currentTilt.count > 0 ? (currentTilt[0] + 1.0) / 2.0 : 0.5
+            return currentTilt.count > 0 ? currentTilt[0] : 0
         case .tilt2:
-            return currentTilt.count > 1 ? (currentTilt[1] + 1.0) / 2.0 : 0.5
+            return currentTilt.count > 1 ? currentTilt[1] : 0
         case .tilt3:
-            return currentTilt.count > 2 ? (currentTilt[2] + 1.0) / 2.0 : 0.5
+            return currentTilt.count > 2 ? currentTilt[2] : 0
         case .accelPressure:
             let vi = voiceIndex ?? lastActiveVoiceIndex
             return pitchChannels[vi].accelPressure
@@ -270,9 +272,11 @@ public class NoteManager: ObservableObject {
             return slider1Value
         case .slider2:
             return slider2Value
-        case .tilt4, .stickX, .stickY:
-            // Mac-side body/stick axes — the iPad never evaluates them.
-            return 0.5
+        case .tilt4, .stickX, .stickY, .strike, .acceleration:
+            // Mac-side axes — the iPad never evaluates them (the
+            // strike/acceleration pair travels as the PERF_STATE strike
+            // byte, not through this map).
+            return 0
         case .none:
             return 0.5
         }
@@ -595,6 +599,9 @@ public class NoteManager: ObservableObject {
         }
         if let a = motionSource?.rawAccel, a.count >= 3 {
             playState.setAccel(a[0], a[1], a[2])
+        }
+        if let s = motionSource?.strikeLevel {
+            playState.setStrike(s)
         }
     }
 

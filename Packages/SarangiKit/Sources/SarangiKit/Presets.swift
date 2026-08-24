@@ -63,4 +63,21 @@ public enum Presets {
         return TanpuraParams(url: url)
     }
 
+    /// The bundled fitted SITAR artifact (`sitar_live.json`, written by
+    /// `scripts/export_sitar_live.py` in the same upstream workspace —
+    /// the r7 modal-contact model retuned to sitar1.wav, 2026-08-19:
+    /// bare-bone jawari with no jiva thread, steel string, near-bridge
+    /// pluck, its own body FIR baked from the reference residual). Same
+    /// schema as the tanpura artifact — the sitar voice is a second
+    /// `TanpuraEngine` mounted from this file; the sympathetic taraf
+    /// halo is NOT in the artifact (it is the sarangi jt web, driven
+    /// live over `bow_poly_jt_inject_write`). Same RECAL LAW.
+    /// nil when missing from the bundle.
+    public static func sitarParams() -> TanpuraParams? {
+        guard let url = Bundle.module.url(forResource: "sitar_live", withExtension: "json") else {
+            return nil
+        }
+        return TanpuraParams(url: url)
+    }
+
 }

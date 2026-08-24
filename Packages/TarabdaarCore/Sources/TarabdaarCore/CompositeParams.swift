@@ -38,17 +38,29 @@ public enum TiltAxisWire {
 
 /// The Mac's FIVE bindable control axes (2026-08-13) — what the Controls
 /// tab and the tilt-binding menus iterate. Axis index = position here
-/// (`AppController.applyTiltAxis`). The first three are the ARM axes —
-/// the iPad's tilt report through the guided arm calibration
-/// (`JoyConInput`, rest → 0.5), or raw pitch/roll/yaw passthrough when
+/// (`AppController.applyTiltAxis`; axis values −1…+1, rest 0 —
+/// 2026-08-18). The first three are the ARM axes — the iPad's tilt
+/// report through the guided arm calibration (`JoyConInput`, rest → 0,
+/// sweep extremes → ±1), or raw pitch/roll/yaw passthrough when
 /// uncalibrated; the last two are the Joy-Con stick. The 2026-08-12
 /// body rework's WRIST axes are gone: `tilt4` keeps its
 /// `InputDimension` case so saved bindings still decode, but it is not
 /// a live axis. `TiltAxisWire` above stays the 3-CC iPad TRANSPORT —
 /// wire format and Mac axes are different things.
 public enum ControlAxes {
+    /// 2026-08-23: `.strike` and `.acceleration` joined as the sixth and
+    /// seventh axes — BOTH ride the iPad's accelerometer strike envelope
+    /// (PERF_STATE `strike` byte, TLP v6), blended per target by time
+    /// since the note started (`StrikeBlendWindow`, 2 s: onset = full
+    /// Strike, sustain = full Acceleration; an unbound side reads as the
+    /// target's default). They are NOT fed through `applyTiltAxis` like
+    /// the others — `AppController.evaluateStrikeBlend` evaluates both
+    /// axes' bindings jointly, so nothing may drive their axis indices
+    /// directly (that would double-apply). UNIPOLAR: the binding curve's
+    /// x-domain reads silence at 0 and a hard strike at 1 (the
+    /// tilts/stick rest at the centre instead).
     public static let dims: [InputDimension] = [
-        .tilt1, .tilt2, .tilt3, .stickX, .stickY,
+        .tilt1, .tilt2, .tilt3, .stickX, .stickY, .strike, .acceleration,
     ]
 }
 

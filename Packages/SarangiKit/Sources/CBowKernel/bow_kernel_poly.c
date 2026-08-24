@@ -182,6 +182,66 @@ typedef struct {
        jtLiftRef = load-time max static penetration, the setter's
        unit). jtDampMul = per-tick momentum multiplier (0/>= 1 = off). */
     double jtLift, jtLiftRef, jtDampMul;
+    /* Tarabdaar CHARGE GOVERNOR (2026-08-15, bow_jt_gov): per-row AGC
+       on the bridge drive into the jt strings. The long-t60 anchor
+       rows (Sa/Pa, 7-9 s) otherwise accumulate a whole phrase — up to
+       +12 dB of taraf ring on the next kin note, a several-dB
+       re-excitation phase lottery, and at high expression the ring
+       crosses the contact knee into the loud-buzz regime (measured,
+       TarafVarianceBench). Each row tracks a peak envelope of its
+       contact-zone velocity (jtGovEnv, ~60 ms release); rows whose
+       ring already exceeds the graze target jtGovRef·wd1 (jtGovRef =
+       target zone DISPLACEMENT in meters, ×mode-1 rate = velocity
+       bound) shed incoming bridge drive by ref/env scaled by
+       jtGovAmt — the ring saturates at its single-strike level
+       instead of piling up. Held-drone noise drive adds AFTER the
+       shed (never ducked). Control-thread scalars + per-row state
+       under the worker partition; jtGovAmt 0 = byte-null. */
+    double jtGovAmt, jtGovRef, jtGovRel;
+    double *jtGovEnv;
+    /* Tarabdaar QUIESCENCE GATE (2026-08-17, bow_jt_gate): the idle-CPU
+       gate. The jt web is a constant-cost simulation — every row ticks
+       its whole mode stack whether ringing or silent, so the app burns
+       the full web cost at rest. Armed (jtGateRef > 0 = floor
+       DISPLACEMENT in meters, apex-scale like jtGovRef): a row whose
+       peak LOW-MODE momentum stays below jtGateRef·wd1 for
+       jtGateHold consecutive jt ticks with no bridge drive above its
+       wake bound and no drone drive goes to sleep IN PLACE — state
+       FROZEN, never zeroed (jtQ holds the settled static wrap against
+       the bone; zeroing would strum the re-settle on wake) — and skips
+       the whole modal tick, radiating exact 0. Low modes are the
+       meter because the wrap sustains a HIGH-mode tick-rate micro
+       limit-cycle that never rests (zone velocity ~0.6 and per-row
+       radiated peak ~5e-3 sit at CONSTANT baselines at rest, while
+       the first modes rest 3+ decades below ring scale). Any drive
+       above jtGateFdEps (the force that could ring the low modes back
+       to the floor within ~one mode-1 period) or any drone drive
+       wakes it.
+       Sleeping through an evolve/lift glide would land the bone
+       stepped, so the evolve setter wakes everyone. Per-row state is
+       worker-owned (a row belongs to one worker); the scalars are
+       control-thread writes (drone-setter contract). 0 = byte-null. */
+    double jtGateRef;         /* floor displacement (m); 0 = off */
+    int jtGateHold;           /* consecutive quiet jt ticks to sleep */
+    double *jtGateFdEps;      /* per-row bridge-drive wake bound */
+    int *jtGateCnt;           /* per-row quiet-run countdown */
+    unsigned char *jtGateSlp; /* per-row asleep flag */
+    /* gate PROBE telemetry (plain racy writes, read+reset by
+       bow_poly_jt_gate_probe): max am/floor and |FdIn|/eps ratios seen
+       on AWAKE rows since the last read (>1 = that condition is what
+       blocks sleep), plus a drone-active flag. */
+    double jtGateAmR, jtGateFdR;
+    int jtGateDnHot;
+    double jtGateEvWake;      /* evolve target the sleepers were last
+                                 woken under — the set_evolve wake is
+                                 CHANGE-gated against this (dead-band
+                                 2% of jtDeep = 5% of apex): a tilt
+                                 binding re-pushing a constant (or
+                                 sensor-jittering) evolve at sensor
+                                 rate must not hold the web awake
+                                 (measured 2026-08-17: a Joy-Con
+                                 stick-Y → bow_jt_evolve binding kept
+                                 all rows permanently awake at idle) */
     /* Tarabdaar HARMONIC-EVOLUTION lift (2026-07-26): a SIGNED bone
        offset (meters; + = bone dropped, graze margin shrinks and the
        upward cascade opens; − = raised, pressed past the knee, no
@@ -444,6 +504,17 @@ typedef struct {
        byte-null. */
     void (*fxDriveFn)(void *ctx, double *buf, int n);
     void *fxDriveCtx;
+    /* TARABDAAR SITAR->TARAF INJECT (2026-08-19): a second voice's
+       rendered output drives the modal-jawari web sympathetically —
+       the sitar's taraf. SPSC ring: the other voice's render callback
+       writes mono samples (bow_poly_jt_inject_write), THIS kernel's
+       render mixes what is available into the recorded jt drive right
+       before the drive-FX hook (so the voice→taraf insert shapes it
+       too). Ring alloc happens in the gain setter (control thread);
+       NULL ring / zero gain / empty ring are all byte-null. */
+    double *sjRing;                   /* 32768 doubles, lazy alloc */
+    long long sjW, sjR;               /* ring cursors (mono counts) */
+    double sjGain;                    /* plain scalar store */
 } bow_poly_state_t;
 
 /* Mount a string in the FRESH-CONTACT friction state (mono kernel's init):
@@ -1203,6 +1274,16 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     st->jtDnLp = (double *)calloc(njt, sizeof(double));
     st->jtDnLp2 = (double *)calloc(njt, sizeof(double));
     st->jtDnPh = (double *)calloc(njt, sizeof(double));
+    /* charge governor: off (byte-null until bow_poly_jt_set_gov) */
+    st->jtGovEnv = (double *)calloc(njt, sizeof(double));
+    st->jtGovAmt = 0.0;
+    st->jtGovRef = 0.0;
+    /* quiescence gate: off (byte-null until bow_poly_jt_set_gate) */
+    st->jtGateFdEps = (double *)calloc(njt, sizeof(double));
+    st->jtGateCnt = (int *)calloc(njt, sizeof(int));
+    st->jtGateSlp = (unsigned char *)calloc(njt, sizeof(unsigned char));
+    st->jtGateRef = 0.0;
+    st->jtGateHold = 1;
     st->jtDnMix = 0.5;
     st->jtDnRng = (unsigned long long *)malloc(sizeof(unsigned long long)
                                                * (size_t)njt);
@@ -1213,6 +1294,7 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
         /* mellow-drone rev (2026-07-26): slow swell/fall + a ~1.6 kHz
            drive top — kept in step with the BowEngine bp defaults
            (bow_drone_*), which always overwrite these at build */
+        st->jtGovRel = exp(-dtj / 0.060);
         st->jtDnA = 1.0 - exp(-dtj / 0.350);
         st->jtDnAAtk = 1.0 - exp(-dtj / 0.150);
         st->jtDnBDec = exp(-dtj / 0.500);
@@ -1576,6 +1658,22 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
 {
     const int J = st->jtJ;
     const double dtj = (double)st->jtDiv / st->sr;
+    /* QUIESCENCE GATE early-out (2026-08-17): an asleep row is frozen
+       in place and skips the whole tick — retune amortization included
+       (the follower only sleeps when nothing plays; it retunes within
+       jtTrkIval ticks of waking). Bridge drive above the row's wake
+       bound or ANY drone drive (pluck boost included) resumes it from
+       the frozen state — no re-settle, no strum. Raw Fd is judged
+       (recruitment/governor scaling is awake-path state). */
+    const double FdIn = Fd;
+    if (st->jtGateRef > 0.0 && st->jtGateSlp[s]) {
+        if (fabs(Fd) <= st->jtGateFdEps[s]
+            && st->jtDnBoost[s] == 0.0 && st->jtDnEnv[s] == 0.0
+            && st->jtDnTgt[s] == 0.0)
+            return 0.0;
+        st->jtGateSlp[s] = 0;
+        st->jtGateCnt[s] = st->jtGateHold;
+    }
     /* melody-follower retune (amortized: every jtTrkIval ticks of the
        tracked row only; other rows pay one compare) */
     if (s == st->jtTrkRow && --st->jtTrkTick <= 0) {
@@ -1597,6 +1695,18 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             c += st->jtDwA * (st->jtDwTgt[s] - c);
             st->jtDwCur[s] = c;
             Fd *= c;
+        }
+        /* CHARGE GOVERNOR shed (previous-tick envelope, one jt-tick
+           lag): a row ringing above its graze target takes ref/env of
+           the bridge drive — an AGC that saturates the ring at the
+           single-strike level instead of letting a phrase pile up in
+           the long-t60 anchors. BEFORE the drone branch: a held
+           drone's own drive is never ducked. */
+        if (st->jtGovAmt > 0.0 && st->jtGovRef > 0.0) {
+            const double refv = st->jtGovRef * st->jtWd[mo];
+            const double env = st->jtGovEnv[s];
+            if (env > refv)
+                Fd *= 1.0 - st->jtGovAmt * (1.0 - refv / env);
         }
         /* DRONE row (2026-07-23, gradual-attack rev): the whole
            excitation is a slewed filtered-noise drive — NO impulse.
@@ -1692,6 +1802,17 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         }
         float u[JT_MAXJ], ud[JT_MAXJ];
         jt_zone(Ms, J, phiU, q, p, u, ud);
+        /* governor envelope: peak |zone velocity| this tick, ~60 ms
+           release (state only touched while armed — byte-null off) */
+        if (st->jtGovAmt > 0.0) {
+            float am = 0.0f;
+            for (int j = 0; j < J; j++) {
+                float t = fabsf(ud[j]);
+                if (t > am) am = t;
+            }
+            double e = st->jtGovEnv[s] * st->jtGovRel;
+            st->jtGovEnv[s] = (double)am > e ? (double)am : e;
+        }
         float pen = -1e30f;
         for (int j = 0; j < J; j++) {
             float d = bc_[j] - u[j];
@@ -1728,6 +1849,45 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         const double dampm = st->jtDampMul;
         if (dampm > 0.0 && dampm < 1.0)
             for (int k = 0; k < Ms; k++) p[k] *= dampm;
+        /* QUIESCENCE GATE entry: a full hold window (~30 ms) of
+           sub-floor LOW-MODE momentum with no bridge drive and no
+           drone drive freezes the row IN PLACE. The meter is the
+           audible ring: peak |p| over the first modes. The zone
+           velocity / raw radiated sample CANNOT gate — the settled
+           static wrap sustains a tick-rate micro limit-cycle against
+           the bone (measured: zone velocity rests at ~0.6, per-row
+           radiated peak at ~5e-3, both CONSTANT), but it lives in the
+           HIGH modes; the low modes rest 3+ decades below ring scale.
+           Single-tick |p| dips at the mode cycle's zero crossings
+           can't fake a CONSECUTIVE quiet run. Armed only. */
+        if (st->jtGateRef > 0.0) {
+            const int kg = Ms < 6 ? Ms : 6;
+            double am = 0.0;
+            for (int k = 0; k < kg; k++) {
+                const double t = fabs(p[k]);
+                if (t > am) am = t;
+            }
+            /* probe telemetry: what would block this row's sleep */
+            {
+                const double amr = am / (st->jtGateRef * st->jtWd[mo]);
+                const double fdr = fabs(FdIn) / st->jtGateFdEps[s];
+                if (amr > st->jtGateAmR) st->jtGateAmR = amr;
+                if (fdr > st->jtGateFdR) st->jtGateFdR = fdr;
+                if (st->jtDnBoost[s] != 0.0 || st->jtDnEnv[s] != 0.0
+                    || st->jtDnTgt[s] != 0.0)
+                    st->jtGateDnHot = 1;
+            }
+            if (am < st->jtGateRef * st->jtWd[mo]
+                && fabs(FdIn) <= st->jtGateFdEps[s]
+                && st->jtDnBoost[s] == 0.0 && st->jtDnEnv[s] == 0.0
+                && st->jtDnTgt[s] == 0.0) {
+                if (--st->jtGateCnt[s] <= 0) {
+                    st->jtGateSlp[s] = 1;
+                    st->jtGateCnt[s] = st->jtGateHold;
+                }
+            } else
+                st->jtGateCnt[s] = st->jtGateHold;
+        }
         double yjt = 0.0;
         for (int k = 0; k < Ms; k++)
             yjt += st->jtPhiO[mo + k] * p[k];
@@ -1879,6 +2039,41 @@ void bow_poly_set_drive_fx(void *vst,
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     st->fxDriveCtx = ctx;
     st->fxDriveFn = fn;
+}
+
+/* ---- Tarabdaar sitar→taraf inject (2026-08-19) ---- */
+#define SJ_RINGN 32768
+
+/* Control thread (the drone-setter contract, plus a one-time ring
+   alloc on the first non-zero gain — call from the param apply path,
+   never the audio thread). 0 with no ring allocated stays byte-null. */
+void bow_poly_jt_inject_gain(void *vst, double g)
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (!st) return;
+    if (g != 0.0 && !st->sjRing) {
+        double *r = (double *)calloc(SJ_RINGN, sizeof(double));
+        st->sjW = 0; st->sjR = 0;
+        __atomic_store_n(&st->sjRing, r, __ATOMIC_RELEASE);
+    }
+    st->sjGain = g;
+}
+
+/* Producer render thread (the OTHER voice's callback): append mono
+   samples. Drops the block when the ring is full (consumer stalled —
+   e.g. the jt web disabled); the consumer realigns on gross backlog. */
+void bow_poly_jt_inject_write(void *vst, const double *x, int n)
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (!st || n <= 0) return;
+    double *ring = __atomic_load_n(&st->sjRing, __ATOMIC_ACQUIRE);
+    if (!ring) return;
+    long long ww = st->sjW;
+    long long rr = __atomic_load_n(&st->sjR, __ATOMIC_ACQUIRE);
+    if (ww - rr > SJ_RINGN - n) return;   /* full: drop */
+    for (int t = 0; t < n; t++)
+        ring[(ww + t) & (SJ_RINGN - 1)] = x[t];
+    __atomic_store_n(&st->sjW, ww + n, __ATOMIC_RELEASE);
 }
 
 void bow_poly_jt_set_lp(void *vst, double a)
@@ -2283,6 +2478,21 @@ void bow_poly_jt_set_evolve(void *vst, double meters)
     if (meters > 1e-3) meters = 1e-3;
     if (meters < -1e-3) meters = -1e-3;
     st->jtEvTgt = meters;
+    /* wake sleeping quiescence-gate rows on a MATERIAL bone move: a
+       row that slept through a real glide would meet the moved bone
+       as a STEP on wake (the strum this slew exists to avoid). The
+       wake is CHANGE-gated against the target the sleepers were
+       frozen under — comparing to jtGateEvWake (not the previous
+       push) so slow cumulative drift still wakes once it adds up,
+       while a re-pushed constant or sensor jitter (a live tilt
+       binding streams this setter at sensor rate) never does. A
+       sub-dead-band offset met on wake is <= 5% of the graze apex —
+       nothing. Awake rows track the slew exactly regardless. */
+    if (st->jtGateRef > 0.0 && st->jtGateSlp
+        && fabs(meters - st->jtGateEvWake) > 0.02 * st->jtDeep) {
+        st->jtGateEvWake = meters;
+        for (int s = 0; s < st->njt; s++) st->jtGateSlp[s] = 0;
+    }
 }
 
 void bow_poly_jt_set_damp_t60(void *vst, double t60)
@@ -2295,6 +2505,99 @@ void bow_poly_jt_set_damp_t60(void *vst, double t60)
     } else {
         st->jtDampMul = 0.0;
     }
+}
+
+/* CHARGE GOVERNOR (Tarabdaar 2026-08-15, `bow_jt_gov`): amt 0..1 is the
+   governor strength (0 = byte-null raw physics); refDisp is the target
+   contact-zone ring DISPLACEMENT in meters (apex-scale — the graze
+   band), converted per row to a velocity bound refDisp·wd1 on the
+   row's zone-velocity peak envelope. Drone-setter contract: plain
+   scalar writes, the jt tick reads them. */
+void bow_poly_jt_set_gov(void *vst, double amt, double refDisp)
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (!st || st->njt <= 0) return;
+    if (amt > 0.0 && refDisp > 0.0) {
+        st->jtGovRef = refDisp;
+        st->jtGovAmt = amt < 1.0 ? amt : 1.0;
+    } else {
+        st->jtGovAmt = 0.0;
+    }
+}
+
+/* QUIESCENCE GATE (Tarabdaar 2026-08-17, `bow_jt_gate`): refDisp is the
+   sleep floor as contact-zone ring DISPLACEMENT in meters (apex-scale,
+   ×mode-1 rate = the per-row velocity floor — the jtGovRef convention).
+   Arms the per-row wake bounds and the ~30 ms hold window; <= 0
+   disarms AND wakes every row (a stale asleep flag under a later
+   re-arm would truncate a ringing row). Drone-setter contract: plain
+   scalar/array writes, the jt tick reads them; the armed flag
+   jtGateRef is written last. */
+void bow_poly_jt_set_gate(void *vst, double refDisp)
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (!st || st->njt <= 0 || !st->jtGateFdEps) return;
+    if (refDisp <= 0.0) {
+        st->jtGateRef = 0.0;
+        for (int s = 0; s < st->njt; s++) st->jtGateSlp[s] = 0;
+        return;
+    }
+    const double dtj = (double)st->jtDiv / st->sr;
+    const int hold = (int)(0.030 / dtj + 0.5);
+    st->jtGateHold = hold < 1 ? 1 : hold;
+    for (int s = 0; s < st->njt; s++) {
+        const int mo = st->jtMOff[s];
+        const double wd1 = st->jtWd[mo];
+        double pdm = 0.0;
+        for (int k = 0; k < st->jtM[s]; k++) {
+            const double t = fabs(st->jtPhiD[mo + k]);
+            if (t > pdm) pdm = t;
+        }
+        /* wake bound: the drive that could ring the low modes back up
+           to the floor refDisp·wd1 within ~one mode-1 period of
+           resonant driving (|p| ≈ π·Fd·phiD/wd1) — conservative, so
+           anything that could become audible wakes the row. The
+           follower's retunes scale wd1 by at most an octave-ish and
+           only land while it is awake (drive present) — the stale
+           bound stays the right order. */
+        st->jtGateFdEps[s] = pdm > 0.0
+            ? refDisp * wd1 * wd1 / (M_PI * pdm)
+            : 1e300;
+        st->jtGateCnt[s] = st->jtGateHold;
+    }
+    st->jtGateEvWake = st->jtEvTgt;   /* evolve wake reference = now */
+    st->jtGateRef = refDisp;
+}
+
+/* gate probe: out = {asleep rows, total rows, max ring/floor ratio,
+   max drive/eps ratio, drone-hot flag} since the last read (ratios
+   reset on read; >1 names the condition blocking sleep).
+   Telemetry-grade racy reads; any thread. */
+void bow_poly_jt_gate_probe(void *vst, double out[5])
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    out[0] = out[1] = out[2] = out[3] = out[4] = 0.0;
+    if (!st || st->njt <= 0 || !st->jtGateSlp || st->jtGateRef <= 0.0)
+        return;
+    int n = 0;
+    for (int s = 0; s < st->njt; s++) n += st->jtGateSlp[s];
+    out[0] = (double)n;
+    out[1] = (double)st->njt;
+    out[2] = st->jtGateAmR;  st->jtGateAmR = 0.0;
+    out[3] = st->jtGateFdR;  st->jtGateFdR = 0.0;
+    out[4] = (double)st->jtGateDnHot;  st->jtGateDnHot = 0;
+}
+
+/* rows currently asleep under the quiescence gate (0 unarmed) —
+   telemetry/tests; any thread. */
+int bow_poly_jt_gate_asleep(void *vst)
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (!st || st->njt <= 0 || !st->jtGateSlp || st->jtGateRef <= 0.0)
+        return 0;
+    int n = 0;
+    for (int s = 0; s < st->njt; s++) n += st->jtGateSlp[s];
+    return n;
 }
 
 /* TARABDAAR LIVE PARAMETERS (2026-07-24): replace the per-sample scalar
@@ -3173,6 +3476,27 @@ void bow_poly_process3(void *vst, int n, int stride,
        the render thread in both modes (async: before the job is
        published), so the hook's own DSP state stays single-threaded
        and in order. NULL hook = byte-null. ---- */
+    /* ---- Tarabdaar sitar→taraf inject (2026-08-19): mix the other
+       voice's ring into the recorded drive BEFORE the drive-FX hook,
+       so the voice→taraf insert shapes it too. When this block's
+       drive was dropped (jtFr NULL) the ring still advances, holding
+       stream alignment; a gross backlog (a stalled consumer catching
+       up, e.g. the jt web re-enabled) realigns to the freshest block
+       instead of replaying seconds of stale drive. Empty ring or zero
+       gain touches nothing — byte-null. ---- */
+    if (st->sjRing) {
+        long long ww = __atomic_load_n(&st->sjW, __ATOMIC_ACQUIRE);
+        long long rr = st->sjR;
+        if (ww - rr > 4 * JT_ABLK) rr = ww - n;   /* stale backlog */
+        int avail = (int)(ww - rr);
+        int take = avail < n ? avail : n;
+        if (jtFr && st->sjGain != 0.0) {
+            double g = st->sjGain;
+            for (int t = 0; t < take; t++)
+                jtFr[t] += g * st->sjRing[(rr + t) & (SJ_RINGN - 1)];
+        }
+        __atomic_store_n(&st->sjR, rr + take, __ATOMIC_RELEASE);
+    }
     if (jtFr && st->fxDriveFn)
         st->fxDriveFn(st->fxDriveCtx, jtFr, n);
     /* ---- modal-jawari POST-PASS ----
@@ -3377,6 +3701,7 @@ void bow_poly_free(void *vst)
         free(st->jtFrBuf); free(st->jtFdv); free(st->jtTkv);
         free(st->jtEvV);
         free(st->jtHp); free(st->jtHpS);
+        free(st->sjRing);
         free(st->jtDrvRing); free(st->jtWebRing);
         free(st->jtWebRingS);
         free(st->jtM); free(st->jtMOff); free(st->jtZOff);
@@ -3389,6 +3714,8 @@ void bow_poly_free(void *vst)
         free(st->jtDnTgt); free(st->jtDnEnv); free(st->jtDnBoost);
         free(st->jtDnLp); free(st->jtDnLp2); free(st->jtDnRng);
         free(st->jtDnPh);
+        free(st->jtGovEnv);
+        free(st->jtGateFdEps); free(st->jtGateCnt); free(st->jtGateSlp);
         free(st->jtDwTgt); free(st->jtDwCur);
     }
     free(st->L);

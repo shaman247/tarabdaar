@@ -26,6 +26,9 @@ struct JoyConStatusView: View {
             if joyCon.connectedName != nil {
                 inputsPanel
             }
+            if joyCon.jcFusedActive {
+                joyConFusedPanels
+            }
             if joyCon.jcIMUActive {
                 joyConIMUPanels
             }
@@ -86,17 +89,11 @@ struct JoyConStatusView: View {
                         .foregroundStyle(joyCon.stickActive
                                          ? Color.accentColor : .secondary)
                 }
-                HStack(spacing: 6) {
-                    ForEach(JoyConInput.Control.allCases, id: \.self) { c in
-                        let down = joyCon.buttonsDown.contains(c)
-                        Text(c.rawValue)
-                            .font(.caption.weight(down ? .bold : .regular))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(RoundedRectangle(cornerRadius: 5)
-                                .fill(down ? Color.accentColor.opacity(0.8)
-                                           : Color.secondary.opacity(0.15)))
-                    }
+                // Two rows: dpad + the shoulder family, then the misc
+                // inputs (stick click, Minus, Capture).
+                VStack(alignment: .leading, spacing: 4) {
+                    controlChips(Array(JoyConInput.Control.allCases.prefix(8)))
+                    controlChips(Array(JoyConInput.Control.allCases.dropFirst(8)))
                 }
                 LabeledContent("Last event") {
                     Text(joyCon.lastEvent)
@@ -119,6 +116,25 @@ struct JoyConStatusView: View {
                             "a %+.2f %+.2f %+.2f g   ω %+5.0f %+5.0f %+5.0f °/s",
                             joyCon.bleIMU[0], joyCon.bleIMU[1], joyCon.bleIMU[2],
                             joyCon.bleIMU[3], joyCon.bleIMU[4], joyCon.bleIMU[5]))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if !joyCon.fusedAttitude.isEmpty {
+                    // Complementary-filter output — judge jitter here,
+                    // not on the raw trails (the iPad's apparent
+                    // steadiness is CoreMotion's fused attitude, not
+                    // quieter sensors). Yaw is mag-pinned once the
+                    // hard-iron estimate is earned: figure-eight the
+                    // Joy-Con until the label flips to 9-axis.
+                    LabeledContent("Fused") {
+                        Text(String(format:
+                            "pitch %+6.1f°  roll %+6.1f°  yaw %+7.1f°  ·  %@",
+                            joyCon.fusedAttitude[0], joyCon.fusedAttitude[1],
+                            joyCon.fusedAttitude[2],
+                            joyCon.yawPinned
+                                ? "9-axis (mag-pinned yaw)"
+                                : "6-axis (yaw drifts — figure-eight to calibrate the mag)"))
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
                     }
@@ -217,7 +233,7 @@ struct JoyConStatusView: View {
                 }
                 if !joyCon.bodyTilts.isEmpty {
                     Text("body  " + joyCon.bodyTilts
-                        .map { String(format: "%.2f", $0) }
+                        .map { String(format: "%+.2f", $0) }
                         .joined(separator: "  "))
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
@@ -239,7 +255,51 @@ struct JoyConStatusView: View {
     /// the motion.
     private var receivedPanel: some View {
         Panel(title: "Received motion (3D)") {
-            ReceivedMotionView(joyCon: joyCon)
+            ReceivedMotionView(
+                samples: { joyCon.liveTrace.map { s in
+                    (s.raw * 2 - SIMD3<Double>(1, 1, 1)) * (.pi / 2)
+                } },
+                names: ["pitch ", "roll  ", "yaw hp"],
+                caption: "as received over MIDI · last 8 s · compare against the iPad's GYRO overlay")
+        }
+    }
+
+    /// The Joy-Con 2 fused pair (2026-08-15) — the analogs of the
+    /// iPad's received motion/acceleration views, from the 9-axis
+    /// fusion: orientation in 3D space (mag-pinned yaw once the
+    /// hard-iron estimate is earned) and gravity-removed linear
+    /// acceleration resting at the origin. Judge the Joy-Con's
+    /// steadiness here — the raw trails below are unfiltered sensors,
+    /// which is why they look busier than the iPad's fused views.
+    private func controlChips(_ controls: [JoyConInput.Control]) -> some View {
+        HStack(spacing: 6) {
+            ForEach(controls, id: \.self) { c in
+                let down = joyCon.buttonsDown.contains(c)
+                Text(c.rawValue)
+                    .font(.caption.weight(down ? .bold : .regular))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 5)
+                        .fill(down ? Color.accentColor.opacity(0.8)
+                                   : Color.secondary.opacity(0.15)))
+            }
+        }
+    }
+
+    private var joyConFusedPanels: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Panel(title: "Joy-Con motion (3D)") {
+                ReceivedMotionView(
+                    samples: { joyCon.liveJoyConAttitude.map { $0.a } },
+                    names: ["pitch ", "roll  ", "yaw   "],
+                    caption: "fused attitude (9-axis complementary filter) · last 8 s · compare against Received motion")
+            }
+            Panel(title: "Joy-Con acceleration (3D)") {
+                VectorTrailView(
+                    samples: { joyCon.liveJoyConLinAccel },
+                    viewRadius: 0.5, names: ["x", "y", "z"], unit: "g",
+                    caption: "fused: accel minus the gravity estimate · rests at the origin · last 8 s")
+            }
         }
     }
 
@@ -288,24 +348,24 @@ struct JoyConStatusView: View {
 
 // MARK: - Received motion (3D)
 
-/// Direct replica of the iPad's on-device GYRO overlay, fed from the
-/// TRANSMITTED tilt values (the raw wire samples, pre-smoothing)
-/// instead of the sensor: the same turntable projection, age-faded
-/// trail and per-axis Δ° readouts, with the wire's 0…1 values
-/// converted back to radians (v·2−1 → ±90°). Side by side with the
-/// iPad overlay this is the transmission A/B — matching trails and
-/// Δ°s mean the wire is transparent. One expected difference: the
-/// wire's yaw is the HIGH-PASSED, bias-corrected axis, so raw yaw
-/// drift visible on the iPad and absent here is correct behaviour.
+/// Shared attitude-trail view (the iPad GYRO overlay's rendering):
+/// turntable projection, age-faded trail and per-axis Δ° readouts over
+/// [pitch, roll, yaw] samples in radians. Two clients: "Received
+/// motion" (the TRANSMITTED tilt values — side by side with the iPad
+/// overlay this is the transmission A/B; the wire's yaw is the
+/// HIGH-PASSED, bias-corrected axis, so raw yaw drift visible on the
+/// iPad and absent there is correct behaviour) and the Joy-Con 2's
+/// fused attitude (2026-08-15).
 private struct ReceivedMotionView: View {
-    /// Deliberately NOT @ObservedObject: the 60 Hz TimelineView drives
-    /// the redraws and `liveTrace` is read fresh inside each tick, so
-    /// the trail moves at the wire rate like the iPad overlay does.
-    let joyCon: JoyConInput
+    /// Sampled fresh inside each 60 Hz timeline tick (attitude in
+    /// radians). Deliberately not observed state: the TimelineView
+    /// drives the redraws, so the trail moves at the source rate.
+    let samples: () -> [SIMD3<Double>]
+    let names: [String]
+    let caption: String
 
     private static let spin = 0.3
     private static let colors: [Color] = [.orange, .green, .cyan]
-    private static let names = ["pitch ", "roll  ", "yaw hp"]
     /// Fixed view scale: ±30° of attitude to the frame edge, the same
     /// constant as the iPad overlay — the two views render motion at
     /// identical size, and the zoom no longer pumps with the trail's
@@ -318,9 +378,7 @@ private struct ReceivedMotionView: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 60.0)) { tl in
-            let pts = joyCon.liveTrace.map { s in
-                (s.raw * 2 - SIMD3<Double>(1, 1, 1)) * (.pi / 2)
-            }
+            let pts = samples()
             VStack(alignment: .leading, spacing: 3) {
                 Canvas { ctx, size in
                     Self.draw(ctx, size: size, pts: pts,
@@ -335,11 +393,11 @@ private struct ReceivedMotionView: View {
                     let pp = ((vals.max() ?? 0) - (vals.min() ?? 0)) * 180 / .pi
                     let cur = (vals.last ?? 0) * 180 / .pi
                     Text(String(format: "%@ %+8.3f°  Δ%.3f°",
-                                Self.names[a], cur, pp))
+                                names[a], cur, pp))
                         .font(.system(size: 10).monospacedDigit())
                         .foregroundColor(Self.colors[a])
                 }
-                Text("as received over MIDI · last 8 s · compare against the iPad's GYRO overlay")
+                Text(caption)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -621,7 +679,7 @@ private struct CalCloudView: View {
             for p in extentPts { c += p }
             c /= Double(extentPts.count)
         }
-        var maxR = 0.02
+        var maxR = 0.04   // floor doubled with the −1…+1 tilt rescale
         for p in extentPts { maxR = max(maxR, simd_length(p - c)) }
         let half = Double(min(size.width, size.height)) / 2 - 14
         let s = half / maxR
@@ -714,7 +772,8 @@ private struct CalCloudView: View {
                        with: .color(.white.opacity(0.9)), lineWidth: 1)
         }
 
-        // "You are here": the live arm position, topmost.
+        // "You are here": the live arm position, topmost, with its raw
+        // tilt values (−1…+1) beside it.
         if let armPos {
             let q = project(armPos)
             ctx.fill(Path(ellipseIn: CGRect(x: q.x - 4, y: q.y - 4,
@@ -723,6 +782,23 @@ private struct CalCloudView: View {
             ctx.stroke(Path(ellipseIn: CGRect(x: q.x - 4, y: q.y - 4,
                                               width: 8, height: 8)),
                        with: .color(.white.opacity(0.8)), lineWidth: 1)
+            // Keep the label inside the canvas: lead on the left half,
+            // trail on the right.
+            let onLeft = q.x < Double(size.width) / 2
+            ctx.draw(Text(tiltLabel(armPos))
+                .font(.system(size: 9).monospacedDigit())
+                .foregroundColor(.yellow),
+                at: CGPoint(x: q.x + (onLeft ? 8 : -8), y: q.y - 8),
+                anchor: onLeft ? .leading : .trailing)
         }
+    }
+
+    /// "(+.4, −.2, −.3)" — the marker's raw tilt values, one decimal,
+    /// leading zero dropped.
+    private static func tiltLabel(_ p: SIMD3<Double>) -> String {
+        func f(_ v: Double) -> String {
+            String(format: "%+.1f", v).replacingOccurrences(of: "0.", with: ".")
+        }
+        return "(\(f(p.x)), \(f(p.y)), \(f(p.z)))"
     }
 }

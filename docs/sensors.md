@@ -29,26 +29,113 @@ struct AccelSample {
 }
 ```
 
-`peakAccelSince(timestamp:)` returns the peak magnitude and its timestamp from all samples after the given time. Used by NoteManager to find the impact spike in the 20ms window after a touch.
+`peakAccelSince(timestamp:)` returns the peak magnitude and its timestamp from all samples after the given time. Used by the fret-pad onset's strike-velocity estimate (`MotionSource.strikeVelocity01`, below) to find the impact spike in the trailing window at touch delivery.
 
-## Velocity Detection
+## Velocity Detection — revived 2026-08-19, backward-looking
 
-iPads have no pressure-sensitive touch. Tarabdaar estimates strike velocity from the accelerometer:
+iPads have no pressure-sensitive touch. Tarabdaar estimates strike
+velocity from the accelerometer. The mechanism was deleted 2026-07-24
+with the keyboard's mapping machinery (its only consumer had died) and
+**revived 2026-08-19 on the Fret Pad path** as the drive for the String
+voice's `bow_attack_vel` velocity→attack-sharpness law (tap hard =
+martelé bite, place gently = legato draw — see
+[sarangi.md](sarangi.md)):
 
-1. `touchBegan` records the touch timestamp and starts a 20ms timer
-2. After 20ms, `fireNote` calls `motionManager.peakAccelSince(touchTimestamp)`
-3. The peak acceleration magnitude is mapped to MIDI velocity:
+1. The fret-pad onset handler (`FretPadSurfaceIOS.began`) calls
+   `MotionSource.strikeVelocity01(at: now)` — no timer, no delay.
+2. That scans the **trailing** `Config.velocityLookback` (50 ms) window
+   of the 200 Hz accel ring buffer via `peakAccelSince`. Backward, not
+   forward: UIKit delivers a touch ~10–25 ms after the physical impact,
+   so the chassis spike is usually already buffered and **the note-on
+   never waits** (the deleted design delayed the note 20 ms instead —
+   do not bring that back on the latency-critical fret path).
+3. The peak magnitude maps log-scale to 0…1:
 
 ```
 clamped = clamp(peakG, velocityMinG, velocityMaxG)  // 0.01g to 0.5g
-normalized = (log(clamped) - log(min)) / (log(max) - log(min))
-velocity = int(normalized * 126) + 1  // 1-127
+vel01 = log(clamped / minG) / log(maxG / minG)      // below minG → 0
 ```
 
-The logarithmic mapping gives better dynamic range than linear. Typical values:
-- Very soft tap: ~0.01-0.02g → velocity ~1-30
-- Medium tap: ~0.05-0.1g → velocity ~50-80
-- Hard tap: ~0.2-0.5g → velocity ~100-127
+The logarithmic mapping gives better dynamic range than linear. Typical
+values (as the old 1–127 scale): very soft ~0.01-0.02g → ~1-30, medium
+~0.05-0.1g → ~50-80, hard ~0.2-0.5g → ~100-127.
+
+**The player can SEE the law (2026-08-20/23).** Every onset draws its
+reading on the touch indicator — an impact ripple sized by the estimate
+plus the number itself (0–127), which survives release as a ~1 s fading
+ghost so staccato taps stay readable. And the toolbar carries the
+**persistent strike scope**: the live accelerometer magnitude run
+through the SAME law (`MotionSource.strikeScale01` — the shared g→0…1
+map both consumers call, so trace and tap can never disagree), drawn as
+a scrolling ~4 s trace on the 0–127 scale with the current value at the
+right and an amber tick holding the last onset's reading. The trace is
+**colored by what the player was doing at each moment** (2026-08-23):
+bright white at a note onset fading to cyan over the next second while
+the note sounds, faded gray while nothing plays — the surface reports
+melody-note begins/ends into `MotionManager.noteBegan/noteEnded`
+(id-keyed, so drone presses and out-of-band touches never unbalance
+it) and the scope walks that timeline per bin. **The trace IS the envelope** (2026-08-23, final form): the scope draws
+only the fast-attack/~150 ms-decay `strikeLevel` — the smoothed control
+signal the `.strike`/`.acceleration` dimensions actually consume — and
+the live number reads it too. The RAW magnitude trace was retired: its
+rectified zero-crossings and the log-floor magnification made smooth
+playing read as spikes, while the envelope is the truth the bindings
+see. Coloring is playing state at each moment: bright white at a note
+onset fading to cyan over the blend window (full cyan = the note has
+fully handed over to Acceleration), DARK gray while nothing plays, and
+note-active frames carry a lighter backdrop so phrases read as blocks
+at a glance. The trace's buckets are anchored to a
+TIME-QUANTIZED grid — bucketing against the moving `lastT − window`
+origin re-rasterized every sample on every redraw and the whole trace
+shimmered; on the quantized grid a sample keeps its bucket and the
+trace scrolls by whole bins.
+
+**And the player can BIND it (2026-08-23): the `.strike` /
+`.acceleration` dimension pair.** The continuous form of the measure —
+`strikeScale01(magnitude)` through a fast-attack / ~150 ms-decay
+tracker (`MotionManager.strikeLevel`, evolved at the full 200 Hz so
+taps between report ticks never drop) — streams as the PERF_STATE
+`strike` byte (TLP v6) and lands as TWO Mac control axes, bindable
+like the arm tilts and the Joy-Con stick. Both ride the SAME
+measurement; what separates them is **time since the note started**
+(`StrikeBlendWindow`, `AppController.evaluateStrikeBlend`): per bound
+target, the applied value is (1−w)·Strike + w·Acceleration, with w
+ramping linearly 0→1 over the note window — **`ctl_strike_window`**
+(Parameters tab, "Strike blend" group, 0.25–8 s, default 2; a
+control-layer `.live` key intercepted in `applyParamToVoice`, so it
+rides presets like everything else and relays to the iPad over
+JOYCON_STATE's v7 `strikeWin` byte, where the scope's white→cyan onset
+fade tracks it — full cyan = the note has fully handed over to its
+Acceleration bindings) — a side without a
+binding evaluates to the target's DEFAULT (registry default for a
+parameter, 0 = rest for a composite), so "expression [0, 1] on Strike,
+unbound on Acceleration (default 0.4)" reads at t = 1 s as the
+interpolated range [0.2, 0.7]. Windows are **per note** (wire touch
+id; retriggers re-anchor): while notes overlap the NEWEST sounding
+note's age drives the weight — a fresh tap always gets full Strike
+treatment, even mid-legato — and releasing it falls back to the
+survivor's own **un-reset** age; with nothing sounding the last onset
+keeps aging, so the pair rests on the Acceleration side. A 30 Hz
+Mac-side timer keeps the weight moving between change-gated wire
+events (guard: `StrikeBlendTests`). UNIPOLAR: silence sits at the
+binding curve's x 0, a hard strike at x 1 (the tilts rest at the
+centre instead). Strike is the onset's voice, Acceleration the
+sustained gesture's — bind accent-flavored mappings to the first and
+aftertouch-flavored ones to the second. Decimation is per-pixel PEAK-HOLD,
+never a sample stride — stride-2 sampled the 200 Hz stream at an
+effective 100 Hz and made the trace toggle between two phase states. It polls the non-published 200 Hz
+history at 30 Hz (the raw-overlay pattern), so motion samples never
+re-render the toolbar.
+
+The estimate rides the touch's `velocity` byte in the PERF_STATE frame
+(it was always in the wire format; the Mac mapper discarded it until
+2026-08-19) and is inert until `bow_attack_vel` is armed on the Mac.
+Producers without an accelerometer (the Mac pads, the keyboard,
+audition scripts) keep sending their flat constant / the score's MIDI
+velocity. Known limit: if a given tap's spike lands later than the
+lookback window (slow motion delivery), that onset under-reads toward
+legato — a playable failure mode; widen `velocityLookback` (≤
+`accelBufferDuration`) before resorting to onset delays.
 
 ## Calibration — ONE step, on the Mac, arm-only (2026-08-13)
 
@@ -94,7 +181,7 @@ The app's **single tilt calibration** is the Mac's **arm calibration**
 (Setup tab ⌘7): 1 rest pose + 3 arm sweeps (↕, ↔, rotation) over the
 iPad's 3-dim raw tilt report, fitted by per-sweep PCA + a joint
 least-squares solve with a robust 7-reading rest merge, producing the
-three arm control axes (rest = 0.5, sweep extremes = 0/1). It runs
+three arm control axes (rest = 0, sweep extremes = ±1 — every tilt value is −1…+1 since 2026-08-18). It runs
 entirely on the tilt stream — no Joy-Con needed (the 2026-08-12
 arm+wrist variant that fused Joy-Con gravity was cut back to arm-only
 the next day). Mechanics, discard conditions and the
@@ -136,7 +223,10 @@ directly), so they were removed along with the iPad's whole mapping
 machinery (`NoteManager` binding caches, the MAP editor, the accelerometer
 velocity capture). The legacy glide engine (audition `noteOn`/`glide`
 events) runs on fixed constants: 110 ms/st, 27.5 ms compression, curve
-k 7.5, drag smoothing 0.3, velocity 92.
+k 7.5, drag smoothing 0.3, velocity 92. (The accelerometer velocity
+ESTIMATE was revived 2026-08-19 on the Fret Pad path — see Velocity
+Detection above — as a direct per-onset wire value, not as a revival of
+this mapping machinery, which stays dead.)
 
 **MIDI output parameters** (sent to whichever MPE receiver is downstream — TarabdaarMac, Ableton, etc.):
 
@@ -145,7 +235,7 @@ k 7.5, drag smoothing 0.3, velocity 92.
 | Vibrato | — | 0–127 | Tilt 1 | Player vibrato depth (channel pressure) |
 | Brightness | (74) | 0–127 | None | Bow position: sul ponticello ↔ sul tasto |
 | Bow Pressure | (1) | 0–127 | None | Bow force inside the playable wedge |
-| Expression | (11) | 0–64 | Tilt 1 | Loudness: rest (0.5) sends the fitted median; tilt down fades toward silence, up ≈ +8 dB |
+| Expression | (11) | 0–64 | Tilt 1 | Loudness: rest (tilt 0) sends the fitted median; tilt down fades toward silence, up ≈ +8 dB |
 | Taraf Purity | (71) | 0–127 | Tilt 1 | Composite slot 1 (default members: jt tone LP 16 k→1.5 kHz, recruitment profile `bow_jt_sel` 0.5→0 — fitted chorus down to the played note's kin at held loudness) |
 | Taraf Decay | (73) | 0–127 | Tilt 2 | Composite slot 2 (default member: taraf damping 0→1) |
 | Tone Tilt | (72) | 0–127 | Tilt 3 | Composite slot 3 (default member: tone tilt −1→1) |
@@ -170,7 +260,7 @@ in-process CC pair decode — CC 16/17/18 + 48/49/50 — survives in
 String voice's taraf/tone controls (CC71/73/72, consumed on the Mac in
 `AudioEngine.routeSarangiModelMIDI` — see [sarangi.md](sarangi.md)). The
 purity/decay default curves are 3-point (`(0,0) (0.5,0) (1,127)`): the
-resting device (body-calibration neutral = 0.5 normalized) stays at 0 = the
+resting device (body-calibration neutral = tilt 0, curve x 0.5) stays at 0 = the
 current default sound, and the axis sweeps only past neutral; tone tilt is
 linear so neutral lands on ~64 = flat. Existing installs adopt these
 bindings once (flag `tarabdaar.tiltAxes.defaultBindings.v1`; the CC11

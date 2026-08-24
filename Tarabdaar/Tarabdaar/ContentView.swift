@@ -102,14 +102,38 @@ struct ContentView: View {
                 }
             }
             link.onJoyConState = { [weak scaleSync] s in
+                // Frame u8 (centre 128) → the −1…+1 display convention.
+                func ax(_ b: UInt8) -> Double { Double(b) / 255.0 * 2.0 - 1.0 }
                 scaleSync?.applyJoyCon(JoyConTiltDisplay(
-                    stickX: Double(s.stickX) / 255.0,
-                    stickY: Double(s.stickY) / 255.0,
-                    wrist1: Double(s.wrist1) / 255.0,
-                    wrist2: Double(s.wrist2) / 255.0,
+                    stickX: ax(s.stickX),
+                    stickY: ax(s.stickY),
+                    wrist1: ax(s.wrist1),
+                    wrist2: ax(s.wrist2),
                     stickLive: s.flags & TLPJoyConState.flagStickLive != 0,
                     bodyLive: s.flags & TLPJoyConState.flagBodyLive != 0,
-                    connected: s.flags & TLPJoyConState.flagConnected != 0))
+                    connected: s.flags & TLPJoyConState.flagConnected != 0,
+                    wrist3: ax(s.wrist3),
+                    arm1: ax(s.arm1),
+                    arm2: ax(s.arm2),
+                    arm3: ax(s.arm3),
+                    armLive: s.flags & TLPJoyConState.flagArmLive != 0,
+                    strikeWindowS: s.strikeWin == 0
+                        ? 2.0 : Double(s.strikeWin) * 0.05))
+            }
+            // Fret-linger display stream: the Mac's per-touch envelope
+            // state (expression charge, auto-vib depth/ceiling) → the
+            // touch overlay, matched by wire id.
+            link.onLingerState = { [weak scaleSync] s in
+                scaleSync?.applyLinger(s.touches.map(LingerTouchDisplay.init))
+            }
+            // Link gone (down or stale) → the Mac's display axes are
+            // history: dim every square (the arm pane falls back to the
+            // iPad's own raw attitude) and un-hide the drone buttons.
+            link.onStatus = { [weak scaleSync] status in
+                if !status.isUp || status.isStale {
+                    scaleSync?.applyJoyCon(.idle)
+                    scaleSync?.applyLinger([])
+                }
             }
             pad.onPanic = { [weak link] in link?.send(event: .panic) }
             // A transport appearing (cable plugged, BLE session up) →

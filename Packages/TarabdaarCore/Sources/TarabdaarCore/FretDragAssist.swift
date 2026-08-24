@@ -9,7 +9,7 @@ import Foundation
 // to be **on** the pitch; while they're moving quickly, they're gliding and
 // must be left alone.
 //
-// Mechanism — a **velocity-gated magnetic correction**, continuous by
+// Mechanism — a **stop-gated magnetic correction**, continuous by
 // construction. Each touch carries one state value, `correction` (log2
 // units), and the played pitch is always
 //
@@ -20,13 +20,20 @@ import Foundation
 // qualifying fret with a rate that is the product of three continuous
 // factors:
 //
-//   • **stationarity OR turn impulse** — the gate. Stationarity is smoothed
-//     horizontal speed through a smoothstep (1 below `speedFloor` px/s, 0
-//     above `speedCeiling`) and handles stops/slow turns. Fast connected
-//     playing turns in ~30 ms — too fast for any speed average — so a
+//   • **stopped OR turn impulse** — the gate. "Stopped" is a genuine stop
+//     detector (2026-08-17): the touch must dwell within `stillRadiusPx` of
+//     a still anchor for `stopDwellMin` before the gate starts opening
+//     (ramping to 1 over `stopDwellRamp`). A slow deliberate glide keeps
+//     leaving the still disc, so the dwell clock keeps restarting and the
+//     gate stays shut — pitch follows the finger at ANY glide tempo. (The
+//     original gate was a smoothed-speed smoothstep, fitted 59/375 px/s;
+//     it read a ~120 px/s glide as ~90% stationary and pulled slow glides
+//     toward every approaching fret.) Jitter wanders inside the disc and
+//     never restarts the clock, so rests still engage the magnet. Fast
+//     connected playing turns in ~30 ms — too fast for any dwell — so a
 //     causally-detected **direction flip** (deadbanded dx sign change, ~one
 //     event of latency) fires an impulse that holds the gate open while it
-//     decays (`turnGain`, `turnTau`). Gate = min(1, max(speedGate,
+//     decays (`turnGain`, `turnTau`). Gate = min(1, max(stopGate,
 //     turnGain·impulse)).
 //   • **proximity** — the fret must be within the assist basin
 //     (`radiusScale` × the Snap radius, in **screen px** — frets are freely
@@ -65,10 +72,13 @@ import Foundation
 // `CACurrentMediaTime()`.
 public final class FretDragAssist {
     /// Assisted result for one touch: the corrected pitch (log2 above the
-    /// tonic) and the fill-glow weights for the assisting fret.
+    /// tonic), the fill-glow weights for the assisting fret, and the stop
+    /// gate (0 = moving … 1 = stopped — the dwell detector's state, without
+    /// the turn impulse) for per-touch indicator overlays.
     public struct Output {
         public let log2Pitch: Double
         public let weights: [String: Double]
+        public let stopGate: Double
     }
 
     private struct TouchState {
@@ -79,6 +89,9 @@ public final class FretDragAssist {
         var correction: Double       // log2 units, slew-filtered
         var impulse: Double          // direction-flip impulse, decaying 1→0
         var dxSign: Int              // last movement direction (±1, 0 unknown)
+        var anchorX: CGFloat         // still anchor of the stopped detector
+        var anchorY: CGFloat
+        var stillStart: TimeInterval // when the touch last (re)entered the disc
         var lastMoveTime: TimeInterval
         var lastUpdateTime: TimeInterval
     }
@@ -95,9 +108,14 @@ public final class FretDragAssist {
     // 2026-07-23 free-fret change the basin is the same 42 px in screen
     // space — re-record and refit on the new surface to re-verify.
 
-    /// px/s below which the touch counts as fully stationary.
+    /// px/s below which the touch counts as fully stationary. Since the
+    /// stopped-detector gate (2026-08-17) this no longer opens the magnet —
+    /// it only bounds the receding check and the correction-shed movement
+    /// gate.
     public var speedFloor: Double = 59
-    /// px/s above which the speed-based gate is fully released (gliding).
+    /// px/s above which the speed-based shed gate saturates; also the speed
+    /// a fresh touch is born at (treated as moving). No longer part of the
+    /// magnet gate (2026-08-17).
     public var speedCeiling: Double = 375
     /// Smoothing time constant for the speed estimate (s).
     public var speedTau: Double = 0.026
@@ -118,6 +136,16 @@ public final class FretDragAssist {
     public var turnGain: Double = 2.0
     /// Decay time constant of the flip impulse (s).
     public var turnTau: Double = 0.026
+    /// The stopped detector's still disc (px): wander within this radius of
+    /// the anchor is jitter, not movement; drifting beyond it re-anchors and
+    /// restarts the dwell clock. Must sit above resting-finger jitter and
+    /// below the displacement a deliberate glide covers in `stopDwellMin` —
+    /// 2 px keeps glides down to ~20 px/s transparent.
+    public var stillRadiusPx: Double = 2.0
+    /// Dwell (s) inside the still disc before the stop gate starts opening.
+    public var stopDwellMin: Double = 0.10
+    /// Ramp (s) over which the stop gate opens 0 → 1 past `stopDwellMin`.
+    public var stopDwellRamp: Double = 0.15
 
     /// px of movement below which direction is not re-evaluated (touch jitter
     /// must not fire flips).
@@ -149,14 +177,25 @@ public final class FretDragAssist {
         self.radiusPx = Double(max(0, snapDistance)) * radiusScale
     }
 
-    /// Register a play touch at note-on. The touch starts at `speedCeiling`
-    /// (treated as moving) with zero correction, so the onset — already
-    /// handled by the onset snap — is never re-corrected abruptly.
+    /// Register a play touch at note-on. Every touch is **born stopped**
+    /// (2026-08-18; legato-only 2026-08-17): a fresh finger isn't moving
+    /// until it actually moves, so the dwell gate starts fully open — a
+    /// staccato tap or legato strike snaps its sloppy landing onto the fret
+    /// immediately (still slew-capped) instead of waiting out the stop
+    /// dwell. The first ≥`stillRadiusPx` of movement re-anchors and shuts
+    /// the gate, so a touch that turns into a glide is left alone from its
+    /// first events; the documented approach-path starts (above/below a
+    /// fret's extent, or in open space) have no magnet candidate at all.
+    /// The onset itself never steps — correction starts at 0 and the onset
+    /// snap owns the exact start pitch.
     public func begin(touchId: Int, x: CGFloat, y: CGFloat,
                       uncorrectedLog: Double, time: TimeInterval) {
         touches[touchId] = TouchState(x: x, y: y, uncorrectedLog: uncorrectedLog,
                                       speed: speedCeiling, correction: 0,
                                       impulse: 0, dxSign: 0,
+                                      anchorX: x, anchorY: y,
+                                      stillStart: time - stopDwellMin
+                                          - stopDwellRamp,
                                       lastMoveTime: time, lastUpdateTime: time)
     }
 
@@ -166,7 +205,7 @@ public final class FretDragAssist {
         guard var s = touches[touchId] else {
             begin(touchId: touchId, x: x, y: y,
                   uncorrectedLog: uncorrectedLog, time: time)
-            return Output(log2Pitch: uncorrectedLog, weights: [:])
+            return Output(log2Pitch: uncorrectedLog, weights: [:], stopGate: 0)
         }
         let dt = min(max(time - s.lastUpdateTime, 1e-4), 0.1)
         s.impulse *= exp(-dt / turnTau)
@@ -224,10 +263,20 @@ public final class FretDragAssist {
                            time: TimeInterval) -> Output {
         s.lastUpdateTime = time
 
-        // Stationarity ∈ [0, 1], smoothstepped; the turn impulse can hold
-        // the gate open regardless. Clamped to 1.
-        let v = max(0.0, min(1.0, (speedCeiling - s.speed)
-                                    / (speedCeiling - speedFloor)))
+        // Stopped ∈ [0, 1]: the touch must dwell inside the still disc for
+        // `stopDwellMin` before the gate opens (smoothstep ramp over
+        // `stopDwellRamp`). A sustained drag — however slow — keeps leaving
+        // the disc and restarting the clock, so the magnet never pulls a
+        // glide; jitter stays inside the disc, so rests still engage it.
+        // The turn impulse can hold the gate open regardless. Clamped to 1.
+        let drift = Double(hypot(s.x - s.anchorX, s.y - s.anchorY))
+        if drift > stillRadiusPx {
+            s.anchorX = s.x
+            s.anchorY = s.y
+            s.stillStart = time
+        }
+        let v = max(0.0, min(1.0, (time - s.stillStart - stopDwellMin)
+                                    / stopDwellRamp))
         let w = v * v * (3 - 2 * v)
         let gate = min(1.0, max(w, turnGain * s.impulse))
 
@@ -291,6 +340,6 @@ public final class FretDragAssist {
         }
 
         return Output(log2Pitch: s.uncorrectedLog + s.correction,
-                      weights: weights)
+                      weights: weights, stopGate: w)
     }
 }

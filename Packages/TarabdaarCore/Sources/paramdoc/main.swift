@@ -19,11 +19,23 @@ func num(_ v: Double) -> String {
     return String(format: "%g", v)
 }
 
-func applyLabel(_ a: ParamApply) -> String {
-    switch a {
+func scopeLabel(_ s: ParamScope) -> String {
+    switch s {
+    case .global:  return "global"
+    case .perNote: return "per-note"
+    }
+}
+
+/// The honest apply timing: the registry's strategy is a routing hint,
+/// and the truth for `.rebuild` keys depends on `inPlaceKeys` — most of
+/// them land on the RUNNING kernel with no rebuild at all.
+func timingLabel(_ p: ParamSpec) -> String {
+    switch p.apply {
     case .live:    return "live"
-    case .rebuild: return "rebuild"
     case .hybrid:  return "hybrid"
+    case .rebuild:
+        return ParamRegistry.inPlaceKeys.contains(p.key)
+            ? "in-place" : "rebuild"
     }
 }
 
@@ -43,17 +55,28 @@ separate "performance parameter" or "physics scalar" category: a
 parameter is a parameter, and any of them can be bound to a tilt or added
 to a composite.
 
-Each parameter has an **apply strategy**:
+Each parameter carries two audit columns (2026-08-23):
 
-| Strategy | Meaning |
+**Scope** — who it acts on:
+
+| Scope | Meaning |
 |---|---|
-| `live` | A runtime setter on the engine — takes effect instantly. |
-| `rebuild` | A `bowed_string.json` build scalar — applied as a persisted override with a debounced off-main engine rebuild. |
-| `hybrid` | A build scalar that also has a live 0–1 scaler in the kernel. At or below the built value it applies instantly; pushing above it rebuilds. |
+| `global` | ONE shared mechanism — the bridge/body, the taraf bank, the room/FX/output chain, the shared string physics, or a control axis every note rides together. Changing it moves the whole instrument at once. |
+| `per-note` | Runs SEPARATELY for each note: every sounding note carries its own state for it (onset clock, settle/linger envelope, vibrato phase, drift walk, strike-blend window), so simultaneous notes are affected independently. The attack family is CAPTURED at the articulation edge — an edit changes subsequent onsets, never a sounding note. |
 
-The two `hybrid` parameters (jawari buzz, vibrato depth) used to appear
-**twice** — once as the build scalar and once as the live scaler under a
-different name (`bow_jaw_gain`, `bow_vibrato`). They are one knob now.
+The line follows per-note CONTROL STATE, not physics plumbing: friction
+and string-construction values are `global` even though every string
+evaluates them — they carry no per-note state and cannot differ between
+simultaneous notes.
+
+**Timing** — when a change is heard:
+
+| Timing | Meaning |
+|---|---|
+| `live` | A dedicated runtime setter — instant everywhere, including through tilt/strike bindings and composites. The right kind for continuous real-time control. |
+| `in-place` | A build scalar whose change lands on the RUNNING kernel (no rebuild, no lost ring) — but it persists as an override and flushes through a ~0.2 s debounce, in the Parameters tab and through bindings alike. Fine for set-and-listen editing; for continuous binding prefer a `live` parameter. |
+| `rebuild` | Needs a fresh engine: ~0.2 s debounce, then an off-main rebuild adopted through a crossfade. |
+| `hybrid` | Instant at or below the built headroom (a live 0–1 kernel scaler); pushing above the built value rebuilds. The two hybrids (jawari buzz, vibrato depth) used to appear twice under separate names (`bow_jaw_gain`, `bow_vibrato`) — they are one knob now. |
 
 **Composite parameters** are named 0–1 macros built from these
 parameters: each member sweeps its own low→high range as the composite
@@ -89,14 +112,14 @@ out += "artifact values (a value loaded outside its range widens the\n"
 out += "slider rather than being clamped).\n\n"
 for (group, params) in ParamRegistry.groups {
     out += "### \(group)\n\n"
-    out += "| Key | Name | Range | Default | Apply | Description |\n"
-    out += "|---|---|---|---|---|---|\n"
+    out += "| Key | Name | Range | Default | Scope | Timing | Description |\n"
+    out += "|---|---|---|---|---|---|---|\n"
     for p in params {
         var def = num(p.def)
         if p.apply == .hybrid, let rest = p.restFraction {
             def = "\(num(p.def)) built · rests at \(num(rest))× the built value"
         }
-        out += "| `\(p.key)` | \(p.label) | \(num(p.lo)) … \(num(p.hi)) | \(def) | \(applyLabel(p.apply)) | \(p.help) |\n"
+        out += "| `\(p.key)` | \(p.label) | \(num(p.lo)) … \(num(p.hi)) | \(def) | \(scopeLabel(p.scope)) | \(timingLabel(p)) | \(p.help) |\n"
     }
     out += "\n"
 }
