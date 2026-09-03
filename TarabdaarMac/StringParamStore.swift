@@ -134,7 +134,7 @@ final class StringParamStore: ObservableObject {
 
     private func pushNow() {
         pushWork?.cancel()
-        // IN-PLACE FAST PATH (2026-07-24): most parameters can be pushed
+        // IN-PLACE FAST PATH : most parameters can be pushed
         // onto the RUNNING engine — no rebuild, no ~0.2 s latency, no
         // crossfade, and a sounding note/ring is untouched. Falls back to
         // the rebuild when any touched key needs fresh tables.

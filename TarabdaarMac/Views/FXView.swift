@@ -1,7 +1,7 @@
 import SwiftUI
 import TarabdaarCore
 
-/// FX tab (⌘6, 2026-08-01): the four-insert FX rack. Each point carries a
+/// FX tab (⌘6): the four-insert FX rack. Each point carries a
 /// 10-band graphic EQ and a selectable reverb (Bigverb / Room), everything
 /// off by default. All controls are ordinary registry parameters
 /// (`fx_<point>_*`, all `.live`) driven through the unified

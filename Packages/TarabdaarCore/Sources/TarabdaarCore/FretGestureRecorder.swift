@@ -12,7 +12,7 @@ import Foundation
 //    extent, width, height, assistParams}, "events":[[t,x,y,u,o,tick],…],
 //    "endT":t}
 //
-// (v2 since the 2026-07-23 free-fret change: each ctx fret carries its pixel
+// (v2 since the free-fret change: each ctx fret carries its pixel
 // `x` and `u` is the fret-field pitch, not an x-mapping.)
 //
 //   t    seconds since the stroke began (CACurrentMediaTime-based)

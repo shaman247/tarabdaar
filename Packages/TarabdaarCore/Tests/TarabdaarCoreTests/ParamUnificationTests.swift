@@ -21,7 +21,7 @@ final class ParamUnificationTests: XCTestCase {
                             .map(\.key)))
     }
 
-    /// DEFAULT = ENGINE TRUTH (2026-08-19). A `.rebuild` parameter's
+    /// DEFAULT = ENGINE TRUTH . A `.rebuild` parameter's
     /// authored default is what the Parameters tab DISPLAYS for an
     /// untouched row, but the engine runs artifact + overrides only — for
     /// a key the artifact does not carry, the value that actually plays is
@@ -58,7 +58,7 @@ final class ParamUnificationTests: XCTestCase {
         }
     }
 
-    /// THE SCOPE AUDIT (2026-08-23): per-note = the parameter drives a
+    /// THE SCOPE AUDIT : per-note = the parameter drives a
     /// mechanism with PER-NOTE control state (onset clocks, envelopes,
     /// phases, walks, blend windows) — exactly the note-scoped groups
     /// plus the plucked voices' per-note releases. Everything else is a

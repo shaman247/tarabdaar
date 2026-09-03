@@ -1,7 +1,7 @@
 import Foundation
 import TarabdaarCore
 
-// Build-time parameter-documentation generator (2026-07-24).
+// Build-time parameter-documentation generator .
 //
 // Renders docs/parameters.md from the LIVE parameter definitions:
 //   * `ParamRegistry`  — every parameter of the String instrument
@@ -39,7 +39,7 @@ separate "performance parameter" or "physics scalar" category: a
 parameter is a parameter, and any of them can be bound to a tilt or added
 to a composite.
 
-Each parameter carries two audit columns (2026-08-23):
+Each parameter carries two audit columns:
 
 
 """
@@ -69,9 +69,7 @@ out += """
 
 A few `live`-routed keys carry an explicit `rebuild` timing because
 their setter schedules a slow re-mount (the tanpura register/scale-shape
-family — seconds of CPU, debounced). The one shipped hybrid (vibrato
-depth) used to appear twice under separate names (`bow_vibrato`); it is
-one knob now.
+family — seconds of CPU, debounced).
 
 **Composite parameters** are named 0–1 macros built from these
 parameters: each member sweeps its own low→high range as the composite

@@ -1,405 +1,162 @@
 # Sensors
 
-## MotionManager
+The iPad streams raw motion; the Mac evaluates every binding. This page covers the iPad's motion pipeline, the strike estimate and its scopes, the Mac-side tilt calibrations, the control dimensions, and the binding model. The wire that carries the sensor fields is described in [MIDI & Audio](midi-and-audio.md); the binding UI and parameter model in [Parameters](parameters.md).
 
-Wraps CoreMotion's `CMMotionManager` at 200Hz (`motionUpdateRate`). Publishes on the main thread.
+## MotionManager (iPad)
 
-### Attitude (Orientation)
+`MotionManager` wraps CoreMotion's `CMMotionManager` at 200 Hz (`Config.motionUpdateRate`) and publishes on the main thread.
 
-- `pitch`: tilt forward/back (radians)
-- `roll`: tilt left/right (radians)
-- `yaw`: rotation around vertical axis (radians)
-- `normalizedTilts`: the three angles at a FIXED ±90° full scale, each clamped to -1…+1 — the raw tilt report
+| Field | Meaning |
+|---|---|
+| `pitch`, `roll`, `yaw` | attitude in radians (yaw is the raw CoreMotion value; the wire uses the corrected form below) |
+| `normalizedTilts` | the three angles at a FIXED ±90° full scale, each clamped to −1…+1 — the raw tilt report the wire carries (tilt 1 = pitch, 2 = roll, 3 = corrected yaw) |
+| `userAccelX/Y/Z`, `accelMagnitude` | gravity-removed acceleration in g |
+| `recentPeakAccel` | peak with fast attack / slow decay (`Config.peakDecayRate` 0.95) |
+| `strikeLevel` | the strike envelope (below) |
 
-### User Acceleration
+### Accelerometer ring buffer
 
-Gravity-removed acceleration in g's:
-- `userAccelX`, `userAccelY`, `userAccelZ`: per-axis
-- `accelMagnitude`: `sqrt(x^2 + y^2 + z^2)`
-- `recentPeakAccel`: peak with fast attack / slow decay (`peakDecayRate = 0.95`)
+A timestamped ring buffer (`accelBuffer`) holds the last 100 ms (`Config.accelBufferDuration`) of magnitude samples. `peakAccelSince(timestamp:)` returns the peak magnitude and its time from all samples after the given time — the onset strike estimate's input.
 
-### Accelerometer Buffer
+### Yaw: high-passed, bias-corrected
 
-A timestamped ring buffer (`accelBuffer`) stores the last 100ms (`accelBufferDuration`) of acceleration samples for velocity correlation:
+Pitch and roll are anchored by gravity; yaw is unreferenced gyro integration and drifts without bound. Tilt 3 is therefore a corrected RELATIVE yaw (`updateYaw`):
 
-```swift
-struct AccelSample {
-    let timestamp: TimeInterval  // CMMotionManager timestamp
-    let magnitude: Double        // acceleration magnitude in g's
-}
-```
+1. Wrap-safe yaw increments leak toward zero with a 60 s time constant (`yawLeakTau`).
+2. The drift RATE is learned while the device is quiescent (observed rate under ~0.57°/s, ~10 s learning constant) and subtracted from every increment — a leak alone passes a constant rate through and plateaus at rate × τ.
 
-`peakAccelSince(timestamp:)` returns the peak magnitude and its timestamp from all samples after the given time. Used by the fret-pad onset's strike-velocity estimate (`MotionSource.strikeVelocity01`, below) to find the impact spike in the trailing window at touch delivery.
+Gestures pass untouched; a twist held motionless re-centres over about a minute; the ±π wrap cannot rail the axis. The Mac's ZL re-zero stays instant.
 
-## Velocity Detection — revived 2026-08-19, backward-looking
+### Motion views
 
-iPads have no pressure-sensitive touch. Tarabdaar estimates strike
-velocity from the accelerometer. The mechanism was deleted 2026-07-24
-with the keyboard's mapping machinery (its only consumer had died) and
-**revived 2026-08-19 on the Fret Pad path** as the drive for the String
-voice's `bow_attack_vel` velocity→attack-sharpness law (tap hard =
-martelé bite, place gently = legato draw — see
-[sarangi.md](sarangi.md)):
+The iPad's GYRO overlay and the Mac Setup tab's "Received motion (3D)" draw the same attitude trail at a fixed ±30° scale centred on the trail mean — the standing sensor-vs-transmission A/B; only yaw may differ (raw on the iPad, corrected on the wire). Each pairs with an **accelerometer twin** (raw `userAcceleration`, origin-centred, fixed ±0.5 g); the Mac's copy reads the PERF_STATE accel fields (±4 g wire scale, display only).
 
-1. The fret-pad onset handler (`FretPadSurfaceIOS.began`) calls
-   `MotionSource.strikeVelocity01(at: now)` — no timer, no delay.
-2. That scans the **trailing** `Config.velocityLookback` (50 ms) window
-   of the 200 Hz accel ring buffer via `peakAccelSince`. Backward, not
-   forward: UIKit delivers a touch ~10–25 ms after the physical impact,
-   so the chassis spike is usually already buffered and **the note-on
-   never waits** (the deleted design delayed the note 20 ms instead —
-   do not bring that back on the latency-critical fret path).
-3. The peak magnitude maps log-scale to 0…1:
+## Strike velocity (iPad)
+
+iPads have no pressure-sensitive touch; the strike is estimated from the accelerometer. Two consumers share ONE law, `StrikeLaw.scale01` (`MotionSource.strikeScale01`):
 
 ```
-clamped = clamp(peakG, velocityMinG, velocityMaxG)  // 0.01g to 0.5g
-vel01 = log(clamped / minG) / log(maxG / minG)      // below minG → 0
+clamped = clamp(peakG, velocityMinG, velocityMaxG)   // 0.01 g … 0.5 g
+vel01   = log(clamped / minG) / log(maxG / minG)      // at or below minG → 0
 ```
 
-The logarithmic mapping gives better dynamic range than linear. Typical
-values (as the old 1–127 scale): very soft ~0.01-0.02g → ~1-30, medium
-~0.05-0.1g → ~50-80, hard ~0.2-0.5g → ~100-127.
+Typical readings on the 0–127 display scale: gentle placement ~1–30, medium (~0.05–0.1 g) ~50–80, hard (~0.2–0.5 g) ~100–127.
 
-**The player can SEE the law (2026-08-20/23).** Every onset draws its
-reading on the touch indicator — an impact ripple sized by the estimate
-plus the number itself (0–127), which survives release as a ~1 s fading
-ghost so staccato taps stay readable. And the toolbar carries the
-**persistent strike scope**: the live accelerometer magnitude run
-through the SAME law (`MotionSource.strikeScale01` — the shared g→0…1
-map both consumers call, so trace and tap can never disagree), drawn as
-a scrolling ~4 s trace on the 0–127 scale with the current value at the
-right and an amber tick holding the last onset's reading. The trace is
-**colored by what the player was doing at each moment** (2026-08-23):
-pale yellow at a note onset fading to deep violet (the shared magma
-level ramp, 2026-09-02) over the next second while the note sounds, faded gray while nothing plays — the surface reports
-melody-note begins/ends into `MotionManager.noteBegan/noteEnded`
-(id-keyed, so drone presses and out-of-band touches never unbalance
-it) and the scope walks that timeline per bin. **The trace IS the envelope** (2026-08-23, final form): the scope draws
-only the fast-attack/~150 ms-decay `strikeLevel` — the smoothed control
-signal the `.strike`/`.acceleration` dimensions actually consume — and
-the live number reads it too. The RAW magnitude trace was retired: its
-rectified zero-crossings and the log-floor magnification made smooth
-playing read as spikes, while the envelope is the truth the bindings
-see. Coloring is playing state at each moment: pale yellow at a note
-onset fading down the magma ramp to violet over the blend window (the
-violet floor = the note has fully handed over to Acceleration), DARK gray while nothing plays, and
-note-active frames carry a lighter backdrop so phrases read as blocks
-at a glance. The trace's buckets are anchored to a
-TIME-QUANTIZED grid — bucketing against the moving `lastT − window`
-origin re-rasterized every sample on every redraw and the whole trace
-shimmered; on the quantized grid a sample keeps its bucket and the
-trace scrolls by whole bins.
+### Per-onset estimate
 
-**And the player can BIND it (2026-08-23): the `.strike` /
-`.acceleration` dimension pair.** The continuous form of the measure —
-`strikeScale01(magnitude)` through a fast-attack / ~150 ms-decay
-tracker (`MotionManager.strikeLevel`, evolved at the full 200 Hz so
-taps between report ticks never drop) — streams as the PERF_STATE
-`strike` byte (TLP v6) and lands as TWO Mac control axes, bindable
-like the arm tilts and the Joy-Con stick. Both ride the SAME
-measurement; what separates them is **time since the note started**
-(`StrikeBlendWindow`, `AppController.evaluateStrikeBlend`): per bound
-target, the applied value is (1−w)·Strike + w·Acceleration, with w
-ramping linearly 0→1 over the note window — **`ctl_strike_window`**
-(Parameters tab, "Strike blend" group, 0.25–8 s, default 2; a
-control-layer `.live` key intercepted in `applyParamToVoice`, so it
-rides presets like everything else and relays to the iPad over
-JOYCON_STATE's v7 `strikeWin` byte, where the scope's yellow→violet onset
-fade tracks it — the violet floor = the note has fully handed over to its
-Acceleration bindings) — a side without a
-binding evaluates to the target's DEFAULT (registry default for a
-parameter, 0 = rest for a composite), so "expression [0, 1] on Strike,
-unbound on Acceleration (default 0.4)" reads at t = 1 s as the
-interpolated range [0.2, 0.7]. Windows are **per note** (wire touch
-id; retriggers re-anchor): while notes overlap the NEWEST sounding
-note's age drives the weight — a fresh tap always gets full Strike
-treatment, even mid-legato — and releasing it falls back to the
-survivor's own **un-reset** age; with nothing sounding the last onset
-keeps aging, so the pair rests on the Acceleration side. A 30 Hz
-Mac-side timer keeps the weight moving between change-gated wire
-events (guard: `StrikeBlendTests`). UNIPOLAR: silence sits at the
-binding curve's x 0, a hard strike at x 1 (the tilts rest at the
-centre instead). Strike is the onset's voice, Acceleration the
-sustained gesture's — bind accent-flavored mappings to the first and
-aftertouch-flavored ones to the second. Decimation is per-pixel PEAK-HOLD,
-never a sample stride — stride-2 sampled the 200 Hz stream at an
-effective 100 Hz and made the trace toggle between two phase states. It polls the non-published 200 Hz
-history at 30 Hz (the raw-overlay pattern), so motion samples never
-re-render the toolbar.
+The fret-pad onset handler (`FretPadSurfaceIOS.began`) calls `MotionSource.strikeVelocity01(at: now)`, which scans the TRAILING `Config.velocityLookback` window (50 ms, must stay under `accelBufferDuration`) of the ring buffer via `peakAccelSince`. Backward-looking: UIKit delivers a touch ~10–25 ms after the physical impact, so the chassis spike is usually already buffered and **the note-on never waits** (never add an onset delay on the fret path). The result rides the touch's `velocity` byte in every PERF_STATE frame; the Mac mapper stores it per slot for the String voice's `bow_attack_vel` velocity→attack-sharpness law (0 default = inert — see [Sarangi](sarangi.md)). Producers without an accelerometer (Mac pads, keyboard, audition scripts) send their flat constant or the score's MIDI velocity.
 
-**The `.fingerAccel` dimension (2026-08-24)** — the strike pair's
-sibling for the FINGER instead of the wrist: the playing finger's pitch
-acceleration, the SIGNED second derivative of the newest sounding
-touch's pitch trajectory, soft-saturated to −1…+1
-(`FingerAccelTracker`: velocity = the pitch's per-sample delta through
-a ~25 ms SIGNED smoother — signed first, so frame jitter cancels
-instead of rectifying — acceleration = the smoothed velocity's delta
-through a second ~25 ms smoother, output a/(|a|+25 000 ¢/s²), the same
-half-saturation scale as the kernel slide noise's `bow_slide_acc`
-default, so the dimension and the noise agree about what a strong
-gesture is). **BIPOLAR like the tilts**: rest AND a constant-rate meend
-read 0 (curve centre); accelerating the pitch upward reads +, braking
-an upward slide or accelerating downward reads −. **No new wire
-traffic**: the Mac derives it from the pitch already in every
-PERF_STATE frame (`LinkIngest.onTouchPitch`/`onTouchGate` →
-`AppController.fingerEvaluate`, newest-sounding-touch rule, the local
-Mac pads and audition scores feeding the same tracker through the
-local-pump ingest, id-namespaced) plus a 30 Hz decay tick while bound —
-frames are change-gated, so a finger coming to rest would otherwise
-freeze the value. A tracked-finger change or a >2-semitone per-sample
-jump is a snap/steal and reseeds without driving. **The iPad's toolbar
-shows a matching FINGER-ACCEL SCOPE** beside the strike scope —
-bipolar, centerline = rest, green trace while a note sounds — drawn
-from the iPad's own display-only computation of the same law
-(`FingerAccelSampler`, 120 Hz off-main from `OutboundPlayState`; the
-strike-scope ownership pattern — the data's source side draws its own
-readout, and the Mac's binding evaluation stays the control truth).
-Guard: `FingerAccelTests` (constant-rate middle ≈ 0, signed kicks at
-start/stop, no-touch decay, snap/steal immunity).
+Known limit: a tap whose spike lands later than the lookback window under-reads toward legato — a playable failure mode; widen `velocityLookback` before resorting to onset delays.
 
-The estimate rides the touch's `velocity` byte in the PERF_STATE frame
-(it was always in the wire format; the Mac mapper discarded it until
-2026-08-19) and is inert until `bow_attack_vel` is armed on the Mac.
-Producers without an accelerometer (the Mac pads, the keyboard,
-audition scripts) keep sending their flat constant / the score's MIDI
-velocity. Known limit: if a given tap's spike lands later than the
-lookback window (slow motion delivery), that onset under-reads toward
-legato — a playable failure mode; widen `velocityLookback` (≤
-`accelBufferDuration`) before resorting to onset delays.
+### The strike envelope
 
-## Calibration — on the Mac: the ARM (2026-08-13) and, since 2026-09-02, the Joy-Con WRIST
+`MotionManager.strikeLevel` is `strikeScale01(magnitude)` through a fast-attack / ~150 ms-decay tracker (`StrikeLaw.envelopeTau`), evolved at the full 200 Hz so a tap between 60 Hz report ticks still registers at height. It streams as the PERF_STATE `strike` byte (0–255 ↔ 0…1) and is the measurement behind the `.strike`/`.acceleration` dimension pair (below).
 
-**The iPad performs no calibration.** The legacy 7-point iPad capture
-(1 rest + 2 endpoints per axis, `CalibrationData`, key
-`tarabdaar_calibration_v2`) was deleted 2026-08-13 — its per-axis 3D
-projection was an affine map of (pitch, roll, yaw), and the Mac's guided
-calibration solve learns its own linear map from the same inputs, so
-calibrating twice added a step without adding information. The iPad now
-streams **raw attitude** at a fixed ±90° full scale
-(`MotionManager.normalizedTilts`, tilt 1 = pitch, 2 = roll, 3 = yaw)
-and there is no first-launch wizard and no recalibrate button.
-**Tilt 3 is HIGH-PASSED, BIAS-CORRECTED yaw (2026-08-14):** pitch/roll
-are anchored by gravity, but yaw is unreferenced gyro integration and
-drifts unboundedly (a resting iPad wandered tens of degrees over
-minutes). Two-stage fix: (1) wrap-safe yaw increments leak toward zero
-with a 60 s time constant — but a leak alone passes a constant drift
-RATE through and plateaus at rate × τ (measured ~0.08°/s → a visible
-~5° crawl), so (2) the drift rate itself is learned while quiescent
-(observed rate < ~0.57°/s, ~10 s learning constant) and subtracted
-from every increment. Gestures pass untouched; a twist held motionless
-re-centres over ~a minute (ZL re-zero stays instant); the ±π wrap can
-no longer rail the axis. End-to-end verification 2026-08-14: sensor
-(GYRO overlay) and wire agree at Δ≈0.02–0.03° on pitch/roll over 10 s.
-The Mac's Setup tab mirrors the iPad overlay one-for-one ("Received
-motion (3D)": same trail, same Δ° readouts, fed from the transmitted
-values, redrawn at 60 Hz off the live unthrottled trace) — the
-standing sensor-vs-transmission A/B; only yaw is allowed to differ
-(raw on the iPad, high-passed on the wire). Both views draw at a
-FIXED ±30° scale (frame edge = 30° from the trail mean; only the
-centring follows the data) — the same motion is the same size on
-both screens, the zoom doesn't pump with trail extent, and sub-degree
-noise reads as the near-stillness it is, with the Δ° labels carrying
-the magnitude. The GYRO overlay and the Mac tab each pair the
-attitude view with an **accelerometer twin** (2026-08-14): raw
-per-axis `userAcceleration` as the same turntable trail, but
-origin-centred (acceleration has a natural zero — taps read as jabs
-from the centre) at a fixed ±0.5 g scale. The Mac's copy is fed by
-the PERF_STATE accel fields (TLP v2, ±4 g wire scale, display-only)
-— the same A/B, for the strike axis.
+### The player can see the law
 
-The app's **single tilt calibration** is the Mac's **arm calibration**
-(Setup tab ⌘7): 1 rest pose + 3 arm sweeps (↕, ↔, rotation) over the
-iPad's 3-dim raw tilt report, fitted by per-sweep PCA + a joint
-least-squares solve with a robust 7-reading rest merge, producing the
-three arm control axes (rest = 0, sweep extremes = ±1 — every tilt value is −1…+1 since 2026-08-18). It runs
-entirely on the tilt stream — no Joy-Con needed (the 2026-08-12
-arm+wrist variant that fused Joy-Con gravity was cut back to arm-only
-the next day). Mechanics, discard conditions and the
-`tarabdaar.armCal.v1` persistence:
-[midi-and-audio.md](midi-and-audio.md). Without an arm calibration the
-iPad's three raw axes pass straight through to control axes 0–2 —
-usable, but uncentered (rest sits wherever the iPad happens to rest,
-not at 0.5).
+- Every onset draws its reading on the touch indicator: an impact ripple sized by the estimate plus the number (0–127), surviving release as a ~1 s fading ghost.
+- The toolbar's **strike scope** (`StrikeScopePane`) draws the envelope — the exact signal the bindings consume — as a scrolling ~4 s trace on the 0–127 scale, the current value at the right, an amber tick holding the last onset. Buckets sit on a TIME-QUANTIZED grid (a moving origin shimmers); decimation is per-pixel PEAK-HOLD, never a sample stride (a stride aliases the 200 Hz stream). It polls the unpublished history at 30 Hz, so motion samples never re-render the toolbar.
+- Colour is playing state: pale yellow at onset fading down the magma ramp to violet over the strike blend window (violet = fully handed over to Acceleration), dark gray while nothing plays, a lighter backdrop on note-active frames. The surface reports melody-note begins/ends into `MotionManager.noteBegan/noteEnded` (id-keyed, so drone presses never unbalance it); the window length arrives as the JOYCON_STATE `strikeWin` byte.
 
-**The Joy-Con WRIST calibration (2026-09-02)** is the same guided
-capture — rest + three sweeps (wrist up/down, inward/outward,
-clockwise/counterclockwise), PCA per sweep, joint least squares, robust
-rest merge, the same live verdicts and 3D cloud — run by a second
-instance of the now-shared `TiltCalibrator` (`Packages/TarabdaarCore`,
-extracted from `JoyConInput`'s arm code; `TiltCalibratorTests` pins the
-solve) over the **Joy-Con's fused attitude**: gravity pitch/roll from
-the complementary filter plus a RELATIVE yaw — the fused yaw's wrap-safe
-increments with the drift rate learned while quiescent and a 60 s leak
-toward zero, the iPad's tilt-3 law ported to the Mac — all at ±90° full
-scale, −1…+1. It produces the **Wrist ↕ / Wrist ↔ / Wrist ⟲**
-dimensions (the revived `tilt4` case + `wrist2`/`wrist3`, control axes
-8–10), rest = 0, sweep extremes ±1; without a calibration they stay
-silent (no raw passthrough — the fused attitude's rest is arbitrary).
-It is an INDEPENDENT capture on the Joy-Con's own stream, not the
-2026-08-12 joint R⁶ arm+wrist solve. Setup tab "Wrist calibration"
-panel (appears once the Joy-Con's motion fusion is live — Joy-Con 2
-over BLE, or a controller with GC motion); dpad-up/down step whichever
-capture is running, **ZL re-zeroes BOTH rest poses**. Persisted under
-`tarabdaar.wristCal.v1`. The iPad's toolbar wrist square mirrors the
-SOLVED wrist axes once calibrated (raw attitude before). **Joy-Con
-Accel** (`jcAccel`, axis 11) needs no calibration: the gravity-removed
-acceleration magnitude through the shared strike law (`StrikeLaw`:
-log-scale 0…1 across velocityMinG…velocityMaxG, fast-attack / 150 ms-
-decay envelope — the iPad strike tracker's law), UNIPOLAR like
-Acceleration (rest at the curve's x 0), every IMU packet, change-gated
-at 1/256, 0 on detach.
+## Control dimensions (Mac)
 
-## Dimension System (Parameter Mapping)
+`ControlAxes.dims` lists the bindable axes in index order. Every axis has exactly one source.
 
-Parameters are driven by **dimensions** — configurable input sources. Each parameter can be mapped to any dimension via the **MAP** button which opens a configuration sheet. The mapping is persisted in `DimensionMapping` (stored in UserDefaults).
+| Axis | Dimension | Source | Polarity |
+|---|---|---|---|
+| 0–2 | Arm ↕ / ↔ / ⟲ (`tilt1–3`) | the iPad tilt report through the arm calibration; raw pitch/roll/yaw passthrough (uncentred) when uncalibrated | bipolar, rest 0 |
+| 3–4 | Stick X / Y | the Joy-Con stick, per-axis 0.1 deflection gate, rescaled 0.1 → 0, full → ±1; centre pinned exactly at rest | bipolar, rest 0 |
+| 5–6 | Strike / Acceleration | the PERF_STATE `strike` envelope byte, blended per target by time since note onset (below) | UNIPOLAR, silence at curve x 0 |
+| 7 | Finger Accel (`fingerAccel`) | the playing finger's signed pitch acceleration (below) | bipolar, rest 0 |
+| 8–10 | Wrist ↕ / ↔ / ⟲ (`tilt4`, `wrist2`, `wrist3`) | the Joy-Con's fused attitude through the wrist calibration; silent until calibrated | bipolar, rest 0 |
+| 11 | Joy-Con Accel (`jcAccel`) | the Joy-Con's gravity-removed acceleration magnitude through `StrikeLaw` (same log map + 150 ms envelope), every IMU packet, change-gated at 1/256, 0 on detach; no calibration needed | UNIPOLAR |
 
-### Available Dimensions
+`InputDimension` also carries `accelPressure`, `keyY`, `slider1`, `slider2` — retired cases kept so saved bindings decode; nothing emits them (see docs/history/).
 
-| Dimension | Type | Description |
-|-----------|------|-------------|
-| Arm ↕ | Global | arm calibration axis 1 (raw passthrough: iPad pitch) |
-| Arm ↔ | Global | arm calibration axis 2 (raw passthrough: iPad roll) |
-| Arm ⟲ | Global | arm calibration axis 3 (raw passthrough: iPad yaw) |
-| Stick X / Y | Global | the Joy-Con stick, per-axis gate + rescale |
-| Strike / Acceleration | Global | the iPad accelerometer strike envelope, blended per target by time since note onset (unipolar) |
-| Finger Accel | Global | the playing finger's signed pitch acceleration |
-| Wrist ↕ / ↔ / ⟲ | Global | Joy-Con wrist calibration axes 1–3 (silent until calibrated) |
-| Joy-Con Accel | Global | Joy-Con gravity-removed acceleration through the strike law's envelope (unipolar) |
-| Pressure | Per-note | Accelerometer pressure at note onset (same as velocity capture) |
-| Key Y | Per-note | Finger y-position on the key (0 = bottom, 1 = top), normalized to key height for black keys |
-| Slider 1 | Global | Horizontal slider in top-right panel (0 at right edge, 1 at left) |
-| Slider 2 | Global | Second horizontal slider below Slider 1 |
-| None | — | Fixed at midpoint (0.5) |
+Every tilt value is −1…+1 with rest 0, in process and on the wire (s16). Binding curves keep a 0…1 x-domain and map at evaluation: bipolar axes via `(v + 1) / 2`, unipolar axes read rest at x 0.
 
-**Global** dimensions have a single value shared across all voices. **Per-note** dimensions have independent values per voice. When a per-note dimension is mapped to a global parameter (glide speed, compression), the most recently activated voice's value is used as a fallback.
+### Strike / Acceleration — one measurement, two axes
 
-### Mappable Parameters
+Both ride the strike envelope byte; what separates them is **time since the note started** (`StrikeBlendWindow`, `AppController.evaluateStrikeBlend`). Per bound target the applied value is (1−w)·Strike + w·Acceleration, w ramping linearly 0→1 over the window:
 
-Each binding uses a Catmull-Rom spline defined by 2–4 control points, replacing the previous linear interpolation. The spline output is clamped to the endpoint min/max. Tilt dimensions are normalized from -1..+1 to 0..1 via `(tilt + 1) / 2`. Per-note dimensions are already 0..1. Multiple dimensions can be bound to a single parameter (many:many mapping).
+- **`ctl_strike_window`** (Parameters tab, "Strike blend" group, 0.25–8 s, default 2) — a control-layer `.live` key intercepted in `applyParamToVoice`; rides presets; relayed to the iPad scope as the JOYCON_STATE `strikeWin` byte (50 ms units).
+- A side without a binding evaluates to the target's DEFAULT (registry default for a parameter, 0 for a composite): "expression [0, 1] on Strike, unbound on Acceleration (default 0.4)" reads at w = 0.5 as [0.2, 0.7].
+- Windows are **per note** (wire touch id; retriggers re-anchor). While notes overlap the NEWEST sounding note's age drives the weight — a fresh tap always gets full Strike, even mid-legato; releasing it falls back to the survivor's own un-reset age; with nothing sounding the last onset keeps aging, so the pair rests on the Acceleration side.
+- Delivery is `LinkIngest.onStrike` + the note-edge `onTouchGate` — deliberately NOT `applyTiltAxis` (that would double-apply the pair) — with a 30 Hz Mac-side timer moving the weight between change-gated wire events while bindings exist. Guard: `StrikeBlendTests`.
 
-The dimension matrix on the iPad covers only the iPad's responsibilities — MIDI emission and glide. iPad sensors **only ever drive MIDI** (pitch bend, channel pressure, CCs); the Mac's String voice consumes those MIDI bytes downstream (the tilt axes map to the taraf purity/decay/tone CCs + expression), but no iPad sensor maps directly into Mac-side DSP state. Voice timbre lives in the one parameter list (Parameters tab) + the tarab (Strings tab).
+Strike is the onset's voice, Acceleration the sustained gesture's: bind accent-flavoured mappings to the first, aftertouch-flavoured ones to the second.
 
-**Internal parameters — DELETED (2026-07-24).** Velocity, Glide Speed,
-Compression, Amplitude, Drag Smooth, and Glide Curve were consumed only by
-the legacy keyboard/glide pipeline (the Fret Pad tracks the finger
-directly), so they were removed along with the iPad's whole mapping
-machinery (`NoteManager` binding caches, the MAP editor, the accelerometer
-velocity capture). The legacy glide engine (audition `noteOn`/`glide`
-events) runs on fixed constants: 110 ms/st, 27.5 ms compression, curve
-k 7.5, drag smoothing 0.3, velocity 92. (The accelerometer velocity
-ESTIMATE was revived 2026-08-19 on the Fret Pad path — see Velocity
-Detection above — as a direct per-onset wire value, not as a revival of
-this mapping machinery, which stays dead.)
+### Finger Accel
 
-**MIDI output parameters** (sent to whichever MPE receiver is downstream — TarabdaarMac, Ableton, etc.):
+The SIGNED second derivative of the newest sounding touch's pitch trajectory, soft-saturated to −1…+1 (`FingerAccelTracker`):
 
-| Parameter | CC# | Default Range | Default Dimension | Description |
-|-----------|-----|--------------|-------------------|-------------|
-| Vibrato | — | 0–127 | Tilt 1 | Player vibrato depth (channel pressure) |
-| Brightness | (74) | 0–127 | None | Bow position: sul ponticello ↔ sul tasto |
-| Bow Pressure | (1) | 0–127 | None | Bow force inside the playable wedge |
-| Expression | (11) | 0–64 | Tilt 1 | Loudness: rest (tilt 0) sends the fitted median; tilt down fades toward silence, up ≈ +8 dB |
-| Taraf Purity | (71) | 0–127 | Tilt 1 | Composite slot 1 (default members: jt tone LP 16 k→1.5 kHz, recruitment profile `bow_jt_sel` 0.5→0 — fitted chorus down to the played note's kin at held loudness) |
-| Taraf Decay | (73) | 0–127 | Tilt 2 | Composite slot 2 (default member: taraf damping 0→1) |
-| Tone Tilt | (72) | 0–127 | Tilt 3 | Composite slot 3 (default member: tone tilt −1→1) |
-| Composite 4–8 | (20–24) | 0–127 | None | Free composite-parameter slots, defined in the Mac's Controls tab |
-| Bow Tilt | (75) | 0–127 | None | Bow-stroke harmonic color (`BowControlMapper`) — don't rebind to a new meaning |
+| Stage | Law |
+|---|---|
+| velocity | per-sample pitch delta through a ~25 ms SIGNED smoother (signed first, so frame jitter cancels instead of rectifying) |
+| acceleration | the smoothed velocity's delta through a second ~25 ms smoother |
+| output | a / (\|a\| + 25 000 ¢/s²) — the same half-saturation scale as the kernel slide noise's `bow_slide_acc` default, so the dimension and the noise agree about what a strong gesture is |
 
-**Raw tilt wire (2026-07-24; TLP state-frame field since 2026-08-14):**
-the iPad does NOT evaluate or send any of the MIDI parameters above — its
-60 Hz tick writes the three raw tilt values (fixed-scale attitude) into
-the outbound `OutboundPlayState`, and they ride EVERY `PERF_STATE` frame
-as **16-bit fields, atomic with pitch** (no more torn CC pairs; ~0.005°
-steps). The link's 250 ms heartbeat keeps a still iPad distinguishable
-from a dead one, and `LinkIngest` change-gates per axis before the Mac's
-bindings. The **Mac evaluates its own tilt bindings**
-(`AppController.handleRawTilt` → `applyTiltAxis`): composites via
-`applyComposite`, parameters through the unified apply. (The iPad-side
-tilt-mapping evaluation and its SysEx were deleted 2026-07-24; the
-in-process CC pair decode — CC 16/17/18 + 48/49/50 — survives in
-`AudioEngine` for audition scores only.)
+Rest AND a constant-rate meend read 0; accelerating upward reads +, braking an upward slide or accelerating downward reads −. No new wire traffic: the Mac derives it from the pitch in every PERF_STATE frame (`LinkIngest.onTouchPitch`/`onTouchGate` → `AppController.fingerEvaluate`; Mac pads and audition scores feed the same tracker through the local-pump ingest) plus a 30 Hz decay tick while bound (frames are change-gated, so a resting finger would otherwise freeze the value). A tracked-finger change or a > 2-semitone per-sample jump is a snap/steal: the chain reseeds without driving. A plain `applyTiltAxis` axis — no blend. Guard: `FingerAccelTests`.
 
-**Tilt performance axes (2026-07-23):** the three tilts default-bind to the
-String voice's taraf/tone controls (CC71/73/72, consumed on the Mac in
-`AudioEngine.routeSarangiModelMIDI` — see [sarangi.md](sarangi.md)). The
-purity/decay default curves are 3-point (`(0,0) (0.5,0) (1,127)`): the
-resting device (body-calibration neutral = tilt 0, curve x 0.5) stays at 0 = the
-current default sound, and the axis sweeps only past neutral; tone tilt is
-linear so neutral lands on ~64 = flat. Existing installs adopt these
-bindings once (flag `tarabdaar.tiltAxes.defaultBindings.v1`; the CC11
-expression default adopts under `.v2`); unbinding afterwards sticks.
+The iPad toolbar shows a matching **finger-accel scope** beside the strike scope — bipolar, centreline = rest, green trace while a note sounds — from its own display-only instance of the same law (`FingerAccelSampler`, 120 Hz off-main from `OutboundPlayState`). The data's source side draws its own readout; the Mac's evaluation stays the control truth.
 
-**Mac-side editor (2026-07-24):** the TarabdaarMac **Controls tab (⌘4,
-`TiltControlsView`)** edits, per tilt, an arbitrary set of **targets**
-with Lo/Hi endpoints and the "From center" rest-zero shape. A target
-(`MapTarget`) is a **composite parameter** or **any single parameter** —
-"Taraf Purity" and "vibrato depth (¢)" bind the same way — and endpoints
-are in the target's native units (0–1 for a composite). The same bindings
-can be made from the Parameters tab's per-row mapping button. Nothing
-syncs: the Mac evaluates every binding itself (`applyTiltAxis`), so edits
-take effect immediately. Bindings persist under
-`tarabdaar_dimensionMapping_v6` (a v5 document migrates, rescaling its old
-0–127 composite endpoints to 0–1).
+## Tilt calibration (Mac)
 
-When set to "None", the parameter uses 0.5 (midpoint of its range).
+**The iPad performs no calibration** — it streams raw attitude (`normalizedTilts`) and has no wizard or recalibrate button. (The former iPad-side 7-point calibration is not present — see docs/history/.) The Mac holds two instances of `TiltCalibrator` (TarabdaarCore; `TiltCalibratorTests` pins the solve), run from the Setup tab (⌘7):
 
-### ParameterMapping Model
+| | Arm | Wrist |
+|---|---|---|
+| Feature stream | the iPad's raw tilt report (`feedArmTilt` → `armTick`, hopped to main) | the Joy-Con's fused attitude: gravity pitch/roll from the complementary filter + a RELATIVE yaw (wrap-safe increments, drift rate learned while quiescent, 60 s leak — the iPad's tilt-3 law ported), ±90° full scale |
+| Sweeps | rest, then arm ↕, arm ↔, arm rotation | rest, then wrist up/down, inward/outward, clockwise/counter-clockwise |
+| Output | control axes 0–2 | control axes 8–10 (`tilt4`, `wrist2`, `wrist3`) |
+| Uncalibrated | raw axes pass through, uncentred | silent (the fused attitude's rest is arbitrary) |
+| Persistence | `tarabdaar.armCal.v2` (a `.v1` record migrates exactly: f0′ = 2·f0−1, extents ×2) | `tarabdaar.wristCal.v1` |
+| Panel | "Arm calibration" — no Joy-Con needed | "Wrist calibration" — appears once the Joy-Con's motion fusion is live (Joy-Con 2 over BLE, or a controller with GC motion) |
 
-Each target's mapping is a `ParameterMapping` struct containing an array of `DimensionBinding` objects (many:many support). Each `DimensionBinding` holds an `InputDimension` and 2–4 `ControlPoint` values defining a Catmull-Rom spline curve, with output clamped to the endpoint min/max. The `DimensionMapping` struct holds all mappings in a dictionary keyed by the target's `storageKey`, persisted to UserDefaults under `"tarabdaar_dimensionMapping_v6"`.
+The two captures are independent. Joy-Con **dpad-up** advances and **dpad-down** steps back whichever capture is running ("Redo previous": clears the current partial capture and the previous phase's samples; everything earlier stands); **ZL re-zeroes BOTH rest poses** without re-fitting. The iPad's toolbar arm square shows the SOLVED arm axes while a calibration is driving (JOYCON_STATE `arm1–3`, flag `armLive`) and its own raw attitude otherwise; the wrist square likewise shows the solved wrist axes once calibrated.
 
-`TiltMapping.swift` defines the `InputDimension` enum, the **`MapTarget`** struct (`.composite(slot:)` or `.param(key:)` — it replaced the old `MappableParameter` enum, which could only name the 8 composite slots), `ControlPoint`, `DimensionBinding`, `ParameterMapping`, and `DimensionMapping`. Composite storage keys keep their legacy spellings (`midiCC71`, `midiCC73`, `midiCC72`, `composite4`…`composite8`) so saved bindings survive; parameter targets store as `param:<key>` and are dropped on load if the key no longer exists.
+### The capture
 
-The Mac keeps a lock-protected per-axis snapshot of the bound targets (`tiltEvalByAxis`) because raw tilt reports arrive on the CoreMIDI thread.
+1. **Rest** phase, then three guided sweeps, each starting from the rest pose (ending there is good practice, not enforced).
+2. The rest pose is measured SEVEN times — the rest phase plus each sweep's first/last ~0.25 s windows — and merged ROBUSTLY: component-wise median, inliers within `max(0.1, 2 × median distance)`, mean of the inliers = `f0`. Off-rest readings are rejected as outliers, never a redo. The fitted detail line reports how many readings agreed and the inlier spread.
+3. Each sweep's extents and both-ways check are judged against the sweep's own nearest rest reading (start or end, whichever is at rest; merged `f0` if neither), so rest wander between phases neither biases the solve nor fails the capture.
+4. Live feedback: per-phase sample counts, refusal to advance an under-sampled phase, and an instant per-sweep verdict on advance (samples, both-ways with measured ± extents, % alignment against every earlier sweep). A fatal sweep — one-sided relative to rest, or ≥ 95 % aligned with an earlier one — **clears itself and repeats on the spot**; 80–95 % warns but advances. One-sided almost always means the rest pose sat at one END of that motion's range: restart with a mid-range rest pose.
+5. `CalCloudView` draws a rotating 3D scatter of the capture live (rest cluster white, sweep arcs orange/green/cyan, a ring on the rest centre, a yellow "you are here" marker with its raw values); the finished capture stays visible until the next one begins.
 
-### Pressure — REMOVED
+### The solve
 
-The accelerometer velocity capture (and its `pressureInUse` fast-path) went
-with the 2026-07-24 dead-parameter deletion: the Fret Pad tracks the finger
-directly and never used it, so notes always fire immediately on touch. The
-`accelPressure` / `keyY` / slider dimensions still exist in
-`InputDimension` but nothing emits them — only the three tilts are wired.
+- Feature vector f ∈ R³. Each sweep's dominant direction by PCA (power iteration) **about the sweep's own mean** (about rest, an off-rest average rotates the direction toward the offset and a both-ways motion projects one-sided).
+- Joint least squares `c = (DᵀD)⁻¹Dᵀ(f − f0)` — non-perpendicular sweeps are separated by the solve.
+- Extents measured through the same solve and applied piecewise (asymmetric lo/hi → rest 0, extremes ±1), absorbing first-order nonlinearity.
+- Two near-identical sweeps (≥ 95 % alignment, with the singular-Gram inversion as backstop) discard the capture; the message names the sweeps and the percentage. After a fit the panel reports the closest pair — some alignment is expected, the arm motions overlap in attitude space.
+
+### Input conditioning
+
+- **Frame coalescing**: messages within `TiltCalibrator.frameGap` (4 ms) update the current frame in place, so the trail, the capture and the smoothing see atomic frames (per-message sampling records torn, staircase frames). Belt-and-braces now that TLP frames are atomic.
+- **EMA per frame** (`Config.smoothAlpha`, arm 0.25) before the solve, the capture and the panel marker: quantized attitude flickers ±1–2 steps at rest and the Gram-inverse rows amplify it. ZL re-zero reads the smoothed vector.
+- The link's 250 ms heartbeat keeps stillness distinguishable from disconnection; `LinkIngest` change-gates per axis before the bindings.
+
+## Binding model
+
+The Mac evaluates every binding itself (`AppController.handleRawTilt` → `applyTiltAxis`; the strike pair through `evaluateStrikeBlend`): composites via `applyComposite`, parameters through the unified `applyParamToVoice`. Nothing syncs to the iPad, so edits take effect immediately.
+
+- **Editors**: the Controls tab (⌘4, `TiltControlsView`) edits, per axis, an arbitrary set of targets with Lo/Hi endpoints and the "From center" rest-zero shape; the Parameters tab's per-row mapping button makes the same bindings.
+- **Targets**: `MapTarget` — `.composite(slot:)` or `.param(key:)`; endpoints in the target's native units (0–1 for a composite). "Taraf Purity" and "vibrato depth (¢)" bind the same way; there is no "mappable" subset.
+- **Curves**: each `DimensionBinding` holds an `InputDimension` and 2–4 `ControlPoint`s defining a Catmull-Rom spline, output clamped to the endpoint min/max. Many dimensions may bind one target.
+- **Model** (`TiltMapping.swift`): `ParameterMapping` (bindings per target) inside `DimensionMapping`, keyed by the target's `storageKey`, persisted under `tarabdaar_dimensionMapping_v6` (a v5 document migrates, rescaling 0–127 composite endpoints to 0–1). Composite keys keep their legacy spellings (`midiCC71`, `midiCC73`, `midiCC72`, `composite4`…`composite8`); parameter targets store as `param:<key>` and drop on load if the key no longer exists.
+- **Threading**: raw tilt reports arrive off-main, so the Mac keeps a lock-protected per-axis snapshot of the bound targets (`tiltEvalByAxis`).
+
+### Default bindings
+
+| Axis | Target | Curve |
+|---|---|---|
+| Arm ↕ | Expression (CC11 loudness) — rest sends the fitted median, tilt down fades toward silence, up ≈ +8 dB | linear |
+| Arm ↕ | Taraf Purity (composite slot 1: jt tone LP 16 k → 1.5 kHz, `bow_jt_sel` 0.5 → 0) | 3-point `(0,0) (0.5,0) (1,1)` — sweeps only past neutral |
+| Arm ↔ | Taraf Decay (composite slot 2: taraf damping 0 → 1) | 3-point, as above |
+| Arm ⟲ | Tone Tilt (composite slot 3: tone tilt −1 → 1) | linear, neutral = flat |
+
+Existing installs adopt these once (flags `tarabdaar.tiltAxes.defaultBindings.v1`, `.v2` for the expression default); unbinding afterwards sticks. Composite slots 4–8 are free macros defined in the Controls tab. CC numbers are a transport detail of the in-process MIDI substrate; no user-facing surface shows them.
 
 ## Vibrato
 
-There is **no automatic vibrato LFO**. The old sine-LFO-on-the-pitch-bend
-(the `vibratoDepth` / `vibratoRate` / `vibratoIntensity` dimension params)
-has been removed. Vibrato is primarily a **playing technique**: the pitch
-tracks your finger directly (see [Fret Pad](fret-pad.md)), so wiggling your
-finger left/right across the surface bends the pitch with the motion.
-
-The kernel also has its own finger-vibrato, exposed since the 2026-07-24
-unification as the single parameter **`bow_vib_cents`** ("vibrato depth
-(¢)", Articulation group) — bind a tilt to it to add vibrato depth by
-leaning. It is a `hybrid` parameter: the kernel scales its built depth by
-the aftertouch axis, which is what the deleted `bow_vibrato` parameter used
-to expose separately.
-
-**Parameter language (2026-07-24 unification):** CC numbers
-(parenthesized above) are a transport detail — no user-facing surface
-shows them. There is **one parameter list** (`ParamRegistry`, the
-Parameters tab ⌘5): every knob of the String instrument, in native units,
-each with an apply strategy — `live` (instant engine setter), `rebuild`
-(a `bowed_string.json` build scalar, applied as a persisted override with
-a debounced off-main rebuild), or `hybrid` (a build scalar that also has a
-live 0–1 scaler in the kernel: instant at or below its built value,
-rebuild above). **Composite parameters** are named 0–1 macros built from
-those parameters, edited in the Controls tab, occupying 8 transport slots.
-
-A tilt binds to a composite **or straight to a single parameter** — there
-is no "mappable" subset. `AppController.applyParamToVoice` is the one
-apply path for the Parameters tab, composite members, tilt bindings and
-audition scripts alike; whatever cannot apply instantly is funnelled into
-one debounced rebuild flush.
-
-**What the unification removed:** the same perceptual knob used to exist
-twice, in two tabs, under two names — `bow_jaw_gain` "web buzz amount"
-next to `bow_taraf_jawari` "jawari buzz", and `bow_vibrato` "vibrato
-depth" next to `bow_vib_cents` "vibrato depth (¢)". In both cases the
-Parameters-tab knob was literally the kernel's 0–1 **scaler** for the
-Sarangi-tab build scalar, so they became single `hybrid` parameters with
-the scaler as an implementation detail. One of those pairs has since gone
-entirely: the **linear sympathetic web was deleted on 2026-07-24**, taking
-`bow_taraf_jawari` (and every other `bow_taraf_*`/`bow_open_*` key) with
-it, so `bow_vib_cents` is the only hybrid left. The web's `bow_taraf_damp`
-went the same way; `bow_jt_damp`, the modal jawari rows' runtime damping,
-is a different bank and remains.
+There is **no automatic vibrato LFO**. Vibrato is a playing technique: the pitch tracks the finger directly (see [Fret Pad](fret-pad.md)), so moving the finger across the surface bends the pitch with the motion. The kernel's own finger-vibrato depth is the single `hybrid` parameter **`bow_vib_cents`** (Articulation group) — bind a tilt to it to add depth by leaning.

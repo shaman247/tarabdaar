@@ -1,12 +1,8 @@
 import Foundation
 
-/// The r7 tanpura model's live artifact (params/tanpura_live.json,
-/// written by scripts/export_tanpura_live.py): string-construction
-/// laws per register role, shared bridge geometry, the round-6/7
-/// polarization config, the per-note pitch-calibration cents (the
-/// static wrap pulls pitch +10..+31 c across the keyboard — measured
-/// at the LIVE config by the exporter; REGENERATE after ANY physics
-/// or live-config change, the recal law), and the body EQ FIR.
+/// The live artifact (tanpura_live.json, written by the offline exporter
+/// — the one external procedure). Its pitch-calibration cents are
+/// measured at the LIVE config: REGENERATE after ANY physics change.
 public struct TanpuraParams: Codable, Sendable {
     public struct Role: Codable, Sendable {
         public let name: String
@@ -20,49 +16,34 @@ public struct TanpuraParams: Codable, Sendable {
         public let threadH: Double     // jiva thread height (m)
         public let pluck: Double       // total pluck displacement (m)
         public let t600: Double        // fundamental t60 (s)
-        // THREAD ELEMENT (round 11): 1-DOF jiva oscillator; nil/0 =
-        // legacy rigid bump
+        // 1-DOF jiva thread element; nil/0 = rigid bump baked into b
         public let thF: Double?
         public let thQ: Double?
         public let thK: Double?
-        /// Per-role PHYSICAL overrides (2026-08-20, the sitar's
-        /// scale-model role ladder — each register string is a
-        /// geometrically scaled copy of the fitted C3 anchor, so its
-        /// HF-damping curve, bone curvature, contact stiffness and
-        /// transverse polarization radius scale WITH it). nil falls
-        /// back to the artifact globals (the tanpura's roles carry
-        /// none of these — its build is byte-identical).
+        /// Per-role physical overrides for the sitar's scale-model role
+        /// ladder (scaled copies of the anchor); nil = the globals.
         public let t60hf: Double?      // HF-damping t60 reference (s)
         public let fhf: Double?        // HF-damping corner (Hz)
         public let radius: Double?     // bone lengthwise curvature (m)
         public let kc: Double?         // contact stiffness
         public let polRt: Double?      // transverse bone curvature (m)
-        /// Contact-zone width (normalized L units). Short strings see a
-        /// RELATIVELY wider bridge contact (the bridge does not shrink
-        /// with the string), and the modal blur 1/M must stay under the
-        /// zone or the under-resolved contact self-oscillates — the
-        /// upper rungs carry bench-set widths.
+        /// Contact-zone width (L units); the modal blur 1/M must stay
+        /// under it or the contact self-oscillates (bench-set per rung).
         public let zoneW: Double?
-        /// Dynamic modal bandwidth (Hz): mount every mode below it that
-        /// the sim can represent — modes past the SIM Nyquist alias
-        /// inside the rotation tables and wreck the cascade, so this
-        /// replaces the mMin contact floor for ladder roles. Radiation
-        /// stays banded at `p.mF` (phiO zeroed above — the same
-        /// anti-alias law the bend path applies).
+        /// Dynamic modal bandwidth (Hz): mount every representable mode
+        /// below it (no mMin floor — aliased modes wreck the cascade).
         public let mDyn: Double?
-        /// Mode-count ceiling with `mDyn` (the anchor string's count —
-        /// the energy budget the varispeed source had).
+        /// Mode-count ceiling with `mDyn` (the anchor's count).
         public let mCap: Int?
     }
     public struct Pol: Codable, Sendable {
         public let cents: Double       // v/w detune
-        public let g: Double           // global mix (FALSIFIED — 0)
+        public let g: Double           // global mix
         public let thDeg: Double       // pluck angle from vertical
         public let rt: Double          // transverse bone curvature (m)
     }
     public let sr: Double
-    /// internal simulation rate (r29-live: 96k — the 48k contact
-    /// rate RUNS AWAY at the r29 graze); nil = sr (legacy)
+    /// internal simulation rate (96k — the contact runs away at 48k)
     public let srSim: Double?
     public let J: Int
     public let zoneW: Double
@@ -89,22 +70,11 @@ public struct TanpuraParams: Codable, Sendable {
     public let revPredelayMs: Double
     public let pluckRefF: Double       // high notes plucked gentler:
     public let pluckExp: Double        // amp *= min(1,(refF/f0)^exp)
-    public let rampCycles: Double?     // round-13 draw ramp (periods)
+    public let rampCycles: Double?     // pluck draw ramp (string periods;
+                                       // the ladder's 1.0 = STABILITY law)
     public let bodyFIR: [Double]       // min-phase body/capture EQ taps
-    // (2026-08-20: the one-day `tapeRefF`/`srcBodyFIR` varispeed law
-    // switches are GONE — the sitar's scale-model similarity now lives
-    // entirely in its role ladder's per-role physical overrides above.
-    // Varispeed was the prototype, the ladder is the instrument.)
-    /// Radiation efficiency PER MODE INDEX for ladder roles (nil for
-    /// the tanpura). Scale-model similarity applies to the body too:
-    /// each register string is a proportionally smaller instrument, so
-    /// its mode k radiates with the anchor instrument's mode-k
-    /// weighting — one shared array (|H_anchor(k·f_anchor)|), constant
-    /// across the ladder. The measured alternative — one fixed-
-    /// frequency body for all strings — deviates from the prototype by
-    /// ±12 dB on single harmonics (the anchor body's 392 Hz notch
-    /// lands on h3 of EVERY cell). Applied at the readout only, like
-    /// `quiet`; `bodyFIR` is then the identity.
+    /// Radiation efficiency PER MODE INDEX for ladder roles (a scaled
+    /// string radiates with the anchor's mode-k weighting); readout-only.
     public let radByMode: [Double]?
 
     public init?(url: URL) {
@@ -116,33 +86,28 @@ public struct TanpuraParams: Codable, Sendable {
     }
 }
 
-/// One note's kernel tables — the Swift LOCKSTEP twin of
-/// `tanpura_model.build_tables` (keep formulas VERBATIM; the parity
-/// golden guards it).
+/// One note's kernel tables — the Swift twin of the exporter's
+/// build_tables (formulas VERBATIM; the parity golden guards it).
 public struct TanpuraNoteTables: Sendable {
     public var M: Int
     public var J: Int
     public var ca: [Double], cb: [Double], ca4: [Double], cb4: [Double]
-    public var ca2: [Double], cb2: [Double]   // dt/2 (live x2 deep)
+    public var ca2: [Double], cb2: [Double]   // dt/2 rotation
     public var cas: [Double], cbs: [Double], wd: [Double]
     public var caw: [Double], cbw: [Double], wdw: [Double]
     public var phi: [Double], phiF: [Double]
     public var b: [Double], g: [Double], g4: [Double]
     public var gd: [Double], gd4: [Double]
     public var phiO: [Double], dq: [Double]
-    public var gTh: [Double]           // thread footprint (round 11)
+    public var gTh: [Double]           // thread footprint
     public var thBase: Double, thH: Double
     public var thF: Double, thQ: Double, thK: Double
     public var deep: Double
     public var dt: Double
     public var pluck: Double
-    /// Per-note contact stiffness (2026-08-20, the scale-model role
-    /// ladder): a scaled string's contact spring follows the
-    /// similarity law, carried per role (`Role.kc`). Legacy roles:
-    /// exactly `p.kc`.
+    /// Per-note contact stiffness (`Role.kc`; default `p.kc`).
     public var kc: Double
-    /// Per-note transverse bone curvature (`Role.polRt` — a transverse
-    /// length, it scales with the string). Legacy: `p.pol.rt`.
+    /// Per-note transverse bone curvature (`Role.polRt`; default `p.pol.rt`).
     public var polRt: Double
 }
 
@@ -153,43 +118,18 @@ public enum TanpuraTables {
         return p.roles[p.roles.count - 1]
     }
 
-    /// Build one note's tables. `f0Sounding` is the DESIRED pitch; the
-    /// wrap pull correction (pitchCents) is applied here.
-    ///
-    /// `shaping` (2026-08-05, scale-shaped overtones) adjusts modes 3+
-    /// — per-partial retune toward the scale + sustain tilt — BETWEEN
-    /// the modal-frequency law and everything derived from it, so the
-    /// rotations, the horizontal bank and the kernel's SAV response
-    /// tables all see the shaped frequencies consistently. nil (or an
-    /// inactive shaping) leaves this function byte-identical to the
-    /// upstream lockstep formulas — the parity golden runs it at nil.
-    // MARK: - Register calibration (2026-08-15)
+    // MARK: - Register calibration
     //
-    // The fitted jiva geometry (thread top 9.75 μm above the bone apex)
-    // puts the REFERENCE register (~65–131 Hz, where the artifact was
-    // fitted against real strings) in the sustained-graze regime that
-    // makes the jawari: slow laddered cascade, drive-independent speed.
-    // Higher slots extrapolate that geometry and fall OUT of the graze —
-    // measured buzz share drops from ~15% (104 Hz) to <1% (156/208 Hz),
-    // and no pluck level brings it back (below the knee = dead, above =
-    // slam: the whole cascade in ~0.2 s). The physical fix is the one a
-    // tanpura player uses — adjust the thread per string. Bench-measured
-    // thread-top-above-apex targets that reproduce the 104 Hz regime
-    // (buzz ~15%, laddered t70s, pitch cost < 1 cent — the upper graze
-    // window; the lower window ~4 μm buzzes too but costs −5…−7 cents):
+    // Higher slots at the fitted thread geometry (top 9.75 μm above the
+    // apex) fall out of the sustained-graze regime that makes the jawari,
+    // so each slot targets a bench-set thread-top height (μm) instead:
     private static let regCompHz: [Double] = [104, 140, 156, 176, 208, 262]
     private static let regCompH: [Double] = [9.75, 9.15, 8.25, 7.95,
                                              7.80, 6.75]  // μm above apex
 
-    /// The register-calibration thread-height multiplier for a slot:
-    /// interpolates the measured targets in log-frequency (flat at the
-    /// fitted geometry below 104 Hz; extended past 262 Hz at the fitted
-    /// slope −2.25 μm/oct, floored at 5.5 μm well above the lower-regime
-    /// cliff). `comp` blends fitted → full target (0 = exactly 1.0).
-    /// The targets were measured at the current artifact's 9.75 μm
-    /// fitted height; a regenerated artifact with different thread
-    /// geometry scales proportionally but should be re-benched
-    /// (`TanpuraCascadeBench`).
+    /// Thread-height multiplier: interpolates the targets in log-frequency
+    /// (flat below 104 Hz; −2.25 μm/oct past 262 Hz, floor 5.5 μm); `comp`
+    /// blends fitted → target. Re-bench after a thread-geometry change.
     public static func registerCompThreadMul(f0: Double, comp: Double,
                                              p: TanpuraParams) -> Double {
         guard comp > 0, f0 > regCompHz[0] else { return 1.0 }
@@ -217,27 +157,14 @@ public enum TanpuraTables {
         return (h * 1e-6 + drop) / r.threadH
     }
 
-    // MARK: - Cascade slowing (2026-08-15, `tp_cascade`)
+    // MARK: - Cascade slowing (`tp_cascade`)
     //
-    // Even register-calibrated, higher slots develop their harmonic
-    // cascade faster than the fitted register in wall-clock terms (the
-    // contact converts on every graze pass, and passes come at f0).
-    // Bench-measured levers that slow it while holding buzziness:
-    // raise the thread slightly further toward the fitted height
-    // (gentler graze → the instant mid-harmonic jump becomes a
-    // ~1 s bloom; measured at 208 Hz: +0.75 μm took h4/h6 onset from
-    // 0.14/0.23 s to 1.2/1.3 s) and stretch the ABSOLUTE-frequency HF
-    // damping so the top of the cascade rings longer (recovers the
-    // brightness the gentler graze costs; ×2 at 208 Hz measured buzz
-    // 14.6% ≈ the 104 Hz anchor). Both graded by log2(f0/104) — zero
-    // at and below the anchor, whose cascade is the reference.
-    // (Probed and rejected: pluck-draw stretch — even 2 periods
-    // cancels the note, the free-rotation draw law; drive reduction —
-    // falls off the graze knee and kills the buzz before it slows.)
+    // Higher slots cascade faster in wall-clock terms (conversion per
+    // graze pass, at f0); a further thread lift plus an HF-damping
+    // stretch slow it, both graded by log2(f0/104) from the anchor.
 
-    /// The cascade gap-lift as a threadHMul ADDEND (compose with
-    /// `registerCompThreadMul` and clamp the sum at 1.0 — the lift
-    /// never pushes past the fitted geometry, where high slots die).
+    /// Cascade thread lift as a threadHMul ADDEND (compose with
+    /// `registerCompThreadMul`; clamp the sum at 1.0 — high slots die past it).
     public static func cascadeThreadLift(f0: Double, cascade: Double,
                                          p: TanpuraParams) -> Double {
         guard cascade > 0, f0 > 104.0 else { return 0.0 }
@@ -247,23 +174,19 @@ public enum TanpuraTables {
         return dH / r.threadH
     }
 
-    /// The cascade HF-sustain stretch: multiplies `t60hf` (the
-    /// absolute-frequency high-partial damping reference) per slot.
+    /// Cascade HF-sustain stretch: multiplies `t60hf` per slot.
     public static func cascadeHFT60Mul(f0: Double,
                                        cascade: Double) -> Double {
         guard cascade > 0, f0 > 104.0 else { return 1.0 }
         return 1.0 + cascade * log2(f0 / 104.0)
     }
 
-    /// `threadHMul` (2026-08-15, register calibration): scales the jiva
-    /// thread's height in the bone profile — the electronic twin of the
-    /// player adjusting the cotton thread per string. 1 = the fitted
-    /// geometry, byte-identical tables (the lockstep golden runs it
-    /// at 1). The thread is baked into `b` (static mode, thF nil), so
-    /// a lift DOES shift the settled wrap slightly — the register-
-    /// calibration bench measured the pitch cost before this shipped.
-    /// `hfT60Mul` (same day, cascade slowing): stretches the t60 law's
-    /// HF reference (`t60hf`) for this slot — 1 is bit-exact.
+    /// Build one note's tables at the DESIRED `f0Sounding` (the wrap-pull
+    /// `cents` is applied here). `shaping` adjusts modes 3+ before every
+    /// derived table, so rotations, the w bank and the SAV tables agree
+    /// (nil = byte-identical to the exporter). `threadHMul` scales the
+    /// jiva thread height (baked into `b`, so a lift shifts the wrap
+    /// slightly); `hfT60Mul` stretches `t60hf`; 1 = bit-exact for both.
     public static func buildNote(f0Sounding: Double, cents: Double,
                                  p: TanpuraParams,
                                  shaping: TanpuraShaping? = nil,
@@ -275,11 +198,8 @@ public enum TanpuraTables {
         let L = 1.0
         let MU = Double.pi * r.R * r.R * r.rho
         let B = r.refB * (r.refF / f0Sounding) * (r.refF / f0Sounding)
-        // Mode count: ladder roles (mDyn set) mount every mode the sim
-        // can hold below the dynamic band, capped at the anchor count —
-        // NO mMin floor (it would force modes past the sim Nyquist,
-        // which alias in the rotations and drain the cascade); legacy
-        // roles keep the tanpura law byte-identically.
+        // Mode count: ladder roles (mDyn) mount every representable mode
+        // below the band, no mMin floor; tanpura roles use mF/f0.
         let M: Int
         if let mDyn = r.mDyn {
             var m = 0
@@ -299,14 +219,8 @@ public enum TanpuraTables {
         let dt = 1.0 / (p.srSim ?? p.sr)
         var w0 = [Double](repeating: 0, count: M)
         var t60 = [Double](repeating: 0, count: M)
-        // PITCH-SCALED t60 (2026-08-03, lockstep with export_tanpura_
-        // live.note_tables): role t600s are calibrated AT refF;
-        // notes above it decay ~(refF/f0)^1.5 (an 880 Hz note is not
-        // a 100 s jodi). Reference pitches unchanged.
-        // Per-role HF-damping overrides (2026-08-20, the sitar's
-        // scale-model ladder): a geometrically scaled string's whole
-        // Q(f) curve sits at its own register — nil = the globals
-        // (every tanpura role), byte-identical.
+        // t600 is calibrated AT refF; notes above decay ~(refF/f0)^1.5.
+        // Per-role HF overrides put a scaled string's Q(f) at its register.
         let t600 = r.t600 * pow(min(1.0, r.refF / f0Sounding), 1.5)
         let fhfEff = r.fhf ?? p.fhf
         let t60hfEff = r.t60hf ?? p.t60hf
@@ -319,14 +233,11 @@ public enum TanpuraTables {
                 + (fk / fhfEff) * (fk / fhfEff)
                     * (1.0 / (t60hfEff * hfT60Mul)))
         }
-        // per-mode radiated-gain multipliers from `quiet`, applied to
-        // phiO below once it exists (nil = all 1 — the common case)
+        // per-mode radiated-gain multipliers from `quiet` (nil = all 1)
         var shapeOutMul: [Double]? = nil
         if let sh = shaping, sh.isActive, M > 2 {
-            // modes 1–2 pin the perceived pitch (and the pitchCents
-            // calibration) — shape 3+ only. w0 is at the MOUNT pitch
-            // (pre-corrected flat); the scale lives in SOUNDING space,
-            // so measure there and apply the ratio back on w0.
+            // modes 1–2 pin pitch: shape 3+ only. w0 is at the MOUNT
+            // pitch; measure in SOUNDING space, apply the ratio to w0.
             let toSounding = pow(2.0, cents / 1200.0)
             var om = [Double](repeating: 1.0, count: M)
             var omActive = false
@@ -373,9 +284,7 @@ public enum TanpuraTables {
         for j in 0..<J { gd[j] = g[j * J + j] }
         let g4 = g.map { $0 / 16.0 }
         let gd4 = gd.map { $0 / 16.0 }
-        // bone profile + jiva thread (round 11: thF > 0 splits the
-        // thread into the moving 1-DOF element — LOCKSTEP with
-        // tanpura_model.build_tables)
+        // bone profile + jiva thread (thF > 0: the moving 1-DOF element)
         let xApex = L - 0.0015
         var b = [Double](repeating: 0, count: J)
         for j in 0..<J {
@@ -405,23 +314,19 @@ public enum TanpuraTables {
             phiO[k] = (2.0 / L).squareRoot()
                 * sin(Double(k + 1) * Double.pi * xO / L)
         }
-        // `quiet`: cut misaligned partials at the READOUT only — the
-        // modes keep their full part in the contact dynamics
+        // `quiet`: readout-only cut — the modes keep their contact role
         if let om = shapeOutMul {
             for k in 0..<M { phiO[k] *= om[k] }
         }
-        // Ladder roles: RADIATE only the `p.mF` band — the modes above
-        // it (mounted for the dynamic energy budget) stay silent at the
-        // readout instead of aliasing into the output. Same law the
-        // bend path applies past Nyquist; readout-only like `quiet`.
+        // Ladder roles radiate only the `p.mF` band — modes above it
+        // (mounted for the energy budget) stay silent at the readout.
         if r.mDyn != nil {
             let toSounding = pow(2.0, cents / 1200.0)
             for k in 0..<M
                 where w0[k] / (2.0 * Double.pi) * toSounding > p.mF {
                 phiO[k] = 0.0
             }
-            // scaled-body radiation: mode k radiates with the anchor
-            // instrument's mode-k weighting (see `radByMode`)
+            // scaled-body radiation (see `radByMode`)
             if let rad = p.radByMode, !rad.isEmpty {
                 for k in 0..<M {
                     phiO[k] *= rad[min(k, rad.count - 1)]
@@ -472,9 +377,7 @@ public enum TanpuraTables {
             var tri = x <= ctr ? x / ctr
                 : (L - zoneW - x) / (L - zoneW - ctr)
             tri = max(tri, 0.0)
-            // association matches numpy's outer(k, pi*x/L): round
-            // pi*x/L ONCE, then scale by k — at k~340 the argument is
-            // ~1e3 rad and a different association costs ~1e-9 rel
+            // round pi*x/L ONCE, then scale by k (the exporter's association)
             let ax = Double.pi * x / L
             for k in 0..<M {
                 dq[k] += (2.0 / L).squareRoot()

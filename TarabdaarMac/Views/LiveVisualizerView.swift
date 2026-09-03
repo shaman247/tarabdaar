@@ -54,7 +54,7 @@ struct LiveVisualizerView: View {
         .onReceive(sample) { _ in tick() }
     }
 
-    /// Which voice the played notes drive (2026-08-04, tanpura port): the
+    /// Which voice the played notes drive (tanpura port): the
     /// String bowed voice or the tanpura (fret note-ons become plucks at
     /// the exact bent pitch; glides/note-offs are ignored — it rings). The
     /// drone buttons' voice is a separate choice on the Strings tab.

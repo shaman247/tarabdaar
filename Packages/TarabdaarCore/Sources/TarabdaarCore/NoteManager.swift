@@ -5,77 +5,45 @@ import QuartzCore
 
 /// The state of a pitch channel's envelope.
 public enum ChannelState {
-    case idle       // No sound. Waiting for a touch to activate.
-    case sounding   // Actively producing sound. May be gliding between pitches.
-    case releasing  // All touches lifted; finishing a glide then fading out.
+    case idle
+    case sounding   // may be gliding between pitches
+    case releasing  // all touches lifted; finishing a glide then fading out
 }
 
-/// A pitch that the glide system must visit.
-///
-/// The glide system maintains an ordered queue of waypoints. The pitch moves
-/// through them one at a time, using a sigmoid curve for each segment. This
-/// queue-based design means every note the player touches will be heard —
-/// the system speeds up as needed rather than skipping notes.
-///
-/// The timestamp records when the waypoint was created. Staleness (how long
-/// a waypoint has been waiting in the queue) drives the physics-based speed
-/// multiplier — older waypoints cause the glide to accelerate.
+/// A pitch the in-process glide engine must visit, in queue order.
 public struct GlideWaypoint {
-    public let note: Int               // MIDI note number to glide to
-    public let timestamp: TimeInterval // when this waypoint was created (CACurrentMediaTime)
+    public let note: Int               // MIDI note
+    public let timestamp: TimeInterval // creation time (CACurrentMediaTime)
 }
 
-/// A single monophonic voice with continuous pitch control.
-///
-/// The pitch channel tracks:
-/// - The current sounding frequency (updated at 60 Hz by the glide loop)
-/// - A queue of target pitches (waypoints) to visit in order
-/// - Which touches are currently held and what note each maps to
-///
-/// All pitch changes go through the waypoint queue. There is no special-case
-/// logic for staccato, ornaments, or returns — they all emerge naturally from
-/// how touches add and remove waypoints.
+/// A monophonic voice with continuous pitch; all changes go through `queue`.
 public struct PitchChannel {
     public let index: Int
     public var state: ChannelState = .idle
-    public var currentFrequency: Double = 440.0   // Hz — the actual sounding pitch right now
-    public var targetFrequency: Double = 440.0    // Hz — the pitch we're currently gliding toward
-    public var startFrequency: Double = 440.0     // Hz — the pitch at the start of the current glide
-    public var baseNote: Int = 69                 // MIDI note used as the pitch bend origin
-    public var targetNote: Int = 69               // MIDI note we're gliding toward
-    public var velocity: Int = 80                 // 0-127, from accelerometer at note onset
-    public var glideProgress: Double = 1.0        // 0.0 = start of glide, 1.0 = arrived at target
-    public var glideDuration: Double = 0.4        // seconds for the current glide segment
-    public var touchNotes: [Int: Int] = [:]       // touchId -> MIDI note (all currently held touches)
-    public var midiChannel: UInt8 = 1             // MPE member channel (rotated per activation)
-    /// Audio-engine bank slot driving this voice. `nil` means "same as
-    /// `index`" — the natural mapping when nothing's been overridden.
-    /// In mono mode, each new note may pick a different idle bank so
-    /// the previous note's bank can keep decaying naturally — see the
-    /// click-on-retrigger fix in `activateChannel`. The audio engine
-    /// has `Config.maxPolyVoices` bank slots; we hop across them while
-    /// the logical voice stays at index 0.
+    public var currentFrequency: Double = 440.0   // Hz, sounding now
+    public var targetFrequency: Double = 440.0    // Hz, gliding toward
+    public var startFrequency: Double = 440.0     // Hz, at the start of the segment
+    public var baseNote: Int = 69                 // pitch bend origin
+    public var targetNote: Int = 69
+    public var velocity: Int = 80
+    public var glideProgress: Double = 1.0        // 0 = segment start, 1 = arrived
+    public var glideDuration: Double = 0.4        // s, current segment
+    public var touchNotes: [Int: Int] = [:]       // touchId → held MIDI note
+    public var midiChannel: UInt8 = 1             // MPE member channel
+    /// Audio-engine bank slot driving this voice; `nil` = `index`.
     public var bankIndexOverride: Int? = nil
-    /// Effective audio-engine bank slot. Use this for every audioEngine
-    /// call that takes a `channel:` argument.
     public var bankIndex: Int { bankIndexOverride ?? index }
 
-    /// Queue of notes the pitch must visit in order.
-    ///
-    /// New notes are appended here. When the current glide finishes, the next
-    /// waypoint is popped and a new glide begins. If a touch is released, its
-    /// waypoints are marked as `released` (which makes the glide faster), and
-    /// the remaining held note is appended as the return destination.
+    /// Notes to visit in order (a release appends the held note as return).
     public var queue: [GlideWaypoint] = []
-    public var dragging: Bool = false           // true when in finger-drag mode
-    public var dragTargetFreq: Double = 0       // the frequency the pitch is chasing during drag
-    public var snapping: Bool = false           // true when quantizing to a note after finger stops
-    public var releaseAfterSnap: Bool = false   // true when touch lifted mid-drag; release once snap converges
-    public var displayNote: Int?                // the key visually under the finger (for highlighting)
+    public var dragging: Bool = false           // finger-drag mode
+    public var dragTargetFreq: Double = 0       // Hz the pitch chases during drag
+    public var snapping: Bool = false           // quantizing after the finger stopped
+    public var releaseAfterSnap: Bool = false   // lifted mid-drag; release once the snap converges
+    public var displayNote: Int?                // key under the finger (highlight)
 
-    // Per-note dimension values (0..1)
-    public var accelPressure: Double = 0.5      // normalized accelerometer pressure at note onset
-    public var keyY: Double = 0.5              // normalized key y-position (updated on touch move)
+    public var accelPressure: Double = 0.5
+    public var keyY: Double = 0.5
 
     public var touchIds: Set<Int> { Set(touchNotes.keys) }
 }
@@ -83,12 +51,12 @@ public struct PitchChannel {
 /// A snapshot of pitch state for the pitch graph display.
 public struct PitchSample {
     public let timestamp: TimeInterval
-    public let frequencies: [Double?]   // one per voice (up to maxPolyVoices), nil if idle
-    public let draggingFlags: [Bool]    // per-voice drag state
-    public let snappingFlags: [Bool]    // per-voice snap state
-    public let touchNotes: [Int]        // MIDI notes of all currently held touches
+    public let frequencies: [Double?]   // per voice, nil if idle
+    public let draggingFlags: [Bool]
+    public let snappingFlags: [Bool]
+    public let touchNotes: [Int]        // all held MIDI notes
 
-    /// Convenience accessors for backward compatibility.
+    /// Voice-0 accessors.
     public var frequency0: Double? { frequencies.indices.contains(0) ? frequencies[0] : nil }
     public var dragging: Bool { draggingFlags.contains(true) }
     public var snapping: Bool { snappingFlags.contains(true) }
@@ -96,101 +64,24 @@ public struct PitchSample {
 
 // MARK: - NoteManager
 
-/// Manages the monophonic pitch pipeline from touch input to audio/MIDI output.
-///
-/// ## Architecture
-///
-/// The system has three stages:
-///
-/// 1. **Touch input** (`touchBegan` / `touchEnded` / `touchMoved`)
-///    - `touchBegan`: starts a 20ms velocity capture timer. After the timer fires,
-///      the note is either activated (if idle) or queued as a glide waypoint.
-///    - `touchEnded`: if other touches are still held, the held note is queued as
-///      a return destination. If all touches are released, the channel enters the
-///      releasing state.
-///    - `touchMoved`: updates the finger position for the active touch.
-///
-/// 2. **Glide engine** (60 Hz timer: `glideUpdate`)
-///    - Advances `glideProgress` each tick.
-///    - Interpolates frequency using an asymmetric sigmoid curve in log-frequency
-///      space (perceptually linear pitch).
-///    - When a glide completes, pops the next waypoint from the queue.
-///    - Also runs tilt-based amplitude modulation.
-///
-/// 3. **Output** (audio + MIDI)
-///    - Audio: sets frequency and amplitude on the AudioEngine voice.
-///    - MIDI: sends pitch bend and channel pressure (from tilt)
-///      on the note's MPE channel.
-///
-/// ## Glide Queue
-///
-/// The waypoint queue is the core mechanism for all pitch changes. Every scenario
-/// reduces to the same queue operations:
-///
-/// **Simple glide (play C, then E):**
-/// - C activates the channel (no queue needed).
-/// - E is queued. Since the channel is at rest (progress=1.0), `advanceQueue`
-///   immediately starts a glide from C to E.
-///
-/// **Staccato ornament (hold C, tap E briefly):**
-/// - C activates. E is queued → glide starts toward E.
-/// - E is released while gliding. E's waypoint is marked `released` (faster glide).
-///   C is appended to the queue as the return destination.
-/// - Glide reaches E → pops C from queue → glides back to C.
-///
-/// **Fast ornament (hold C, tap E then D quickly):**
-/// - C activates. E is queued → glide starts.
-/// - D arrives mid-glide to E. D is queued. The current glide to E speeds up
-///   (each queued item doubles the speed).
-/// - Glide reaches E → pops D → glides to D.
-/// - If E was released, C would also be queued as a return.
-///
-/// **All touches released:**
-/// - Queue is cleared. If mid-glide, the glide accelerates and the channel
-///   enters `.releasing` state. When the glide finishes, noteOff is sent.
-///
-/// ## Glide Speed
-///
-/// Each glide segment's duration is the **minimum** of two values:
-///
-/// 1. **Distance-based**: `glideTimePerSemitone × semitones` (e.g., 40ms/semitone)
-///    A C→E glide (4 semitones) takes 160ms. A C→G (7 semitones) takes 280ms.
-///
-/// 2. **Time-gap**: the time between consecutive waypoint timestamps.
-///    This caps the glide so the pitch tracks the player's tempo.
-///
-/// This single rule handles all cases:
-/// - Slow playing → time gap is large, distance-based duration wins → smooth glide
-/// - Fast ornament (C E D) → time gaps are short → glides are fast, pitch keeps up
-/// - Staccato (hold C, tap E) → the return-to-C waypoint is timestamped at E's
-///   release, so the gap from E to C equals the staccato hold duration
-///
-/// ## Velocity / Expression
-///
-/// - **Onset velocity**: derived from the accelerometer spike in the 20ms after
-///   touch (see `fireNote`). Maps log-scale from `velocityMinG` to `velocityMaxG`.
-/// - **Tilt expression**: the calibrated up/down tilt value modulates amplitude
-///   continuously via `tiltVelocityMin`/`tiltVelocityMax`, sent as MIDI channel
-///   pressure (MPE aftertouch).
-///
-/// ## MPE
-///
-/// Each channel activation gets a fresh MIDI channel (round-robin 1-15). This
-/// ensures pitch bends on a new note don't affect reverb tails of old notes.
-/// Pitch bend range is set via RPN on each channel at activation time.
+/// The iPad's 60 Hz tick. Its live job is `sendTiltReport`: sampling the
+/// motion source's tilts, raw acceleration and strike envelope into
+/// `OutboundPlayState`, the wire state the link paces (the iPad evaluates
+/// no parameter mappings — the Mac interprets). It also hosts the
+/// in-process monophonic keyboard/glide engine that audition scripts
+/// exercise through `MIDIEngine`: touches feed a waypoint queue, each
+/// segment glides with an asymmetric sigmoid in log-frequency space, and
+/// every activation takes a fresh MPE channel (round-robin 1–15).
 public class NoteManager: ObservableObject {
 
-    // Internal state — mutated at 60Hz but only published to SwiftUI at ~15Hz
     public var pitchChannels: [PitchChannel] = (0..<Config.maxPolyVoices).map { PitchChannel(index: $0) }
 
-    /// Built-in synthesizer output toggle.
     @Published public var synthEnabled: Bool = UserDefaults.standard.object(forKey: "synthEnabled") as? Bool ?? true {
         didSet {
             UserDefaults.standard.set(synthEnabled, forKey: "synthEnabled")
         }
     }
 
-    /// MIDI output toggle.
     @Published public var midiOutputEnabled: Bool = UserDefaults.standard.object(forKey: "midiOutputEnabled") as? Bool ?? true {
         didSet {
             UserDefaults.standard.set(midiOutputEnabled, forKey: "midiOutputEnabled")
@@ -201,7 +92,7 @@ public class NoteManager: ObservableObject {
     private var pitchHistoryBuffer: [PitchSample] = []
     private var pitchHistoryIndex: Int = 0
 
-    /// Ordered pitch history (oldest first) for the graph display.
+    /// Pitch history, oldest first.
     public var pitchHistory: [PitchSample] {
         guard pitchHistoryBuffer.count >= Config.pitchHistoryLength else {
             return pitchHistoryBuffer
@@ -211,7 +102,7 @@ public class NoteManager: ObservableObject {
     }
     public var recentPeakDelays: [Double] = []
 
-    // MARK: - Profiling counters (in ms; refreshed every UI tick)
+    // MARK: - Profiling counters (ms, refreshed every UI tick)
     public private(set) var lastGlideTickMs: Double = 0
     public private(set) var maxGlideTickMs: Double = 0
     public private(set) var lastLockWaitMicros: Double = 0
@@ -219,41 +110,29 @@ public class NoteManager: ObservableObject {
     private var profilingWindowStart: TimeInterval = 0
     private var maxGlideTickInWindow: Double = 0
 
-    // Throttled UI update counter
     private var uiUpdateCounter: Int = 0
     private let uiUpdateInterval: Int = 4  // publish every 4th tick (~15Hz)
 
-    /// When true, the glide loop and motion processing are paused (e.g., during parameter tuning).
+    /// Pauses the glide loop and motion processing.
     public var paused: Bool = false
 
-    /// Raw tilt values cached each tick (3 axes, -1..+1 each). Index 0 = primary (up/down).
+    /// Raw tilt values cached each tick (3 axes, −1…+1).
     public var currentTilt: [Double] = [0, 0, 0]
 
-    /// Slider values (0..1). Revert to their configured defaults when not touched.
+    /// Slider values (0…1); revert to their defaults when not touched.
     public var slider1Value: Double = Config.slider1Default
     public var slider2Value: Double = Config.slider2Default
     public var slider1Touched: Bool = false
     public var slider2Touched: Bool = false
 
-    // (2026-07-24 dead-param deletion: the dimension-mapping machinery —
-    // `dimensionMapping`, the binding caches, `cachedParamValue`,
-    // `activeCCs`, `pressureInUse` — is GONE. All parameter mapping is
-    // Mac-side now; this class only reports raw tilts and plays the
-    // legacy glide engine with fixed constants.)
-
-    /// Per-note dimension values from the most recently activated voice (for UI display).
+    /// Per-note dimension values of the most recent voice (UI display).
     public var lastActiveAccelPressure: Double { pitchChannels[lastActiveVoiceIndex].accelPressure }
     public var lastActiveKeyY: Double { pitchChannels[lastActiveVoiceIndex].keyY }
 
-    /// Index of the most recently activated voice, used as fallback when
-    /// a per-note dimension is mapped to a global parameter.
+    /// Index of the most recently activated voice — the per-note fallback.
     private var lastActiveVoiceIndex: Int = 0
 
-    /// Returns the normalized value for a dimension, resolved for a
-    /// specific voice: tilts are −1…+1 (rest 0, the app-wide tilt
-    /// convention since 2026-08-18), everything else 0…1.
-    /// For per-note dimensions, pass `voiceIndex` to get that voice's value;
-    /// if omitted, falls back to `lastActiveVoiceIndex`.
+    /// A dimension's normalized value: tilts −1…+1 (rest 0), else 0…1.
     public func normalizedDimension(for dim: InputDimension, voiceIndex: Int? = nil) -> Double {
         switch dim {
         case .tilt1:
@@ -274,22 +153,18 @@ public class NoteManager: ObservableObject {
             return slider2Value
         case .tilt4, .wrist2, .wrist3, .jcAccel, .stickX, .stickY,
              .strike, .acceleration, .fingerAccel:
-            // Mac-side axes — the iPad never evaluates them (the
-            // strike/acceleration pair travels as the PERF_STATE strike
-            // byte, and finger accel is derived from the wire pitch
-            // stream on the Mac; the iPad's scope is display-only).
             return 0
         case .none:
             return 0.5
         }
     }
 
-    /// Glide time per semitone (seconds).
+    /// Glide time per semitone (s).
     public var glideTimePerSemitone: Double {
         NoteManager.glideSpeedSecPerSemitone
     }
 
-    /// Glide max wait — mid-glide compression threshold (seconds).
+    /// Mid-glide compression threshold (s).
     public var glideMaxWait: Double {
         NoteManager.glideCompressionSec
     }
@@ -297,41 +172,31 @@ public class NoteManager: ObservableObject {
     public var motionSource: MotionSource?
     public var midiEngine: MIDIEngine?
 
-    /// The playing scale (keyboard layout + tuning). Loaded from persistence.
+    /// The keyboard layout + tuning, persisted.
     public var scale: Scale = Scale.load() {
         didSet { scale.save() }
     }
-
-    // Sympathetic-strings concerns live entirely on the Mac side now
-    // (TarabdaarMac/AppController.swift). iPad has no audio engine and
-    // no sym scale.
 
     public var startNote: Int { scale.startNote }
     public var noteCount: Int { scale.noteCount }
 
     // MARK: - Drag State
     private var dragSnapTimer: Timer?
-    private var touchOriginX: [Int: Double] = [:]  // touchId -> original xFraction
-    private var drag = DragInfo(lastDragX: 0)      // the single voice's drag state
+    private var touchOriginX: [Int: Double] = [:]  // touchId → origin xFraction
+    private var drag = DragInfo(lastDragX: 0)
 
-    /// Find the nearest enabled note to a fractional semitone value.
-    /// If `whiteOnly`, restricts to non-black-key enabled notes.
+    /// Nearest enabled note (`whiteOnly` skips black keys).
     private func nearestEnabledNote(to semitone: Double, whiteOnly: Bool = false) -> Int {
         return scale.nearestEnabledNote(to: semitone, whiteOnly: whiteOnly)
     }
 
-    /// Convert x fraction to a continuous (fractional) MIDI note number.
-    /// Maps through the white key layout so the result matches the visual keyboard.
-    /// Each white key's center maps exactly to its MIDI note; edges interpolate
-    /// between adjacent white keys.
+    /// x fraction → continuous MIDI note through the white-key layout.
     private func continuousMidiNote(xFraction: Double) -> Double {
         let whites = whiteNotes
         let whiteCount = whites.count
         guard whiteCount > 1 else { return Double(startNote) }
 
         let clamped = max(0, min(1, xFraction))
-        // Map so that the center of key i is at (i + 0.5) / whiteCount
-        // Shift by -0.5 so key centers land on integer indices
         let keyPos = clamped * Double(whiteCount) - 0.5
         let lowerIdx = max(0, min(whiteCount - 1, Int(floor(keyPos))))
         let upperIdx = min(lowerIdx + 1, whiteCount - 1)
@@ -344,13 +209,10 @@ public class NoteManager: ObservableObject {
 
     // MARK: - MPE Channel Allocation
 
-    /// Round-robin through MIDI channels 1-15. Channel 0 is the MPE master channel.
+    /// Round-robin through channels 1–15 (0 is the MPE master).
     private var nextMpeChannel: UInt8 = 1
-    /// MPE channels that have already had `Config.midiPitchBendRange`
-    /// asserted via RPN. The hosted-AU's per-channel state is sticky,
-    /// so once the RPN lands we don't need to resend it on every Note
-    /// On — only first use. `panic()` doesn't reset this because
-    /// CC 123 (All Notes Off) leaves RPN state untouched at the AU.
+    /// Channels whose bend-range RPN has been sent (first use only;
+    /// `panic()` doesn't reset it — CC 123 leaves RPN state untouched).
     private var bendRangeSet: Set<UInt8> = []
 
     private func allocateMpeChannel() -> UInt8 {
@@ -369,19 +231,18 @@ public class NoteManager: ObservableObject {
 
     // MARK: - Pending Touches (velocity capture)
 
-    /// A touch that has been registered but is waiting for the accelerometer
-    /// spike to arrive (20ms delay) before the note fires.
+    /// A registered touch whose note has not fired yet.
     private struct PendingTouch {
         let touchId: Int
         let midiNote: Int
-        let touchTimestamp: TimeInterval  // CMMotionManager timestamp for accel correlation
+        let touchTimestamp: TimeInterval
         let keyY: Double
         let timer: Timer
     }
     private var pendingTouches: [Int: PendingTouch] = [:]
 
-    /// Grace period timer: delays the transition to idle/releasing after all
-    /// touches lift, so a new touch arriving within the window connects as a glide.
+    /// A touch within `Config.releaseGracePeriod` of the last lift connects
+    /// as a glide.
     private var releaseGraceTimer: Timer?
 
     // MARK: - Drag Tracking
@@ -390,7 +251,7 @@ public class NoteManager: ObservableObject {
         var lastDragX: Double
         var dragDirection: Int = 0
         var dragInWhiteZone: Bool = true
-        var snapOriginX: Double = 0  // x position when snap engaged (for dead zone)
+        var snapOriginX: Double = 0  // x when the snap engaged (dead zone)
     }
 
     // MARK: - Glide Speed Physics
@@ -401,10 +262,8 @@ public class NoteManager: ObservableObject {
     private var glideTimer: Timer?
     private var lastTickTime: TimeInterval = 0
 
-    // Legacy glide-engine constants (2026-07-24 dead-param deletion):
-    // formerly dimension-mapped; nothing on the live playing path reads
-    // them, and the audition/keyboard path uses these fixed values (the
-    // old defaults' resting midpoints).
+    // Fixed glide-engine constants for the in-process keyboard/audition
+    // path; nothing on the live playing path reads them.
     static let glideSpeedSecPerSemitone = 0.110
     static let glideCompressionSec = 0.0275
     static let dragSmoothingCoeff = 0.3
@@ -415,7 +274,7 @@ public class NoteManager: ObservableObject {
         startGlideLoop()
     }
 
-    /// Starts the 60 Hz timer that drives all continuous pitch updates.
+    /// Starts the 60 Hz timer.
     private func startGlideLoop() {
         lastTickTime = CACurrentMediaTime()
         glideTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
@@ -423,7 +282,7 @@ public class NoteManager: ObservableObject {
         }
     }
 
-    /// Called 60 times per second. Advances the glide and tilt modulation.
+    /// The 60 Hz tick: glide + tilt report.
     private func glideUpdate() {
         if paused {
             lastTickTime = CACurrentMediaTime()
@@ -431,7 +290,6 @@ public class NoteManager: ObservableObject {
         }
         let tickStart = CACurrentMediaTime()
 
-        // Cache tilt for consistent use this tick
         if let tilts = motionSource?.normalizedTilts {
             for i in 0..<min(tilts.count, 3) {
                 currentTilt[i] = max(-1, min(1, tilts[i]))
@@ -446,27 +304,16 @@ public class NoteManager: ObservableObject {
             updateVoiceGlide(voiceIndex: 0, dt: dt)
             updateVoiceExpression(voiceIndex: 0, dt: dt)
         }
-        // The raw tilt report streams CONTINUOUSLY (2026-08-12), not
-        // just while a note sounds — the Mac's arm+wrist body fusion
-        // consumes it as its arm sensor, including during calibration
-        // with no note down. Change-gated plus a 0.25 s heartbeat: a
-        // still iPad costs 3 CCs per beat, and the beat is what keeps
-        // the fusion's staleness gate open while the player holds the
-        // rest pose.
+        // The raw tilt report streams CONTINUOUSLY, not just while a note
+        // sounds — the Mac's body fusion consumes it as its arm sensor,
+        // including during calibration with no note down.
         sendTiltReport()
 
-        // Push all control-rate modal-synth parameters and sym-coupling gains
-        // Voice timbre / reverb / sym amp pushes used to live here;
-        // they're Mac-only concerns now (AppController.pushTimbre etc.)
-        // and the iPad has no audioEngine to push to.
-
-        // --- Record pitch history for the graph ---
         let frequencies: [Double?] = (0..<Config.maxPolyVoices).map { i in
             guard pitchChannels[i].state != .idle else { return nil }
             return pitchChannels[i].currentFrequency
         }
 
-        // Only compute display-only data on UI update ticks
         let isUITick = uiUpdateCounter + 1 >= uiUpdateInterval
         let heldNotes: [Int]
         if isUITick {
@@ -491,16 +338,13 @@ public class NoteManager: ObservableObject {
         }
         pitchHistoryIndex += 1
 
-        // Per-tick profiling: track this tick's duration vs. the rolling max.
         let tickElapsed = (CACurrentMediaTime() - tickStart) * 1000.0
         lastGlideTickMs = tickElapsed
         if tickElapsed > maxGlideTickInWindow { maxGlideTickInWindow = tickElapsed }
 
-        // Throttle SwiftUI updates to ~15Hz
         uiUpdateCounter += 1
         if uiUpdateCounter >= uiUpdateInterval {
             uiUpdateCounter = 0
-            // Snapshot rolling stats once per UI tick (~15Hz).
             let nowSec = CACurrentMediaTime()
             if profilingWindowStart == 0 { profilingWindowStart = nowSec }
             let windowElapsed = nowSec - profilingWindowStart
@@ -513,9 +357,8 @@ public class NoteManager: ObservableObject {
         }
     }
 
-    /// Advances glide interpolation for a single voice.
+    /// Advances one voice's drag smoothing, glide segment and release.
     private func updateVoiceGlide(voiceIndex i: Int, dt: Double) {
-        // --- Drag smoothing ---
         if pitchChannels[i].dragging && pitchChannels[i].dragTargetFreq > 0 {
             let logCurrent = log2(pitchChannels[i].currentFrequency)
             let logTarget = log2(pitchChannels[i].dragTargetFreq)
@@ -527,7 +370,7 @@ public class NoteManager: ObservableObject {
 
             sendPitchBend(for: i)
 
-            // If touch was released mid-drag, release once snap converges
+            // Released mid-drag: release once the snap converges.
             if pitchChannels[i].releaseAfterSnap && pitchChannels[i].snapping {
                 let centsDelta = abs(logTarget - logCurrent) * 1200.0
                 if centsDelta < 1.0 {
@@ -540,12 +383,11 @@ public class NoteManager: ObservableObject {
             }
         }
 
-        // --- Glide interpolation (waypoint-based, used when not dragging) ---
         if !pitchChannels[i].dragging && pitchChannels[i].glideProgress < 1.0 {
             pitchChannels[i].glideProgress += dt / pitchChannels[i].glideDuration
             pitchChannels[i].glideProgress = min(pitchChannels[i].glideProgress, 1.0)
 
-            // Asymmetric sigmoid easing in log-frequency space
+            // Asymmetric sigmoid easing in log-frequency space.
             let t = pitchChannels[i].glideProgress
             let k = NoteManager.glideCurveK
             let m = Config.glideMidpoint
@@ -564,7 +406,6 @@ public class NoteManager: ObservableObject {
             }
         }
 
-        // --- Release handling ---
         if pitchChannels[i].state == .releasing && pitchChannels[i].glideProgress >= 1.0 {
             if midiOutputEnabled {
                 let midiCh = pitchChannels[i].midiChannel
@@ -575,23 +416,15 @@ public class NoteManager: ObservableObject {
         }
     }
 
-    /// Applies pitch bend to a single voice. (2026-07-24: per-voice
-    /// aftertouch/CC emission is GONE — the controller streams only the
-    /// raw tilt report (`sendTiltReport`) and the Mac evaluates its own
-    /// tilt bindings.)
+    /// Pitch bend only (no aftertouch/CC — the Mac evaluates tilt).
     private func updateVoiceExpression(voiceIndex i: Int, dt: Double) {
         guard midiOutputEnabled else { return }
         sendPitchBend(for: i)
     }
 
-    /// The outbound play state (TarabLink) the 60 Hz tick writes tilt
-    /// into. The controller still knows nothing about parameters, slots
-    /// or mappings — the Mac interprets. Raw means raw since 2026-08-13
-    /// (fixed-scaled attitude, no iPad-side calibration). 2026-08-14: the
-    /// tilt WIRE is a state-frame field now, not CC pairs — 16-bit,
-    /// atomic with pitch, change-gated in `OutboundPlayState`; the link's
-    /// 250 ms heartbeat replaces the old per-report heartbeat, so a still
-    /// iPad still reads as alive, not disconnected.
+    /// The outbound play state the tick writes raw tilt (uncalibrated
+    /// attitude), acceleration and strike into — change-gated there, atomic
+    /// with pitch on the wire.
     public weak var playState: OutboundPlayState?
 
     private func sendTiltReport() {
@@ -609,15 +442,13 @@ public class NoteManager: ObservableObject {
 
     // MARK: - Glide Queue
 
-    /// Called when the current glide segment reaches progress=1.0.
-    /// Pops the next waypoint from the queue and starts a new glide.
+    /// A segment reached progress 1: pop the next waypoint.
     private func glideCompleted(voiceIndex: Int = 0) {
         pitchChannels[voiceIndex].currentFrequency = pitchChannels[voiceIndex].targetFrequency
         advanceQueue(voiceIndex: voiceIndex)
     }
 
-    /// Pops the next waypoint from the queue and begins gliding to it.
-    /// Each waypoint must be reached within `glideMaxStaleness`.
+    /// Pops the next waypoint and begins gliding to it.
     private func advanceQueue(voiceIndex: Int = 0) {
         guard !pitchChannels[voiceIndex].queue.isEmpty else { return }
 
@@ -648,13 +479,12 @@ public class NoteManager: ObservableObject {
 
     // MARK: - Piano Layout Hit Testing
 
-    /// All white key MIDI notes in the current keyboard range (for layout).
+    /// White-key MIDI notes in the keyboard range.
     public var whiteNotes: [Int] {
         scale.whiteNotesInRange()
     }
 
-    /// Converts raw yFraction (0=top, 1=bottom) to normalized key Y (0=bottom, 1=top),
-    /// accounting for black keys being shorter (60% of keyboard height).
+    /// yFraction (0 = top) → key Y (0 = bottom); black keys span the top 60%.
     public static func normalizedKeyY(yFraction: Double, isBlackKey: Bool) -> Double {
         if isBlackKey {
             let withinKey = min(1.0, yFraction / 0.6)
@@ -668,12 +498,7 @@ public class NoteManager: ObservableObject {
         public let isBlackKey: Bool
     }
 
-    /// Determines which piano key a touch at (xFraction, yFraction) hits.
-    ///
-    /// The keyboard is laid out with white keys spanning the full width.
-    /// Black keys are 75% of white key width and 60% of keyboard height,
-    /// overlaid in the top portion. Touches in the top 60% can hit black keys;
-    /// touches in the bottom 40% always hit white keys.
+    /// Which key a touch hits (black keys: 75% width, top 60% of height).
     public func hitTest(xFraction: Double, yFraction: Double) -> HitResult {
         let whites = whiteNotes
         let whiteCount = whites.count
@@ -700,7 +525,6 @@ public class NoteManager: ObservableObject {
             }
         }
 
-        // Return the white key only if it's enabled; otherwise find nearest enabled
         let whiteNote = whites[clampedWhiteIndex]
         if scale.isEnabled(whiteNote) {
             return HitResult(note: whiteNote, isBlackKey: false)
@@ -711,10 +535,8 @@ public class NoteManager: ObservableObject {
 
     // MARK: - Touch Events
 
-    /// Called when a finger touches the keyboard.
-    ///
-    /// Starts a velocity capture timer (if pressure is in use) or fires immediately.
-    /// The note doesn't sound until `fireNote` is called.
+    /// Called when a finger touches the keyboard; the note fires
+    /// immediately with the fixed velocity.
     public func touchBegan(touchId: Int, xFraction: Double, yFraction: Double, motionTimestamp: TimeInterval) {
         let hit = hitTest(xFraction: xFraction, yFraction: yFraction)
         let note = hit.note
@@ -722,21 +544,14 @@ public class NoteManager: ObservableObject {
 
         let normalizedY = Self.normalizedKeyY(yFraction: yFraction, isBlackKey: hit.isBlackKey)
 
-        // (2026-07-24: velocity is a fixed constant — the accelerometer
-        // capture delay is gone; notes always fire immediately.)
         fireNote(touchId: touchId, note: note, motionTimestamp: motionTimestamp, keyY: normalizedY)
     }
 
-    /// Called when a finger lifts from the keyboard.
-    ///
-    /// Three cases:
-    /// 1. Touch was still pending (velocity timer) → fire the note immediately, then release.
-    /// 2. All touches released → clear queue, enter releasing state.
-    /// 3. Other touches still held → mark released waypoints, queue return to held note.
+    /// A finger lifted: the last lift releases after the grace period,
+    /// otherwise the return to the held note is queued.
     public func touchEnded(touchId: Int) {
         touchOriginX.removeValue(forKey: touchId)
 
-        // Case 1: velocity timer hasn't fired yet — fire the note now, then fall through to release
         if let pending = pendingTouches.removeValue(forKey: touchId) {
             pending.timer.invalidate()
             fireNote(touchId: touchId, note: pending.midiNote,
@@ -746,7 +561,6 @@ public class NoteManager: ObservableObject {
         dragSnapTimer?.invalidate()
         dragSnapTimer = nil
 
-        // If dragging, snap to nearest note before releasing
         if pitchChannels[0].dragging {
             snapToNearestPitch()
             pitchChannels[0].releaseAfterSnap = true
@@ -758,16 +572,11 @@ public class NoteManager: ObservableObject {
         pitchChannels[0].touchNotes.removeValue(forKey: touchId)
 
         if pitchChannels[0].touchNotes.isEmpty {
-            // Case 2: all touches released — start grace period.
-            // If a new touch arrives within the window, it will connect as a glide
-            // instead of starting a new note.
             pitchChannels[0].queue.removeAll()
             releaseGraceTimer?.invalidate()
             releaseGraceTimer = Timer.scheduledTimer(withTimeInterval: Config.releaseGracePeriod, repeats: false) { [weak self] _ in
                 guard let self else { return }
-                // Only release if still no touches (not reclaimed during grace period)
                 guard self.pitchChannels[0].touchNotes.isEmpty else { return }
-                // If snap-then-release is pending, the glide loop will handle release
                 guard !self.pitchChannels[0].releaseAfterSnap else { return }
                 if self.pitchChannels[0].glideProgress < 1.0 {
                     self.pitchChannels[0].glideDuration *= 0.3
@@ -782,16 +591,13 @@ public class NoteManager: ObservableObject {
                 }
             }
         } else {
-            // Case 3: other touches still held
             let now = CACurrentMediaTime()
             if let remainingNote = pitchChannels[0].touchNotes.values.first {
-                // Queue the return to the held note (unless already the target or queued)
                 let isCurrentTarget = pitchChannels[0].targetNote == remainingNote
                 let alreadyQueued = pitchChannels[0].queue.contains { $0.note == remainingNote }
                 if !isCurrentTarget && !alreadyQueued {
                     pitchChannels[0].queue.append(GlideWaypoint(note: remainingNote, timestamp: now))
 
-                    // Compress current glide to finish within maxWait
                     if pitchChannels[0].glideProgress < 1.0 {
                         let remaining = 1.0 - pitchChannels[0].glideProgress
                         let currentRemaining = remaining * pitchChannels[0].glideDuration
@@ -801,7 +607,6 @@ public class NoteManager: ObservableObject {
                     }
                 }
 
-                // If at rest, start processing the queue
                 if pitchChannels[0].glideProgress >= 1.0 && !pitchChannels[0].queue.isEmpty {
                     advanceQueue()
                 }
@@ -809,18 +614,15 @@ public class NoteManager: ObservableObject {
         }
     }
 
-    /// Called when a finger moves on the keyboard.
-    /// With a single finger: enters drag mode and tracks pitch continuously.
-    /// When the finger stops, snaps to the nearest 12-tone pitch.
+    /// A finger moved: a single finger drags pitch continuously and snaps
+    /// when it stops.
     public func touchMoved(touchId: Int, xFraction: Double, yFraction: Double) {
         guard pitchChannels[0].state == .sounding,
               pitchChannels[0].touchNotes.keys.contains(touchId) else { return }
 
-        // Update per-note key y dimension
         let hit = hitTest(xFraction: xFraction, yFraction: yFraction)
         pitchChannels[0].keyY = Self.normalizedKeyY(yFraction: yFraction, isBlackKey: hit.isBlackKey)
 
-        // Drag glide: only when a single touch is present
         guard pitchChannels[0].touchNotes.count == 1 else { return }
 
         if tryEnterDrag(voiceIndex: 0, touchId: touchId, xFraction: xFraction, yFraction: yFraction) {
@@ -831,7 +633,6 @@ public class NoteManager: ObservableObject {
         processDrag(voiceIndex: 0, touchId: touchId, xFraction: xFraction, yFraction: yFraction,
                     hit: hit, drag: &drag)
 
-        // Reset snap timer — when finger stops, smoothly target the nearest scale tone
         dragSnapTimer?.invalidate()
         let snapX = xFraction
         dragSnapTimer = Timer.scheduledTimer(withTimeInterval: Config.dragSnapDelay, repeats: false) { [weak self] _ in
@@ -840,9 +641,8 @@ public class NoteManager: ObservableObject {
         }
     }
 
-    /// Core drag processing.
-    /// Updates pitch channel state and drag info based on finger movement.
-    /// Returns true if drag was initialized this tick (caller should skip further processing).
+    /// Drag target from finger movement, with reversal correction and the
+    /// snap dead zone.
     private func processDrag(voiceIndex: Int, touchId: Int, xFraction: Double, yFraction: Double,
                              hit: HitResult, drag: inout DragInfo) {
         drag.dragInWhiteZone = yFraction >= 0.6
@@ -851,7 +651,6 @@ public class NoteManager: ObservableObject {
         let continuousNote = continuousMidiNote(xFraction: xFraction)
         let fingerFreq = scale.frequency(for: continuousNote)
 
-        // Direction reversal correction
         var reversalThisTick = false
         let dx = xFraction - drag.lastDragX
         if abs(dx) > 0.0001 {
@@ -885,8 +684,7 @@ public class NoteManager: ObservableObject {
         pitchChannels[voiceIndex].targetNote = Int(round(continuousNote))
     }
 
-    /// Checks if a touch has moved enough to enter drag mode.
-    /// Returns true if drag mode was just activated (caller should initialize drag state).
+    /// Enters drag mode after a third of a key; true on the entering tick.
     private func tryEnterDrag(voiceIndex: Int, touchId: Int, xFraction: Double, yFraction: Double) -> Bool {
         guard !pitchChannels[voiceIndex].dragging else { return false }
         guard let originX = touchOriginX[touchId] else { return false }
@@ -898,8 +696,7 @@ public class NoteManager: ObservableObject {
         return true
     }
 
-    /// When finger stops, set the drag target to the nearest scale tone.
-    /// The glide loop's smoothing will glide there naturally.
+    /// Drag target = the nearest scale tone.
     private func snapToNearestPitch(voiceIndex: Int = 0, whiteOnly: Bool? = nil) {
         guard pitchChannels[voiceIndex].state == .sounding, pitchChannels[voiceIndex].dragging else { return }
 
@@ -916,25 +713,16 @@ public class NoteManager: ObservableObject {
 
     // MARK: - Note Firing
 
-    /// Called after the 20ms velocity capture delay.
-    ///
-    /// Reads the peak accelerometer magnitude since the touch timestamp,
-    /// converts it to MIDI velocity (1-127, log scale), then either:
-    /// - Activates the channel (if idle)
-    /// - Adds the touch to an existing channel on the same note
-    /// - Queues a glide to the new note
+    /// Fires a note: activates an idle channel, registers a touch on the
+    /// current note, or queues a glide.
     private func fireNote(touchId: Int, note: Int, motionTimestamp: TimeInterval, keyY: Double) {
         pendingTouches.removeValue(forKey: touchId)
 
-        // (2026-07-24: accelerometer velocity capture deleted with the
-        // dead velocity parameter — fixed velocity, per-note dims kept
-        // only as UI state.)
         let normalized = 0.5
         pitchChannels[lastActiveVoiceIndex].accelPressure = normalized
         pitchChannels[lastActiveVoiceIndex].keyY = keyY
         let velocity = NoteManager.fixedVelocity
 
-        // Same note as current target? Just register the touch.
         if pitchChannels[0].state != .idle && pitchChannels[0].targetNote == note {
             releaseGraceTimer?.invalidate()
             releaseGraceTimer = nil
@@ -946,19 +734,16 @@ public class NoteManager: ObservableObject {
             return
         }
 
-        // Channel idle? Activate it with this note.
         if pitchChannels[0].state == .idle {
             activateChannel(touchId: touchId, note: note, velocity: velocity,
                             accelPressure: normalized, keyY: keyY)
             return
         }
 
-        // Channel active with a different note? Queue a glide.
         startGlide(touchId: touchId, targetNote: note, velocity: velocity)
     }
 
-    /// Activates a voice from idle with a new note.
-    /// Allocates a fresh MPE channel, sets pitch bend range, sends noteOn.
+    /// Activates an idle voice: fresh MPE channel, bend range, noteOn.
     private func activateChannel(touchId: Int, note: Int, velocity: Int, voiceIndex: Int = 0,
                                  accelPressure: Double = 0.5, keyY: Double = 0.5) {
         let freq = scale.frequency(for: note)
@@ -986,29 +771,22 @@ public class NoteManager: ObservableObject {
         }
     }
 
-    /// Queues a glide to a new note on a specific voice.
-    ///
-    /// If the voice is mid-glide, the new note is appended to the queue.
-    /// If the voice is at rest (glide complete), the queue is started
-    /// immediately via `advanceQueue`. Cancels any release grace timer.
+    /// Queues a glide (started at once when at rest).
     private func startGlide(touchId: Int, targetNote: Int, velocity: Int, voiceIndex: Int = 0) {
         let now = CACurrentMediaTime()
         releaseGraceTimer?.invalidate()
         releaseGraceTimer = nil
         pitchChannels[voiceIndex].touchNotes[touchId] = targetNote
         pitchChannels[voiceIndex].state = .sounding
-        pitchChannels[voiceIndex].dragging = false  // tap-based glide, not a drag
+        pitchChannels[voiceIndex].dragging = false
         pitchChannels[voiceIndex].releaseAfterSnap = false
 
         let waypoint = GlideWaypoint(note: targetNote, timestamp: now)
         pitchChannels[voiceIndex].queue.append(waypoint)
 
         if pitchChannels[voiceIndex].glideProgress >= 1.0 {
-            // At rest: start gliding immediately
             advanceQueue(voiceIndex: voiceIndex)
         } else {
-            // Mid-glide: compress remaining duration so we finish within
-            // maxStaleness of the new waypoint's creation time.
             let remaining = 1.0 - pitchChannels[voiceIndex].glideProgress
             let currentRemaining = remaining * pitchChannels[voiceIndex].glideDuration
             if currentRemaining > glideMaxWait {
@@ -1017,17 +795,15 @@ public class NoteManager: ObservableObject {
         }
     }
 
-    /// Releases a single voice: sends noteOff or enters releasing state if mid-glide.
+    /// noteOff at rest, an accelerated `.releasing` glide otherwise.
     private func releaseVoice(_ voiceIndex: Int) {
         pitchChannels[voiceIndex].touchNotes.removeAll()
         pitchChannels[voiceIndex].queue.removeAll()
 
         if pitchChannels[voiceIndex].glideProgress < 1.0 {
-            // Mid-glide: accelerate and mark releasing
             pitchChannels[voiceIndex].glideDuration *= 0.3
             pitchChannels[voiceIndex].state = .releasing
         } else {
-            // At rest: immediate noteOff
             if midiOutputEnabled {
                 let midiCh = pitchChannels[voiceIndex].midiChannel
                 midiEngine?.sendNoteOff(note: UInt8(pitchChannels[voiceIndex].baseNote), channel: midiCh)
@@ -1056,7 +832,7 @@ public class NoteManager: ObservableObject {
         recentPeakDelays.max()
     }
 
-    /// Emergency reset: silences all sound and clears all state.
+    /// Silences everything and clears all state.
     public func panic() {
         for i in 0..<pitchChannels.count {
             if pitchChannels[i].state != .idle {

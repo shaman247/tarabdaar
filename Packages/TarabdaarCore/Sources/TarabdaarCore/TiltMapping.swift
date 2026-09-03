@@ -1,10 +1,8 @@
 import Foundation
-/// 2026-08-13, THE ARM-ONLY CALIBRATION: the Mac's live control axes
-/// (`ControlAxes.dims`) are the iPad's three ARM tilt axes — calibrated
-/// through the guided arm solve in `JoyConInput`, or raw pitch/roll/yaw
-/// passthrough when uncalibrated — plus the Joy-Con stick's X/Y. The
-/// 2026-08-12 body rework's WRIST axes are gone from the live set;
-/// `tilt4` keeps its case so old saved bindings still decode.
+/// The bindable input dimensions. Raw values are Codable by rawValue and
+/// persist in saved bindings, so cases are never renumbered or removed —
+/// retired cases (`accelPressure`, `keyY`, the sliders) survive so old
+/// documents still decode. Live axes: `ControlAxes.dims`.
 public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     case tilt1          = 0    // arm up/down (raw: iPad pitch)
     case tilt2          = 1    // arm in/out (raw: iPad roll)
@@ -13,46 +11,38 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     case keyY           = 4
     case slider1        = 5
     case slider2        = 6
-    case tilt4          = 7    // wrist up/down — REVIVED 2026-09-02 (Joy-Con wrist calibration axis 1; retired 2026-08-13…09-02, the case survived so bindings decoded)
+    case tilt4          = 7    // wrist up/down (Joy-Con wrist calibration, axis 1)
     case stickX         = 8    // Joy-Con stick
     case stickY         = 9
-    /// The accelerometer STRIKE/ACCELERATION pair (2026-08-23, split same
-    /// day): BOTH ride the same measurement — the continuous 0…1
-    /// strike-scale measure (`MotionSource.strikeScale01` through the
-    /// iPad's fast-attack/~150 ms-decay tracker), streamed as the
-    /// PERF_STATE `strike` byte (TLP v6) — and what separates them is
-    /// TIME SINCE THE NOTE STARTED: per target, the applied value blends
-    /// (1−w)·Strike + w·Acceleration with w ramping 0→1 over the 2 s
-    /// note window (`StrikeBlendWindow`; an unbound side reads as the
-    /// target's default). Strike = the onset's voice, Acceleration = the
-    /// sustained gesture's. UNIPOLAR: rest (silence) sits at the curve's
-    /// LEFT end (x 0), a hard strike at x 1 — unlike the tilts, whose
-    /// rest is the centre. (`accelPressure` above is the RETIRED
-    /// per-note onset value from the old keyboard; these are the live
-    /// global axes.)
+    /// The accelerometer STRIKE/ACCELERATION pair: both ride the iPad's
+    /// 0…1 strike-scale envelope (`MotionSource.strikeScale01`, the
+    /// PERF_STATE `strike` byte); what separates them is TIME SINCE THE
+    /// NOTE STARTED — per target the applied value blends (1−w)·Strike +
+    /// w·Acceleration with w ramping 0→1 over the note window
+    /// (`StrikeBlendWindow`; an unbound side reads as the target's
+    /// default). UNIPOLAR: rest (silence) sits at the curve's LEFT end
+    /// (x 0), a hard strike at x 1 — unlike the tilts, whose rest is the
+    /// centre. (`accelPressure` above is the retired per-note onset
+    /// value; these are live global axes.)
     case strike         = 10
     case acceleration   = 11
-    /// FINGER ACCELERATION (2026-08-24): the playing finger's pitch
-    /// acceleration — the SIGNED second derivative of the newest sounding
-    /// touch's pitch trajectory, soft-saturated to −1…+1
+    /// FINGER ACCELERATION: the SIGNED second derivative of the newest
+    /// sounding touch's pitch trajectory, soft-saturated to −1…+1
     /// (`FingerAccelTracker`, ±1 half-way at 25 000 ¢/s²; up = +).
-    /// BIPOLAR like the tilts: rest/constant-rate meend = 0 = curve
-    /// centre; the finger accelerating upward reads +, braking an upward
-    /// slide (or accelerating downward) reads −. Mac-evaluated from the
-    /// wire pitch stream; the iPad's toolbar scope shows its own
-    /// display-only computation of the same law.
+    /// BIPOLAR like the tilts: rest / constant-rate meend = 0 = curve
+    /// centre. Mac-evaluated from the wire pitch stream; the iPad's
+    /// toolbar scope runs its own display-only copy of the law.
     case fingerAccel    = 12
-    /// THE JOY-CON WRIST (2026-09-02): three −1…+1 axes from the Joy-Con's
-    /// fused attitude through its own guided calibration (`TiltCalibrator`
-    /// `.wrist` — rest + three sweeps: wrist up/down, in/out, rotation),
-    /// the wrist's twin of the iPad arm calibration. `.tilt4` is the
-    /// first (up/down); these are the other two. Rest = 0 like the tilts.
+    /// THE JOY-CON WRIST: three −1…+1 axes from the Joy-Con's fused
+    /// attitude through its own guided calibration (`TiltCalibrator`
+    /// `.wrist` — rest + three sweeps). `.tilt4` is the first (up/down);
+    /// these are the other two. Rest = 0 like the tilts.
     case wrist2         = 13   // wrist in/out
     case wrist3         = 14   // wrist rotation
-    /// JOY-CON ACCELERATION (2026-09-02): the Joy-Con's gravity-removed
-    /// acceleration magnitude through the iPad strike law (`StrikeLaw`:
-    /// log-scale 0…1 + fast-attack/150 ms-decay envelope). UNIPOLAR like
-    /// `.acceleration` — rest reads at the curve's LEFT end (x 0).
+    /// JOY-CON ACCELERATION: the Joy-Con's gravity-removed acceleration
+    /// magnitude through the iPad strike law (`StrikeLaw`: log-scale 0…1 +
+    /// fast-attack/150 ms-decay envelope). UNIPOLAR like `.acceleration`
+    /// — rest reads at the curve's LEFT end (x 0).
     case jcAccel        = 15
     case none           = -1
 
@@ -116,20 +106,16 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     ]
 }
 
-/// What a tilt can drive — since the 2026-07-24 PARAMETER UNIFICATION a
-/// tilt binds either to a **composite parameter** (a named 0…1 control
-/// built from several parameters) or **directly to any single parameter**
-/// in `ParamRegistry`. The old `MappableParameter` enum — which was
-/// exactly the 8 composite slots — is gone: nothing is mappable-or-not
-/// anymore, every parameter is.
+/// What a control axis can drive: a **composite parameter** (a named 0…1
+/// control built from several parameters) or **any single parameter** in
+/// `ParamRegistry` directly.
 ///
-/// Endpoints are always in the target's NATIVE units: 0…1 for a composite,
-/// the parameter's own `lo…hi` for a direct binding (the old 0…127
-/// transport units are migrated away on load).
+/// Endpoints are always in the target's NATIVE units: 0…1 for a
+/// composite, the parameter's own `lo…hi` for a direct binding.
 ///
-/// All Mac-evaluated (the iPad streams only its raw tilt report).
+/// All Mac-evaluated (the iPad streams only its raw sensor report).
 /// Persistence keys on `storageKey`; the composite keys keep their legacy
-/// spellings so bindings saved by older builds survive.
+/// spellings so saved bindings survive.
 public struct MapTarget: Hashable {
     public enum Kind: Hashable {
         case composite(slot: Int)
@@ -142,7 +128,7 @@ public struct MapTarget: Hashable {
     public init(paramKey: String) { kind = .param(key: paramKey) }
     public init(kind: Kind) { self.kind = kind }
 
-    /// Legacy per-slot storage keys (pre-unification names, kept so saved
+    /// Legacy per-slot storage keys (kept so saved
     /// mappings deserialize unchanged).
     public static let compositeStorageKeys = [
         "midiCC71", "midiCC73", "midiCC72", "composite4",
@@ -220,9 +206,8 @@ public struct MapTarget: Hashable {
 
 /// A control point on a dimension-to-parameter transfer curve.
 /// `x` is the PERSISTED curve domain, 0…1 — the live axis value is
-/// −1…+1 (rest 0) since 2026-08-18 and callers map it to this domain
-/// ((v+1)/2) before evaluating, so saved bindings and presets never
-/// needed migrating.
+/// −1…+1 (rest 0) and callers map it to this domain ((v+1)/2) before
+/// evaluating.
 public struct ControlPoint: Codable, Equatable {
     public var x: Double  // 0..1 normalized input (axis −1…+1 ↔ x 0…1)
     public var y: Double  // output in parameter's native units
@@ -398,9 +383,9 @@ public struct DimensionMapping: Codable, Equatable {
 
     // MARK: - Persistence
 
-    /// v6 = the 2026-07-24 unification: arbitrary targets (composites AND
-    /// single parameters) with endpoints in native units. v5 stored only
-    /// the 8 composite slots with 0…127 endpoints — migrated on first load.
+    /// v6: arbitrary targets (composites AND single parameters) with
+    /// endpoints in native units. v5 stored only the 8 composite slots
+    /// with 0…127 endpoints — migrated on first load.
     private static let storageKey = "tarabdaar_dimensionMapping_v6"
     private static let legacyStorageKey = "tarabdaar_dimensionMapping_v5"
 
@@ -448,11 +433,9 @@ public struct DimensionMapping: Codable, Equatable {
             }
         }
         // The controller strum's expression ships bound to the Joy-Con
-        // stick Y (2026-08-28): full-throw linear — stick down = silent
-        // chord, centre = half, up = full. Seeded only when the key is
-        // ENTIRELY absent (fresh installs and pre-feature documents); an
-        // entry the user emptied persists as an empty mapping and stays
-        // that way.
+        // stick Y: full-throw linear — stick down = silent chord, centre =
+        // half, up = full. Seeded only when the key is ENTIRELY absent; an
+        // entry the user emptied persists as an empty mapping.
         let strumKey = MapTarget(paramKey: "ctl_strum_expr").storageKey
         if m[strumKey] == nil {
             m[strumKey] = ParameterMapping(

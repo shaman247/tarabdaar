@@ -1,17 +1,9 @@
-/* TANPURA live kernel (2026-08-01): the r7 tanpura model
-   (scripts/tanpura_tool.c — itself tanpura_modal.py run_modal semantics
-   VERBATIM) as a playable slot instrument. One slot per keyboard note,
-   mounted+settled ONCE at engine build (the settle runs through THIS
-   kernel so q0 is the solver's own equilibrium — the jt startup-ping
-   lesson), then plucked at note-on. Inactive slots cost nothing; a slot
-   auto-idles when its output stays below the floor. Physics per slot:
-   damped modal rotation (v bank + detuned w bank), implicit grid
-   contact (solve_matrix = jt_web_tool.c VERBATIM), x4 substep at deep
-   engagement, round-6 contact-mediated polarization (b_eff = b −
-   w²/2R_t, lateral reaction −(w/R_t)·F_n), mid-string angled plucks.
-   Tables are built in Swift (TanpuraTables — LOCKSTEP with
-   tanpura_model.build_tables; the artifact params/tanpura_live.json
-   carries the construction laws + pitch-calibration curve). */
+/* TANPURA live kernel: one slot per mounted pitch, settled onto its
+   static wrap ONCE at build (through this kernel, so q0 is the solver's
+   own equilibrium), plucked at note-on, auto-idling when quiet. Per
+   slot: damped modal rotation (v + detuned w bank), energy-stable (SAV)
+   grid contact, contact-mediated polarization (b_eff = b − w²/2R_t,
+   lateral reaction −(w/R_t)·F_n), a 1-DOF jiva thread. */
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -26,13 +18,11 @@
 #include <pthread/qos.h>
 #endif
 
-#define TP_MAXM 384   /* r29: corner-resolution mode counts
-   (M*f0 ~ 21000 -> M up to 340; the stack-smash law) */
+#define TP_MAXM 384   /* mode-count ceiling; sizes the stack buffers */
 #define TP_MAXJ 64
 
-/* float fast pow (bow_kernel.c jt_fastpow VERBATIM — the jt live law:
-   pow() dominated the contact cost; float32 zone math with double
-   modal state is the proven live precision split) */
+/* float fast pow (shared with bow_kernel.c): float32 zone math over
+   double modal state */
 static inline float tp_fastpow(float x, float A)
 {
     union { float f; int32_t i; } u, v;
@@ -52,18 +42,12 @@ static inline float tp_fastpow(float x, float A)
     return p2 * v.f;
 }
 
-/* the r7 implicit contact solve (12 under-relaxed outer + 10
-   diag-Newton + Hunt-Crossley), float zone math + fastpow + an
-   ACTIVE-column list (zero-force columns skip — measured numerically
-   null offline, the jt active-set law) */
+/* iterative Hunt-Crossley contact solve. Reached only through
+   tp_contact_apply — the live contact is tp_sav_contact. */
 static void tp_solve(int nn, const float *eta0, const float *udot,
                      const float *Gm, const float *gdm,
                      float kc, float alpha, float hcB, float *F)
 {
-    /* F arrives WARM (the previous sample's converged forces — the
-       fixed point moves slowly in steady ring, so the under-relaxed
-       outer loop exits in 1-3 iterations instead of running all 12;
-       the caller zeroes F on pluck/reset) */
     float c[TP_MAXJ], f[TP_MAXJ];
     int act[TP_MAXJ], aci[TP_MAXJ], nac;
     const float am1 = alpha - 1.0f;
@@ -104,30 +88,12 @@ static void tp_solve(int nn, const float *eta0, const float *udot,
             if (f[i] > fm) fm = f[i];
         }
         for (int i = 0; i < nn; i++) F[i] += 0.5f * (f[i] - F[i]);
-        if (dF < 1e-4f * fm) {   /* warm-start exit: converged ring
-                                    states leave in 1-2 outers;
-                                    transients run more (pool era —
-                                    headroom favors fidelity).
-                                    fm floor 1e-2 => ABSOLUTE floor
-                                    1e-4*1e-2 = 1e-6 on quiet tails —
-                                    the double tool's own quiet-regime
-                                    tolerance (its 1e-6*fm with fm>=1).
-                                    The old fm>=1 floor tolerated
-                                    ~100% force error on tails (the
-                                    -67 dB perpetual limit cycle /
-                                    never-idle bug); a fully-relative
-                                    exit instead ran all 12 outers on
-                                    every quiet solve (note 69 alone
-                                    measured 1.03x RT — the speed-gate
-                                    blowup). Residual sub-audible
-                                    floors are culled by the
-                                    stagnation idle. (2026-08-03) */
+        if (dF < 1e-4f * fm) {   /* relative 1e-4, absolute floor 1e-6 */
             for (int i = 0; i < nn; i++) F[i] = f[i];
             break;
         }
     }
-    /* F now holds the PRE-Hunt-Crossley converged forces (the warm
-       state for the next call); the hc factor applies into Fout */
+    /* F: pre-Hunt-Crossley forces (next call's warm start) */
 }
 
 static void tp_hc(int nn, const float *udot, float hcB,
@@ -143,11 +109,10 @@ static void tp_hc(int nn, const float *udot, float hcB,
 
 typedef struct {
     int used, active, M, J;
-    /* ---- FD CONTINUUM MODE (round 20, the live hybrid): when
-       is_fd, the slot is a spatially-resolved Bilbao string with
-       penalty contact (the offline tanpura_fd.simulate semantics at
-       96 kHz internal rate); the modal fields above stay unused. */
-    int is_fd, fdN, fdOi, fdSteps;   /* grid pts, obs node, steps/48k */
+    /* ---- FD continuum slot (is_fd): a finite-difference string with
+       penalty contact; the modal fields stay unused. Not mounted by
+       TanpuraEngine. ---- */
+    int is_fd, fdN, fdOi, fdSteps;   /* grid pts, obs node, steps/out */
     double *fdU, *fdUp, *fdB, *fdPsh, *fdScr;
     double *fdUeq;                   /* settled wrap (touch anchor) */
     double fdTouch;                  /* finger damp at pluck (1 = off) */
@@ -156,7 +121,7 @@ typedef struct {
     /* tables (owned) */
     double *ca, *cb, *ca4, *cb4, *ca2, *cb2, *cas, *cbs, *wd;
     double *caw, *cbw, *wdw;
-    double *iwd, *iwdw;            /* 1/wd tables (the jt division law) */
+    double *iwd, *iwdw;            /* 1/wd tables */
     double *Phi, *phiF, *b, *q0;
     float *Phif, *phiFf;           /* float twins for the hot matvecs */
     float *Gf, *G4f, *gdf, *gd4f;
@@ -165,17 +130,12 @@ typedef struct {
     double kc, alpha, hcB, deep, dt, gain;
     double cg, sg, av, aw;      /* pol mixing + pluck-angle split */
     double rt;                  /* transverse curvature (0 = off) */
-    /* THREAD ELEMENT (round 11): 1-DOF jiva oscillator riding the
-       bone under gth; th_f = 0 = legacy rigid bump */
+    /* 1-DOF jiva thread under gth; th_f = 0 = rigid bump baked into b */
     double *gth;
     double thBase, thH;
     double thCa, thCb, thWd, thM;
-    int rampN;                  /* pluck draw ramp (samples; round 13:
-                                   one string period — 0 = instant) */
-    int ovs;                    /* internal steps per OUTPUT sample
-                                   (r29-live: tables at 96k, output
-                                   48k -> ovs 2; the 48k contact rate
-                                   RUNS AWAY at the r29 graze) */
+    int rampN;                  /* pluck draw ramp (internal samples; 0 = instant) */
+    int ovs;                    /* internal steps per OUTPUT sample */
     /* state */
     double *q, *p, *qw, *pw;
     double thz, thv;
@@ -183,91 +143,51 @@ typedef struct {
     double rampAmp, rampPrev;
     float Fw[TP_MAXJ];          /* warm contact forces (pre-hc) */
     double idle_env;            /* output envelope for auto-idle */
-    double envPrev;             /* stagnation-idle: last block env */
-    int stagn;                  /* blocks with no decay while quiet */
-    double pen0;                /* settled STATIC wrap penetration:
-                                   > deep marks a PERMANENT-DEEP slot
-                                   (skip the doomed base attempt) */
-    long deepRun;               /* consecutive dynamic-deep fires */
-    long permaCount;            /* samples left in adaptive perma
-                                   mode (re-probe when exhausted) */
-    int forceDeep;              /* x4 contact ALWAYS (extrapolated
-                                   register — see mount) */
-    double costEma;             /* smoothed render cost (s/block) —
+    double envPrev;             /* stagnation-idle: last window env */
+    int stagn;                  /* blocks since the last window */
+    double pen0;                /* settled static wrap penetration */
+    long deepRun;               /* unused */
+    long permaCount;            /* unused */
+    int forceDeep;              /* f0 > 140 Hz: costEma seed x4 */
+    double costEma;             /* smoothed render cost (s/sample) —
                                    the pool's heavy-first sort key */
-    /* ---- ENERGY-STABLE (SAV) CONTACT (2026-08-03d, user-ratified
-       vs legacy on the full gauge suite) — the modal contact path.
-       kq/kp = exact constant-force-over-step response (dq=F kq,
-       dp=F kp); svG = matching within-step compliance; psi/eta/bud
-       = per-node aux state (RSAV dissipation budget). The deep/
-       perma/forceDeep machinery is DEAD under SAV (passive at any
-       rate/M by construction; midpoint-g owns brightness). */
+    /* ---- SAV contact: kq/kp = exact constant-force-over-step response
+       (dq = F kq, dp = F kp); svG = matching within-step compliance;
+       psi/eta/bud = per-node auxiliary state (dissipation budget).
+       Passive at any rate and M by construction. ---- */
     double *svKq, *svKp, *svG;
     double svPsi[TP_MAXJ], svEta[TP_MAXJ], svBud[TP_MAXJ];
     double svPsi0[TP_MAXJ], svEta0[TP_MAXJ], svBud0[TP_MAXJ];
-    /* ---- LIVE BEND + RELEASE (Tarabdaar 2026-08-05): base copies of
-       the mount tables let a bend rescale every mode's rotation in
-       place (tp_apply_bend); relMul < 1 applies extra broadband
-       decay toward the settled wrap each internal sample. ---- */
-    double bendRatio;           /* current mode-frequency scale (1 = unbent) */
-    double *wd0, *wdw0;         /* base (mount-time) mode frequencies */
+    /* ---- live bend + release: base tables let a bend rescale every
+       mode's rotation in place; relMul < 1 decays toward the wrap ---- */
+    double bendRatio;           /* mode-frequency scale (1 = unbent) */
+    double *wd0, *wdw0;         /* mount-time mode frequencies */
     double *envE, *envEw;       /* per-mode damping envelopes hypot(ca,cb) */
-    double relMul;              /* per-internal-sample release multiplier
-                                   (1 = held/natural ring) */
-    /* ---- PLUCK ISOLATION + PLUCK DRIVE (Tarabdaar 2026-08-15; the
-       STRING-BANK rework, same day). The isolation value (op 3,
-       `iso`) makes each pluck a SEPARATE STRING: at the pluck the
-       primary slot's ringing state MIGRATES to a free CLONE slot
-       (full jawari simulation continues there at the old pitch —
-       the clone freezes copies of the 11 bend-mutable tables and
-       aliases the rest), and the pluck lands on settled state. The
-       kernel keeps the N most-recently-played strings alive
-       (c->polyMax clones, global); overflow evicts the OLDEST clone
-       into its owner's linear ghost bank ("decay without the full
-       jawari simulation" — the pile-up tier), and auto-idle culls
-       below audibility. iso scales how much of the old string's
-       ring survives the migration (1 = in full). iso 0 = legacy:
-       the pluck rides the ringing primary. `drive` scales the pluck
-       displacement while gain rides gain0/drive — contact
-       engagement vs radiated level, decoupled. ---- */
-    double iso;                 /* pluck isolation (op 3; 0 = legacy) */
+    double relMul;              /* per-internal-sample release multiplier */
+    /* ---- string bank: with iso > 0 each pluck is a SEPARATE STRING —
+       the primary's ringing state migrates to a CLONE slot (frozen
+       pitch, full simulation), scaled by iso, and the pluck lands on
+       settled state; past polyMax the OLDEST clone goes to the ghost. */
+    double iso;                 /* pluck isolation (op 3; 0 = ride the ring) */
     int justMigrated;           /* pre-pluck bend already migrated */
-    int isClone;                /* clone: owns only state + frozen
-                                   tables; everything else aliased */
+    int isClone;                /* owns only state + frozen tables */
     int owner;                  /* clone: primary slot index */
     long long seq;              /* clone: pluck sequence (LRU key) */
     double drive;
     double gain0;               /* mount output gain (gain = gain0/drive) */
-    /* ---- GHOST BANK (Tarabdaar 2026-08-15): the previous notes'
-       ring-out. A deviation state that rotates through the SAME
-       per-mode damping envelopes as the live string (correct pitches
-       and t60s, full natural decay) but skips zone/contact/thread —
-       the demoted-string law applied to old notes, so a slot's whole
-       history of re-plucks costs one linear bank. Ghosts are LINEAR,
-       so every handoff superposes exactly into the one bank. Tables
-       are frozen at the first handoff (composed to OUTPUT rate:
-       R_out = R_in^ovs) so a later bend retunes only the live
-       string, not the ringing history. gGain freezes the output
-       trim of the first handoff; later handoffs at a different live
-       gain are pre-scaled by gain/gGain (linearity), so drive edits
-       never step the ghost tail. ---- */
+    /* ---- ghost bank: evicted notes ring out LINEARLY (same per-mode
+       envelopes, no contact), superposed into one bank per slot. Tables
+       freeze at the first handoff at OUTPUT rate (R_in^ovs). ---- */
     int ghostOn;
     double *gq, *gp, *gqw, *gpw;            /* deviation state */
     double *gca, *gcb, *gwd, *giwd;         /* frozen v-bank rotation */
     double *gcaw, *gcbw, *gwdw, *giwdw;     /* frozen w-bank rotation */
-    double gcg, gsg;                        /* frozen pol mix (output rate) */
+    double gcg, gsg;                        /* frozen pol mix */
     double gGain;
     double ghost_env;
-    int demoted;                /* TAIL DEMOTION (perf, 2026-08-03e):
-                                   below inaudibility the grazing-knee
-                                   converts ~nothing (the knee law) —
-                                   the voice rings LINEARLY about the
-                                   wrap. q holds the DEVIATION from
-                                   q0 (same rotation, no DC fall, no
-                                   re-engagement slam); zone/contact/
-                                   thread are skipped. Re-pluck
-                                   promotes: q += q0, sv state from
-                                   the settled snapshot. */
+    int demoted;                /* tail demotion: q holds the DEVIATION
+                                   from q0 and rings linearly (no zone/
+                                   contact/thread); re-pluck promotes */
 } tp_slot;
 
 static int tp_sav_contact(tp_slot *s, const float *beff,
@@ -289,17 +209,16 @@ struct tp_ctx {
     int nslots;                  /* user slots + TP_CLONES */
     int nUser;                   /* mounted (pluckable) slots */
     long long pluckSeq;          /* global pluck counter (clone LRU) */
-    int polyMax;                 /* live history strings (atomic-ish) */
+    int polyMax;                 /* live history strings (atomic) */
     tp_slot *s;
-    int deep_budget;             /* sync path: 3; pool path: huge */
+    int deep_budget;             /* unused by the SAV render */
     long resets;                 /* divergence-guard resets (telemetry) */
-    /* ---- note-event SPSC ring (audio thread -> dispatcher) ---- */
+    /* ---- note-event SPSC ring (producer -> dispatcher) ---- */
     int evSlot[TP_EVN];
-    int evOp[TP_EVN];            /* 0 note, 1 bend, 2 release */
-    double evAmp[TP_EVN];        /* op 0: amp (<0 damps); op 1: ratio;
-                                    op 2: rate 1/s */
+    int evOp[TP_EVN];            /* 0 note 1 bend 2 release 3 iso 4 drive 6 pre-pluck bend */
+    double evAmp[TP_EVN];        /* op 0 amp (<0 damps); 1/6 ratio; 2 rate 1/s */
     long long evW, evR;          /* atomic W (producer), R (dispatcher) */
-    /* ---- async one-block-late machinery (the jt pattern) ---- */
+    /* ---- async one-block-late machinery ---- */
     int poolN;                   /* workers (>=2 arms async) */
     int poolInit, quit;
     pthread_t wTid[TP_MAXW], dTid;
@@ -310,7 +229,7 @@ struct tp_ctx {
     double *wBuf;                /* per-worker accumulation buffers */
     int actList[96], actN;       /* active slots+clones, HEAVY-FIRST */
     int wCursor;                 /* work-stealing cursor (atomic) */
-    int overN;                   /* controller streak (unused) */
+    int overN;                   /* underrun-burst streak */
     long lastUr;                 /* underrun-feedback watermark */
     int lastPluck;               /* most recent pluck slot (protected) */
     int jobN[TP_ARING];
@@ -329,8 +248,7 @@ void *tanpura_create(int nslots)
     c->polyMax = 6;
     c->s = (tp_slot *)calloc((size_t)c->nslots, sizeof(tp_slot));
     c->deep_budget = 3;
-    /* clone pool: state + frozen-table buffers sized for any owner
-       (TP_MAXM); everything else aliases the owner at migration */
+    /* clone pool: state + frozen-table buffers sized for any owner */
     for (int i = nslots; i < c->nslots; i++) {
         tp_slot *s = &c->s[i];
         s->isClone = 1;
@@ -362,8 +280,7 @@ static void tp_slot_free(tp_slot *s)
 {
     if (!s->used) return;
     if (s->isClone) {
-        /* clones own only their state + frozen bend-mutable tables;
-           everything else aliases the owner — never free it here */
+        /* clones alias the owner's other tables — never free them */
 #define TPCF(x) free(s->x); s->x = 0
         TPCF(q); TPCF(p); TPCF(qw); TPCF(pw);
         TPCF(ca); TPCF(cb); TPCF(wd); TPCF(iwd);
@@ -456,8 +373,7 @@ void tanpura_mount(void *vc, int slot, int M, int J,
         s->iwd[i] = 1.0 / wd[i];
         s->iwdw[i] = 1.0 / wdw[i];
     }
-    /* live-bend base tables: mode freqs + damping envelopes (ca/cb
-       are E*cos/sin(wd*dt), so E = hypot — exact) */
+    /* live-bend base tables (ca/cb = E*cos/sin(wd*dt), so E = hypot) */
     s->wd0 = tp_dup(wd, M);
     s->wdw0 = tp_dup(wdw, M);
     s->envE = (double *)malloc((size_t)M * sizeof(double));
@@ -501,8 +417,7 @@ void tanpura_mount(void *vc, int slot, int M, int J,
     s->pw = (double *)calloc((size_t)M, sizeof(double));
     s->kc = kc; s->alpha = alpha; s->hcB = hcB;
     s->deep = deep; s->dt = dt; s->gain = gain;
-    /* SAV tables: exact-response kick + matching compliance (built
-       from the DOUBLE mount inputs; no artifact/lockstep change) */
+    /* SAV tables: exact-response kick + matching compliance */
     s->svKq = (double *)malloc((size_t)M * sizeof(double));
     s->svKp = (double *)malloc((size_t)M * sizeof(double));
     s->svG = (double *)malloc((size_t)J * J * sizeof(double));
@@ -563,28 +478,19 @@ void tanpura_mount(void *vc, int slot, int M, int J,
     s->envPrev = 0.0; s->stagn = 0; s->pen0 = 0.0;
     s->demoted = 0;
     s->deepRun = 0; s->permaCount = 0;
-    /* FORCE x4 contact above the tanpura's own register
-       (2026-08-03b): 247-294 Hz self-oscillated LOUDLY at ANY M —
-       the graze pulse crosses the zone in <2 samples at 96k there,
-       but the band's wrap sits BELOW the pen0>deep bar so the
-       permanent-deep path never engaged (deeper apex, pol_rt, and
-       M 180-280 all probed inert; the reference strings <=131 Hz
-       are extensively validated at base rate). wd[0]/2pi ~ f0. */
+    /* wd[0]/2pi ~ f0 */
     s->forceDeep = (wd[0] / (2.0 * 3.14159265358979323846)) > 140.0;
-    /* pre-measurement cost seed (base-path scale, ~3.6e-8*M matches
-       the measured M321 note); perma-deep notes cost ~4x this and
-       the pool's timing corrects the EMA within ~10 blocks — a
-       deliberate UNDER-estimate, brief overshoot rides the ring
-       slack rather than falsely stealing voices at mount */
+    /* pre-measurement cost seed — a deliberate under-estimate (the
+       pool timing corrects it within ~10 blocks) so a brief overshoot
+       rides the ring slack rather than stealing voices at mount */
     s->costEma = 3.6e-8 * (double)M;
     s->used = 1;
     s->active = 0;
     s->idle_env = 0.0;
 }
 
-/* zone displacement/velocity from the modal state — the ONE hot
-   matvec (float tables, 4-wide unrolled: clang will not vectorize
-   float reductions without -ffast-math, the jt law) */
+/* zone displacement + velocity (float tables, unrolled: clang will not
+   vectorize float reductions without -ffast-math) */
 static void tp_zone(const tp_slot *s, float *uf, float *udf)
 {
     const int M = s->M, J = s->J;
@@ -604,16 +510,11 @@ static void tp_zone(const tp_slot *s, float *uf, float *udf)
 }
 
 
-/* uf-ONLY zone eval (perf round 2026-08-03e): SAV never reads the
-   zone velocity (the legacy Hunt-Crossley consumer is gone) — the
-   udf half of tp_zone was pure waste, twice per output sample per
-   voice. BLAS gemv on the pool threads where available. */
+/* displacement-only zone eval — the per-sample hot matvec (SAV never
+   reads the zone velocity) */
 static void tp_zone_u(const tp_slot *s, float *uf)
 {
     const int M = s->M, J = s->J;
-    /* hand loop beats BLAS here (measured): tall-thin transposed
-       gemv is column-stride-hostile; the row accumulate keeps J=16
-       accumulators in registers at stride 1 */
     for (int j = 0; j < J; j++) uf[j] = 0.0f;
     for (int k = 0; k < M; k++) {
         const float *Pr = s->Phif + (size_t)k * J;
@@ -640,9 +541,8 @@ static void tp_wlat(const tp_slot *s, float *wl)
     }
 }
 
-/* contact on precomputed zone state: solves, then applies the modal
-   impulse AND (if rt) the fused lateral reaction in one phiF pass.
-   Returns 1 if fired. */
+/* Hunt-Crossley contact on precomputed zone state. Unreferenced — the
+   render path uses tp_sav_contact. */
 static int tp_contact_apply(tp_slot *s, const float *beff,
                             const float *uf, const float *udf,
                             const float *wl, int sub, double dtv,
@@ -698,9 +598,8 @@ static int tp_contact_apply(tp_slot *s, const float *beff,
     return 1;
 }
 
-/* settle onto the static wrap through THIS kernel (build-time only):
-   heavy-damping rotation + full-dt contact, then store q -> q0.
-   Run once per slot at engine build, OFF the audio thread. */
+/* build-time settle onto the static wrap: heavy-damping rotation +
+   contact, then q -> q0. Off the audio thread. */
 void tanpura_settle(void *vc, int slot, long n)
 {
     tp_ctx *c = (tp_ctx *)vc;
@@ -722,16 +621,13 @@ void tanpura_settle(void *vc, int slot, long n)
         tp_sav_contact(s, bf, uf, udf, 0, 0);
     }
     memcpy(s->q0, s->q, sizeof(double) * (size_t)M);
-    /* snapshot the settled SAV state — idle-wake restores it with q0
-       (a zeroed psi at the deep wrap free-falls; the settle already
-       paid for this consistency once) */
+    /* settled SAV snapshot — every reset/idle-wake restores it with q0 */
     memcpy(s->svPsi0, s->svPsi, sizeof(s->svPsi));
     memcpy(s->svEta0, s->svEta, sizeof(s->svEta));
     memcpy(s->svBud0, s->svBud, sizeof(s->svBud));
     memset(s->p, 0, sizeof(double) * (size_t)M);
     memset(s->qw, 0, sizeof(double) * (size_t)M);
     memset(s->pw, 0, sizeof(double) * (size_t)M);
-    /* settled static penetration: the deep-substep baseline */
     tp_zone(s, uf, udf);
     float p0 = 0.0f;
     for (int j = 0; j < J; j++) {
@@ -739,14 +635,13 @@ void tanpura_settle(void *vc, int slot, long n)
         if (d > p0) p0 = d;
     }
     s->pen0 = (double)p0;
-    /* PERMANENT-DEEP slots cost ~4x the base path — seed the cost
-       estimate accordingly so pluck-time budget enforcement sheds
-       voices BEFORE the overload, not one transient later */
+    /* deep-wrap / high-register slots cost ~4x: seed so the pluck-time
+       budget sheds BEFORE the overload */
     if (s->pen0 > s->deep || s->forceDeep) s->costEma *= 4.0;
     s->active = 0;
 }
 
-/* ---- FD continuum slot (round 20) ---- */
+/* ---- FD continuum slot ---- */
 void tanpura_mount_fd(void *vc, int slot, int N,
                       const double *b, const double *pshape,
                       double lam2, double muk, double s1h,
@@ -754,10 +649,8 @@ void tanpura_mount_fd(void *vc, int slot, int N,
                       int o_i, int ramp_n, int steps_per_out,
                       double gain, double dt, double touch)
 {
-    /* NOTE: kc arrives PRE-DIVIDED by MU (the offline stencil's
-       dt^2*fc/MU term) — the Swift builder passes kc/MU.
-       touch (round 21): finger damp at pluck — state blends toward
-       the settled wrap by this factor (1.0 = legacy no-damp). */
+    /* kc arrives PRE-DIVIDED by MU; touch = finger damp at pluck
+       (state blends toward the settled wrap; 1 = none) */
     tp_ctx *c = (tp_ctx *)vc;
     if (slot < 0 || slot >= c->nslots) return;
     tp_slot *s = &c->s[slot];
@@ -781,9 +674,8 @@ void tanpura_mount_fd(void *vc, int slot, int N,
     s->used = 1; s->active = 0;
 }
 
-/* one internal FD step (the offline stencil VERBATIM: d2/d2p/d4 with
-   simply-supported end fixups, capped one-sided penalty, ends
-   pinned). extra_damp > 0 = the settle relaxation. */
+/* one internal FD step (simply-supported ends, capped one-sided
+   penalty); extra_damp > 0 = settle relaxation */
 static void tp_fd_step(tp_slot *s, double extra_damp)
 {
     const int N = s->fdN;
@@ -809,12 +701,8 @@ static void tp_fd_step(tp_slot *s, double extra_damp)
         else
             d4 = u[i + 2] - 4.0 * u[i + 1] + 6.0 * u[i]
                  - 4.0 * u[i - 1] + u[i - 2];
-        /* IMPLICIT per-node contact (round-20 FD-live law: the
-           explicit penalty is only stable when the grid bound covers
-           the CONTACT frequency — at 96 kHz it diverges above
-           ~180 Hz; the python reference diverges identically).
-           Scalar Newton on f = kc*(eta* − cl*f)^alpha with
-           cl = dt^2/A0 (kc arrives pre-divided by MU). */
+        /* implicit per-node contact: scalar Newton on
+           f = kc*(eta* − cl*f)^alpha, cl = dt^2/A0 */
         double v = (2.0 * u[i] - B0 * up[i] + lam2 * d2 - muk * d4
                     + s1h * (d2 - d2p)) / A0;
         double eta_s = b[i] - v;
@@ -848,18 +736,13 @@ static void tp_fd_step(tp_slot *s, double extra_damp)
     s->fdScr = tmp;
 }
 
-/* build-time settle from the tent (mirrors the offline recipe);
-   caller pre-loads fdU with the tent via tanpura_fd_set_state */
+/* build-time settle from the tent (caller pre-loads fdU) */
 void tanpura_settle_fd(void *vc, int slot, long n)
 {
     tp_ctx *c = (tp_ctx *)vc;
     tp_slot *s = &c->s[slot];
     if (!s->used || !s->is_fd) return;
-    /* mirror tanpura_fd._settle: HEAVY damping swapped into A0/B0
-       (sigma*dt ~ 0.2 — the settle must actually settle; the old
-       0.02 relative pull never reached the static wrap, and the
-       resulting off-equilibrium contact point cost ~4-6 dB of
-       jawari conversion at pluck) */
+    /* heavy damping swapped into A0/B0 so the settle reaches the wrap */
     const double a0s = s->fdA0, b0s = s->fdB0;
     const double sig = 2.0e4;
     s->fdA0 = 1.0 + sig * s->dt;
@@ -898,16 +781,10 @@ void tanpura_fd_set_state(void *vc, int slot, const double *u0)
     memcpy(s->fdUp, u0, sizeof(double) * ((size_t)s->fdN + 1));
 }
 
-/* concurrent-voice management: steal the QUIETEST ringing modal slot
-   when a pluck would exceed EITHER the count cap or the COST budget
-   (2026-08-03b). Each slot carries costEma (measured s/sample from
-   the pool timing; seeded from M before first measurement); the
-   budget is the serial-equivalent load the worker pool sustains
-   RELIABLY under concurrency (measured: the 8-note M150 chord at
-   ~5x RT serial fell behind persistently; ~3.5x holds). A slammed
-   chord degrades to its loudest voices instead of underrunning the
-   whole instrument — the stolen slot is the quietest, musically the
-   least missed. */
+/* voice management: steal the QUIETEST ringing modal slot when a pluck
+   would exceed the count cap or the cost budget (costEma = s/sample
+   from the pool timing) — a slammed chord keeps its loudest voices
+   instead of underrunning the whole instrument. */
 #define TP_VOICE_CAP 24
 #define TP_COST_BUDGET_XRT 5.0
 static void tp_voice_cap(tp_ctx *c, int keep)
@@ -934,20 +811,10 @@ static void tp_voice_cap(tp_ctx *c, int keep)
     }
 }
 
-/* note-on: activate + add the angled pluck (amp in metres, TOTAL
-   displacement; the v/w split is the mount's pol_th) */
-/* GHOST HANDOFF (Tarabdaar 2026-08-15; string-bank rework): move
-   `frac` of SRC's ringing deviation into DST's linear ghost bank.
-   Under the string bank this is the PILE-UP tier only: it runs when
-   the clone pool overflows (oldest history string evicted, full
-   band) or when polyMax is 0 (no history strings at all — then
-   `split` keeps only the partials above 2*f0, because the incoming
-   same-slot pluck replaces the fundamental in the same instant; a
-   full-band handoff there measured a 3.6-4.1 dB re-pluck level
-   lottery from same-frequency phase summing). Ghost tables freeze
-   from SRC (composed to output rate), so the evicted note keeps its
-   own pitch; a releasing (note-off) string is finger-stopped and is
-   never resurrected into the ghost. */
+/* ghost handoff: move `frac` of SRC's ringing deviation into DST's
+   ghost bank — on clone-pool overflow (full band) or with polyMax 0
+   (`split`: only partials above 2*f0, since the same-slot pluck
+   replaces the fundamental). A releasing string never enters. */
 static void tp_ghost_handoff(tp_slot *dst, tp_slot *src, double frac,
                              int split)
 {
@@ -958,9 +825,7 @@ static void tp_ghost_handoff(tp_slot *dst, tp_slot *src, double frac,
     const int M = src->M;
     const int toGhost = src->relMul >= 1.0;
     if (toGhost && !dst->ghostOn) {
-        /* freeze SRC's dynamics, composed to output rate:
-           R_out = R_in^ovs — same wd, envelope E^ovs, so the ghost
-           decays exactly as the live string would have */
+        /* freeze SRC's rotation composed to output rate (E^ovs) */
         const int ovs = src->ovs > 1 ? src->ovs : 1;
         for (int k = 0; k < M; k++) {
             double a = src->ca[k], b2 = src->cb[k];
@@ -993,13 +858,11 @@ static void tp_ghost_handoff(tp_slot *dst, tp_slot *src, double frac,
         dst->gGain = src->gain;
         dst->ghostOn = 1;
     }
-    /* superpose (linear): a handoff at a different gain pre-scales
-       so it renders at the frozen gGain identically */
+    /* linear superposition; pre-scale to the frozen gGain */
     const double gs = !toGhost ? 0.0
         : (dst->gGain != 0.0 ? frac * src->gain / dst->gGain : frac);
     const double w1 = src->wd[0];
     if (src->demoted) {
-        /* demoted q already holds the deviation from q0 */
         for (int k = 0; k < M; k++) {
             double wk = 1.0;
             if (split) {
@@ -1045,18 +908,9 @@ static void tp_ghost_handoff(tp_slot *dst, tp_slot *src, double frac,
     if (toGhost) dst->ghost_env = 1.0;
 }
 
-/* PLUCK DRIVE (Tarabdaar 2026-08-15): the mellow<->buzzy axis at
-   constant loudness. The SAV contact is a power law (kc*em^alpha),
-   so how hard the string is driven into the jawari sets the buzz
-   conversion — measured on the shipped voice: pluck level 0.25->2
-   moved the attack centroid 2357->3269 Hz. Drive scales the pluck
-   displacement by D and the slot's OUTPUT gain by 1/D, both applied
-   sample-synchronously at the pluck: the note keeps its calibrated
-   level while the contact sees a x D deeper (or shallower)
-   engagement. D 1 is a strict no-op (gain untouched — bit-exact).
-   NOTE: a drive EDIT between re-plucks of a still-ringing slot
-   steps the old tail's level by Dold/Dnew at the pluck instant —
-   with pluck touch active the tail is damped there anyway. */
+/* pluck drive: displacement x D, output gain x 1/D at the pluck — the
+   power-law contact sees D-times deeper engagement at calibrated level.
+   D 1 is a strict no-op; a drive edit steps a ringing tail by Dold/Dnew. */
 static void tp_apply_drive(tp_slot *s, double d)
 {
     if (d < 0.05) d = 0.05;
@@ -1064,17 +918,10 @@ static void tp_apply_drive(tp_slot *s, double d)
     s->drive = d;
 }
 
-/* STRING-BANK MIGRATION (Tarabdaar 2026-08-15): move the primary's
-   ringing string onto a free clone — the old note keeps its FULL
-   jawari simulation at its own (frozen) pitch while the primary is
-   reset for the incoming pluck. The clone freezes copies of the 11
-   bend-mutable tables (so later glides retune only the primary) and
-   aliases everything else; `iso` scales how much of the old ring
-   survives. When the pool is full past polyMax, the globally OLDEST
-   clone is evicted into its owner's ghost bank first (split only if
-   that owner is the slot being re-plucked — its fundamental gets
-   replaced in the same instant). polyMax 0 skips clones entirely:
-   the primary hands off straight to its own ghost (split). */
+/* migration: move the primary's ringing string onto a free clone
+   (frozen pitch; later glides retune only the primary), evicting the
+   OLDEST clone to its owner's ghost when past polyMax (split only for
+   the re-plucked slot); polyMax 0 hands off straight to the ghost. */
 static void tp_migrate(tp_ctx *c, int slot, double iso)
 {
     tp_slot *s = &c->s[slot];
@@ -1100,13 +947,11 @@ static void tp_migrate(tp_ctx *c, int slot, double iso)
             oldest->active = 0;
             cl = oldest;
         }
-        /* ---- copy the string onto the clone ---- */
         const int M = s->M, J = s->J;
         cl->M = M; cl->J = J;
         cl->owner = slot;
         cl->seq = ++c->pluckSeq;
         cl->is_fd = 0;
-        /* frozen bend-mutable tables */
         memcpy(cl->ca, s->ca, sizeof(double) * (size_t)M);
         memcpy(cl->cb, s->cb, sizeof(double) * (size_t)M);
         memcpy(cl->wd, s->wd, sizeof(double) * (size_t)M);
@@ -1118,7 +963,7 @@ static void tp_migrate(tp_ctx *c, int slot, double iso)
         memcpy(cl->svKq, s->svKq, sizeof(double) * (size_t)M);
         memcpy(cl->svKp, s->svKp, sizeof(double) * (size_t)M);
         memcpy(cl->svG, s->svG, sizeof(double) * (size_t)J * J);
-        /* aliased read-only tables (bend never touches these) */
+        /* aliased (bend never touches these) */
         cl->ca4 = s->ca4; cl->cb4 = s->cb4;
         cl->ca2 = s->ca2; cl->cb2 = s->cb2;
         cl->cas = s->cas; cl->cbs = s->cbs;
@@ -1131,7 +976,6 @@ static void tp_migrate(tp_ctx *c, int slot, double iso)
         cl->phi_o = s->phi_o; cl->dq = s->dq; cl->q0 = s->q0;
         cl->wd0 = s->wd0; cl->wdw0 = s->wdw0;
         cl->envE = s->envE; cl->envEw = s->envEw;
-        /* scalars */
         cl->kc = s->kc; cl->alpha = s->alpha; cl->hcB = s->hcB;
         cl->deep = s->deep; cl->dt = s->dt; cl->gain = s->gain;
         cl->cg = s->cg; cl->sg = s->sg;
@@ -1143,7 +987,6 @@ static void tp_migrate(tp_ctx *c, int slot, double iso)
         cl->forceDeep = s->forceDeep; cl->pen0 = s->pen0;
         cl->costEma = s->costEma;
         cl->bendRatio = s->bendRatio;
-        /* state */
         memcpy(cl->q, s->q, sizeof(double) * (size_t)M);
         memcpy(cl->p, s->p, sizeof(double) * (size_t)M);
         memcpy(cl->qw, s->qw, sizeof(double) * (size_t)M);
@@ -1164,7 +1007,6 @@ static void tp_migrate(tp_ctx *c, int slot, double iso)
         cl->envPrev = 0.0; cl->stagn = 0;
         cl->ghostOn = 0; cl->ghost_env = 0.0;
         cl->active = 1;
-        /* iso < 1: only that much of the old ring survives */
         if (iso < 1.0) {
             for (int k = 0; k < M; k++) {
                 if (cl->demoted) { cl->q[k] *= iso; }
@@ -1190,21 +1032,19 @@ reset_primary:
     s->relMul = 1.0;
 }
 
+/* note-on: activate + add the angled pluck (amp = TOTAL displacement
+   in metres; the v/w split is the mount's pol_th) */
 void tanpura_pluck(void *vc, int slot, double amp)
 {
     tp_ctx *c = (tp_ctx *)vc;
     tp_slot *s = &c->s[slot];
     if (!s->used || s->isClone) return;
-    /* pluck isolation (op 3 stored `iso`): the ringing string becomes
-       a SEPARATE history string before the new pluck lands (unless a
-       pre-pluck bend already migrated it at its old pitch) */
+    /* isolation: migrate the ringing string unless a pre-pluck bend
+       already did */
     if (!s->is_fd && s->iso > 0.0 && s->active && !s->justMigrated)
         tp_migrate(c, slot, s->iso);
     s->justMigrated = 0;
-    /* pluck drive: deeper (or shallower) contact engagement at the
-       calibrated radiated level (gain0/1.0 == gain0 exactly, so
-       drive 1 leaves the mount gain bit-identical). Modal slots
-       only — mount_fd never initializes drive/gain0. */
+    /* drive (modal slots only; drive 1 leaves gain bit-identical) */
     if (!s->is_fd && s->drive > 0.0) {
         amp *= s->drive;
         s->gain = s->gain0 / s->drive;
@@ -1217,10 +1057,7 @@ void tanpura_pluck(void *vc, int slot, double amp)
         s->demoted = 0;
     }
     if (!s->active) {
-        /* waking from idle: state is the settled wrap (or decayed
-           back to it); make that exact so long-idle drift never
-           accumulates. A damped slot's ghost is stale — silence it
-           (the empty->active handoff re-zeros the arrays). */
+        /* waking from idle: exact settled wrap; a stale ghost is silenced */
         memcpy(s->q, s->q0, sizeof(double) * (size_t)s->M);
         memset(s->p, 0, sizeof(double) * (size_t)s->M);
         memset(s->qw, 0, sizeof(double) * (size_t)s->M);
@@ -1266,8 +1103,7 @@ void tanpura_pluck(void *vc, int slot, double amp)
     tp_voice_cap(c, slot);
 }
 
-/* hard-stop a slot (all-notes-off): the primary, its history
-   clones, and its ghost bank */
+/* hard-stop a slot: primary, its clones, its ghost */
 void tanpura_damp(void *vc, int slot)
 {
     tp_ctx *c = (tp_ctx *)vc;
@@ -1282,17 +1118,10 @@ void tanpura_damp(void *vc, int slot)
                 c->s[i].active = 0;
 }
 
-/* LIVE RETUNE (Tarabdaar 2026-08-05): rescale every mode's rotation
-   angle from the mount-time base tables. The rotation is exact at any
-   angle, so this is a true retune, not an approximation; the damping
-   envelope E (= hypot(ca,cb)) is preserved, so t60s ride along
-   unchanged. The SAV exact-response kick tables (svKq/svKp) and the
-   within-step compliance (svG) follow the new frequencies — the
-   contact solve stays consistent with the rotation it interleaves.
-   Modes whose bent frequency crosses ~the OUTPUT Nyquist get
-   ca=cb=0 (state zeroes — silence, not aliasing); contact re-grows
-   them when the bend comes back down. NEVER call concurrently with
-   tp_render_slot on the same slot — the drain/sync contract. */
+/* live retune: rescale every mode's rotation angle from the base tables
+   (exact; envelope E preserved); the SAV tables follow. Modes past ~the
+   output Nyquist get ca=cb=0 (silence, not aliasing). NEVER concurrent
+   with tp_render_slot on the same slot. */
 static void tp_apply_bend(tp_slot *s, double r)
 {
     if (s->is_fd || !s->wd0) return;
@@ -1347,16 +1176,10 @@ void tanpura_bend(void *vc, int slot, double ratio)
     tp_apply_bend(s, ratio);
 }
 
-/* note-off release: DEMOTE the ringing string immediately (the tail
-   demotion transform — q becomes the deviation from the settled wrap,
-   contact/zone/thread are skipped) and decay that deviation by relMul
-   each internal sample. The demotion is load-bearing, not just perf:
-   with contact live, the per-sample pull toward q0 perturbs the wrap
-   equilibrium's periodic orbit and the contact re-corrects it — a
-   sustained limit cycle ~26 dB under the ring that NEVER dies
-   (measured). Linearized, the decay is exact and the slot auto-idles.
-   Musically it is a finger stop: the jawari buzz cuts at note-off,
-   the pitch rings down fast. Re-pluck promotes (the existing path). */
+/* note-off release: demote immediately (q = deviation from the wrap,
+   contact skipped) and decay by relMul per internal sample. Demotion is
+   load-bearing: with contact live the pull toward q0 becomes a limit
+   cycle that never dies; linearized it idles. A finger stop. */
 static void tp_apply_release(tp_slot *s, double rate)
 {
     if (s->is_fd) return;
@@ -1378,10 +1201,7 @@ void tanpura_release(void *vc, int slot, double rate)
     tp_apply_release(s, rate);
 }
 
-/* pluck isolation: set how much of the ringing string becomes a
-   separate history string at each subsequent pluck (string-bank
-   rework — stored, consumed by the pluck/pre-pluck-bend ops; sync
-   path, the pool path rides event op 3) */
+/* pluck isolation (sync path; pool path = op 3) */
 void tanpura_set_touch(void *vc, int slot, double touch)
 {
     tp_ctx *c = (tp_ctx *)vc;
@@ -1391,11 +1211,9 @@ void tanpura_set_touch(void *vc, int slot, double touch)
     s->iso = touch < 0.0 ? 0.0 : (touch > 1.0 ? 1.0 : touch);
 }
 
-/* pre-pluck bend (op 6): a re-pluck landing at a DIFFERENT pitch —
-   migrate the ringing string first (its clone freezes at the old
-   pitch), then retune the primary for the incoming pluck. Glide
-   bends (op 1 / tanpura_bend) never migrate: they retune the
-   primary only, and the history clones keep their frozen pitch. */
+/* pre-pluck bend (op 6): a re-pluck at a DIFFERENT pitch migrates the
+   ringing string first, then retunes the primary. Glide bends (op 1)
+   never migrate. */
 void tanpura_prepluck_bend(void *vc, int slot, double ratio)
 {
     tp_ctx *c = (tp_ctx *)vc;
@@ -1412,8 +1230,7 @@ void tanpura_prepluck_bend(void *vc, int slot, double ratio)
     tp_apply_bend(s, ratio);
 }
 
-/* set the pluck drive applied at each subsequent pluck (sync path;
-   the pool path rides event op 4) */
+/* pluck drive (sync path; pool path = op 4) */
 void tanpura_set_drive(void *vc, int slot, double drive)
 {
     tp_ctx *c = (tp_ctx *)vc;
@@ -1432,10 +1249,8 @@ int tanpura_active_count(void *vc)
     return n;
 }
 
-/* SCOPE TELEMETRY (Tarabdaar 2026-09-01): one user slot's output
-   envelope (the auto-idle meter — block peak with a 2%/block decay,
-   output units post gain+FIR; 1.0 right at the pluck), 0 for an
-   unused/idle slot. Racy display read; any thread. */
+/* scope telemetry: a slot's output envelope (block peak, 2%/block
+   decay, output units), 0 when idle. Racy display read. */
 double tanpura_slot_env(void *vc, int slot)
 {
     tp_ctx *c = (tp_ctx *)vc;
@@ -1444,17 +1259,12 @@ double tanpura_slot_env(void *vc, int slot)
     return (s->used && s->active) ? s->idle_env : 0.0;
 }
 
-/* render one slot for n samples, ACCUMULATING into out.
-   deep_ok gates the x4 substep (the sync path budgets it; the pool
-   path always allows it). Returns 1 if the slot took the deep path. */
+/* render one FD slot, ACCUMULATING into out */
 static int tp_render_fd(tp_ctx *c, tp_slot *s, int n, double *out)
 {
     double peak = 0.0;
     for (int t = 0; t < n; t++) {
-        /* ramp injection rides the INTERNAL rate (rampN counts
-           srSim samples — one increment per fd step, matching the
-           python reference; per-output injection stretched the draw
-           by fdSteps and softened every attack) */
+        /* the draw ramp rides the internal rate */
         for (int k = 0; k < s->fdSteps; k++) {
             if (s->rampLeft > 0) {
                 const double x = (double)(s->rampN - s->rampLeft + 1)
@@ -1493,19 +1303,15 @@ static int tp_render_fd(tp_ctx *c, tp_slot *s, int n, double *out)
         return 0;
     }
     s->idle_env = peak > s->idle_env ? peak : s->idle_env * 0.98;
-    /* auto-idle at MUSICAL silence (~-86 dBFS post gain+FIR), not
-       1e-7: the float contact limit cycle floors ~1e-4, so a 1e-7
-       bar meant slots NEVER idled and cost accumulated with every
-       note ever played (2026-08-03 choppy-under-polyphony bug) */
+    /* auto-idle at musical silence (~-86 dBFS post chain) */
     if (s->idle_env < 1e-3) s->active = 0;
     return 0;
 }
 
 
-/* ENERGY-STABLE (SAV) modal contact — the ratified scheme (see the
-   slot-field comment). Double solve on the float zone eval; one
-   J-system per sample, no iterations, no substeps. cv/appr fixed at
-   the ratified offline values. Returns 1 if any force fired. */
+/* SAV modal contact: one J-system per internal sample, no iterations,
+   no substeps; approach-only viscosity TP_SAV_CV. Returns 1 if any
+   force fired. */
 #define TP_SAV_CV 10.0
 static int tp_sav_contact(tp_slot *s, const float *beff,
                           const float *uf, const float *udf,
@@ -1633,7 +1439,7 @@ sav_build:
         }
         s->svEta[j] = etaEnd;
     }
-    /* exact-response kicks (double phiF; BLAS on the pool threads) */
+    /* exact-response kicks */
     for (int k = 0; k < M; k++) {
         const double *Pr = s->phiF + (size_t)k * J;
         double im = 0.0;
@@ -1652,6 +1458,8 @@ sav_build:
     return 1;
 }
 
+/* render one modal slot, ACCUMULATING into out (deep_ok unused;
+   returns 0) */
 static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
                           int deep_ok)
 {
@@ -1707,12 +1515,7 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
             }
         }
         double fth = 0.0;
-        /* SAV modal contact (2026-08-03d, ratified): one damped
-           rotation + zone eval + non-iterative energy-stable solve
-           per internal sample. The perma/forceDeep/dynamic-deep
-           machinery, the rewind snapshot, and the pen dispatch are
-           all DEAD — passivity is structural (midpoint-g SAV with
-           approach-only viscosity; see tp_sav_contact). */
+        /* damped rotation, zone eval, SAV solve */
         {
             double *restrict q = s->q, *restrict pp = s->p;
             const double *restrict ca = s->ca, *restrict cb = s->cb,
@@ -1731,8 +1534,7 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
                                              th_on ? &fth : 0,
                                              rt_on ? Fn : 0);
             if (fired && rt_on) {
-                /* lateral reaction -(w/R_t)*F_n onto the w bank
-                   (the offline SAV A/B path, ratified) */
+                /* lateral reaction -(w/R_t)*F_n onto the w bank */
                 for (int k = 0; k < M; k++) {
                     const double *Pr = s->phiF + (size_t)k * J;
                     double s2 = 0.0;
@@ -1745,8 +1547,7 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
         }
         }
         if (th_on && !s->demoted) {
-            /* thread 1-DOF update (exact rotation, ZOH footprint
-               force; clamped +-thH — the bistable-edge guard) */
+            /* thread 1-DOF update, clamped +-thH */
             const double zk = s->thz, vk = s->thv;
             s->thz = s->thCa * zk + s->thCb * (vk / s->thWd);
             s->thv = -s->thCb * (s->thWd * zk) + s->thCa * vk;
@@ -1782,10 +1583,8 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
             }
         }
         if (s->relMul < 1.0) {
-            /* NOTE-OFF RELEASE: extra broadband decay toward the
-               SETTLED WRAP (q -> q0, momenta -> 0) — never toward
-               zero, which would lift the string off the bone. The
-               demoted state already holds the deviation from q0. */
+            /* release: decay toward the SETTLED WRAP (never toward
+               zero — that would lift the string off the bone) */
             const double m = s->relMul;
             double *restrict q = s->q, *restrict pp = s->p;
             double *restrict qw = s->qw, *restrict pw = s->pw;
@@ -1813,10 +1612,7 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
             double ao = fabs(o);
             if (ao > peak) peak = ao;
             if (s->ghostOn) {
-                /* GHOST BANK: one output-rate linear rotation per
-                   bank (frozen tables) + the frozen pol mix — the
-                   previous notes ringing out at their own pitches
-                   and t60s, no contact */
+                /* ghost bank: output-rate linear rotation, frozen tables */
                 double og = 0.0;
                 {
                     double *restrict q = s->gq, *restrict pp = s->gp;
@@ -1890,24 +1686,12 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
         if (s->ghost_env < 1e-3) s->ghostOn = 0;
     }
     s->idle_env = peak > s->idle_env ? peak : s->idle_env * 0.98;
-    /* auto-idle at MUSICAL silence (~-86 dBFS post gain+FIR), not
-       1e-7: the float contact limit cycle floors ~1e-4, so a 1e-7
-       bar meant slots NEVER idled and cost accumulated with every
-       note ever played (2026-08-03 choppy-under-polyphony bug) */
+    /* auto-idle at musical silence (~-86 dBFS post chain) */
     if (s->idle_env < 1e-3 && !s->ghostOn) s->active = 0;
-    /* STAGNATION idle (2026-08-03b): under-resolved contact can
-       floor at a quiet limit cycle ABOVE the level bar (measured
-       -55 dB at 587 Hz/M150 — inaudible post-chain, but a permanent
-       96k solve). Compare against a ~2 s-old envelope reference —
-       the floor env WOBBLES a few % block-to-block, so a
-       per-block no-decay test never fires; the long-window trend
-       does. Quiet + <1 dB decay per window = stuck floor: cull.
-       (A live ghost holds the slot active either way — the ring-out
-       must finish; the ghost is linear and cannot stagnate.) */
+    /* stagnation idle: an under-resolved contact can floor at a quiet
+       limit cycle ABOVE the level bar; quiet + <1 dB decay over a ~2 s
+       window = stuck, cull (a live ghost keeps the slot active). */
     if (++s->stagn >= 180) {
-        /* bar 1e-2 (-40 dB kernel ~= -74 dBFS post-chain): the
-           highest measured stuck floors (-43 dB at 880 Hz) must
-           qualify; the cut lands well under perception */
         if (s->idle_env < 1e-2 && s->envPrev > 0.0
             && s->idle_env > 0.89 * s->envPrev && !s->ghostOn)
             s->active = 0;
@@ -1917,7 +1701,7 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
     return went_deep;
 }
 
-/* SYNC render (tests/bench/serial fallback): deep budget applies */
+/* SYNC render (tests/bench/serial fallback) */
 void tanpura_render(void *vc, int n, double *out)
 {
     tp_ctx *c = (tp_ctx *)vc;
@@ -1936,11 +1720,9 @@ long tanpura_reset_count(void *vc)
     return __atomic_load_n(&c->resets, __ATOMIC_RELAXED);
 }
 
-/* ---- async one-block-late pool (the jt live pattern): the audio
-   callback RECORDS note events + READS completed audio; a dispatcher
-   thread drains events and renders the next block with the worker
-   pool on its own time. Constant one-block latency; overload
-   fade-fills and counts an underrun instead of glitching. ---- */
+/* ---- async one-block-late pool: the callback RECORDS events + READS
+   completed audio; the dispatcher drains events and renders the next
+   block with the workers. Overload fade-fills + counts an underrun. */
 
 static void tp_drain_events(tp_ctx *c)
 {
@@ -1972,9 +1754,7 @@ static void tp_drain_events(tp_ctx *c)
                 continue;
             }
             if (amp < 0.0) { tanpura_damp((void *)c, slot); continue; }
-            /* op 0 note: same body as the sync entry point
-               (migration, drive, fd ramp, demote-promotion,
-               injection, cap) */
+            /* op 0 note: the sync entry point's body */
             tanpura_pluck((void *)c, slot, amp);
         }
     }
@@ -2002,11 +1782,8 @@ static void *tp_worker_run(void *va)
         double *buf = c->wBuf + (size_t)idx * TP_ABLK;
         memset(buf, 0, sizeof(double) * (size_t)n);
         (void)per;
-        /* WORK-STEALING over the heavy-first active list (2026-08-03b):
-           the old static round-robin paired slots blindly — with
-           mixed costs (high notes ~1x RT alone) an unlucky pair blew
-           the block period while other workers idled. Greedy
-           heavy-first stealing bounds the makespan near max(slot). */
+        /* work-stealing over the heavy-first list bounds the makespan
+           near max(slot) */
         for (;;) {
             const int i = __atomic_fetch_add(&c->wCursor, 1,
                                              __ATOMIC_RELAXED);
@@ -2019,8 +1796,7 @@ static void *tp_worker_run(void *va)
             const double el = ((double)(t1.tv_sec - t0.tv_sec)
                 + 1e-9 * (double)(t1.tv_nsec - t0.tv_nsec))
                 / (double)(n > 0 ? n : 1);
-            /* rise fast (overload must register within ~2 blocks),
-               decay slow (jitter spikes shouldn't steal voices) */
+            /* rise fast, decay slow (jitter spikes must not steal voices) */
             s->costEma = el > s->costEma
                 ? 0.5 * s->costEma + 0.5 * el
                 : 0.9 * s->costEma + 0.1 * el;
@@ -2035,9 +1811,7 @@ static void *tp_worker_run(void *va)
 
 static void tp_shed_quietest(tp_ctx *c)
 {
-    /* never below 2 voices (a tanpura that goes MUTE under load is
-       worse than one that dips), never the most recent pluck (the
-       note just played must sound) */
+    /* never below 2 voices, never the most recent pluck */
     int qi = -1, nact = 0;
     double qe = 1e30;
     for (int k = 0; k < c->nslots; k++) {
@@ -2090,21 +1864,12 @@ static void tp_run_job(tp_ctx *c, int n)
         c->outRing[(w + t) & (TP_OUTN - 1)] = acc;
     }
     __atomic_store_n(&c->outW, w + n, __ATOMIC_RELEASE);
-    /* UNDERRUN-FEEDBACK CONTROLLER (2026-08-03b — the third design;
-       the first two mis-fired: makespan thresholds sit inside one
-       heavy note's normal range, and ring slack GROWS during
-       sustained underrun because failed callbacks don't consume).
-       The underrun counter is the ground truth: while it's
-       incrementing, shed the quietest voice, one per block, until
-       the instrument fits the machine. The pluck-time budget bar
-       (accurate pen0-informed seeds) pre-sheds the egregious so
-       this trims, not rescues. */
+    /* underrun feedback: while the counter increments, shed the
+       quietest voice (one per burst) until the instrument fits the
+       machine — the pluck-time budget pre-sheds, this trims */
     {
         const long ur = __atomic_load_n(&c->underruns,
                                         __ATOMIC_RELAXED);
-        /* rate-limited: an underrun BURST is one overload event —
-           shedding once per burst-window keeps a 4-block burst from
-           killing 4 voices */
         if (ur > c->lastUr) {
             if (++c->overN >= 3) {
                 tp_shed_quietest(c);
@@ -2136,13 +1901,8 @@ static void *tp_dispatch_run(void *va)
             pthread_cond_timedwait(&c->cvW, &c->mx, &ts);
         }
         if (c->quit) break;
-        /* JOB BATCHING (2026-08-03b): fold ALL queued jobs into one
-           pool run. At the M150/x4 chord load the heaviest slot
-           alone is ~0.96x the block period, leaving <0.5 ms for
-           wake/join/sum overheads — jitter starved the pool one
-           block at a time and the deficit compounded. Batching N
-           queued blocks pays those overheads once per batch; the
-           1536-sample prefill covers the extra in-flight depth. */
+        /* batch all queued jobs into one pool run: wake/join/sum
+           overheads paid once per batch */
         int n = 0;
         long long jr = c->jobR;
         const long long jw =
@@ -2161,8 +1921,8 @@ static void *tp_dispatch_run(void *va)
     return NULL;
 }
 
-/* arm the pool (call at engine build, NEVER on the audio thread).
-   nworkers < 2 keeps the serial sync path. */
+/* arm the pool at engine build (NEVER on the audio thread); nworkers < 2
+   keeps the serial sync path */
 void tanpura_set_threads(void *vc, int nworkers)
 {
     tp_ctx *c = (tp_ctx *)vc;
@@ -2179,15 +1939,8 @@ void tanpura_set_threads(void *vc, int nworkers)
                                * (size_t)nworkers * TP_ABLK);
     c->deep_budget = 1 << 30;         /* pool path: no degradation */
     c->gen = 0; c->done = 0; c->quit = 0;
-    /* prefill one block of silence: the callback then carries a block
-       of ring slack beyond the in-flight job — transient absorption
-       for chord plucks at +~21 ms total latency (fine for a plucked
-       drone; the paced gate holds underruns to the startup fill) */
-    /* three blocks of slack (was 1024 = 2): the M150/x4-deep config
-       runs the 8-note chord at ~5x RT total — a per-block makespan
-       ~0.9-1.0x the period, where scheduler jitter alone caused
-       ~100 underruns in the 6 s gate. Latency 21 -> ~32 ms on the
-       plucked drone only (the earlier 21 ms precedent: inaudible). */
+    /* prefill three blocks of silence: ring slack for chord-pluck
+       transients (~32 ms total latency, inaudible on a plucked drone) */
     memset(c->outRing, 0, sizeof(double) * 1536);
     c->outW = 1536;
     c->poolN = nworkers;
@@ -2206,10 +1959,8 @@ long tanpura_underruns(void *vc)
                            __ATOMIC_RELAXED);
 }
 
-/* enqueue a note event (audio/MIDI thread safe — SPSC vs the
-   dispatcher; the Swift engine serializes producers). amp < 0 damps
-   the slot; slot -1 damps all. Pool path only — the sync path
-   mutates slots directly via tanpura_pluck/tanpura_damp. */
+/* enqueue a note event — SPSC vs the dispatcher (the Swift engine
+   serializes producers). Pool path only. */
 void tanpura_event2(void *vc, int slot, int op, double val)
 {
     tp_ctx *c = (tp_ctx *)vc;
@@ -2228,8 +1979,8 @@ void tanpura_event(void *vc, int slot, double amp)
     tanpura_event2(vc, slot, 0, amp);
 }
 
-/* the async callback: read one block of COMPLETED audio (fade-fill
-   an underrun), then enqueue the render of the next block. */
+/* async callback: read one block of COMPLETED audio (fade-fill an
+   underrun), enqueue the next */
 void tanpura_render_async(void *vc, int n, double *out)
 {
     tp_ctx *c = (tp_ctx *)vc;
@@ -2247,8 +1998,7 @@ void tanpura_render_async(void *vc, int n, double *out)
         }
         c->outR = r + n;
     } else {
-        /* underrun (startup fill or overload): fade the last sample
-           to zero instead of glitching */
+        /* underrun (startup fill or overload): fade out, no glitch */
         double v = c->lastOut;
         for (int t = 0; t < n; t++) {
             v *= 0.999;

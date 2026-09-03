@@ -66,6 +66,6 @@ final class DroneStringTests: XCTestCase {
         XCTAssertEqual(redecoded.droneStringIds[0], state.droneStringIds[0])
     }
 
-    // MARK: - Controller strum set (2026-08-27)
+    // MARK: - Controller strum set
 
 }

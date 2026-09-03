@@ -17,9 +17,7 @@ struct MacMainWindow: View {
         return .live
     }()
 
-    /// 2026-07-24 parameter unification: the Sarangi tab is gone — its
-    /// physics sliders merged into the one Parameters list (which also
-    /// carries the preset toolbar it used to own).
+    /// The Mac's tabs, in ⌘-number order.
     enum Tab: String, Hashable, CaseIterable {
         case live = "Live"
         case strings = "Strings"
@@ -28,10 +26,10 @@ struct MacMainWindow: View {
         case parameters = "Parameters"
         case fx = "FX"
         case setup = "Setup"
-        /// 2026-09-01: the performance scope — touched vs sounding
+        /// the performance scope — touched vs sounding
         /// pitches and every taraf row's level + harmonic character.
         case scope = "Scope"
-        /// 2026-09-02: the per-row taraf panel — level, radiated vs modal
+        /// the per-row taraf panel — level, radiated vs modal
         /// spectra, the radiation-tap comb.
         case taraf = "Taraf"
     }

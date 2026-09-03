@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-// MARK: - Chord bar (2026-08-28)
+// MARK: - Chord bar
 //
 // The **chord bar** fills the dead space BELOW the Fret Pad's playable band:
 // the same horizontal layout as the frets, but each fret's column carries a
@@ -9,7 +9,7 @@ import Foundation
 // fret's degree, built from the configured scale itself. Tapping a cell
 // selects that chord as what the controller strum (Joy-Con L / the accel
 // trigger) plays; tapping any cell of the already-selected degree
-// deselects it (selection is octave-agnostic since 2026-08-30 — see
+// deselects it (selection is octave-agnostic  — see
 // `ChordSelection` and the Shepard register law below), and with nothing
 // selected the strum falls back to the Strings tab's configured strum set
 // (default low Sa · low Pa).
@@ -172,7 +172,7 @@ public func scaleChords(
 
 // MARK: - Selection
 
-/// The active strum chord. OCTAVE-AGNOSTIC since 2026-08-30: a chord is a
+/// The active strum chord. OCTAVE-AGNOSTIC  a chord is a
 /// pitch-CLASS object — tapping any Sa cell selects the same I chord, all
 /// cells of the degree highlight, and the sound is fixed in register by
 /// the Shepard construction (`shepardChordNotes`), not by which octave's
@@ -191,7 +191,7 @@ public struct ChordSelection: Equatable, Sendable {
     }
 }
 
-// MARK: - Shepard register law (2026-08-30)
+// MARK: - Shepard register law
 
 /// The chord bar's REGISTER LAW: chords sound CENTERED IN THE OCTAVE BELOW
 /// THE TONIC, Shepard-style, regardless of which degree they root on — a

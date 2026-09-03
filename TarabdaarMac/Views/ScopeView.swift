@@ -2,7 +2,7 @@ import SarangiKit
 import TarabdaarCore
 import SwiftUI
 
-/// The **Scope** tab (⌘8, 2026-09-01): the performance at a glance.
+/// The **Scope** tab (⌘8): the performance at a glance.
 ///
 /// One **pitch field** — time along x (a fixed 8 s window scrolling
 /// smoothly, the Live tab's law), log-frequency along y with the scale's
@@ -13,7 +13,7 @@ import SwiftUI
 ///   currentTouches`) — a parked or queued finger shows here even while
 ///   the voice sounds somewhere else.
 /// - **Sounding** pitches of the MAIN VOICE (magma by level — the shared
-///   `ScopeColor.level` ramp, 2026-09-02): one trajectory per physical
+///   `ScopeColor.level` ramp): one trajectory per physical
 ///   string — the bowed slots' target pitch and ring envelope, or the
 ///   plucked instrument's strings at their bent pitch, ringing on after
 ///   the touch lifts. Held strings draw thick, released ones thin.
@@ -26,10 +26,10 @@ import SwiftUI
 ///   melody follower's lane moves with the played note.
 ///
 /// The per-row taraf panel (level, radiated + modal spectra, brightness)
-/// lives on its own **Taraf** tab (⌘9, `TarafScopeView.swift`) since
-/// 2026-09-02; both tabs share `ScopeModel`.
+/// lives on its own **Taraf** tab (⌘9, `TarafScopeView.swift`); both
+/// tabs share `ScopeModel`.
 ///
-/// Drawing (2026-09-02 de-jitter): samples at 60 Hz, redraw at display
+/// Drawing: samples at 60 Hz, redraw at display
 /// rate; every trace is ONE stroke per contiguous run — a Catmull-Rom
 /// spline (pitch lines) or a polyline (lanes) filled with a linear
 /// gradient whose stops are the per-sample colours — so neither the
@@ -97,7 +97,7 @@ private struct LegendSwatch: View {
 
 enum ScopePalette {
     /// Taraf lane colour: HUE by harmonic character (amber → lime →
-    /// cyan-blue), LUMINANCE by level (2026-09-02 — was opacity).
+    /// cyan-blue), LUMINANCE by level.
     static func taraf(level: Double, bright: Double) -> Color {
         let b = min(1, max(0, bright))
         let l = min(1, max(0, level))

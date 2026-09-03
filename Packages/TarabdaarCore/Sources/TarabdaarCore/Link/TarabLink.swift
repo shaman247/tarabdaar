@@ -1,20 +1,14 @@
 import Foundation
 
-/// The link facade: ONE protocol (TLP) over the CoreMIDI SysEx tunnel on
-/// both legs — the USB session when wired, the BLE-MIDI session otherwise.
-/// Lane selection is inherited from `MIDIEngine`'s wired-first destination
-/// routing, so there is no lane state machine here; sequence dedupe covers
-/// the brief overlap when both legs deliver during a plug/unplug switch.
-///
-/// All internal state is confined to the serial link queue
-/// (`userInteractive`). Producers call thread-safe entry points; receive
-/// callbacks (`onPerfState`/`onJoyConState`/`onEvent`/`onStatus`/
-/// `onLinkDrop`) fire ON the link queue — hop to main yourself for UI.
+/// The link facade: TLP over the CoreMIDI SysEx tunnel — USB when wired,
+/// BLE-MIDI otherwise (`MIDIEngine`'s wired-first routing; sequence dedupe
+/// covers the plug/unplug overlap). All state lives on the serial link
+/// queue; entry points are thread-safe and receive callbacks fire ON the
+/// link queue — hop to main yourself for UI.
 ///
 /// The paced sender runs at 120 Hz: at most one fresh PERF_STATE (pad) or
 /// JOYCON_STATE (host) frame per tick, a 250 ms heartbeat when idle (the
-/// far side marks the link stale after 1.5 s of silence), and a 2 s
-/// ping/pong for the RTT + clock-offset estimate.
+/// far side marks the link stale after 1.5 s), and a 2 s ping/pong RTT.
 public final class TarabLink {
 
     public struct Status: Equatable {
@@ -33,18 +27,15 @@ public final class TarabLink {
     private var clockSync = LinkClockSync()
 
     // Wiring (set before start()).
-    /// Sends one complete SysEx message. `isEvent` = reliable traffic —
-    /// the Mac side passes it as `fallbackToAll` so a renamed endpoint
-    /// can't silently block a must-arrive sync, while state streams just
-    /// drop when the peer is absent.
+    /// Sends one complete SysEx message. `isEvent` = reliable traffic (sent
+    /// `fallbackToAll` so a renamed endpoint can't block a sync).
     public var sendRaw: ((_ sysex: [UInt8], _ isEvent: Bool) -> Void)?
     public var onPerfState: ((TLPPerfState) -> Void)?
     public var onJoyConState: ((TLPJoyConState) -> Void)?
     public var onEvent: ((TLPEvent) -> Void)?
     public var onStatus: ((Status) -> Void)?
-    /// Fired once when the link goes stale or down while anything might be
-    /// held — the Mac wires this to `LinkIngest.linkDidDrop` (the kill
-    /// path).
+    /// Fired once when the link goes stale — the Mac wires this to
+    /// `LinkIngest.linkDidDrop` (the kill path).
     public var onLinkDrop: (() -> Void)?
 
     // Link-queue state.
@@ -72,9 +63,8 @@ public final class TarabLink {
         self.role = role
     }
 
-    /// Pad role: the outbound snapshot the paced sender serializes. The
-    /// 120 Hz tick polls the dirty flag, so a touch burst costs O(1) locked
-    /// writes and at most one frame per tick reaches the wire.
+    /// Pad role: the outbound snapshot the paced sender serializes (the
+    /// tick polls its dirty flag — at most one frame per tick).
     public func attach(playState state: OutboundPlayState) {
         queue.async { self.playState = state }
     }
@@ -104,10 +94,8 @@ public final class TarabLink {
         }
     }
 
-    /// A transport (re)appeared — CoreMIDI setup change. Re-greets and,
-    /// on the pad, asks the host for a full resync. Throttled to one per
-    /// second: kick is an edge signal, and a caller bug that fires it per
-    /// frame must not be able to storm the wire with resync→push cycles.
+    /// A transport (re)appeared: re-greet and (pad) request a resync.
+    /// Throttled to one per second so it can never storm the wire.
     public func kick() {
         queue.async {
             let now = LinkClock.nowUs()
@@ -131,8 +119,8 @@ public final class TarabLink {
         }
     }
 
-    /// Host role: latest Joy-Con display state; the paced sender emits it
-    /// coalesced. `force` skips pacing (connect edges acting as state).
+    /// Host role: latest Joy-Con display state, emitted coalesced. `force`
+    /// skips pacing.
     public func setJoyConState(_ display: JoyConTiltDisplay, force: Bool = false) {
         queue.async {
             self.joyCon = display
@@ -141,18 +129,16 @@ public final class TarabLink {
         }
     }
 
-    /// Host role: the latest voice/taraf VOLUME READOUT bytes (TLP v9,
-    /// `TLPVolume` log mapping) — they ride every JOYCON_STATE frame.
-    /// Change-gated here, so a silent instrument dirties nothing and the
-    /// heartbeat alone re-delivers the resting 0s.
+    /// Host role: the voice/taraf volume-readout bytes riding every
+    /// JOYCON_STATE frame. Change-gated, so a silent instrument dirties
+    /// nothing.
     public func setVolumeLevels(voice: UInt8, taraf: UInt8) {
         queue.async {
             guard voice != self.volVoice || taraf != self.volTaraf
             else { return }
             self.volVoice = voice
             self.volTaraf = taraf
-            // The frame needs a display to ride — seed the idle one if
-            // no Joy-Con state was ever set (emit guards on nil).
+            // The frame needs a display to ride — seed the idle one.
             if self.joyCon == nil { self.joyCon = .idle }
             self.joyConDirty = true
         }
@@ -160,8 +146,7 @@ public final class TarabLink {
     private var volVoice: UInt8 = 0
     private var volTaraf: UInt8 = 0
 
-    /// Complete inbound SysEx (F0…F7) from either leg's receiver.
-    /// Non-TLP messages are ignored. Any thread.
+    /// Complete inbound SysEx (F0…F7) from either leg; non-TLP ignored.
     public func receivedSysEx(_ sysex: [UInt8]) {
         queue.async { self.processIncomingLocked(sysex) }
     }
@@ -170,7 +155,6 @@ public final class TarabLink {
 
     private func tick() {
         let now = LinkClock.nowUs()
-        // Pad: perf state — dirty, else heartbeat.
         if role == .pad, let state = playState {
             let heartbeat = LinkClock.elapsedUs(from: lastSentUs, to: now)
                 >= TarabLink.heartbeatUs
@@ -179,7 +163,6 @@ public final class TarabLink {
                 outbox.enqueue(.perfState(frame))
             }
         }
-        // Host: joycon state — dirty, else heartbeat.
         if role == .host {
             let heartbeat = LinkClock.elapsedUs(from: lastSentUs, to: now)
                 >= TarabLink.heartbeatUs
@@ -207,7 +190,7 @@ public final class TarabLink {
         guard let j = joyCon else { return }
         joyConDirty = false
         joyConSeq &+= 1
-        // Display axes −1…+1 → the frame's u8 (centre 128).
+        // Axes −1…+1 → u8 (centre 128).
         func b(_ v: Double) -> UInt8 {
             UInt8((min(max(v, -1), 1) + 1) / 2 * 255.0 + 0.5)
         }
@@ -222,8 +205,8 @@ public final class TarabLink {
             stickX: b(j.stickX), stickY: b(j.stickY),
             wrist1: b(j.wrist1), wrist2: b(j.wrist2), wrist3: b(j.wrist3),
             arm1: b(j.arm1), arm2: b(j.arm2), arm3: b(j.arm3),
-            // Blend window → 50 ms wire units (v7), floor 1 so a tiny
-            // configured window never encodes as the "unset" 0.
+            // 50 ms units, floor 1 so a tiny window never encodes as
+            // "unset" 0.
             strikeWin: UInt8(min(max((j.strikeWindowS / 0.05).rounded(),
                                      1), 255)),
             volVoice: volVoice, volTaraf: volTaraf,
@@ -238,7 +221,7 @@ public final class TarabLink {
 
     private func sendHelloLocked() {
         let now = LinkClock.nowUs()
-        // Greeting throttle: a hello-reply-to-hello must not ping-pong.
+        // A hello-reply-to-hello must not ping-pong.
         if let last = lastHelloSentUs,
            LinkClock.elapsedUs(from: last, to: now) < 1_000_000 { return }
         lastHelloSentUs = now
@@ -259,11 +242,10 @@ public final class TarabLink {
 
     private func processIncomingLocked(_ sysex: [UInt8]) {
         guard let (senderRole, bytes) = TLPPack.unenvelope(sysex),
-              // Our own traffic can echo back through a MIDI loop (IAC
-              // bus, patchbays, USB+BLE double delivery). Drop it — a
-              // looped hello must never mark the link up (that arms the
-              // staleness kill path with no peer), and looped events must
-              // never pollute the peer's sequence gating.
+              // Our own traffic can echo back through a MIDI loop. Drop
+              // it — a looped hello must never mark the link up (that arms
+              // the staleness kill path with no peer), and looped events
+              // must never pollute the sequence gating.
               senderRole != role,
               let frame = TLPFrame.decode(bytes) else { return }
         lastReceiveUs = LinkClock.nowUs()
@@ -271,10 +253,8 @@ public final class TarabLink {
             status.isStale = false
             onStatus?(status)
         }
-        // Self-healing handshake: the peer is clearly alive (a valid frame
-        // just arrived), but we haven't completed HELLO — keep greeting
-        // (1 s-throttled) until its hello lands. Covers every launch-order
-        // race: whichever side is down keeps asking.
+        // Self-healing handshake: a valid frame arrived but HELLO is not
+        // complete — keep greeting (1 s-throttled) until its hello lands.
         if !status.isUp {
             sendHelloLocked()
             drainLocked()
@@ -288,8 +268,8 @@ public final class TarabLink {
             onJoyConState?(s)
         case .event(let seq, let event):
             if case .hello = event {
-                // A hello is a stream epoch: the peer (re)started, its
-                // sequence spaces reset. Always accept, re-anchor gating.
+                // A hello is a stream epoch: the peer's sequence spaces
+                // reset. Always accept, re-anchor gating.
                 lastEventSeqSeen = seq
                 lastStateSeqSeen.removeAll(keepingCapacity: true)
             } else {
@@ -312,20 +292,16 @@ public final class TarabLink {
     private func handleEventLocked(_ event: TLPEvent) {
         switch event {
         case .hello(let minVer, let maxVer, _):
-            // Proper range intersection — a one-sided check let a newer
-            // peer come "up" against an older one whose frames it could
-            // no longer decode.
+            // Range intersection: a one-sided check would let a newer peer
+            // come "up" against one whose frames it cannot decode.
             let compatible = minVer <= TLP.versionMax
                 && maxVer >= TLP.versionMin
             let wasUp = status.isUp
             status.isUp = compatible
             status.remoteVersionMax = maxVer
             if !wasUp || !compatible { onStatus?(status) }
-            // Always greet back (the 1 s throttle in sendHelloLocked
-            // terminates any reply chain after one round trip). Gating
-            // this on the up-transition once left a relaunched peer down
-            // forever: the other side was already up, never replied, and
-            // the newcomer had no way to learn the link existed.
+            // Always greet back (the 1 s throttle ends the chain). Never
+            // gate on the up-transition: a relaunched peer would stay down.
             sendHelloLocked()
             drainLocked()
         case .ping(let id, let t1):

@@ -1,29 +1,15 @@
-/* POLYPHONIC bow kernel (2026-07-16) — app-side extension, NOT part of the
-   src/bowstring.py C_SRC byte-parity twin (bow_kernel.c stays untouched).
+/* POLYPHONIC bow kernel: nb bowed gut strings on ONE bridge. Per sample
+   every active string runs the bow-string section (friction contacts,
+   thermal rosin, contact noise, terminations, gut loss/dispersion) on its
+   OWN delay lines; the forces sum into the bridge force F, the taraf web +
+   modal body solve V, and every string takes the same bridge velocity back
+   through its gated kret return.
 
-   nb independent bowed gut strings share ONE bridge on ONE instrument:
-   per sample every active string runs the mono kernel's bow-string section
-   verbatim (friction contacts, thermal rosin, contact noise, nut/bridge
-   terminations, gut loss/dispersion) against its OWN delay lines, their
-   transmitted forces sum into the single bridge force F, the one taraf web
-   + modal body solve V from that sum, and each string then receives the
-   same bridge velocity back through its own gated kret return. The bridge
-   displacement FM (kdisp*disp) is shared — one bridge moves every string's
-   termination.
-
-   STABILITY (the one deliberate physics change vs the mono law): in the
-   passive-junction topology the mono kernel loads the bridge with
-   -zload*bowW*Z*Vprev (one-sample delay). The delayed form's per-sample
-   feedback jy0*nb*zZb crosses 1 at nb=4 with the fitted body (measured
-   jy0 = 0.204, zZb = 1.196) — the poly kernel instead folds the processed
-   strings' loading into the DELAY-FREE junction solve:
+   STABILITY LAW: in the passive-junction topology the strings' loading is
+   folded into the DELAY-FREE junction solve
        V = (Vstate + jy0*F0) / (1 + jy0*(jzsum + nProc*zZb))
-   which is structurally passive at any polyphony (same -Z*V physics, same
-   algebra as the taraf junction). With V == 0 (the generic string's rigid
-   bridge) poly and mono are arithmetically identical per string.
-
-   Strings that have decayed to silence are skipped whole (their state is
-   zero — skipping is exact); the host can query bow_poly_active(). */
+   — passive at any polyphony (a delayed load crosses unity at nb=4).
+   Silent strings are skipped whole (exact: their state is zero). */
 
 #include <math.h>
 #include <stdlib.h>
@@ -45,7 +31,7 @@ static double pfrac_read(const double *buf, int n, int w, double delay) {
     return buf[i0 % n] * (1.0 - fr) + buf[i1] * fr;
 }
 
-/* per-string cross-sample state — the mono kernel's bow-string fields */
+/* per-string cross-sample state */
 typedef struct {
     double buf1[MAXBOW], buf2[MAXBOW];
     double bufAB[64], bufBA[64];
@@ -61,52 +47,25 @@ typedef struct {
     double Tr3[3];
     double kGate;
     double senv;        /* chunk peak of |brLp| — ring envelope for skip */
-    /* torsional wave loop (2026-07-16j; mono-kernel port, per string) */
+    /* torsional wave loop */
     double bufT[MAXBOW];
     int wti;
-    /* rate-and-state contact aging (2026-07-17g; mono-kernel port,
-       per string): strength deficit, ageA at slip / unloaded, decays by
-       ageDk per stick sample. ageA = 0 is BIT-NULL. */
+    /* rate-and-state contact aging: strength deficit, ageA at slip / unloaded,
+       decays by ageDk per stick sample. ageA = 0 is bit-null. */
     double ageDef, ageDef3[3];
     double hairLp, hairLp3[3];
-    /* continuum-release contact (2026-07-19d; mono-kernel port, per
-       string): stuck fraction of the hair band per contact site,
-       relaxing toward s_eq(|demand|/grip) with release-only tau.
-       crW = crMs = 0 is BIT-NULL (branch-gated). */
+    /* continuum-release contact: stuck fraction per contact site relaxing
+       toward s_eq(|demand|/grip), release-only tau. crW = crMs = 0 is
+       bit-null. */
     double crS, crSB, crS3[3];
-    /* Tarabdaar SITAR TWANG (2026-08-01): fast-attack / slow-release
-       PER-SIDE peak envelopes of the bridge-reflected wave — the
-       self-adjusting graze knee references (see poly_string_return).
-       Two sides because a bowed loop settles its Helmholtz wrap on
-       either polarity and slides AWAY from a one-sided fold (measured:
-       the lobe flipped -0.44 → +0.43 when the fold changed sides); a
-       graze that rides each side's own envelope leaves no escape
-       configuration. twD is the smoothed rolling-contact length
-       shortening (samples) — the conservative wrap (see
-       poly_string_return) — and twDb its slow (~80 ms) mean: the read
-       applies twD - twDb, so the PM keeps its cascade (AC) while the
-       mean shortening (DC ≈ +7…18 cents sharp at useful wrap depths)
-       cancels; the tracker's onset lag leaves a brief natural
-       sharpening, like a real pluck settling onto the bone. State only
-       while the twang is disarmed. */
+    /* SITAR TWANG: per-side peak envelopes of the reflected wave (the graze
+       knee references); twD = smoothed wrap shortening (samples), twDb its
+       slow mean (the read applies twD - twDb). All rest at 0 while disarmed. */
     double twEnvP, twEnvN, twD, twDb;
-    /* Tarabdaar SLIDE TRACKER (2026-08-24): slF = previous f0 sample,
-       slD = the SIGNED 10 ms delta smoother (≈ finger slew), slEnv =
-       0..1 SLEW envelope for the dulling (15 ms attack / 120 ms release
-       on r/(r+rate), 80 c/s drive floor so OU drift never arms it and
-       the parity phrase stays bit-exact under baked defaults).
-       ACCELERATION chain (the v2 finger noise, 2026-08-24 evening —
-       the v1 slew-driven noise hissed steadily through a constant-rate
-       slide, unrelated to the gesture, and was cut by ear the same
-       afternoon): slA = a second SIGNED 10 ms smoother on ΔslD (the
-       slew's own derivative), slEnvA = 0..1 ACCEL envelope (10 ms
-       attack / 100 ms release, 6000 c/s² floor — the drift's smoothed
-       accel jitter measures σ≈1500 c/s², so steady notes never draw a
-       noise sample), slLp = the finger-noise one-pole, slRng = a
-       per-slot xorshift64 stream of its own. Noise sounds where the
-       finger STARTS, STOPS or turns — a constant-rate meend is quiet
-       in the middle. Everything rests at 0, branch-gated on the two
-       keys — bit-null while disarmed. */
+    /* SLIDE TRACKER: slF = previous f0, slD/slEnv = signed slew smoother +
+       0..1 dulling envelope, slA/slEnvA = signed accel smoother + 0..1 noise
+       envelope, slLp = finger-noise one-pole, slRng = per-slot xorshift64.
+       All rest at 0, branch-gated — bit-null while disarmed. */
     double slF, slD, slEnv, slA, slEnvA, slLp;
     unsigned long long slRng;
     int slFValid;
@@ -139,280 +98,155 @@ typedef struct {
     double jawRho;
     double jawRoll, jawRollAmp;
     double lossReg;   /* register damping: loop-corner scaling below f0Open */
-    double slideRate, slideDull;         /* slide dulling (2026-08-24) */
-    double slideNoise, slideAcc;         /* accel-driven finger noise (v2) */
-    /* Tarabdaar TILT purity: runtime web-jawari BUZZ scale (multiplies
-       the buzz sources jn/jw; the jl LOSS stays full — see mono). */
+    double slideRate, slideDull;         /* slide dulling */
+    double slideNoise, slideAcc;         /* accel-driven finger noise */
+    /* runtime web-jawari BUZZ scale (scales jn/jw; the jl LOSS stays full) */
     double jawG;
     double *rollD, *rollE, *rollAv;
-    /* DRIVEN-UNISON TAP DUCK (mono-kernel port; tuw 1.0 = off/bit-null):
-       while ANY bowing slot sits within ~30 c of a voice's partial
-       coincidence, that voice's direct-tap weight ducks toward tuw. */
+    /* DRIVEN-UNISON TAP DUCK (tuw 1.0 = off/bit-null): while any bowing slot
+       sits within ~30 c of a voice's partial coincidence, that voice's
+       direct-tap weight ducks toward tuw. */
     double tuw;
     double *fv, *dwt, *dtg;
     /* --- derived constants --- */
-    /* ---- MODAL-JAWARI sympathetic strings (2026-07-21) ----
-       The validated tanpura-evolution physics (scripts/tanpura_modal.py
-       is the reference twin): per string a MODAL-EXACT stiff steel
-       string (precomputed damped-rotation tables ca/cb + wd, quarter-
-       step ca4/cb4) over a curved grazing bone sampled at J zone
-       points; contact = the compliance-consistent IMPLICIT solve
-       (vector Newton on the diagonal, UNDER-RELAXED outer off-diagonal
-       lag) with dissipative-only Hunt-Crossley damping and dt/4
-       SUBSTEPPING at deep engagement (penetration > jtDeep). Driven
-       ONE-WAY by the PREVIOUS sample's junction bridge force (1-sample
-       lag = zero stability interaction with the passive web); radiates
-       through its own gain (the jawari taraf sit on their own bridge —
-       the tdir rationale). All dt-dependence lives in the PRECOMPUTED
-       tables (builders own it; C only applies). Loaded by bow_jt_load
-       AFTER bow_init (the body-table pattern — init signature, the
-       scalar vector and every existing golden untouched). njt == 0 or
-       jtGain == 0: the block never runs, jtFprev never updates —
-       BYTE-NULL by construction. */
+    /* ---- MODAL-JAWARI sympathetic strings: per row a modal-exact stiff
+       string (precomputed rotation tables ca/cb + wd, quarter-step ca4/cb4)
+       over a grazing bone sampled at J zone points; implicit Hunt-Crossley
+       contact with dt/4 substepping past jtDeep; driven ONE-WAY by the previous
+       sample's junction force. Loaded by bow_poly_jt_load after
+       bow_poly_init; njt == 0 or jtGain == 0 = byte-null by construction. */
     int njt, jtJ;
     int *jtM, *jtMOff, *jtZOff;
     double *jtCa, *jtCb, *jtCa4, *jtCb4, *jtWd, *jtWdI,
-        *jtPhiD;            /* jtWdI = 1/wd (kills the division
-        in the per-mode rotation — the M-side hot spot) */
-    /* zone tables in FLOAT32 (2026-07-21 live optimization): the
-       M*J matmuls + the J-vector solve dominate the cost and live
-       happily in float (penetrations ~1e-6 m, ulp ~1e-13; forces
-       O(100)); the MODAL RECURSION stays double (float drifts).
-       Written as clang-vectorizable loops (NEON 4-wide). */
+        *jtPhiD;            /* jtWdI = 1/wd (no division in the rotation) */
+    /* zone tables in FLOAT32 (the matmuls + J-vector solve dominate; the modal
+       recursion stays double). Loops written for clang auto-vectorization. */
     float *jtPhiU, *jtPhiF;       /* zone matrices, concat M*J */
     float *jtB;                   /* bone profile, concat J */
     float *jtG, *jtG4;            /* compliance, concat J*J */
     float *jtGd, *jtGd4;          /* compliance diag, concat J */
     double jtKc, jtAlpha, jtHcB, jtDeep, jtGain, jtDrv;
-    /* Tarabdaar SLEWED OUTPUT GAIN (2026-09-03): jtGain is the target;
-       jtGainCur glides toward it per kernel sample (~40 ms, the jt slew
-       convention). A stepped bow_jt_gain was inaudible on the smooth
-       velocity pickup but the bridge-force radiation carries the
-       contact pulse train's large low-frequency swing, and a 60 Hz
-       stepped gain on it splashed impulses ~10× the signal (ZipperTests
-       fast flick, measured 2026-09-03). Constant gain: cur == target
-       exactly, so static renders are bit-identical. */
+    /* SLEWED OUTPUT GAIN: jtGainCur glides toward jtGain per kernel sample
+       (~40 ms) — the force radiation's low-frequency swing would splash a
+       stepped gain. Constant gain: cur == target exactly, bit-identical. */
     double jtGainCur, jtGainA;
-    /* RATE DIVIDER (live): the jt block ticks every jtDiv-th
-       kernel sample with tables built at sr/jtDiv; the held
-       output's ZOH imaging dies in the kernel's own halfband
-       decimation to 48k. Drive = mean of the skipped samples. */
+    /* RATE DIVIDER: the jt block ticks every jtDiv-th kernel sample on tables
+       built at sr/jtDiv (ZOH imaging dies in the host's decimation). Drive =
+       mean of the skipped samples. */
     int jtDiv, jtPhase;
     double jtHold, jtFacc;
-    /* Tarabdaar jt tone LP (2026-07-23): one-pole on the radiated jt sum,
-       armed by bow_poly_jt_set_lp (NOT part of the load ABI — python-
-       parity twins never arm it). jtLpA <= 0 = bypass, bit-exact. */
+    /* jt tone LP on the radiated sum (bow_poly_jt_set_lp); <= 0 = bypass,
+       bit-exact */
     double jtLpA, jtLpY;
-    /* Tarabdaar jt tone HP (2026-07-26): one-pole high-pass on the
-       radiated jt sum, after the LP — the jawari-formant voicing
-       (quiet fundamental under the high cluster). Same contract as
-       jtLpA: setter outside the load ABI, <= 0 = bypass, byte-exact. */
+    /* jt tone HP after the LP — the jawari-formant voicing (quiet fundamental
+       under the high cluster). Same contract: <= 0 = bypass, bit-exact. */
     double jtHpA, jtHpY;
-    /* Tarabdaar TILT axes (2026-07-23 evening, mono lockstep): runtime
-       taraf purity + decay — control-thread-written scalars read by
-       the jt tick. jtLift = bone drop (0 = byte-exact contact;
-       jtLiftRef = load-time max static penetration, the setter's
-       unit). jtDampMul = per-tick momentum multiplier (0/>= 1 = off). */
+    /* TILT axes (control-thread scalars): jtLift = bone drop (0 = bit-exact;
+       jtLiftRef = load-time max penetration), jtDampMul = momentum
+       multiplier. */
     double jtLift, jtLiftRef, jtDampMul;
-    /* Tarabdaar CHARGE GOVERNOR (2026-08-15, bow_jt_gov): per-row AGC
-       on the bridge drive into the jt strings. The long-t60 anchor
-       rows (Sa/Pa, 7-9 s) otherwise accumulate a whole phrase — up to
-       +12 dB of taraf ring on the next kin note, a several-dB
-       re-excitation phase lottery, and at high expression the ring
-       crosses the contact knee into the loud-buzz regime (measured,
-       TarafVarianceBench). Each row tracks a peak envelope of its
-       contact-zone velocity (jtGovEnv, ~60 ms release); rows whose
-       ring already exceeds the graze target jtGovRef·wd1 (jtGovRef =
-       target zone DISPLACEMENT in meters, ×mode-1 rate = velocity
-       bound) shed incoming bridge drive by ref/env scaled by
-       jtGovAmt — the ring saturates at its single-strike level
-       instead of piling up. Held-drone noise drive adds AFTER the
-       shed (never ducked). Control-thread scalars + per-row state
-       under the worker partition; jtGovAmt 0 = byte-null. */
+    /* CHARGE GOVERNOR (bow_jt_gov): per-row AGC on the bridge drive so the
+       long-t60 anchor rows saturate at their single-strike level. jtGovEnv =
+       peak zone velocity (~60 ms release); a row above jtGovRef·wd1 (jtGovRef
+       = zone DISPLACEMENT in meters) sheds drive by ref/env × jtGovAmt. Drone
+       drive adds after the shed. jtGovAmt 0 = byte-null. */
     double jtGovAmt, jtGovRef, jtGovRel;
     double *jtGovEnv;
-    /* Tarabdaar PER-STRING VOICE-RELATIVE CAP (2026-09-01, bow_jt_cap):
-       each modal-jawari row's RADIATED output held at or below
-       ratio × the played voice's own decaying peak — the runaway-bloom
-       lever applied string by string (the 2026-08-31 version limited
-       the summed taraf bus in BowEngine; one blooming anchor row then
-       ducked the whole web). The render loop tracks an instant-attack
-       peak envelope of the voice bus (`out`, kernel rate, ~1.2 s-τ
-       release ≈ 7 dB/s) and records it beside the drive (jtCapBuf /
-       jtCapRing, the jtFr layout); the tick scheduler converts it to
-       a per-tick ROW ceiling (voice env × ratio ÷ the jt output gain,
-       so row units compare with bus units) and every row runs its own
-       150 ms peak envelope + gain (3 ms toward reduction / 120 ms
-       recovery; reduction = hard × the dB overshoot, hard 1 = a hard
-       relative limiter). Pure radiation gain — the row's physics, the
-       governor and the gate meters are untouched. Per-row state is
-       worker-owned; the arm edge bumps jtCapGen so each row resets
-       itself lazily on its next tick (no control-thread array writes
-       under running workers). Drone-setter contract; hard 0 =
-       byte-null (the ceiling record is state only). */
+    /* PER-STRING VOICE-RELATIVE CAP (bow_jt_cap): each row's RADIATED output is
+       held at or below ratio × the voice bus's decaying peak (the runaway-bloom
+       lever, per string so one anchor row never ducks its neighbours). The
+       render loop records the voice peak envelope (~1.2 s-τ) beside the drive;
+       the tick scheduler turns it into a per-tick ROW ceiling (× ratio ÷ the
+       jt output gain); each row runs a 150 ms peak envelope + gain (3 ms
+       attack / 120 ms recovery, reduction = hard × the dB overshoot) as a pure
+       radiation gain after its physics. Per-row state is worker-owned: an arm
+       edge bumps jtCapGen and each row resets itself on its next tick (never
+       write the per-row arrays from the control thread). hard 0 = byte-null. */
     double jtCapHard, jtCapRatio;
-    /* SCOPE blend (2026-09-02, bow_jt_cap_bus): 0 = per string (each
-       row removes hard × its own dB overshoot), 1 = per taraf (the rows
-       stand, the summed web removes hard × the bus overshoot — the
-       2026-08-31 bus limiter, feed-forward on the raw sum), between =
-       both stages share the hardness: rows hard·(1−bus), then the sum
-       hard·bus of what remains. The bus stage runs in the hold walk at
-       the tick (mono + side, one gain), walk-thread-owned state with
-       the same lazy generation reset as the rows. */
+    /* SCOPE blend (bow_jt_cap_bus): 0 = per string, 1 = per taraf (the
+       summed web capped in the hold walk), between = rows hard·(1−bus), sum
+       hard·bus. */
     double jtCapMode;
     double jtCapBEnv, jtCapBGain; int jtCapBGen;
     double jtCapVEnv, jtCapVRel;      /* voice peak env + per-sample release */
     double jtCapTRel, jtCapAtk, jtCapRel;   /* per-jt-tick clocks */
     double *jtCapEnv, *jtCapGain;     /* per-row (worker-owned) */
     int jtCapGen, *jtCapRowGen;       /* arm generation, per-row copy */
-    double *jtCapV;                   /* per-tick ceiling scratch (with jtFdv) */
+    double *jtCapV;                   /* per-tick ceiling scratch */
     double *jtCapBuf;                 /* sync voice-env record (with jtFrBuf) */
     double *jtCapRing;                /* async record ring (with jtDrvRing) */
-    /* Tarabdaar SCOPE TELEMETRY (2026-09-01): display-only per-row
-       meters for the Mac Scope/Taraf tabs — NEVER read by the physics.
-       Armed (scopeOn, control thread): each row keeps a peak envelope of
-       its own RADIATED sample (~120 ms release) and, every 4th tick,
-       per-mode peak envelopes of the first scopeK modal velocities |p_k|
-       (~150 ms decay) — the string's own energy per mode (∝ p_k²), which
-       since the force radiation is also its radiated spectrum up to a
-       flat weight. Worker-owned per-row state; racy display reads (the
-       gate-probe convention). Unarmed = the exact legacy tick. */
+    /* SCOPE TELEMETRY: display-only per-row radiated + per-mode |p_k| peak
+       envelopes, NEVER read by the physics. Worker-owned, racy display reads;
+       unarmed = the exact unmetered tick. */
     int scopeOn, scopeK;
     double scopeRel;                  /* per-tick level release */
     float scopeModeDk;                /* per-update mode-env decay */
     double *scopeEnv;                 /* per-row radiated peak env */
     float *scopeMode;                 /* per-row × scopeK |p_k| envs */
     unsigned *scopeCnt;               /* per-row tick counter */
-    /* Tarabdaar BRIDGE-FORCE RADIATION (2026-09-02; THE radiation since
-       2026-09-03): each row radiates its CONTACT FORCE on the jawari
-       bone — the zone force-density sum × spacing, the force the string
-       hands its bridge, the physical observable. It replaced the fitted
-       0.90 L velocity pickup (phiO·p), whose |sin(k·π·0.9)| comb humped
-       modes 5/15 and nulled mode 10 in every row's radiated spectrum
-       (the pickup, `bow_jt_tap`/`bow_jtc_tap` and the one-day
-       `bow_jt_rad_force` mix are DELETED — do not revive). jtRadScale
-       (per row, from the builder: gout·π·wj/(mu·L·wd1)) converts force
-       to the old pickup's velocity units, so the level calibration
-       carried over (measured ≈ +5…8 dB hotter — the buzz harmonics the
-       comb muffled) and every mode radiates FLAT in those units. A
-       per-row one-pole DC blocker (~8 Hz, primed to the first sample)
-       removes the static wrap preload. */
+    /* BRIDGE-FORCE RADIATION: each row radiates its CONTACT FORCE on the bone;
+       jtRadScale (builder: gout·π·wj/(mu·L·wd1)) makes every mode radiate FLAT
+       in pickup units. A ~8 Hz DC blocker, primed to the first sample, takes
+       only the static wrap preload. */
     double jtRadA;
     double *jtRadScale, *jtRadLp;
     unsigned char *jtRadPrime;
-    /* per-row radiation scale SLEW (2026-09-03): jtRadScale is the target
-       (a coefficient reload steps it — the two-bridge chromatic level
-       rides `bow_jtc_gain / bow_jt_gain`, so a bow_jt_gain sweep re-scales
-       every chromatic row per update); jtRadScaleCur glides ~40 ms per jt
-       tick. Constant scale: cur == target exactly, bit-null. */
+    /* per-row radiation scale slew: jtRadScaleCur glides ~40 ms per jt tick
+       toward jtRadScale (a coefficient reload steps the target). Constant
+       scale: cur == target exactly, bit-null. */
     double jtRadSlewA;
     double *jtRadScaleCur;
-    /* Tarabdaar QUIESCENCE GATE (2026-08-17, bow_jt_gate): the idle-CPU
-       gate. The jt web is a constant-cost simulation — every row ticks
-       its whole mode stack whether ringing or silent, so the app burns
-       the full web cost at rest. Armed (jtGateRef > 0 = floor
-       DISPLACEMENT in meters, apex-scale like jtGovRef): a row whose
-       peak LOW-MODE momentum stays below jtGateRef·wd1 for
-       jtGateHold consecutive jt ticks with no bridge drive above its
-       wake bound and no drone drive goes to sleep IN PLACE — state
-       FROZEN, never zeroed (jtQ holds the settled static wrap against
-       the bone; zeroing would strum the re-settle on wake) — and skips
-       the whole modal tick, radiating exact 0. Low modes are the
-       meter because the wrap sustains a HIGH-mode tick-rate micro
-       limit-cycle that never rests (zone velocity ~0.6 and per-row
-       radiated peak ~5e-3 sit at CONSTANT baselines at rest, while
-       the first modes rest 3+ decades below ring scale). Any drive
-       above jtGateFdEps (the force that could ring the low modes back
-       to the floor within ~one mode-1 period) or any drone drive
-       wakes it.
-       Sleeping through an evolve/lift glide would land the bone
-       stepped, so the evolve setter wakes everyone. Per-row state is
-       worker-owned (a row belongs to one worker); the scalars are
-       control-thread writes (drone-setter contract). 0 = byte-null. */
+    /* QUIESCENCE GATE (bow_jt_gate): the idle-CPU gate. Armed (jtGateRef > 0 =
+       floor DISPLACEMENT in meters): a row whose peak LOW-MODE momentum stays
+       below jtGateRef·wd1 for jtGateHold ticks with no bridge or drone drive
+       sleeps IN PLACE — FROZEN, never zeroed (zeroing jtQ would strum the
+       re-settle) — and skips the tick, radiating exact 0. Low modes are the
+       meter: the wrap keeps the HIGH modes in a limit-cycle that never rests.
+       Worker-owned per-row state, control-thread scalars. 0 = byte-null. */
     double jtGateRef;         /* floor displacement (m); 0 = off */
     int jtGateHold;           /* consecutive quiet jt ticks to sleep */
     double *jtGateFdEps;      /* per-row bridge-drive wake bound */
     int *jtGateCnt;           /* per-row quiet-run countdown */
     unsigned char *jtGateSlp; /* per-row asleep flag */
-    /* gate PROBE telemetry (plain racy writes, read+reset by
-       bow_poly_jt_gate_probe): max am/floor and |FdIn|/eps ratios seen
-       on AWAKE rows since the last read (>1 = that condition is what
-       blocks sleep), plus a drone-active flag. */
+    /* gate PROBE telemetry (racy, read+reset by bow_poly_jt_gate_probe): max
+       ring/floor and drive/eps ratios on AWAKE rows, plus a drone-active
+       flag */
     double jtGateAmR, jtGateFdR;
     int jtGateDnHot;
-    double jtGateEvWake;      /* evolve target the sleepers were last
-                                 woken under — the set_evolve wake is
-                                 CHANGE-gated against this (dead-band
-                                 2% of jtDeep = 5% of apex): a tilt
-                                 binding re-pushing a constant (or
-                                 sensor-jittering) evolve at sensor
-                                 rate must not hold the web awake
-                                 (measured 2026-08-17: a Joy-Con
-                                 stick-Y → bow_jt_evolve binding kept
-                                 all rows permanently awake at idle) */
-    /* Tarabdaar HARMONIC-EVOLUTION lift (2026-07-26): a SIGNED bone
-       offset (meters; + = bone dropped, graze margin shrinks and the
-       upward cascade opens; − = raised, pressed past the knee, no
-       twang), slewed toward jtEvTgt once per divided jt sample
-       (jtEvA, ~40 ms) so the bone glides instead of stepping — the
-       click-free live form of `bow_jt_evolve`. The effective deep-
-       substep threshold moves with it (jtDeep − 2.5·ev), mirroring
-       what building at the shifted apex would have produced. jtEvV
-       carries the per-sample slewed values into the worker pool
-       (fill-time advance == serial advance, so pool replay stays
-       bit-exact). All-zero = byte-null. */
+    double jtGateEvWake;      /* set_evolve wake reference: change-gated
+                                 (dead-band 2% of jtDeep) so a
+                                 re-pushed constant never holds the web awake */
+    /* HARMONIC-EVOLUTION lift (bow_jt_evolve): SIGNED bone offset in meters
+       (+ = dropped, cascade opens; − = raised), slewed per jt sample (jtEvA,
+       ~40 ms); the deep-substep threshold follows (jtDeep − 2.5·ev). jtEvV
+       carries the slewed values into the pool (bit-exact replay). 0 =
+       byte-null. */
     double jtEvTgt, jtEvCur, jtEvA;
     double *jtEvV;
-    /* ---- Tarabdaar EVOLUTION REGISTER TILT (2026-08-27): per-row
-       SIGNED bone offsets (meters) ADDED to the global evolution lift
-       — the `bow_jt_ev_reg` law (BowEngine owns the register→offset
-       map, evolve units per octave from the tonic; the kernel just
-       glides each row's bone). Each row's offset slews toward its
-       target once per jt tick (~40 ms, the evolve constant) inside
-       jt_tick_string — row-owned state, so serial and pool paths
-       advance identically. Targets are control-thread writes
-       (drone-setter contract). jtEvOfsOn stays 0 until the setter
-       first runs — byte-null by construction (and armed all-zero
-       offsets add 0.0 exactly). */
+    /* ---- EVOLUTION REGISTER TILT (bow_jt_ev_reg): per-row SIGNED bone offsets
+       added to the global lift, slewed per row per jt tick (row-owned state).
+       jtEvOfsOn stays 0 until the setter runs — byte-null. */
     int jtEvOfsOn;
     double jtEvOfsA;                  /* slew coeff (jt tick rate) */
     double *jtEvOfsTgt, *jtEvOfsCur;  /* per-row offset target / current */
-    /* ---- Tarabdaar TWO BRIDGES (2026-09-02): per-row CONTACT LAW —
-       the chromatic set sits on its own jawari with its own contact
-       exponent / hysteresis damping / deep-substep threshold (the
-       raga rows keep the global phys values). Written by
-       bow_poly_jt_set_row_contact (drone-setter contract: plain
-       array stores, the jt tick reads them per row); jtRowContactOn
-       stays 0 until the setter first runs — byte-null by
-       construction (the tick reads the exact global scalars). */
+    /* ---- TWO BRIDGES: per-row contact law (the chromatic set's own jawari);
+       jtRowContactOn 0 until set = byte-null (the tick reads the globals). */
     int jtRowContactOn;
     double *jtRowAlpha, *jtRowHcB, *jtRowDeep;
-    /* ---- Tarabdaar RECRUITMENT weights (2026-07-26): per-row scale on
-       the bridge drive into each row — the taraf-selectivity axis.
-       Targets are control-thread-written (bow_poly_jt_drive_weights);
-       the jt tick slews jtDwCur toward jtDwTgt (~30 ms) and multiplies
-       the row's incoming bridge force. Per-row state under the worker
-       partition (a row belongs to one worker). jtDwOn stays 0 until
-       the setter first runs — byte-null by construction. */
+    /* ---- RECRUITMENT weights: per-row scale on the incoming bridge drive (the
+       taraf-selectivity axis). Control-thread targets; the jt tick slews
+       jtDwCur (~30 ms). jtDwOn stays 0 until the setter runs — byte-null. */
     int jtDwOn;
     double jtDwA;                 /* slew coeff (jt tick rate) */
     double *jtDwTgt, *jtDwCur;    /* per-row weight target / current */
-    /* RECRUITMENT lush half: radiated-gain multiplier on the jt web's
-       output (slewed in jt_lp_step at the kernel rate). Drive weights
-       above 1 saturate against the contact (the graze drains harder as
-       it is pushed — measured ×2 drive = +8% ring), so the "how loud
-       is the chorus" lever is output level, which nothing drains. */
+    /* RECRUITMENT lush half: radiated-gain multiplier on the web's output
+       (slewed in jt_lp_step). Drive above 1 saturates against the contact, so
+       loudness is an output lever, which nothing drains. */
     int jtGMulOn;
     double jtGMulA, jtGMulTgt, jtGMulCur;
-    /* ---- Tarabdaar jt BODY radiation (2026-08-01): blend the radiated
-       jt sum through the SAME formula-body radiation bank the played
-       strings radiate through (shared ba1/ba2/bn0/bC/c0 coefficients,
-       OWN filter state) — the taraf rings from the instrument's body
-       instead of beside it. Mix target is a control-thread scalar
-       write (the drone-setter contract), slewed ~30 ms in jt_lp_step;
-       jtBodyOn stays 0 until the setter first runs — byte-null by
-       construction. A live bow_poly_set_body re-points both the voice
-       and this twin (same read of the same arrays). */
+    /* ---- jt BODY radiation: blend the jt sum through the body bank (shared
+       coefficients, OWN state), slewed ~30 ms; jtBodyOn 0 until set =
+       byte-null. */
     int jtBodyOn;
     double jtBodyA, jtBodyTgt, jtBodyCur;
     double jbx1[96], jbx2[96], jby1[96], jby2[96];      /* mid twin */
@@ -420,35 +254,21 @@ typedef struct {
     double *jtQ, *jtP;            /* modal state, concat modes */
     double jtFprev, jtFmax, jtPenMax;   /* + telemetry */
     double jtFdc;                 /* drive DC tracker (~50 ms) */
-    /* ---- jt DRONE rows (2026-07-23): press-to-sound taraf ----
-       per-row control-thread-written scalars read by the jt tick:
-       a pending pluck (one-shot momentum kick via phiD) and a
-       sustained filtered-noise drive target, slewed (~20 ms) so
-       press/release never click.  All-zero is BYTE-NULL (the tick
-       guards the whole branch — goldens untouched). */
+    /* ---- jt DRONE rows: per-row control-thread scalars (onset boost +
+       noise drive target, slewed so press/release never click). All-zero =
+       byte-null. */
     double *jtDnTgt, *jtDnEnv, *jtDnBoost, *jtDnLp, *jtDnLp2;
     unsigned long long *jtDnRng;
-    /* pitched drone drive (mellow-drone rev 2026-07-26): per-row sine
-       at the row's own mode-1 frequency, mixed jtDnMix sine : (1-mix)
-       band-passed noise. A sympathetic string in the real instrument
-       is handed a PITCHED bridge force — broadband noise rings the
-       row's high modes far above their played-note balance (measured
-       H4 ≈ H1 vs the played tap's H4 −29 dB). */
+    /* pitched drone drive: sine at the row's mode-1 mixed jtDnMix : (1-mix)
+       noise — noise alone rings the high modes far above their played
+       balance */
     double *jtDnPh;
     double jtDnMix;
-    /* ---- Tarabdaar MELODY-FOLLOWER row (2026-07-25): one jt row live-
-       retunes to the played pitch. The host writes jtTrkTarget (Hz —
-       plain scalar store, the drone-setter contract); the row's own jt
-       tick slews jtTrkF0 toward it every jtTrkIval ticks and recomputes
-       ONLY the f0-dependent per-mode tables (ca/cb/ca4/cb4/wd) from the
-       stored damping/inharmonicity law — mode shapes, bone profile and
-       output taps stay fixed (retune-by-tension: the string's length
-       never moves). The active mode count jtTrkMUse = fx/f0 is trimmed
-       live so no mode above the builder's fx corner ever enters the
-       contact solve (under-resolved modes limit-cycle against the bones
-       — the dynamic-taraf-era scratching), and the contact compliance
-       G/gd is re-prefix-summed from phiU/phiF when it changes.
-       jtTrkRow -1 (the default) = the whole feature is byte-null. */
+    /* ---- MELODY-FOLLOWER row: one jt row live-retunes to the played pitch.
+       The host writes jtTrkTarget (Hz); the row's own tick slews jtTrkF0 and
+       recomputes ONLY the f0-dependent mode tables (retune-by-tension). The
+       active mode count jtTrkMUse = fx/f0 is trimmed live (modes above the fx
+       corner limit-cycle against the bone). jtTrkRow -1 = byte-null. */
     int jtTrkRow;                 /* -1 = none */
     double jtTrkTarget;           /* target f0 Hz (any thread writes) */
     double jtTrkF0;               /* slewed current f0 (jt-thread owned) */
@@ -461,30 +281,18 @@ typedef struct {
     double jtDnA;                 /* release slew coeff (jt tick rate) */
     double jtDnAAtk;              /* attack slew coeff (jt tick rate) */
     double jtDnBDec;              /* onset-boost decay per jt tick */
-    double jtDnALp, jtDnALp2;     /* noise band-pass coeffs (default
-                                     ~25 Hz–1.6 kHz; bow_poly_jt_drone_tone):
-                                     sub-audio drive would wander the string
-                                     against the jawari bone and pump the
-                                     buzz (audible slow tremolo) */
-    /* jt worker POOL (mono lockstep 2026-07-21 night): persistent
-       high-QoS workers for the deferred block-parallel post-pass;
-       spawned OFF the audio thread (bow_poly_jt_set_threads at
-       engine build).  jtPoolN < 2 = serial replay (bit-exact vs the
-       historical inline block). */
+    double jtDnALp, jtDnALp2;     /* noise band-pass coeffs (sub-audio drive
+                                     would pump the buzz) */
+    /* jt worker POOL: persistent high-QoS workers for the block-parallel
+       post-pass, spawned off the audio thread (bow_poly_jt_set_threads).
+       jtPoolN < 2 = serial replay, bit-exact vs the pool. */
     int jtNth, jtPoolN, jtPoolInit, jtGen, jtDone, jtQuit;
     pthread_t jtTid[16];
     pthread_mutex_t jtMx;
-    /* DISPATCH-OWNER lock (2026-08-31): one jt-web computer at a time.
-       The async dispatcher's jt_run_job and bow_poly_process3's
-       offline-pull fallback share the string states, the fdv/evv/tkv/hp
-       scratch, the LP/hold state AND the pool rendezvous; dispatching
-       concurrently crossed the jtDone/jtGen counting and (with the
-       one-waiter cond_signal completion) left one dispatcher asleep on
-       jtCvD forever — the render thread wedged at 0% CPU (observed
-       under offline test pulls, where ring underruns make the fallback
-       routine). Taken only when jtPoolInit is set (a pool or dispatcher
-       exists) — the plain serial path never locks, bit-exact and
-       overhead-free. */
+    /* DISPATCH-OWNER lock: one jt-web computer at a time (dispatcher vs the
+       offline-pull fallback share row state, scratch and the pool
+       rendezvous; concurrent dispatch wedges a waiter on jtCvD). Taken only
+       if jtPoolInit. */
     pthread_mutex_t jtDispMx;
     pthread_cond_t jtCvW, jtCvD;
     int jtWnT, jtWPer;
@@ -492,16 +300,10 @@ typedef struct {
     double *jtFrBuf; int jtFrCap;
     double *jtFdv; int *jtTkv; double *jtHp;
     struct { void *st; int idx; } jtParg[16];
-    /* ---- ASYNC one-block-late jt (LIVE, 2026-07-21 late night) ----
-       the audio callback NEVER waits: it records the block's drive
-       into a ring slot and pops the web SIGNAL from a completed-
-       samples FIFO (constant ~one-block wash latency; under overload
-       the wash flat-fills from its last value instead of glitching).
-       A DISPATCHER thread consumes drive jobs in order, runs the
-       schedule + the worker pool synchronously on ITS thread, and
-       appends the walked web signal to the FIFO.  All jt drive/hold
-       state is dispatcher-owned in async mode.  Orchestration only —
-       the per-string numerics are the same jt_tick_string. */
+    /* ---- ASYNC one-block-late jt (LIVE): the callback records the block's
+       drive into a ring slot and pops the web from a completed-samples FIFO
+       (flat-fill under overload); a DISPATCHER thread runs the schedule +
+       pool on ITS thread. All jt drive/hold state is dispatcher-owned. */
     int jtAsync;
     int jtDJobW, jtDJobR;             /* drive-job ring cursors */
     int jtDJobN[8];                   /* per-job sample count */
@@ -512,33 +314,13 @@ typedef struct {
     pthread_t jtDTid;
     int jtDLive, jtDQuit;
     long long jtDropBlocks, jtFlatSamples;   /* telemetry */
-    double jtMixG;                    /* live web fade-in: the builder's
-                                         static wrap can never sit exactly
-                                         on the kernel's SOLVER-DEFINED
-                                         contact equilibrium (8 partial
-                                         iterations), so every fresh
-                                         engine releases a soft ~0.5 s
-                                         settling chime — ramp the web
-                                         mix over ~0.7 s instead (live
-                                         async path only; offline serial
-                                         stays bit-exact) */
-    /* ---- TARABDAAR STEREO SIDE OUTPUT (2026-07-23) ----
-       A physically-derived SIDE stream carrying only the DIRECT
-       radiation — the sources that genuinely occupy distinct places on
-       the instrument: the taraf strings' direct tap (tdir), the
-       modal-jawari rows' own radiation (the wash — they sit on their
-       own bridge), and the bow-contact noise (at the played string's
-       position). Everything that reaches the listener VIA THE BRIDGE
-       (played-string force, driven web resonance) radiates from the
-       ONE body — a fixed central radiator — and stays mid-only, so
-       the image is a spread halo around a centred voice and never
-       leans with the melody. The tdir side sum runs its own copy of
-       the tdir shaping bank (linearity: equals radiating each string
-       panned). MID is untouched; L = mid + side, R = mid - side at
-       the host — the L+R fold-down is bit-identical to the legacy
-       mono output. Armed by bow_poly_set_stereo (call AFTER
-       bow_poly_jt_load); never arming it, or passing outS = NULL, is
-       the exact legacy path — every golden untouched. */
+    double jtMixG;                    /* live web fade-in (~0.7 s, async only)
+                                         over the fresh engine's chime */
+    /* ---- STEREO SIDE OUTPUT: a SIDE stream of the DIRECT radiation only
+       (taraf direct tap, the jawari rows' own radiation, bow noise at the
+       played string); everything reaching the listener VIA THE BRIDGE stays
+       mid-only. Host: L = mid + side, R = mid - side, fold-down bit-identical
+       to mono. Armed by bow_poly_set_stereo; outS = NULL = mono path. */
     int stOn;
     double *stWebPan;                 /* nv: taraf web pans */
     double *stSlotPan;                /* nb: played-string (noise) pans */
@@ -549,49 +331,20 @@ typedef struct {
     double jtHoldS, jtOutHoldS;       /* side jt hold walk / async hold */
     double *jtHpS;                    /* pool partial sums, side */
     double *jtWebRingS;               /* async web FIFO, side */
-    /* ---- TARABDAAR INSTRUMENT WIDTH (2026-08-01 unifying rev): ONE
-       small instrument, TWO observation points — the whole stereo law
-       in one mechanism. Identical at low frequency (monopole
-       radiation), diffusely decorrelated at high frequency: above the
-       Schroeder crossover a real body's radiation is a dense
-       overlapping mode field where two listening positions see random
-       independent mode shapes. The fitted mid has no resolved
-       structure up there (its 9 signature modes all land 55–250 Hz;
-       the upper spectrum ships as flat c0·F feedthrough), so the
-       observation-point DIFFERENCE is modelled the way the mid models
-       the diffuse region itself (the bow_body_tail idiom): a dense
-       random-sign side-only modal bank. Static, passive, linear — a
-       difference transfer, not a pan/Haas/detune trick, so the image
-       never leans and the L+R fold-down cancels it exactly.
-       The bank runs once per BUS — [0] voice (pre-jt mid), [1] the jt
-       wash — with SHARED coefficients and per-bus state. Linearity:
-       bank(voice) + bank(jt) = bank(voice + jt), so the split FX
-       buses keep their own valid side streams while the fused sum
-       equals the one-instrument model. (A per-mode residue readout of
-       the body bank itself — the first 2026-08-01 attempt — was
-       measured inaudible on this fit and deleted the same day; see
-       docs/sarangi.md.) Armed by bow_poly_set_stereo_width; 0 from a
-       cold start / never armed = byte-null, every golden safe. */
+    /* ---- INSTRUMENT WIDTH: one instrument, two observation points — a dense
+       random-sign side-only modal bank (identical at low frequency, diffusely
+       decorrelated above the Schroeder crossover); static, passive, linear, so
+       the L+R fold-down cancels it exactly. One instance per BUS ([0] voice,
+       [1] jt wash), shared coefficients. Never armed = byte-null. */
     int stWidthOn;
     double stWidthTgt, stWidthCur;    /* slewed width scalar */
     double stWidthSl;                 /* ~30 ms one-pole slew coeff */
-    /* ---- TARABDAAR SITAR TWANG (2026-08-01): a grazing jawari fold on
-       the PLAYED string's bridge termination (poly_string_return) — the
-       sitar's flat-bridge contact on the melody string itself, distinct
-       from the jt taraf's bones. One-sided collision fold (the web
-       combs' v3 idiom) whose knee RIDES the string's own peak envelope
-       (twKneeR × per-string twEnv): the graze engages at the same
-       relative depth at ANY strike level — the bow_jt_evolve lesson
-       (the cascade lives in a narrow band around the knee, which is why
-       a fixed knee twangs inconsistently) applied to the played string.
-       The upward energy cascade accumulates over string round trips
-       (~30-80 trips ≈ 100-300 ms — the sitar sample's measured bloom
-       time), the one-sided fold makes the even-harmonic asymmetry, and
-       the release-lagged envelope + the bridge LP let the centroid fall
-       back. Passive by construction (amt·depth ≤ 1 removes energy).
-       Armed by bow_poly_set_twang; 0 from a cold start / never calling
-       is byte-null (twOn-gated, and it self-disarms once the slewed
-       amount dies). */
+    /* ---- SITAR TWANG: a grazing jawari fold on the PLAYED string's bridge
+       termination (poly_string_return) whose knee RIDES the string's own peak
+       envelope, so the graze engages at the same relative depth at any strike
+       level; the one-sided fold builds the even-harmonic cascade over round
+       trips. Passive (amt·depth ≤ 1). Armed by bow_poly_set_twang; never armed
+       = byte-null; self-disarms once the slewed amount dies. */
     int twOn;
     double twTgt, twCur;              /* slewed 0..1 amount */
     double twSl;                      /* ~30 ms per-sample slew coeff */
@@ -600,23 +353,15 @@ typedef struct {
     double twRel;                     /* side-env per-sample release mul */
     double twRollSmp;                 /* wrap length shortening at amt 1 */
     double twAv;                      /* twD smoothing coeff (~0.5 ms) */
-    double twDcA;                     /* twDb mean-tracker coeff (~80 ms) */
-    /* the sitar-morph half of the axis: the wrap alone cascades into a
-       string whose terminations reabsorb HF within tens of ms (gut over
-       a leather-topped bridge, finger-release damping) — the sample's
-       bloom band SUSTAINS because a sitar is steel over hard bone with
-       a fret-wire stop. amount therefore also brightens the
-       terminations (pow exponent on the one-pole coeffs) and eases the
-       release damping. twBright/twRing/twGut are the morph strengths at
-       amount 1; tw*C are their chunk-rate derived values. */
+    double twDcA;                     /* twDb mean-tracker coeff */
+    /* sitar-morph half: amount also brightens the terminations (pow exponent
+       on the one-pole coeffs) and eases release damping — steel over bone
+       sustains the bloom that gut terminations reabsorb. tw*C = chunk
+       values. */
     double twBright, twRing, twGut;
     double twXpC, twBrAC, twNutAC, twGutA2C, twGutC, twRingC;
-    /* pitch lock: brightening the termination one-poles REMOVES loop
-       phase delay (a one-pole's low-f phase delay is a/(1-a) kernel
-       samples), which is what made the twanged ring run sharp of the
-       un-twanged ring. twTrimC restores exactly the removed delay on
-       the bridge-segment read, chunk-derived — the twanged and plain
-       rings then track the same period at any pitch and amount. */
+    /* pitch lock: brightened one-poles lose loop phase delay (a/(1-a) samples
+       each); twTrimC restores it on the bridge-segment read. */
     double twTrimC;
     int sdN;
     double sdA1[16], sdA2[16], sdN0[16], sdG[16];
@@ -639,42 +384,31 @@ typedef struct {
     /* --- per-string state --- */
     bow_pstring_t *strs;
     int *proc;             /* per-chunk processed-string index scratch */
-    /* Tarabdaar FX (2026-08-01): host hook on the recorded jt drive — the
-       "main voice before the taraf" insert point. Called on the render
-       thread with the block's drive buffer AFTER the record walk and
-       BEFORE the jt post-pass consumes it (async mode: before the ring
-       job is published, so ordering and state continuity hold). Set
-       OFF the audio thread at engine build; NULL (the default) is
-       byte-null. */
+    /* FX hook on the recorded jt drive (the voice→taraf insert), called on the
+       render thread before the post-pass consumes it. NULL = byte-null. */
     void (*fxDriveFn)(void *ctx, double *buf, int n);
     void *fxDriveCtx;
-    /* TARABDAAR SITAR->TARAF INJECT (2026-08-19): a second voice's
-       rendered output drives the modal-jawari web sympathetically —
-       the sitar's taraf. SPSC ring: the other voice's render callback
-       writes mono samples (bow_poly_jt_inject_write), THIS kernel's
-       render mixes what is available into the recorded jt drive right
-       before the drive-FX hook (so the voice→taraf insert shapes it
-       too). Ring alloc happens in the gain setter (control thread);
-       NULL ring / zero gain / empty ring are all byte-null. */
+    /* SITAR->TARAF INJECT: another voice's output drives the web via an SPSC
+       ring (producer's render callback writes; this render mixes what is
+       available into the recorded drive before the drive-FX hook). Ring alloc
+       in the gain setter; NULL ring / zero gain / empty ring = byte-null. */
     double *sjRing;                   /* 32768 doubles, lazy alloc */
     long long sjW, sjR;               /* ring cursors (mono counts) */
     double sjGain;                    /* plain scalar store */
 } bow_poly_state_t;
 
-/* Mount a string in the FRESH-CONTACT friction state (mono kernel's init):
-   the aging deficit starts at ageA — weak grip on a new contact. A bare
-   memset would start it at 0 = full static grip, the opposite state, and
-   only the unloaded branch (Fb <= 1e-6) would ever correct it. */
+/* Mount a string in the FRESH-CONTACT friction state: the aging deficit
+   starts at ageA (weak grip). A bare memset would start it at full static
+   grip, and only the unloaded branch would ever correct it. */
 static void poly_mount_string(bow_poly_state_t *st, bow_pstring_t *S)
 {
     memset(S, 0, sizeof(*S));
-    /* finger-noise RNG: deterministic per slot (renders reproduce, panic
-       + replay is bit-identical — the drift-seed philosophy) */
+    /* finger-noise RNG: deterministic per slot (renders reproduce) */
     S->slRng = 0x9E3779B97F4A7C15ULL
         ^ ((unsigned long long)(S - st->strs) + 1ULL) * 0xBF58476D1CE4E5B9ULL;
     S->ageDef = st->ageA;
     S->ageDef3[0] = S->ageDef3[1] = S->ageDef3[2] = st->ageA;
-    /* a freshly-placed bow lands STUCK (mono init) */
+    /* a freshly-placed bow lands STUCK */
     S->crS = 1.0; S->crSB = 1.0;
     S->crS3[0] = S->crS3[1] = S->crS3[2] = 1.0;
 }
@@ -685,8 +419,8 @@ static double *pdup_d(const double *a, int n) {
     return b;
 }
 
-/* continuum contact: equilibrium stuck fraction at demand ratio
-   x = |stickF|/grip (mono kernel's cr_seq, verbatim) */
+/* continuum contact: equilibrium stuck fraction at demand ratio x =
+   |stickF|/grip */
 static double cr_seq(double x, double w) {
     if (w <= 1e-12) return x <= 1.0 ? 1.0 : 0.0;
     if (x <= 1.0 - w) return 1.0;
@@ -695,7 +429,7 @@ static double cr_seq(double x, double w) {
     return u * u * (3.0 - 2.0 * u);
 }
 
-/* rolling-contact read (mono kernel's roll_read, verbatim) */
+/* rolling-contact read */
 static double roll_read(const double *b, int wi, int len, int L,
                         double w0, double w1, double w2,
                         double w3, double w4, double rollD)
@@ -792,7 +526,7 @@ void *bow_poly_init(int nb, double sr,
         ? 1.0 - exp(-1.0 / (crMsp * 1e-3 * sr)) : 1.0;
     st->jawRho = jawRhop;
     st->jawRoll = jawRollp;
-    st->jawG = 1.0;    /* Tarabdaar TILT purity: 1 = byte-exact legacy */
+    st->jawG = 1.0;    /* buzz scale: 1 = bit-exact */
     st->jawRollAmp = (jawRollAmpp > 1e-9 ? jawRollAmpp : 1e-9);
     st->lossReg = lossRegp;
     st->slideRate = (slideRatep > 1.0 ? slideRatep : 900.0);
@@ -807,7 +541,7 @@ void *bow_poly_init(int nb, double sr,
         st->dwt[i_] = 1.0;
         st->dtg[i_] = 1.0;
     }
-    /* taraf voice ring arena + pre-charge — verbatim mono */
+    /* taraf voice ring arena + pre-charge */
     st->off = (int *)malloc(sizeof(int) * (nv + 1));
     int tot = 0;
     for (int i = 0; i < nv; i++) { st->off[i] = tot; tot += L[i] + 8; }
@@ -852,11 +586,9 @@ void *bow_poly_init(int nb, double sr,
     return (void *)st;
 }
 
-/* One string, one sample: the mono kernel's "---- bow string ----" section
-   (friction contacts + terminations + contact/transition noise), verbatim
-   against this string's state. Returns the string's transmitted bridge
-   force; accumulates its direct-radiated noise; outputs the rdmp/gk this
-   sample computed (the post-body return write needs them). */
+/* One string, one sample: friction contacts + terminations + contact noise
+   against this string's state. Returns its transmitted bridge force,
+   accumulates its direct-radiated noise, outputs rdmp/gk for the return. */
 static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                                 double f0t, double vbt, double fbt,
                                 double betat, double gatet,
@@ -895,9 +627,8 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
     S->kGate = (1.0 - kga) * bowForce + kga * S->kGate;
     double gk = S->kGate >= 0.10 ? 1.0 : S->kGate * 10.0;
     double rdmp = 1.0 - (0.69 / fmax(f0t, 40.0)) * (1.0 - gk);
-    /* Tarabdaar SITAR TWANG morph: brighter, harder terminations and an
-       eased release damping (a sitar string rings against a fret wire,
-       not a lifted finger). All exact-legacy while disarmed. */
+    /* SITAR TWANG morph: brighter terminations, eased release damping;
+       bit-exact while disarmed */
     const int twOn = st->twOn;
     double brAe = twOn ? st->twBrAC : brA;
     const double gutGe = twOn ? st->twGutC : gutG;
@@ -919,36 +650,21 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
         } else if (twOn) {
             nutAf = st->twNutAC;
         }
-        /* Tarabdaar REGISTER DAMPING (2026-08-24, bow_loss_reg): the
-           fitted nut/bridge/gut corners are ABSOLUTE frequencies, so a
-           note below the tonic keeps its Helmholtz corner as sharp per
-           second as the fitted register's — measured ~30 dB more
-           relative 3–6 kHz energy an octave below the tonic than at it
-           (the brassy low register). Scale all three corners by
-           (f0/f0Open)^lossReg for notes below the tonic — a one-pole
-           coefficient a = exp(-2πfc/sr), so fc·s == a^s. Composes after
-           the nail law and the twang morph; continuous at f0 == f0Open;
-           at/above the tonic untouched; 0 = bit-exact legacy. */
-        /* Tarabdaar SLIDE TRACKER (2026-08-24, bow_slide_dull /
-           bow_slide_rate / bow_slide_noise / bow_slide_acc): a real
-           meend is a finger moving ON the string — the moving, lighter
-           contact absorbs more HF than a firmly stopped one (DULLING,
-           driven by the SLEW), and the contact scrapes where the
-           finger STARTS, STOPS or turns (NOISE, driven by the slew's
-           DERIVATIVE — the v1 noise rode the slew itself and hissed
-           steadily through a constant-rate slide, unrelated to the
-           gesture; cut by ear and reinstated acceleration-driven the
-           same day). Slew: |Δf|/f · 1731 · sr c/s, SIGNED 10 ms
-           pre-smoothing before rectifying (the OU drift rides f0 as
-           white micro-jitter that would rectify to ~hundreds of c/s;
-           smoothed residual ~15 c/s sits under the 80 c/s floor — what
-           keeps baked defaults bit-exact on steady notes). Accel: the
-           per-sample change of that smoothed slew through a second
-           SIGNED 10 ms smoother, in c/s² (·sr again); the drift's
-           smoothed accel jitter measures σ≈1500 c/s², floored at
-           6000 c/s². A per-sample jump > ~2 cents is a MOUNT/SNAP,
-           not a slide — the tracker skips without driving (the "a
-           pitch SNAP is not a glide" rule). */
+        /* REGISTER DAMPING (bow_loss_reg): the fitted corners are absolute
+           frequencies, so below the tonic they would stay as sharp per second
+           as
+           the fitted register's (brassy low register). Scale all three by
+           (f0/f0Open)^lossReg below the tonic (fc·s == a^s). Composes after the
+           nail law and the twang morph; continuous at f0Open; 0 = bit-exact. */
+        /* SLIDE TRACKER (bow_slide_*): a moving finger absorbs more HF
+           (DULLING,
+           driven by the slew) and scrapes where it starts, stops or turns
+           (NOISE,
+           driven by the slew's derivative). Both trackers are SIGNED 10 ms
+           smoothers before rectifying, so the OU drift stays under the 80 c/s
+           and
+           6000 c/s² floors and steady notes are bit-exact. A per-sample jump >
+           ~2 cents is a mount/snap, not a slide. */
         double slN = 0.0;
         if (st->slideDull > 1e-9 || st->slideNoise > 1e-12) {
             if (S->slFValid) {
@@ -984,20 +700,13 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 double w = (double)(long long)S->slRng
                     * 1.0842021724855044e-19;
                 S->slLp += 0.25 * (w - S->slLp);
-                /* x40: the injection crosses the bow contact and both
-                   termination corners before it radiates (measured
-                   ~-26 dB path loss to the 2.5-7 kHz radiated band),
-                   and the accel drive fires in brief bursts (~30-50 ms
-                   at a gesture transition) rather than the v1's
-                   sustained envelope — double the v1 makeup so a burst
-                   still reads at the calibrated level */
+                /* x40 makeup: ~26 dB path loss to the radiated band, and the
+                   drive fires in brief bursts */
                 slN = st->slideNoise * 40.0 * S->slEnvA * gk * S->slLp;
             }
         }
-        /* Tarabdaar REGISTER DAMPING + slide dulling: one composed
-           corner scale. sReg is bit-identical to the pre-slide law when
-           slideDull is 0 (same value, same pow), and exactly 1 (block
-           skipped) when nothing is armed. */
+        /* one composed corner scale; sReg is exactly 1 (block skipped) when
+           nothing is armed */
         {
             double sReg = 1.0;
             if (st->lossReg > 1e-9 && f0Open > 1.0 && f0t < f0Open)
@@ -1014,17 +723,10 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                                fmax(2.0, L1 * 2.0 - bowWidth));
         double dl = kdisp * st->disp;
         if (dl > 0.02) dl = 0.02; else if (dl < -0.02) dl = -0.02;
-        /* Tarabdaar SITAR TWANG: the rolling wrap shortens the bridge
-           segment by twD - twDb samples — the wrap's per-cycle phase
-           modulation with its pitch-shifting mean removed — and two
-           pitch-lock terms hold the twanged ring on the plain ring's
-           pitch: twTrimC restores the loop phase delay the brightened
-           terminations lost (analytic, verified ±0.1 samples over
-           three octaves), and the twWt curve cancels the wrap's
-           phase-SELECTIVE residual (the corner samples twD at a
-           note-dependent phase; fitted n(P) = 0.335 - 66.2/P samples
-           per unit of amt·roll over notes 48/60/72). All 0 while
-           disarmed — bit-exact. */
+        /* SITAR TWANG: the wrap shortens the bridge segment by twD - twDb;
+           twTrimC
+           + the twWt curve hold the twanged ring on the plain pitch. 0
+           disarmed. */
         double twWt = 0.0;
         if (twOn && st->twCur > 0.0) {
             double Pn = sr / fmax(f0t, 40.0);
@@ -1036,7 +738,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                                     - S->twD + S->twDb + twWt));
         double hBA = 0, hAB = 0;
         if (bowCont >= 2.5 && bowWidth >= 2.0) {
-            /* Pitteroff v2: three hair-group contacts, own friction solves */
+            /* three hair-group contacts, own friction solve per group */
             static const double hs2[3] = {0.88, 1.0, 1.12};
             static const double hl2[3] = {0.92, 1.0, 1.09};
             double wseg = bowWidth * 0.5;
@@ -1213,8 +915,8 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                     }
                 }
                 } else {
-                    /* continuum contact (mono port): stuck-fraction
-                       blend, release-only tau, snap capture */
+                    /* continuum contact: stuck-fraction blend, release-only
+                       tau, snap capture */
                     double xq = fabs(stickF) / fmax(muS * Fb, 1e-30);
                     double se = cr_seq(xq, crW);
                     if (se < S->crS) S->crS += crAt * (se - S->crS);
@@ -1385,8 +1087,8 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
     return F;
 }
 
-/* One string, one sample: the post-body bridge-motion return + stiffness
-   dispersion + reflection write (the mono loop's second bowOn block). */
+/* One string, one sample: post-body bridge-motion return + stiffness
+   dispersion + reflection write. */
 static void poly_string_return(bow_poly_state_t *st, bow_pstring_t *S,
                                double V, double rdmp, double gk)
 {
@@ -1403,21 +1105,12 @@ static void poly_string_return(bow_poly_state_t *st, bow_pstring_t *S,
     int dispNi = (int)(st->dispN + 0.5);
     if (dispNi < 1) dispNi = 1; if (dispNi > 4) dispNi = 4;
     double apy = -S->brLp + vr;
-    /* Tarabdaar SITAR TWANG (2026-08-01): the grazing jawari fold on the
-       played string's bridge reflection. The knee rides the string's
-       own peak envelope (fast attack, ~40 ms release), so the graze
-       engages at the same relative depth at any strike level — the
-       consistency the fixed-knee web buzz never had. One-sided: only
-       positive excursions past the knee fold, which flattens one
-       polarity of the wave (the flat-bridge wrap) and pumps the
-       even-harmonic cascade round trip by round trip. Applied BEFORE
-       the dispersion chain — the bone sits on the string side of the
-       bridge. twOn 0 skips everything (byte-null). */
+    /* SITAR TWANG: the graze fold on the bridge reflection, before the
+       dispersion chain (the bone sits on the string side of the bridge).
+       twOn 0 skips everything. */
     if (st->twOn) {
-        /* per-side peak envelopes, instant attack / slow release (the
-           web roll contact's rollE idiom) — the knee sits just under
-           each side's true recent peak, so the graze engages only at
-           the excursion TIPS, at any strike level */
+        /* per-side peak envelopes, instant attack / slow release: the knee sits
+           just under each side's recent peak */
         double eP0 = S->twEnvP * st->twRel;
         S->twEnvP = apy > eP0 ? apy : eP0;
         double eN0 = S->twEnvN * st->twRel;
@@ -1428,21 +1121,13 @@ static void poly_string_return(bow_poly_state_t *st, bow_pstring_t *S,
             double eN = -apy - st->twKneeR * S->twEnvN;
             int gP = eP > 0.0 && S->twEnvP > 1e-12;
             int gN = eN > 0.0 && S->twEnvN > 1e-12;
-            /* the WRAP — conservative rolling-contact shortening of
-               the bridge segment while the tip presses the bone (the
-               web's v2 roll idiom): the bridge read slides closer by
-               twD samples (poly_string_force), a per-cycle phase
-               modulation that pumps the harmonic cascade WITHOUT
-               deleting ring energy (a subtractive fold alone measured
-               as buzz + a choked ring) */
+            /* the WRAP: the bridge read slides closer by twD samples while a
+               tip
+               presses the bone — lossless phase modulation that pumps the
+               cascade */
             double tgt = (gP || gN) ? amt * st->twRollSmp : 0.0;
             S->twD += st->twAv * (tgt - S->twD);
-            /* twDb = twD's time-averaged mean: removes the wrap's DC
-               pitch shift. (An engaged-gated "corner-phase" tracker was
-               tried and measured WORSE — the engagement/corner phase
-               relationship varies with note; the residual after the
-               time-averaged mean is handled by the fitted twWrapTrim
-               curve in poly_string_force.) */
+            /* twDb = twD's mean: removes the wrap's DC pitch shift */
             S->twDb += st->twDcA * (S->twD - S->twDb);
             /* light hysteretic contact loss at the graze */
             double d = amt * st->twDepth;
@@ -1526,7 +1211,7 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     st->jtGovEnv = (double *)calloc(njt, sizeof(double));
     st->jtGovAmt = 0.0;
     st->jtGovRef = 0.0;
-    /* per-string voice-relative cap: off (byte-null until bow_poly_jt_set_cap) */
+    /* per-string cap: off (byte-null until bow_poly_jt_set_cap) */
     st->jtCapEnv = (double *)calloc(njt, sizeof(double));
     st->jtCapGain = (double *)malloc(sizeof(double) * (size_t)njt);
     st->jtCapRowGen = (int *)calloc(njt, sizeof(int));
@@ -1539,7 +1224,7 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     st->jtCapBGen = 0;
     st->jtCapVEnv = 0.0;
     st->jtCapGen = 0;
-    /* scope telemetry: off (display-only; never armed by any twin) */
+    /* scope telemetry: off */
     st->scopeOn = 0;
     st->scopeK = 16;
     {
@@ -1573,9 +1258,8 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
         st->jtDnRng[s] = 0x9E3779B97F4A7C15ULL * (unsigned long long)(s + 1);
     {
         double dtj = (double)st->jtDiv / st->sr;
-        /* mellow-drone rev (2026-07-26): slow swell/fall + a ~1.6 kHz
-           drive top — kept in step with the BowEngine bp defaults
-           (bow_drone_*), which always overwrite these at build */
+        /* envelope/tone defaults — BowEngine's bow_drone_* values overwrite
+           these at build */
         st->jtGovRel = exp(-dtj / 0.060);
         st->jtCapTRel = 1.0 - exp(-dtj / 0.150);
         st->jtCapAtk = 1.0 - exp(-dtj / 0.003);
@@ -1631,14 +1315,11 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
             st->jtDwCur[s] = 1.0;
         }
     }
-    /* tilt-axis reference: the deepest static wrap across strings
-       (floor jtDeep) — the unit bow_poly_jt_set_lift scales to clear
-       the bone at full purity. Axes start off (byte-null). */
+    /* tilt-axis reference: the deepest static wrap across rows (floor jtDeep)
+       — the unit bow_poly_jt_set_lift scales to. Axes start off (byte-null). */
     st->jtLift = 0.0; st->jtDampMul = 0.0;
-    /* Tarabdaar HARMONIC-EVOLUTION lift (2026-07-26): signed bone offset
-       in meters, slewed per jt sample (~40 ms) so the bone GLIDES —
-       a tilt sweep is a slow jawari adjustment, not a strum. 0 =
-       byte-null (the exact legacy contact + jtDeep compare). */
+    /* harmonic-evolution lift: slewed ~40 ms per jt sample so the bone glides;
+       0 = byte-null */
     st->jtEvTgt = 0.0; st->jtEvCur = 0.0;
     st->jtEvA = 1.0 - exp(-((double)st->jtDiv / st->sr) / 0.040);
     {
@@ -1657,17 +1338,11 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
 #define JT_MAXM 72
 #define JT_MAXJ 44
 
-/* the implicit contact solve (tanpura_modal.contact_force, FLOAT +
-   HERTZIAN FAST PATH): vector Newton on the diagonal compliance inside
-   an UNDER-RELAXED off-diagonal lag loop; projection cap c/gd. When
-   alpha == 1.5 (Hertz sphere-on-plane — the live default) every pow
-   collapses to sqrtf; other alphas keep powf (offline exploration).
-   Loops are written for clang auto-vectorization (float NEON). */
-/* x^A for x in (1e-12, ~0.05], A in (0,1) — pure-arithmetic
-   log2/exp2 (bit casts + minimax polys, floorf only; NO libm powf,
-   so the bits are platform-identical).  HAND-PORTED from the mono
-   kernel 2026-07-21k — the twins must move together (a bit split at
-   alpha != 1.5 would hide behind the artifact's staged 1.5). */
+/* the implicit contact solve (float, Hertzian fast path): vector Newton on
+   the diagonal compliance inside an under-relaxed off-diagonal lag loop,
+   projection cap c/gd. alpha == 1.5 collapses every pow to sqrtf. */
+/* x^A for x in (1e-12, ~0.05], A in (0,1): pure-arithmetic log2/exp2 (no
+   libm powf, so the bits are platform-identical). */
 static inline float jt_fastpow(float x, float A)
 {
     union { float f; int32_t i; } u, v;
@@ -1700,10 +1375,8 @@ static int jt_solve(int J, const float *b_, const float *ustar,
     }
     if (!any) return 0;
     const int hertz = (alpha > 1.499f && alpha < 1.501f);
-    /* ACTIVE-SET matvec (mono lockstep 2026-07-21k): only ~2 of J
-       zone points carry force at the render op — iterate nonzero-F
-       columns only (F[k] is EXACTLY 0.0f off the set; iteration 0
-       has an empty list and gf = 0 exactly, as before). */
+    /* ACTIVE-SET matvec: only nonzero-F columns are iterated (F[k] is EXACTLY
+       0.0f off the set, so the result is unchanged). */
     int act[JT_MAXJ];
     int na = 0;
     for (int o = 0; o < 8; o++) {
@@ -1722,9 +1395,8 @@ static int jt_solve(int J, const float *b_, const float *ustar,
             else
                 f[j] = 0.0f;
         }
-        /* inner Newton over the ACTIVE-c list only (bit-exact: the
-           skipped points held f=0 already; per-point math and
-           ascending order unchanged) */
+        /* inner Newton over the active-c list only (skipped points hold f=0
+           already) */
         int acj[JT_MAXJ];
         int ncj = 0;
         for (int j = 0; j < J; j++)
@@ -1754,9 +1426,7 @@ static int jt_solve(int J, const float *b_, const float *ustar,
             if (d > dF) dF = d;
             if (f[j] > fm) fm = f[j];
         }
-        /* float-appropriate exit: 1e-4 relative (forces O(100) sit
-           above the float noise floor at 1e-6 — the exit never fired
-           and every solve ran all its outer iterations) */
+        /* float-appropriate exit: 1e-4 relative */
         if (dF < 1e-4f * fm) {
             for (int j = 0; j < J; j++) F[j] = f[j];
             break;
@@ -1788,9 +1458,8 @@ static void jt_zone(int M, int J, const float *phiU,
     }
 }
 
-/* contact core at step size dts on tables (G, gd): solve on the
-   PRECOMPUTED zone snapshot, Hunt-Crossley (dissipative-only),
-   impulse into q/p (double accumulation). */
+/* contact core at step dts on tables (G, gd): solve on the zone snapshot,
+   Hunt-Crossley (dissipative-only), impulse into q/p (double accumulation) */
 static void jt_core(int M, int J, const float *u, const float *ud,
                     const float *phiF, const float *b_,
                     const float *G, const float *gd,
@@ -1805,17 +1474,15 @@ static void jt_core(int M, int J, const float *u, const float *ud,
         if (hc > 1.0f) hc = 1.0f;
         F[j] *= hc;
     }
-    /* bridge-force radiation tap (2026-09-02): the zone force-density
-       sum (× spacing = the contact force on the bone), AFTER the
-       dissipative scaling — read only, the impulse below is unchanged */
+    /* radiation tap: force-density sum after the dissipative scaling (read
+       only) */
     if (fsum) {
         float t = 0.0f;
         for (int j = 0; j < J; j++) t += F[j];
         *fsum += t;
     }
     double h2 = 0.5 * dts * dts;
-    /* project only the ACTIVE force columns (mono lockstep — the
-       rest are exactly 0.0f and contribute nothing) */
+    /* project only the active force columns (the rest are exactly 0.0f) */
     int actc[JT_MAXJ];
     int nac = 0;
     for (int j = 0; j < J; j++)
@@ -1852,14 +1519,9 @@ static double jt_maxpen(int M, int J, const float *phiU,
     return (double)pen;
 }
 
-/* Tarabdaar MELODY FOLLOWER (2026-07-25): slew the tracked row's f0
-   toward the host's target and rebuild its f0-dependent mode tables in
-   place. Runs on whichever thread ticks the row (serial / pool / async
-   all funnel through jt_tick_string), so the writes are same-thread
-   with the reads. The static wrap is NOT re-solved — the contact
-   physics re-settles on its own, which is exactly a string gliding
-   under a grazing bone. Cost: ~M transcendental recomputes per ~1.3 ms
-   only while the pitch is actually moving; zero at rest. */
+/* MELODY FOLLOWER: slew the row's f0 and rebuild its tables in place on
+   the ticking thread. The static wrap is NOT re-solved — the contact
+   re-settles on its own, exactly a string gliding under the bone. */
 static void jt_track_retune(bow_poly_state_t *st)
 {
     const int s = st->jtTrkRow;
@@ -1879,9 +1541,8 @@ static void jt_track_retune(bow_poly_state_t *st)
     const int Mall = st->jtM[s];
     const double dtj = (double)st->jtDiv / st->sr;
     const double dt4 = 0.25 * dtj;
-    /* active mode count: NO 16-mode floor here — a mode above the fx
-       corner is under-resolved in the contact solve and limit-cycles
-       into broadband static (measured, dynamic-taraf era) */
+    /* active mode count, no floor: a mode above the fx corner limit-cycles into
+       static */
     int mUse = (int)(st->jtTrkFx / f);
     if (mUse < 2) mUse = 2;
     if (mUse > Mall) mUse = Mall;
@@ -1893,7 +1554,7 @@ static void jt_track_retune(bow_poly_state_t *st)
         const double kk = (double)(k + 1);
         const double w0 = twoPi * f * kk * sqrt(1.0 + bst * kk * kk);
         const double fk = w0 / twoPi;
-        /* the builder's per-mode damping law (buildJawariTables) */
+        /* the builder's per-mode damping law */
         const double t60k = 1.0 / (1.0 / t60
             + (fk / fHf) * (fk / fHf) * (1.0 / t60));
         const double sg = 6.91 / t60k;
@@ -1908,8 +1569,7 @@ static void jt_track_retune(bow_poly_state_t *st)
         st->jtCb4[mo + k] = e4 * sin(wd * dt4);
     }
     if (mUse != st->jtTrkMUse) {
-        /* modes leaving/entering the active set start from zero (a
-           re-entering mode is pulled into the wrap by the contact) */
+        /* modes leaving/entering the active set start from zero */
         const int lo = mUse < st->jtTrkMUse ? mUse : st->jtTrkMUse;
         int hi = mUse > st->jtTrkMUse ? mUse : st->jtTrkMUse;
         if (hi > Mall) hi = Mall;
@@ -1917,9 +1577,8 @@ static void jt_track_retune(bow_poly_state_t *st)
             st->jtQ[mo + k] = 0.0;
             st->jtP[mo + k] = 0.0;
         }
-        /* contact compliance = prefix sum over the active modes:
-           G[a][b] = (dt^2/2) * sum_k phiU[k][a]*phiF[k][b]
-           (phiF carries wj/mu — matches the builder's gscale) */
+        /* contact compliance = prefix sum over the active modes: G[a][b] =
+           (dt^2/2) * sum_k phiU[k][a]*phiF[k][b] (phiF carries wj/mu) */
         float *G = st->jtG + (size_t)s * (size_t)J * J;
         float *G4 = st->jtG4 + (size_t)s * (size_t)J * J;
         float *gd = st->jtGd + (size_t)s * J;
@@ -1943,16 +1602,8 @@ static void jt_track_retune(bow_poly_state_t *st)
     }
 }
 
-/* one modal-jawari sample: rotate every string, contact (substepped at
-   deep engagement), one-way drive Fd, return the summed observation.
-   Shared by bow_process, bow_jt_test and the poly kernel port. */
-/* per-string advance — the threading unit (mono lockstep): touches
-   only string s's state slices + shared read-only tables; penmax
-   accumulates locally (merged by the caller). */
-/* advance the evolution-lift slew one divided jt sample (single
-   caller thread per mode: the audio thread, the pool dispatcher or
-   the async walker — never the workers). Snap kills denormal tails
-   and restores the exact ev == 0.0 byte-null path at rest. */
+/* advance the evolution-lift slew one divided jt sample (never on the
+   workers). The snap restores the exact ev == 0.0 path at rest. */
 static inline double jt_ev_step(bow_poly_state_t *st)
 {
     double c = st->jtEvCur;
@@ -1964,21 +1615,17 @@ static inline double jt_ev_step(bow_poly_state_t *st)
     return c;
 }
 
-/* cap: this tick's per-row radiated ceiling in row units (see
-   jt_cap_ceiling), < 0 = the cap is off — the row's state is not
-   touched and the return is byte-exact. */
+/* One row, one divided jt sample — the threading unit (touches only row s
+   + shared read-only tables; penmax accumulates locally). cap = this
+   tick's row ceiling (jt_cap_ceiling), < 0 = off, cap state untouched. */
 static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
                              double ev, double cap, double *penmax)
 {
     const int J = st->jtJ;
     const double dtj = (double)st->jtDiv / st->sr;
-    /* QUIESCENCE GATE early-out (2026-08-17): an asleep row is frozen
-       in place and skips the whole tick — retune amortization included
-       (the follower only sleeps when nothing plays; it retunes within
-       jtTrkIval ticks of waking). Bridge drive above the row's wake
-       bound or ANY drone drive (pluck boost included) resumes it from
-       the frozen state — no re-settle, no strum. Raw Fd is judged
-       (recruitment/governor scaling is awake-path state). */
+    /* QUIESCENCE GATE early-out: an asleep row skips the whole tick; raw
+       bridge drive above its wake bound or any drone drive resumes it from
+       the frozen state (no re-settle). */
     const double FdIn = Fd;
     if (st->jtGateRef > 0.0 && st->jtGateSlp[s]) {
         if (fabs(Fd) <= st->jtGateFdEps[s]
@@ -1988,8 +1635,8 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         st->jtGateSlp[s] = 0;
         st->jtGateCnt[s] = st->jtGateHold;
     }
-    /* melody-follower retune (amortized: every jtTrkIval ticks of the
-       tracked row only; other rows pay one compare) */
+    /* melody-follower retune, amortized every jtTrkIval ticks of the tracked
+       row */
     if (s == st->jtTrkRow && --st->jtTrkTick <= 0) {
         st->jtTrkTick = st->jtTrkIval;
         jt_track_retune(st);
@@ -1998,23 +1645,17 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         const int Ms = s == st->jtTrkRow ? st->jtTrkMUse : st->jtM[s];
         const int mo = st->jtMOff[s], zo = st->jtZOff[s];
         double *q = st->jtQ + mo, *p = st->jtP + mo;
-        /* Tarabdaar RECRUITMENT (2026-07-26): per-row bridge-drive weight,
-           slewed here (~30 ms) so a note change re-voices the taraf
-           without a step. BEFORE the drone branch: a held drone's noise
-           drive adds after and is never ducked. Energy the row already
-           holds rings out naturally — the weight gates recruitment, not
-           the ring. Unarmed = byte-null. */
+        /* RECRUITMENT: slewed per-row drive weight (~30 ms), before the drone
+           branch so a held drone is never ducked. Unarmed = byte-null. */
         if (st->jtDwOn) {
             double c = st->jtDwCur[s];
             c += st->jtDwA * (st->jtDwTgt[s] - c);
             st->jtDwCur[s] = c;
             Fd *= c;
         }
-        /* EVOLUTION REGISTER TILT: slew this row's own bone offset and
-           compose it with the global evolution lift — the per-row form
-           of the jtEv glide (an asleep row freezes its slew with the
-           rest of its state; the setter wakes it on a material move).
-           Unarmed = the exact legacy scalar (byte-null). */
+        /* EVOLUTION REGISTER TILT: slew this row's own bone offset onto the
+           global
+           lift (an asleep row freezes its slew with the rest of its state). */
         double evs = ev;
         if (st->jtEvOfsOn) {
             double c = st->jtEvOfsCur[s];
@@ -2022,29 +1663,19 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             st->jtEvOfsCur[s] = c;
             evs += c;
         }
-        /* CHARGE GOVERNOR shed (previous-tick envelope, one jt-tick
-           lag): a row ringing above its graze target takes ref/env of
-           the bridge drive — an AGC that saturates the ring at the
-           single-strike level instead of letting a phrase pile up in
-           the long-t60 anchors. BEFORE the drone branch: a held
-           drone's own drive is never ducked. */
+        /* CHARGE GOVERNOR shed (previous-tick envelope): a row ringing above
+           its
+           graze target takes ref/env of the drive. Before the drone branch. */
         if (st->jtGovAmt > 0.0 && st->jtGovRef > 0.0) {
             const double refv = st->jtGovRef * st->jtWd[mo];
             const double env = st->jtGovEnv[s];
             if (env > refv)
                 Fd *= 1.0 - st->jtGovAmt * (1.0 - refv / env);
         }
-        /* DRONE row (2026-07-23, gradual-attack rev): the whole
-           excitation is a slewed filtered-noise drive — NO impulse.
-           The envelope eases toward (hold target + onset boost) with
-           the attack coefficient and falls with the release one; the
-           boost (set by bow_poly_jt_pluck at press) decays over a
-           few hundred ms, so the onset is a swell that relaxes into
-           the sustain. The string is the resonator — only its modal
-           response radiates. Whole branch guarded so the all-zero
-           (unused) path is byte-identical to the legacy tick.
-           Per-row state, per-row visitation: safe under the worker
-           partition (a row belongs to one worker). */
+        /* DRONE row: a slewed band-passed drive (hold + decaying onset boost),
+           no
+           impulse. Whole branch guarded: all-zero = the unarmed tick,
+           bit-exact. */
         if (st->jtDnBoost[s] != 0.0 || st->jtDnEnv[s] != 0.0
             || st->jtDnTgt[s] != 0.0) {
             double bst = st->jtDnBoost[s];
@@ -2064,9 +1695,7 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
                 st->jtDnRng[s] = x;
                 double w = (double)(long long)(x >> 11)
                     * (1.0 / 4503599627370496.0) - 1.0;
-                /* band-passed noise (sub-audio content would push the
-                   string quasi-statically against the jawari bone and
-                   pump the buzz — slow tremolo) */
+                /* band-passed noise (sub-audio content would pump the buzz) */
                 double lp = st->jtDnLp[s];
                 lp += st->jtDnALp * (w - lp);
                 st->jtDnLp[s] = lp;
@@ -2074,10 +1703,7 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
                 lp2 += st->jtDnALp2 * (lp - lp2);
                 st->jtDnLp2[s] = lp2;
                 double drv = lp - lp2;
-                /* pitched part (mellow-drone rev): a sine at the row's
-                   own mode-1 frequency — the drive a played note hands
-                   a sympathetic string. Noise alone rings the row's
-                   high modes far above their played-note balance. */
+                /* pitched part: a sine at the row's own mode-1 frequency */
                 const double mix = st->jtDnMix;
                 if (mix > 0.0) {
                     double ph = st->jtDnPh[s]
@@ -2101,12 +1727,9 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         const float *G4_ = st->jtG4 + (size_t)s * (size_t)J * J;
         const float *gd_ = st->jtGd + (size_t)s * J;
         const float *gd4_ = st->jtGd4 + (size_t)s * J;
-        /* Tarabdaar TILT: bone lift (taraf-purity axis, mono lockstep) —
-           the jawari bone drops jtLift below its profile; penetration
-           shrinks toward zero and the string rings as a PURE modal
-           taraf. Composed with the slewed evolution lift `ev` (SIGNED
-           — negative raises the bone). 0 = the byte-exact legacy
-           contact. */
+        /* TILT bone lift: the bone drops jtLift below its profile and the row
+           rings as a pure modal taraf; composed with the signed evolution lift.
+           0 = the bit-exact contact. */
         const float lift = (float)(st->jtLift + evs);
         float bl[JT_MAXJ];
         const float *bc_ = b_;
@@ -2114,9 +1737,8 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             for (int j = 0; j < J; j++) bl[j] = b_[j] - lift;
             bc_ = bl;
         }
-        /* TWO BRIDGES (2026-09-02): the row's own contact law when the
-           setter armed it (the chromatic bridge's alpha / hcB / apex),
-           else the exact global scalars (byte-null). */
+        /* TWO BRIDGES: the row's own contact law when armed, else the exact
+           global scalars */
         const float kcR = (float)st->jtKc;
         const float alphaR = (float)(st->jtRowContactOn
                                      ? st->jtRowAlpha[s] : st->jtAlpha);
@@ -2124,8 +1746,8 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
                                    ? st->jtRowHcB[s] : st->jtHcB);
         const double deepRow = st->jtRowContactOn
                                ? st->jtRowDeep[s] : st->jtDeep;
-        /* deep-substep threshold follows the evolution lift the way a
-           rebuild at the shifted apex would (phys[3] = 2.5·apex). */
+        /* deep-substep threshold follows the evolution lift (phys[3] =
+           2.5·apex) */
         double deepEff = deepRow - 2.5 * evs;
         if (deepEff < 1e-7) deepEff = 1e-7;
         double qs[JT_MAXM], ps[JT_MAXM];
@@ -2138,8 +1760,8 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         }
         float u[JT_MAXJ], ud[JT_MAXJ];
         jt_zone(Ms, J, phiU, q, p, u, ud);
-        /* governor envelope: peak |zone velocity| this tick, ~60 ms
-           release (state only touched while armed — byte-null off) */
+        /* governor envelope: peak |zone velocity|, ~60 ms release (touched only
+           while armed) */
         if (st->jtGovAmt > 0.0) {
             float am = 0.0f;
             for (int j = 0; j < J; j++) {
@@ -2180,22 +1802,15 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         }
         for (int k = 0; k < Ms; k++)
             p[k] += dtj * Fd * st->jtPhiD[mo + k];
-        /* Tarabdaar TILT: extra taraf decay — momentum-proportional loss
-           per tick (static wrap p = 0 untouched). 0/>= 1 = off. */
+        /* TILT extra decay: momentum-proportional loss per tick; 0 / >= 1 =
+           off */
         const double dampm = st->jtDampMul;
         if (dampm > 0.0 && dampm < 1.0)
             for (int k = 0; k < Ms; k++) p[k] *= dampm;
-        /* QUIESCENCE GATE entry: a full hold window (~30 ms) of
-           sub-floor LOW-MODE momentum with no bridge drive and no
-           drone drive freezes the row IN PLACE. The meter is the
-           audible ring: peak |p| over the first modes. The zone
-           velocity / raw radiated sample CANNOT gate — the settled
-           static wrap sustains a tick-rate micro limit-cycle against
-           the bone (measured: zone velocity rests at ~0.6, per-row
-           radiated peak at ~5e-3, both CONSTANT), but it lives in the
-           HIGH modes; the low modes rest 3+ decades below ring scale.
-           Single-tick |p| dips at the mode cycle's zero crossings
-           can't fake a CONSECUTIVE quiet run. Armed only. */
+        /* QUIESCENCE GATE entry: a full hold window of sub-floor LOW-MODE
+           momentum
+           with no bridge or drone drive freezes the row in place (only low-mode
+           |p| can meter quiescence — see the state block). Armed only. */
         if (st->jtGateRef > 0.0) {
             const int kg = Ms < 6 ? Ms : 6;
             double am = 0.0;
@@ -2224,9 +1839,7 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             } else
                 st->jtGateCnt[s] = st->jtGateHold;
         }
-        /* BRIDGE-FORCE RADIATION (2026-09-02, the only radiation since
-           2026-09-03): the row radiates its DC-blocked, unit-matched
-           contact force on the bone. */
+        /* BRIDGE-FORCE RADIATION: DC-blocked, unit-matched contact force */
         double rs = st->jtRadScaleCur[s];
         rs += st->jtRadSlewA * (st->jtRadScale[s] - rs);
         st->jtRadScaleCur[s] = rs;
@@ -2236,12 +1849,8 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         lp += st->jtRadA * (fr - lp);
         st->jtRadLp[s] = lp;
         double yjt = fr - lp;
-        /* PER-STRING VOICE-RELATIVE CAP (2026-09-01): this row's own
-           radiated peak envelope against the voice-derived ceiling —
-           a pure output gain, applied after the physics so the ring,
-           the governor and the gate see the un-capped string. A fresh
-           arm (generation bump) resets the row here, on its own
-           worker. hard 1 skips the pow. */
+        /* PER-STRING CAP: pure output gain after the physics; a fresh arm
+           (generation bump) resets the row here, on its own worker. */
         if (cap >= 0.0) {
             if (st->jtCapRowGen[s] != st->jtCapGen) {
                 st->jtCapRowGen[s] = st->jtCapGen;
@@ -2265,10 +1874,8 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             st->jtCapGain[s] = g;
             yjt *= g;
         }
-        /* SCOPE TELEMETRY (2026-09-01): the row's own radiated peak
-           envelope + amortized per-mode envelopes — after the cap, so
-           the meter shows what the row actually contributes. Pure
-           reads of the physics; unarmed = the branch never runs. */
+        /* SCOPE TELEMETRY (after the cap — what the row actually
+           contributes) */
         if (st->scopeOn) {
             const double a = fabs(yjt);
             double e = st->scopeEnv[s];
@@ -2291,10 +1898,9 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
     }
 }
 
-/* The per-tick ROW ceiling for the per-string cap: the recorded voice
-   peak envelope × ratio, divided by the jt output gain (jtGain × the
-   live gain multiplier) so a row's raw radiated sample compares with
-   the voice in bus units. < 0 = off (hard 0). */
+/* The per-tick ROW ceiling: recorded voice peak × ratio ÷ the jt output
+   gain (so a row's raw sample compares with the voice in bus units).
+   < 0 = off. */
 static inline double jt_cap_ceiling(const bow_poly_state_t *st, double venv)
 {
     if (st->jtCapHard <= 0.0) return -1.0;
@@ -2304,13 +1910,9 @@ static inline double jt_cap_ceiling(const bow_poly_state_t *st, double venv)
     return venv * st->jtCapRatio / g;
 }
 
-/* The per-TARAF half of the cap (bow_jt_cap_bus): at each jt tick, the
-   summed web (after the rows' own stage) against the same ceiling —
-   feed-forward peak envelope of |hold| (150 ms release), gain slewed
-   like the rows', exponent hard·bus, one gain on mono and side.
-   Called from every hold walk on its owning thread; cap < 0 = off,
-   state untouched (byte-null). The envelope keeps tracking at bus 0 so
-   a live sweep toward 1 does not step. */
+/* The per-TARAF half of the cap: the summed web (after the rows' stage)
+   against the same ceiling, exponent hard·bus, one gain on mono and side.
+   Called from every hold walk on its owning thread; cap < 0 = off. */
 static inline void jt_cap_bus(bow_poly_state_t *st, double cap,
                               double *hold, double *holdS)
 {
@@ -2338,9 +1940,8 @@ static inline void jt_cap_bus(bow_poly_state_t *st, double cap,
     *holdS *= g;
 }
 
-/* sideOut (nullable): accumulates the PAN-WEIGHTED row sum for the
-   Tarabdaar stereo side path — each modal-jawari string radiates from
-   its own place across the bridge. NULL = the legacy mono walk. */
+/* sideOut (nullable): accumulates the pan-weighted row sum for the stereo side
+   path */
 static double jt_tick(bow_poly_state_t *st, double Fd, double ev,
                       double cap, double *sideOut)
 {
@@ -2363,7 +1964,7 @@ static double jt_tick(bow_poly_state_t *st, double Fd, double ev,
     return jrad;
 }
 
-/* ---- persistent jt worker pool (mono lockstep) ---- */
+/* ---- persistent jt worker pool ---- */
 #define JT_POOL_CH 65536
 
 static void *jt_pool_run(void *va)
@@ -2392,8 +1993,7 @@ static void *jt_pool_run(void *va)
         const double *fd = st->jtFdv;
         const double *evv = st->jtEvV;
         const double *capv = st->jtCapV;
-        /* Tarabdaar stereo: pan-weighted side partials ride a second
-           accumulator row (stOn set at build, before rendering) */
+        /* stereo: pan-weighted side partials ride a second accumulator row */
         double *hpS = (st->stOn && st->jtHpS && st->stJtPan)
             ? st->jtHpS + (size_t)idx * JT_POOL_CH : NULL;
         for (int s = s0; s < s1; s++) {
@@ -2421,8 +2021,7 @@ static void jt_pool_stop(bow_poly_state_t *st)
     pthread_mutex_lock(&st->jtMx);
     st->jtQuit = 1;
     pthread_cond_broadcast(&st->jtCvW);
-    /* a dispatcher mid-rendezvous waits on jtCvD with jtDone still
-       short — wake it too (its wait predicate breaks on jtQuit) or a
+    /* a dispatcher mid-rendezvous waits on jtCvD — wake it too, or a
        teardown/resize during a dispatch wedges it forever */
     pthread_cond_broadcast(&st->jtCvD);
     pthread_mutex_unlock(&st->jtMx);
@@ -2475,15 +2074,8 @@ void bow_poly_jt_set_threads(void *vst, int nth)
 #define JT_ARING 8
 #define JT_WEBN 32768
 
-/* Tarabdaar jt tone LP (2026-07-23): arm/clear the one-pole on the
-   radiated jt sum. a <= 0 = bypass (the historical bit-exact output).
-   RUNTIME-SAFE (mono lockstep, purity axis 2026-07-23 night): mid +
-   side states PRESERVED on coefficient moves; the bypass branches
-   keep them warm. Plain scalar write, any thread. */
-/* Tarabdaar FX (2026-08-01): install the jt-drive FX hook. Plain pointer
-   stores — call OFF the audio thread (engine build, before rendering);
-   NULL fn (the calloc default) is byte-null. Context is stored first so
-   a non-NULL fn never observes a stale ctx. */
+/* Install the jt-drive FX hook OFF the audio thread; NULL fn = byte-null.
+   Context is stored first so a non-NULL fn never sees a stale ctx. */
 void bow_poly_set_drive_fx(void *vst,
                            void (*fn)(void *ctx, double *buf, int n),
                            void *ctx)
@@ -2493,12 +2085,11 @@ void bow_poly_set_drive_fx(void *vst,
     st->fxDriveFn = fn;
 }
 
-/* ---- Tarabdaar sitar→taraf inject (2026-08-19) ---- */
+/* ---- sitar→taraf inject ---- */
 #define SJ_RINGN 32768
 
-/* Control thread (the drone-setter contract, plus a one-time ring
-   alloc on the first non-zero gain — call from the param apply path,
-   never the audio thread). 0 with no ring allocated stays byte-null. */
+/* Control thread (drone-setter contract + a one-time ring alloc on the
+   first non-zero gain — never the audio thread). */
 void bow_poly_jt_inject_gain(void *vst, double g)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -2511,9 +2102,8 @@ void bow_poly_jt_inject_gain(void *vst, double g)
     st->sjGain = g;
 }
 
-/* Producer render thread (the OTHER voice's callback): append mono
-   samples. Drops the block when the ring is full (consumer stalled —
-   e.g. the jt web disabled); the consumer realigns on gross backlog. */
+/* Producer render thread (the other voice's callback). Drops the block
+   when the ring is full; the consumer realigns on gross backlog. */
 void bow_poly_jt_inject_write(void *vst, const double *x, int n)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -2528,50 +2118,37 @@ void bow_poly_jt_inject_write(void *vst, const double *x, int n)
     __atomic_store_n(&st->sjW, ww + n, __ATOMIC_RELEASE);
 }
 
+/* jt tone LP/HP: a <= 0 = bypass (bit-exact); mid + side states are
+   preserved on coefficient moves. Plain scalar writes, any thread. */
 void bow_poly_jt_set_lp(void *vst, double a)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     st->jtLpA = a;
 }
 
-/* Tarabdaar jt tone HP (2026-07-26): arm/clear the one-pole high-pass on
-   the radiated jt sum (applied after the LP inside jt_lp_step). Same
-   contract as set_lp: a <= 0 = bypass (byte-exact legacy), states
-   preserved on coefficient moves, plain scalar write, any thread. */
 void bow_poly_jt_set_hp(void *vst, double a)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     st->jtHpA = a;
 }
 
-/* Tarabdaar jt BODY radiation mix (2026-08-01): 0..1 blend of the
-   radiated jt sum through the SAME formula-body radiation bank the
-   played strings radiate through (own filter state inside jt_lp_step,
-   shared coefficient arrays — a live bow_poly_set_body re-points
-   both). Plain scalar store, any thread (the drone-setter contract);
-   slewed ~30 ms at the kernel rate. Never calling it is byte-null.
-   NOT part of the load ABI — same contract as set_lp/set_hp. */
+/* jt BODY radiation mix 0..1 — plain scalar store, any thread, slewed
+   ~30 ms at the kernel rate; never calling it is byte-null. */
 void bow_poly_jt_set_body(void *vst, double mix)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     if (!st || st->njt <= 0) return;
     if (mix < 0.0) mix = 0.0;
     if (mix > 1.0) mix = 1.0;
-    /* a 0 push while unarmed stays a no-op — the app's startup
-       resting-push sends every live parameter, and arming here would
-       tick K idle biquads per jt sample forever */
+    /* a 0 push while unarmed stays a no-op (arming would tick K idle biquads
+       per sample forever) */
     if (!st->jtBodyOn && mix <= 0.0) return;
     st->jtBodyTgt = mix;
     st->jtBodyOn = 1;
 }
 
-/* TARABDAAR STEREO SIDE OUTPUT (2026-07-23): arm the side path with
-   per-source pan weights (each already scaled by the host's spread —
-   the kernel just applies them). webPan[nv] = taraf web strings,
-   jtPan[njt] = modal-jawari rows (call AFTER bow_poly_jt_load),
-   slotPan[nb] = played gut strings. NULL / wrong-length arrays leave
-   that family centred (zero pan). Call at engine build, off the audio
-   thread, before rendering starts. */
+/* Arm the side path with per-source pans (webPan[nv], jtPan[njt] after
+   jt_load, slotPan[nb]; NULL = centred). Engine build, off the audio thread. */
 void bow_poly_set_stereo(void *vst, const double *webPan, int nWeb,
                          const double *jtPan, int nJt,
                          const double *slotPan, int nSlot)
@@ -2605,23 +2182,10 @@ void bow_poly_set_stereo(void *vst, const double *webPan, int nWeb,
     st->stOn = 1;
 }
 
-/* TARABDAAR INSTRUMENT WIDTH (2026-08-01 unifying rev): derive the
-   diffuse-field difference bank (see the state block): 16 modes
-   log-spaced 700 Hz -> 6.5 kHz with golden jitter, Q ~ 12,
-   plastic-number signs (the builder's own jitter/sign sequences —
-   deterministic, no RNG), each peak-normalized like the mid body
-   modes and weighted by a log-frequency directivity ramp d(f), 0
-   below 300 Hz -> 1 at 3 kHz (ka ~ 1 onset for a sarangi-sized
-   radiator: fundamentals stay dead-centre, only the upper spectrum
-   opens). The drive is the radiated mid itself, so unit weight =
-   "as loud as the mid"; 1.4·d(f) at the peaks stays well inside what
-   two real observation points show (|H_L - H_R| reaches 2·|H| at a
-   sign flip) — measured with BOTH bus instances live (the wash rings
-   right in the bank's band, so it dominates the calibration): width
-   0.2 lands melody interaural coherence ~0.9 at 4-8 kHz with the
-   bare wash at ~0.3-0.4 ("air, image intact"); 0.6 is very wide
-   (melody ~0.4-0.5). Depends only on the sample rate — a live body
-   retune does NOT need a re-derive. */
+/* INSTRUMENT WIDTH derive: 16 modes log-spaced 700 Hz -> 6.5 kHz (golden
+   jitter, Q ~ 12, plastic-number signs), peak-normalized, × 1.4 × a
+   log-frequency directivity ramp (0 below 300 Hz -> 1 at 3 kHz). Depends
+   only on the sample rate. */
 static double poly_width_ramp(double f)
 {
     if (f <= 300.0) return 0.0;
@@ -2660,9 +2224,8 @@ static void poly_width_derive(bow_poly_state_t *st)
     st->stWidthSl = 1.0 - exp(-1.0 / (0.030 * st->sr));
 }
 
-/* one width-bank step for bus b ([0] voice, [1] jt wash): shared
-   coefficients, per-bus state — linearity keeps the split FX buses'
-   side streams valid while their sum equals the one-instrument model */
+/* one width-bank step for bus b ([0] voice, [1] jt wash): shared coefficients,
+   per-bus state */
 static inline double poly_width_bank(bow_poly_state_t *st, int b, double x)
 {
     double acc = 0.0;
@@ -2676,13 +2239,9 @@ static inline double poly_width_bank(bow_poly_state_t *st, int b, double x)
     return acc;
 }
 
-/* Arm / retarget the instrument width. Width factors out of the bank
-   linearly, so the bank stores unit width and the scalar is slewed
-   ~30 ms on the render thread (zipper-safe live moves). Call at
-   engine build off the audio thread (any order w.r.t.
-   bow_poly_set_stereo — the render gates on stOn && stWidthOn).
-   Never calling it, or width 0 from a cold start, is the exact
-   legacy side path. */
+/* Arm / retarget the width: the bank stores unit width and the scalar is
+   slewed ~30 ms on the render thread. Call off the audio thread; width 0
+   from a cold start = byte-null. */
 void bow_poly_set_stereo_width(void *vst, double width)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -2693,15 +2252,9 @@ void bow_poly_set_stereo_width(void *vst, double width)
     st->stWidthOn = 1;         /* arm last — the render gates on it */
 }
 
-/* TARABDAAR SITAR TWANG (2026-08-01): shape defaults, derived once on
-   first arm (the width-derive idiom). Values are the sitar1.wav fit
-   (staccato C4 on the shipping artifact vs the sample's pluck 2, band-
-   trajectory match): buzz-band/low-band gap -9.5/-8.5/-10.6/-11.8 dB
-   at 150/300/600/900 ms into the ring vs the sitar's -6/-2/-7/-7, low
-   band decaying in step, pitch error +0.9 cents. The contact-loss fold
-   ships at 0 — any measured depth shortened the ring without adding
-   twang (the wrap PM is the whole cascade); the hook keeps it for
-   sound-design experiments. See bow_poly_set_twang_shape to re-fit. */
+/* SITAR TWANG shape defaults, derived once on first arm. The contact-loss
+   fold ships at 0 — the wrap PM is the whole cascade; set_twang_shape keeps
+   depth for experiments. */
 static void poly_twang_defaults(bow_poly_state_t *st)
 {
     if (st->twSl > 0.0) return;                    /* already derived */
@@ -2709,15 +2262,8 @@ static void poly_twang_defaults(bow_poly_state_t *st)
     st->twKneeR = 0.5;
     st->twDepth = 0.0;
     st->twRel = exp(-1.0 / (0.040 * st->sr));
-    /* extended-top rev (the "go twangier" rework): the endpoints are
-       HOTTER than the original sitar1.wav fit (roll 4 / bright 2.5 /
-       ring 0.95 / gut 0.8, knee 0.55), which now lives near amount
-       ~0.75 of the throw — ring/gut deliberately exceed their derive
-       caps so they SATURATE at the fitted sustain by ~0.75 and the
-       last quarter spends its travel on wrap + brightness (the buzz
-       levers that still move up there; the sweep measured the buzz
-       equilibrium saturating near roll 5.5 — a bigger swing also
-       smears more HF, so past this the axis only buys drain). */
+    /* ring/gut exceed their derive caps so they saturate by ~0.75 of the throw
+       and the last quarter spends its travel on wrap + brightness */
     st->twRollSmp = 5.5;
     st->twAv = 1.0 - exp(-1.0 / (0.0005 * st->sr));
     st->twDcA = 1.0 - exp(-1.0 / (0.030 * st->sr));
@@ -2732,9 +2278,8 @@ static void poly_twang_defaults(bow_poly_state_t *st)
     st->twRingC = 1.0;
 }
 
-/* chunk-rate derivation of the sitar-morph effective terminations from
-   the current slewed amount (called at the top of process3 while armed;
-   pow at chunk rate, plain reads per sample) */
+/* chunk-rate derivation of the sitar-morph terminations from the slewed
+   amount */
 static void poly_twang_derive(bow_poly_state_t *st)
 {
     double a = st->twCur;
@@ -2745,20 +2290,16 @@ static void poly_twang_derive(bow_poly_state_t *st)
     st->twBrAC = pow(st->brA, xp);
     st->twNutAC = pow(st->nutA, xp);
     st->twGutA2C = st->gutA2 > 0.0 ? pow(st->gutA2, xp) : st->gutA2;
-    /* ring/gut ease saturate (endpoints > 1 park the fitted sustain at
-       ~3/4 throw; the caps keep the loop lossy enough to stay stable) */
+    /* ring/gut ease saturate (the caps keep the loop lossy enough to stay
+       stable) */
     double gutE = st->twGut * a;
     if (gutE > 0.9) gutE = 0.9;
     st->twGutC = 1.0 - (1.0 - st->gutG) * (1.0 - gutE);
     double ringE = st->twRing * a;
     if (ringE > 0.98) ringE = 0.98;
     st->twRingC = 1.0 - ringE;
-    /* pitch lock: phase delay the brightened one-poles no longer
-       provide, added back on the bridge read (a/(1-a) per pole per
-       pass; low-f form — f0 sits well under both corners; verified
-       accurate to ~0.1 samples across three octaves on a wrap-free
-       morph). The wrap's own detune is handled separately — the
-       engaged-gated twDb tracker in poly_string_return. */
+    /* pitch lock: the loop delay the brightened one-poles lose (a/(1-a) per
+       pole, low-f form), added back on the bridge read */
     double dBr = st->brA / (1.0 - st->brA)
         - st->twBrAC / (1.0 - st->twBrAC);
     double dNut = st->nutA / (1.0 - st->nutA)
@@ -2767,12 +2308,9 @@ static void poly_twang_derive(bow_poly_state_t *st)
     if (st->twTrimC < 0.0) st->twTrimC = 0.0;
 }
 
-/* Arm / retarget the played-string sitar-twang amount 0..1 (the live
-   form of the `bow_twang` parameter — see the state-struct comment for
-   the physics). Plain scalar store, any thread (the drone-setter
-   contract); the amount slews ~30 ms per kernel sample. 0 from a cold
-   start / never calling is byte-null, and the fold self-disarms once
-   a live 0 finishes slewing. */
+/* Arm / retarget the twang amount 0..1 (bow_twang). Plain scalar store,
+   any thread; slews ~30 ms. Never calling is byte-null; a live 0 self-
+   disarms once slewed. */
 void bow_poly_set_twang(void *vst, double amt)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -2785,16 +2323,9 @@ void bow_poly_set_twang(void *vst, double amt)
     st->twOn = 1;
 }
 
-/* Offline / fitting hook (the bow_jt_set_lift precedent — no registry
-   parameter drives this): override the twang wrap's shape. kneeR =
-   graze knee as a fraction of each side's peak envelope (0..0.99 —
-   high = only the excursion tips engage); depth = the hysteretic
-   contact-LOSS fold slope at amount 1 (small — the wrap itself is
-   conservative); relMs = the peak envelope's release (attack is
-   instant — the rollE idiom); rollSmp = the wrap's bridge-segment
-   shortening in kernel-rate samples at amount 1 (the main, energy-
-   conserving cascade device). Non-positive values keep the current
-   (fitted-default) shape. Call off the audio thread. */
+/* Fitting hook (no registry parameter): kneeR = knee fraction of the side
+   envelope, depth = fold slope, relMs = envelope release, rollSmp = wrap
+   shortening (samples). Non-positive = keep. Off the audio thread. */
 void bow_poly_set_twang_shape(void *vst, double kneeR, double depth,
                               double relMs, double rollSmp,
                               double bright, double ring, double gut)
@@ -2812,15 +2343,6 @@ void bow_poly_set_twang_shape(void *vst, double kneeR, double depth,
     if (gut > 0.0) st->twGut = gut < 1.2 ? gut : 1.2;
 }
 
-/* one filtered step of the jt output walk (bypass = identity with a
-   warm state track — output byte-identical to the legacy bypass).
-   ALSO the ONE application point of the recruitment lush gain
-   (jtGMul): every radiating path runs the mono step exactly once per
-   kernel sample, so the slew advances here; the side twin reads the
-   value the mono step just advanced. The gain multiplies the RETURN
-   only — the LP state stays pre-gain, so engaging/releasing the boost
-   never steps the filter. Unarmed multiplies by exactly 1.0
-   (bit-null). */
 /* the slewed jt output gain, stepped ONCE per kernel output sample (call
    once per sample and reuse for the side stream) */
 static inline double jt_gain_step(bow_poly_state_t *st)
@@ -2829,6 +2351,9 @@ static inline double jt_gain_step(bow_poly_state_t *st)
     return st->jtGainCur;
 }
 
+/* one filtered step of the jt output walk (bypass = warm-tracked identity)
+   and the ONE slew point of the lush gain jtGMul, applied to the RETURN
+   only so engaging it never steps the filter state. */
 static inline double jt_lp_step(bow_poly_state_t *st, double x)
 {
     double m = 1.0;
@@ -2836,12 +2361,9 @@ static inline double jt_lp_step(bow_poly_state_t *st, double x)
         st->jtGMulCur += st->jtGMulA * (st->jtGMulTgt - st->jtGMulCur);
         m = st->jtGMulCur;
     }
-    /* Tarabdaar jt BODY radiation (2026-08-01): blend through the voice's
-       own body radiation bank (shared coefficients, own state) BEFORE
-       the tone LP/HP — physically the rows radiate into the body, the
-       tone pair is sound-design EQ after it. Mix slewed ~30 ms here;
-       the filter keeps ticking while armed so engage/release never
-       steps the state. mix 0 adds exactly 0.0 — bit-exact dry. */
+    /* jt BODY radiation before the tone LP/HP (the rows radiate into the
+       body; the tone pair is EQ after it). Mix slewed ~30 ms; mix 0 adds
+       exactly 0.0. */
     if (st->jtBodyOn) {
         st->jtBodyCur += st->jtBodyA * (st->jtBodyTgt - st->jtBodyCur);
         double wet = st->c0 * x;
@@ -2857,21 +2379,17 @@ static inline double jt_lp_step(bow_poly_state_t *st, double x)
     }
     if (st->jtLpA <= 0.0) st->jtLpY = x;
     else { st->jtLpY += st->jtLpA * (x - st->jtLpY); x = st->jtLpY; }
-    /* Tarabdaar jt tone HP (2026-07-26, the jawari-formant voicing):
-       one-pole high-pass (x − LP(x)) AFTER the tone LP — quiets the
-       taraf's fundamental band under the high-harmonic cluster.
-       Unarmed = warm-tracked identity, byte-exact legacy. */
+    /* jt tone HP (x − LP(x)) after the LP; unarmed = warm-tracked identity */
     if (st->jtHpA <= 0.0) st->jtHpY = x;
     else { st->jtHpY += st->jtHpA * (x - st->jtHpY); x -= st->jtHpY; }
     return m * x;
 }
 
-/* side twin (own states, same coefficients) — Tarabdaar stereo */
+/* side twin (own states, same coefficients) */
 static inline double jt_lp_stepS(bow_poly_state_t *st, double x)
 {
     const double m = st->jtGMulOn ? st->jtGMulCur : 1.0;
-    /* body twin: same coefficients, own state; reads the mix the mono
-       step just advanced (the jtGMul pattern) */
+    /* body twin: reads the mix the mono step just advanced */
     if (st->jtBodyOn) {
         double wet = st->c0 * x;
         const int Kb = st->K;
@@ -2891,12 +2409,8 @@ static inline double jt_lp_stepS(bow_poly_state_t *st, double x)
     return m * x;
 }
 
-/* Radiated-gain multiplier (the lush half of the recruitment axis):
-   scales the jt web's OUTPUT, slewed ~30 ms in jt_lp_step. Unlike a
-   drive boost, output level cannot be drained by the graze contact —
-   this is the reliable "how loud is the chorus" lever. Plain scalar
-   store, any thread (the drone-setter contract). 1 = bit-exact; never
-   calling it is byte-null. */
+/* Radiated-gain multiplier (the lush half of recruitment), slewed ~30 ms
+   in jt_lp_step. Plain scalar store, any thread; 1 = bit-exact. */
 void bow_poly_jt_set_gain_mul(void *vst, double m)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -2907,9 +2421,8 @@ void bow_poly_jt_set_gain_mul(void *vst, double m)
     st->jtGMulOn = 1;
 }
 
-/* Per-row bridge-drive weights (the recruitment axis) — plain per-row
-   scalar stores, any thread (the drone-setter contract; the jt tick
-   slews). First call arms the tick's multiply; all-ones is bit-exact. */
+/* Per-row bridge-drive weights (recruitment) — plain stores, any thread;
+   the jt tick slews. All-ones is bit-exact. */
 void bow_poly_jt_drive_weights(void *vst, const double *w, int n)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -2924,13 +2437,8 @@ void bow_poly_jt_drive_weights(void *vst, const double *w, int n)
     st->jtDwOn = 1;
 }
 
-/* Tarabdaar HARMONIC-EVOLUTION lift (2026-07-26): signed bone offset in
-   meters (+ = bone dropped — graze margin shrinks, the upward cascade
-   opens; − = raised — pressed past the knee, no twang), slewed per jt
-   sample (~40 ms) by jt_ev_step so the bone GLIDES: a tilt sweep is a
-   slow jawari adjustment, not a strum. The live form of the
-   `bow_jt_evolve` parameter (BowEngine owns the 0…1 → meters map).
-   Plain scalar store, any thread. 0 at rest = byte-null. */
+/* HARMONIC-EVOLUTION lift in meters (BowEngine owns the 0…1 map), slewed
+   ~40 ms so a tilt sweep is an adjustment, not a strum. Plain store. */
 void bow_poly_jt_set_evolve(void *vst, double meters)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -2938,16 +2446,9 @@ void bow_poly_jt_set_evolve(void *vst, double meters)
     if (meters > 1e-3) meters = 1e-3;
     if (meters < -1e-3) meters = -1e-3;
     st->jtEvTgt = meters;
-    /* wake sleeping quiescence-gate rows on a MATERIAL bone move: a
-       row that slept through a real glide would meet the moved bone
-       as a STEP on wake (the strum this slew exists to avoid). The
-       wake is CHANGE-gated against the target the sleepers were
-       frozen under — comparing to jtGateEvWake (not the previous
-       push) so slow cumulative drift still wakes once it adds up,
-       while a re-pushed constant or sensor jitter (a live tilt
-       binding streams this setter at sensor rate) never does. A
-       sub-dead-band offset met on wake is <= 5% of the graze apex —
-       nothing. Awake rows track the slew exactly regardless. */
+    /* wake sleeping gate rows on a MATERIAL move (else they meet the moved
+       bone as a step); change-gated against jtGateEvWake so drift wakes while
+       a re-pushed constant never does */
     if (st->jtGateRef > 0.0 && st->jtGateSlp
         && fabs(meters - st->jtGateEvWake) > 0.02 * st->jtDeep) {
         st->jtGateEvWake = meters;
@@ -2955,17 +2456,8 @@ void bow_poly_jt_set_evolve(void *vst, double meters)
     }
 }
 
-/* Tarabdaar EVOLUTION REGISTER TILT (2026-08-27, `bow_jt_ev_reg`):
-   per-row SIGNED bone offsets in meters, ADDED to the global
-   evolution lift (bow_poly_jt_set_evolve) and slewed per jt tick per
-   row (~40 ms) — BowEngine owns the register→offset map (evolve
-   units per octave from the tonic); the kernel just glides each
-   row's bone. A sleeping quiescence-gate row whose own target
-   materially moves is woken (the set_evolve wake rule, judged per
-   row against the previous target — the engine dead-bands its
-   pushes, so a bound tilt cannot stream sub-band jitter here).
-   Drone-setter contract: plain array writes, the jt tick reads
-   them. Never calling this is byte-null. */
+/* EVOLUTION REGISTER TILT: per-row signed bone offsets in meters; a
+   sleeping row whose target materially moves is woken. Plain array writes. */
 void bow_poly_jt_set_evolve_ofs(void *vst, const double *ofs, int n)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -2983,17 +2475,9 @@ void bow_poly_jt_set_evolve_ofs(void *vst, const double *ofs, int n)
     st->jtEvOfsOn = 1;
 }
 
-/* Tarabdaar TWO BRIDGES (2026-09-02): per-row CONTACT LAW — the
-   chromatic set's own jawari. alpha = contact stiffness exponent, hcb =
-   hysteretic contact damping, deep = the deep-substep penetration
-   threshold (2.5 × that bridge's apex, the phys[3] convention). Rows
-   past n keep their current values; rows on the raga bridge are
-   expected to be written with the global phys values (a row written
-   with EXACTLY the globals ticks bit-identically to the unarmed path
-   — the same float casts). Drone-setter contract: plain array stores,
-   any thread; the jt tick reads per row. Never calling it is
-   byte-null. Survives bow_poly_jt_set_coeffs (the engine re-pushes
-   after every in-place reload). */
+/* TWO BRIDGES setter: alpha = exponent, hcb = hysteretic damping, deep =
+   substep threshold (2.5 × apex). Exactly-global rows tick bit-identically
+   to the unarmed path. Plain stores; survives bow_poly_jt_set_coeffs. */
 void bow_poly_jt_set_row_contact(void *vst, const double *alpha,
                                  const double *hcb, const double *deep,
                                  int n)
@@ -3034,12 +2518,9 @@ void bow_poly_jt_set_damp_t60(void *vst, double t60)
     }
 }
 
-/* CHARGE GOVERNOR (Tarabdaar 2026-08-15, `bow_jt_gov`): amt 0..1 is the
-   governor strength (0 = byte-null raw physics); refDisp is the target
-   contact-zone ring DISPLACEMENT in meters (apex-scale — the graze
-   band), converted per row to a velocity bound refDisp·wd1 on the
-   row's zone-velocity peak envelope. Drone-setter contract: plain
-   scalar writes, the jt tick reads them. */
+/* CHARGE GOVERNOR: amt 0..1 = strength (0 = byte-null), refDisp = target
+   ring DISPLACEMENT in meters (× wd1 per row = the velocity bound).
+   Drone-setter contract. */
 void bow_poly_jt_set_gov(void *vst, double amt, double refDisp)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -3052,13 +2533,9 @@ void bow_poly_jt_set_gov(void *vst, double amt, double refDisp)
     }
 }
 
-/* PER-STRING VOICE-RELATIVE CAP (Tarabdaar 2026-09-01, `bow_jt_cap`):
-   hard 0..1 (0 = off, byte-null), ratio = the radiated level each row
-   may reach relative to the voice's decaying peak. An arm edge bumps
-   the generation so every row resets its envelope/gain on its own
-   worker at its next tick — no array writes from this thread. bus 0..1
-   blends the scope: per string (0) … per taraf (1), see jtCapMode.
-   Drone-setter contract: plain scalar writes, the armed flag last. */
+/* PER-STRING CAP: hard 0..1 (0 = byte-null), ratio vs the voice peak, bus
+   = scope blend. An arm edge bumps the generation — rows reset on their
+   own workers, no array writes here. Armed flag written last. */
 void bow_poly_jt_set_cap(void *vst, double hard, double ratio, double bus)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -3073,14 +2550,9 @@ void bow_poly_jt_set_cap(void *vst, double hard, double ratio, double bus)
     }
 }
 
-/* QUIESCENCE GATE (Tarabdaar 2026-08-17, `bow_jt_gate`): refDisp is the
-   sleep floor as contact-zone ring DISPLACEMENT in meters (apex-scale,
-   ×mode-1 rate = the per-row velocity floor — the jtGovRef convention).
-   Arms the per-row wake bounds and the ~30 ms hold window; <= 0
-   disarms AND wakes every row (a stale asleep flag under a later
-   re-arm would truncate a ringing row). Drone-setter contract: plain
-   scalar/array writes, the jt tick reads them; the armed flag
-   jtGateRef is written last. */
+/* QUIESCENCE GATE: refDisp = floor DISPLACEMENT in meters (× wd1 per row).
+   <= 0 disarms AND wakes every row (a stale asleep flag under a later
+   re-arm would truncate a ringing row). jtGateRef is written last. */
 void bow_poly_jt_set_gate(void *vst, double refDisp)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -3101,13 +2573,8 @@ void bow_poly_jt_set_gate(void *vst, double refDisp)
             const double t = fabs(st->jtPhiD[mo + k]);
             if (t > pdm) pdm = t;
         }
-        /* wake bound: the drive that could ring the low modes back up
-           to the floor refDisp·wd1 within ~one mode-1 period of
-           resonant driving (|p| ≈ π·Fd·phiD/wd1) — conservative, so
-           anything that could become audible wakes the row. The
-           follower's retunes scale wd1 by at most an octave-ish and
-           only land while it is awake (drive present) — the stale
-           bound stays the right order. */
+        /* wake bound: the drive that could ring the low modes back to the floor
+           within ~one mode-1 period (|p| ≈ π·Fd·phiD/wd1) — conservative */
         st->jtGateFdEps[s] = pdm > 0.0
             ? refDisp * wd1 * wd1 / (M_PI * pdm)
             : 1e300;
@@ -3117,10 +2584,9 @@ void bow_poly_jt_set_gate(void *vst, double refDisp)
     st->jtGateRef = refDisp;
 }
 
-/* gate probe: out = {asleep rows, total rows, max ring/floor ratio,
-   max drive/eps ratio, drone-hot flag} since the last read (ratios
-   reset on read; >1 names the condition blocking sleep).
-   Telemetry-grade racy reads; any thread. */
+/* gate probe: out = {asleep rows, total rows, max ring/floor ratio, max
+   drive/eps ratio, drone-hot flag} since the last read (>1 names the
+   condition blocking sleep). Racy telemetry reads, any thread. */
 void bow_poly_jt_gate_probe(void *vst, double out[5])
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -3148,11 +2614,9 @@ int bow_poly_jt_gate_asleep(void *vst)
     return n;
 }
 
-/* SCOPE TELEMETRY (Tarabdaar 2026-09-01): display-only meters for the
-   Mac Scope tab. Arming clears the meters and turns the per-row tick
-   branch on; disarmed the tick is the exact legacy code path. Plain
-   scalar/array writes from the control thread; the jt workers read
-   the flag and own the per-row state (telemetry-grade races). */
+/* SCOPE TELEMETRY arm: clears the meters and turns the per-row tick branch
+   on; disarmed the tick is the exact unmetered path. Control-thread
+   writes; the workers own the per-row state (telemetry-grade races). */
 void bow_poly_scope_arm(void *vst, int on)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -3166,17 +2630,9 @@ void bow_poly_scope_arm(void *vst, int on)
     st->scopeOn = on ? 1 : 0;
 }
 
-/* Per-row scope read: f0 = the row's CURRENT fundamental (Hz — the
-   melody follower reports its slewed retune target), level = the row's
-   radiated peak envelope in VOICE-BUS units (× the jt output gain and
-   its live multiplier, so it compares with the played strings' bus —
-   the host's outGain still applies), asleep = quiescence-gate flag,
-   modes = the first K per-mode MODAL VELOCITY envelopes |p_k| (row-major,
-   K per row, zero-padded past the row's mode count; energy per mode ∝
-   p_k² — with the flat force radiation this IS the radiated spectrum up
-   to a constant). An asleep row reads silent. Any output pointer may be
-   NULL. Fills min(nrows, njt) rows; returns njt (0 = no jt block /
-   unarmed). */
+/* Per-row scope read: f0 (Hz), level = radiated peak envelope in voice-bus
+   units, asleep = gate flag, modes = first K |p_k| envelopes (row-major,
+   zero-padded). Asleep rows read silent. Returns njt (0 = unarmed). */
 int bow_poly_scope_jt(void *vst, int nrows, double *f0, double *level,
                       unsigned char *asleep, float *modes, int K)
 {
@@ -3207,10 +2663,8 @@ int bow_poly_scope_jt(void *vst, int nrows, double *f0, double *level,
     return st->njt;
 }
 
-/* Per played-string scope read: level = the string's ring envelope
-   (chunk peak of the bridge-side wave, string units — a RELATIVE
-   sounding/decaying meter, 0 for an inactive string). Fills
-   min(n, nb) slots (slot index = the mapper's); returns nb. */
+/* Per played-string scope read: level = ring envelope (chunk peak of the
+   bridge-side wave; 0 when inactive). Returns nb. */
 int bow_poly_scope_slots(void *vst, double *level, int n)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -3223,16 +2677,9 @@ int bow_poly_scope_slots(void *vst, double *level, int n)
     return st->nb;
 }
 
-/* TARABDAAR LIVE PARAMETERS (2026-07-24): replace the per-sample scalar
-   vector on a LIVE state — the same 61 values bow_poly_init takes, in the
-   same order, with the same derivations. Coefficient/table arrays and
-   every piece of RUNNING STATE (string histories, the contact/aging
-   state crS/crSB/crS3/ageDef/ageDef3, jawG, the jt web) are left
-   alone, so editing a physics parameter no longer needs a fresh engine
-   — no rebuild, no settle pre-roll, no crossfade, no lost ring.
-   Plain scalar writes, control-thread safe, exactly like the
-   jaw-gain/drone setters. No parity fixture calls it, so every golden
-   is untouched. Order MUST stay in lockstep with bow_poly_init. */
+/* LIVE PARAMETERS: replace the scalar vector on a live state (same order
+   and derivations as bow_poly_init); tables and all running state are left
+   alone. Plain scalar writes. Order MUST stay in lockstep with init. */
 void bow_poly_set_scalars(void *vst, const double *s, int n)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -3268,9 +2715,8 @@ void bow_poly_set_scalars(void *vst, const double *s, int n)
     st->jawRho = s[58];
     st->jawRoll = s[59];
     st->jawRollAmp = (s[60] > 1e-9 ? s[60] : 1e-9);
-    /* scalars 62-66 (2026-08-24): register damping + slide dulling +
-       the accel-driven finger noise — absent in an old-format block,
-       which means legacy behavior */
+    /* scalars 62-66: register damping, slide dulling, finger noise — absent =
+       inert */
     st->lossReg = (n >= 62) ? s[61] : 0.0;
     st->slideRate = (n >= 63 && s[62] > 1.0) ? s[62] : 900.0;
     st->slideDull = (n >= 64) ? s[63] : 0.0;
@@ -3278,13 +2724,9 @@ void bow_poly_set_scalars(void *vst, const double *s, int n)
     st->slideAcc = (n >= 66 && s[65] > 1.0) ? s[65] : 25000.0;
 }
 
-/* TARABDAAR LIVE PARAMETERS stage 3 (2026-07-24): overwrite the BODY modal
-   bank's coefficients on a live state. The resonator HISTORIES are
-   separate arrays and are left untouched, so retuning the body under a
-   sounding note is click-free (the same trick as swapping biquad
-   coefficients while keeping the delay state). Refuses (returns 0) when
-   the mode count differs — that is a reallocation, i.e. a real rebuild.
-   No parity fixture calls it; the goldens are unaffected. */
+/* Overwrite the BODY modal bank's coefficients on a live state; the
+   resonator histories are untouched, so a body retune under a sounding
+   note is click-free. Refuses (0) when the mode count differs. */
 int bow_poly_set_body(void *vst, int K, const double *ba1, const double *ba2,
                 const double *bn0, const double *bA, const double *bC)
 {
@@ -3300,14 +2742,9 @@ int bow_poly_set_body(void *vst, int K, const double *ba1, const double *ba2,
     return 1;
 }
 
-/* TARABDAAR LIVE PARAMETERS stage 3: overwrite the MODAL-JAWARI tables'
-   coefficients in place. The modal STATE (jtQ = the settled static wrap,
-   jtP, the drone envelopes, jtFprev) is deliberately kept: changing the
-   bone geometry under a ringing web is a real physical act, and the web
-   relaxing from its old wrap toward the new equilibrium IS the correct
-   transient. Refuses when the shape moved (string count, zone count or
-   any per-string mode count) — that needs a rebuild. Mirrors
-   bow_jt_load's conversions; keep the two in lockstep. */
+/* Overwrite the MODAL-JAWARI tables in place; the modal STATE is kept (the
+   web relaxing to the new wrap IS the correct transient). Refuses when the
+   shape moved. Mirrors bow_poly_jt_load's conversions. */
 int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
               const double *ca, const double *cb,
               const double *ca4, const double *cb4, const double *wd,
@@ -3350,10 +2787,8 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
     st->jtKc = phys[0]; st->jtAlpha = phys[1]; st->jtHcB = phys[2];
     st->jtDeep = phys[3]; st->jtGain = phys[4]; st->jtDrv = phys[5];
     /* (jtGainCur keeps gliding toward the new jtGain — no reset) */
-    /* the reload rebuilt the follower row's tables at its BUILD pitch
-       with the full mode count — mark it so the next tick recomputes at
-       the current tracked pitch (and re-trims G/gd, since the arrays
-       were just overwritten with full-M sums) */
+    /* the reload rebuilt the follower row at its BUILD pitch — the next tick
+       recomputes at the tracked pitch and re-trims G/gd */
     if (st->jtTrkRow >= 0) {
         st->jtTrkMUse = st->jtM[st->jtTrkRow];
         st->jtTrkApplied = 0.0;
@@ -3363,10 +2798,9 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
     return 1;
 }
 
-/* run one drive job to a WEB SIGNAL buffer: the schedule + the
-   worker pool (blocking waits are fine — this runs on the DISPATCHER
-   thread, never the audio callback) + the hold walk.  The numerics
-   are the sync post-pass's exactly; only the destination differs. */
+/* run one drive job to a web-signal buffer: schedule + pool (blocking is
+   fine — this is the DISPATCHER thread) + hold walk. Same numerics as the
+   sync post-pass. */
 static void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
                               const double *cv, int n,
                               double *web, double *webS)
@@ -3470,9 +2904,8 @@ static void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
     }
 }
 
-/* One jt-web computer at a time (see jtDispMx): the dispatcher always
-   runs with jtPoolInit set (bow_poly_jt_set_async inits it), so the
-   lock is unconditional here. */
+/* One jt-web computer at a time (jtDispMx); the dispatcher always has
+   jtPoolInit set */
 static void jt_run_job(bow_poly_state_t *st, const double *drv,
                        const double *cv, int n,
                        double *web, double *webS)
@@ -3495,8 +2928,8 @@ static void *jt_dispatch_run(void *va)
         while (!st->jtDQuit
                && __atomic_load_n(&st->jtDJobW, __ATOMIC_ACQUIRE)
                   == st->jtDJobR) {
-            /* the callback's wake is opportunistic (trylock) — a
-               1 ms timed backstop bounds a missed signal */
+            /* the callback's wake is opportunistic (trylock) — a 1 ms timed
+               backstop bounds a missed signal */
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_nsec += 1000000;
@@ -3540,8 +2973,8 @@ void bow_poly_jt_set_async(void *vst, int on)
             st->jtPoolInit = 1;
         }
         if (!st->jtFdv) {
-            /* dispatcher path uses the schedule scratch even when the
-               worker pool is off (serial-in-dispatcher fallback) */
+            /* the dispatcher uses the schedule scratch even without a worker
+               pool */
             st->jtFdv = (double *)malloc(sizeof(double) * JT_POOL_CH);
             st->jtEvV = (double *)calloc(JT_POOL_CH, sizeof(double));
             st->jtCapV = (double *)calloc(JT_POOL_CH, sizeof(double));
@@ -3586,11 +3019,9 @@ void bow_poly_jt_async_stats(void *vst, double *out4)
     out4[3] = (double)st->jtAsync;
 }
 
-/* DRONE rows: control-thread setters (per-row scalar writes read by
-   the jt tick — an aligned 8-byte store; a torn transition is inaudible
-   and a lost onset under a simultaneous tick is a non-event).
-   bow_poly_jt_pluck (gradual-attack rev) sets the decaying ONSET BOOST —
-   the drive envelope swells toward level+boost, no impulse anywhere. */
+/* DRONE rows: control-thread setters — aligned 8-byte per-row stores read
+   by the jt tick (a torn transition is inaudible). bow_poly_jt_pluck sets
+   the decaying ONSET BOOST; no impulse anywhere. */
 void bow_poly_jt_drone(void *vst, int s, double level)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -3605,14 +3036,9 @@ void bow_poly_jt_pluck(void *vst, int s, double amp)
     st->jtDnBoost[s] = amp > 0.0 ? amp : 0.0;
 }
 
-/* MELODY FOLLOWER (Tarabdaar 2026-07-25): arm row `row` as the live-
-   retuned follower. f0 = the row's builder frequency; t60/fHf/bst = the
-   damping/inharmonicity law constants the retune re-applies (the
-   builder's own). Call at engine build off the audio thread, or after
-   bow_poly_jt_set_coeffs to refresh the constants — re-arming the SAME
-   row keeps the current pitch (only the law is refreshed), so a live
-   parameter reload never snaps the follower back to its build pitch.
-   row < 0 disarms. */
+/* MELODY FOLLOWER: arm `row` (f0 = builder frequency, t60/fHf/bst = the
+   builder's damping law). Engine build off the audio thread, or after
+   set_coeffs — re-arming the SAME row keeps its pitch. row < 0 disarms. */
 void bow_poly_jt_track_config(void *vst, int row, double f0, double t60,
                               double fHf, double bst)
 {
@@ -3639,9 +3065,8 @@ void bow_poly_jt_track_config(void *vst, int row, double f0, double t60,
     }
 }
 
-/* The follower's pitch target (Hz) — the drone-setter contract: a plain
-   aligned scalar store from any thread; the row's jt tick slews to it.
-   Out-of-range values are clamped/ignored at the tick. */
+/* The follower's pitch target (Hz) — plain aligned store, any thread; the tick
+   slews to it */
 void bow_poly_jt_track_target(void *vst, double hz)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -3649,9 +3074,8 @@ void bow_poly_jt_track_target(void *vst, double hz)
     if (hz > 0.0) st->jtTrkTarget = hz;
 }
 
-/* drone envelope times (seconds), call at engine build off the audio
-   thread: attack/release slews of the drive envelope + the onset-boost
-   decay. Non-positive values keep the load-time defaults. */
+/* drone envelope times (seconds), engine build off the audio thread;
+   non-positive values keep the load-time defaults */
 void bow_poly_jt_drone_env(void *vst, double atkSec, double relSec,
                            double onsetDecaySec)
 {
@@ -3663,13 +3087,9 @@ void bow_poly_jt_drone_env(void *vst, double atkSec, double relSec,
     if (onsetDecaySec > 0.0) st->jtDnBDec = exp(-dtj / onsetDecaySec);
 }
 
-/* drone drive tone, call at engine build off the audio thread.
-   lpHz/hpHz = the noise band-pass corners (sub-audio drive would
-   wander the string against the jawari bone and pump the buzz).
-   toneMix = the pitched fraction of the drive (0..1): each row is
-   driven by a sine at its own mode-1 frequency mixed with the noise —
-   1 = fully pitched, 0 = the first-rev pure-noise drive. Non-positive
-   lp/hp and negative toneMix keep the load-time defaults. */
+/* drone drive tone (engine build, off the audio thread): lpHz/hpHz = noise
+   band-pass corners, toneMix = pitched fraction 0..1 (sine at the row's
+   mode-1 : noise). Non-positive lp/hp, negative toneMix = keep defaults. */
 void bow_poly_jt_drone_tone(void *vst, double lpHz, double hpHz,
                             double toneMix)
 {
@@ -3695,7 +3115,7 @@ void bow_poly_process3(void *vst, int n, int stride,
                        const double *xv, double *out, double *outS,
                        double *outJt, double *outJtS);
 
-/* Legacy mono entry — the bit-exact path every golden runs. */
+/* Mono entry — the bit-exact parity path. */
 void bow_poly_process(void *vst, int n, int stride,
                       const double *f0, const double *vb, const double *fb,
                       const double *beta, const double *gate,
@@ -3705,10 +3125,8 @@ void bow_poly_process(void *vst, int n, int stride,
                       out, NULL);
 }
 
-/* Stereo entry (Tarabdaar 2026-07-23): outS = the SIDE stream (host does
-   L = mid + side, R = mid - side — the L+R fold-down equals the mono
-   out exactly). outS NULL or bow_poly_set_stereo never called = the
-   legacy path, bit-exact. */
+/* Stereo entry: outS = the SIDE stream (host: L = mid + side, R = mid -
+   side). outS NULL or stereo never armed = the mono path, bit-exact. */
 void bow_poly_process2(void *vst, int n, int stride,
                        const double *f0, const double *vb, const double *fb,
                        const double *beta, const double *gate,
@@ -3718,13 +3136,9 @@ void bow_poly_process2(void *vst, int n, int stride,
                       out, outS, NULL, NULL);
 }
 
-/* Split-bus entry (Tarabdaar FX, 2026-08-01): when outJt is non-NULL the
-   modal-jawari post-pass ADDS into outJt/outJtS (kernel-zeroed here)
-   instead of out/outS, so the host can process the voice and taraf
-   buses separately. Every jt term lands in each sample exactly once,
-   so host-side `out[t] + outJt[t]` reproduces the fused path's
-   rounding bit-exactly — splitting is free, and outJt NULL is the
-   verbatim legacy code path. */
+/* Split-bus entry: with outJt non-NULL the jt post-pass ADDS into
+   outJt/outJtS (zeroed here); out[t] + outJt[t] reproduces the fused
+   rounding bit-exactly. outJt NULL = the fused path. */
 void bow_poly_process3(void *vst, int n, int stride,
                        const double *f0, const double *vb, const double *fb,
                        const double *beta, const double *gate,
@@ -3791,9 +3205,8 @@ void bow_poly_process3(void *vst, int n, int stride,
             S->active = 0;
         }
     }
-    /* delay-free string loading of the junction (passive topology): every
-       processed string adds zload*bowW*Z — constant over the chunk, so the
-       solve denominator is one precomputed scalar */
+    /* delay-free string loading of the junction: constant over the chunk, so
+       the solve denominator is one precomputed scalar */
     double zsumB = 0.0;
     if (psv && bowOn && zload > 1e-9)
         zsumB = (double)nProc * (zload * bowW * Z);
@@ -3803,14 +3216,11 @@ void bow_poly_process3(void *vst, int n, int stride,
     double pkArr[64], rdmpArr[64], gkArr[64];
     for (int i = 0; i < nProc; i++) pkArr[i] = 0.0;
 
-    /* drive record for the deferred jt post-pass (one-way web).
-       ASYNC live mode records straight into a dispatcher ring slot
-       and never waits; sync mode rides the preallocated buffer (no
-       audio-thread malloc) or mallocs for offline-sized calls. */
+    /* drive record for the deferred jt post-pass: async mode records into a
+       dispatcher ring slot; sync mode uses the preallocated buffer or
+       mallocs */
     double *jtFr = NULL;
-    /* the per-string cap's voice-envelope record rides beside the
-       drive in the same slot/buffer layout (state only — the cap
-       itself is byte-null unarmed) */
+    /* the cap's voice-envelope record rides beside the drive (state only) */
     double *jtCv = NULL;
     int jtAsyncBlk = 0;
     if (st->njt > 0 && st->jtGain != 0.0) {
@@ -3824,8 +3234,8 @@ void bow_poly_process3(void *vst, int n, int stride,
                 jtCv = st->jtCapRing
                     + (size_t)(wj & (JT_ARING - 1)) * JT_ABLK;
             } else
-                st->jtDropBlocks++;   /* overload: skip this block's
-                                         drive (web decays briefly) */
+                st->jtDropBlocks++;   /* overload: skip this block's drive (web
+                                         decays briefly) */
         } else {
             jtFr = (st->jtFrBuf && n <= st->jtFrCap)
                 ? st->jtFrBuf
@@ -3836,9 +3246,8 @@ void bow_poly_process3(void *vst, int n, int stride,
         }
     }
 
-    /* Tarabdaar SITAR TWANG: self-disarm once a live 0 finished slewing —
-       back to the zero-cost byte-null path — else derive the chunk's
-       sitar-morph terminations from the slewed amount */
+    /* SITAR TWANG: self-disarm once a live 0 finished slewing, else derive the
+       chunk's morph terminations from the slewed amount */
     if (st->twOn && st->twTgt <= 1e-9 && st->twCur < 1e-7) {
         st->twOn = 0;
         st->twCur = 0.0;
@@ -3849,15 +3258,12 @@ void bow_poly_process3(void *vst, int n, int stride,
         double F = 0.0;
         double tdir = 0.0;
         double noiseDir = 0.0;
-        /* Tarabdaar SITAR TWANG: ~30 ms amount slew (zipper-safe live
-           moves; dead branch while disarmed) */
+        /* SITAR TWANG: ~30 ms amount slew (dead branch while disarmed) */
         if (st->twOn)
             st->twCur += st->twSl * (st->twTgt - st->twCur);
-        /* Tarabdaar stereo side accumulators — DIRECT radiation only
-           (dead when !stOn) */
+        /* stereo side accumulators — DIRECT radiation only (dead when !stOn) */
         double tdirS = 0.0, noiseDirS = 0.0;
-        /* driven-unison duck targets, block-rate (tuw = 1 -> inert):
-           a voice ducks if ANY bowing slot sits at a coincidence */
+        /* driven-unison duck targets, block-rate (tuw = 1 -> inert) */
         if (tuw < 0.999 && (t & 63) == 0) {
             static const double rat[11] = {0.25, 0.333333333, 0.5,
                                            0.666666667, 0.75, 1.0,
@@ -3886,13 +3292,12 @@ void bow_poly_process3(void *vst, int n, int stride,
             F += poly_string_force(st, S, f0[o], vb[o], fb[o], beta[o],
                                    gate[o], &noiseDir,
                                    &rdmpArr[i], &gkArr[i]);
-            /* the bow-contact noise sounds AT the played string's
-               position; the string's bridge force radiates from the
-               one central body and stays mid-only */
+            /* the bow-contact noise sounds AT the played string's position; its
+               bridge force radiates from the one body and stays mid-only */
             if (stOn) noiseDirS += stSp[b] * (noiseDir - nd0);
             if (fabs(S->brLp) > pkArr[i]) pkArr[i] = fabs(S->brLp);
-            /* non-passive topology keeps the mono one-sample -Z*V load
-               (V == 0 for the rigid-bridge generic string) */
+            /* non-passive topology: the one-sample -Z*V load (V == 0 for a
+               rigid bridge) */
             if (!psv && bowOn && zload > 1e-9)
                 F -= zload * bowW * Z * st->Vprev;
         }
@@ -3923,8 +3328,8 @@ void bow_poly_process3(void *vst, int n, int stride,
                     + g[i] * ySer;
                 double wv = y;
                 if (st->jawRoll > 1e-12) {
-                    /* v2 brief-contact law (mono port): engage only
-                       near the positive displacement extreme */
+                    /* brief-contact roll law: engage only near the positive
+                       displacement extreme */
                     st->rollE[i] = fmax(0.99999 * st->rollE[i], fabs(y));
                     double tgt = (jn[i] > 1e-9
                                   && y > st->jawRollAmp * st->rollE[i])
@@ -3933,7 +3338,7 @@ void bow_poly_process3(void *vst, int n, int stride,
                     if (st->rollD[i] > 3.0) st->rollD[i] = 3.0;
                 } else if (jn[i] > 1e-9 && y > 0.0) {
                     if (st->jawRho > 1e-12) {
-                        /* v3 collision fold (mono port) */
+                        /* collision fold */
                         double e2 = y - jq2;
                         if (e2 > 0.0)
                             wv = y - st->jawG * jn[i] * (1.0 + st->jawRho) * e2;
@@ -3967,8 +3372,8 @@ void bow_poly_process3(void *vst, int n, int stride,
                         * wout[i] * vlp[i];
             }
         } else {
-            /* PASSIVE WAVE JUNCTION, PASS 1 (mono law + the poly strings'
-               delay-free loading in zsumT/jden) */
+            /* PASSIVE WAVE JUNCTION, PASS 1 (the strings' delay-free loading
+               rides in zsumT/jden) */
             for (int i = 0; i < nv; i++) {
                 int len = L[i] + 8;
                 double *b = arena + off[i];
@@ -4011,20 +3416,15 @@ void bow_poly_process3(void *vst, int n, int stride,
             V += bA[k] * y;
             rad += bC[k] * y;
         }
-        /* ---- TARABDAAR BODY-SIDE READOUT (2026-08-01): the second
-           observation point — a separate residue sum over the SAME
-           fresh mode outputs (after the loop above st->by1[k] holds
-           this sample's y), so the hot loop and the mid readout are
-           untouched. K MACs per sample when armed; byte-null off. */
         if (psv) {
-            /* PASSIVE JUNCTION, PASS 2 — verbatim mono */
+            /* PASSIVE JUNCTION, PASS 2 */
             for (int i = 0; i < nv; i++) {
                 double x = alphaw[i] * xv[t] - zdrv[i] * V;
                 double y = (1.0 - g[i]) * x + sv[i];
                 double wv = y;
                 if (st->jawRoll > 1e-12) {
-                    /* v2 brief-contact law (mono port): engage only
-                       near the positive displacement extreme */
+                    /* brief-contact roll law: engage only near the positive
+                       displacement extreme */
                     st->rollE[i] = fmax(0.99999 * st->rollE[i], fabs(y));
                     double tgt = (jn[i] > 1e-9
                                   && y > st->jawRollAmp * st->rollE[i])
@@ -4033,7 +3433,7 @@ void bow_poly_process3(void *vst, int n, int stride,
                     if (st->rollD[i] > 3.0) st->rollD[i] = 3.0;
                 } else if (jn[i] > 1e-9 && y > 0.0) {
                     if (st->jawRho > 1e-12) {
-                        /* v3 collision fold (mono port) */
+                        /* collision fold */
                         double e2 = y - jq2;
                         if (e2 > 0.0)
                             wv = y - st->jawG * jn[i] * (1.0 + st->jawRho) * e2;
@@ -4092,26 +3492,18 @@ void bow_poly_process3(void *vst, int n, int stride,
             trad = tmix * trad + (1.0 - tmix) * tdir;
         }
         out[t] = rad + tdirect * trad + noiseDir;
-        /* ---- TARABDAAR INSTRUMENT WIDTH (2026-08-01 unifying rev):
-           the second observation point on the whole voice bus — the
-           diffuse-field difference bank on the full pre-jt mid
-           (bridge radiation + taraf direct + bow noise). The jt wash
-           gets its own bank instance in the post-pass ([1]); by
-           linearity the two together equal one bank on the complete
-           instrument. Antisymmetric side — cancels exactly in the
-           L+R fold-down; byte-null when unarmed. ---- */
+        /* ---- INSTRUMENT WIDTH on the voice bus (the jt wash gets its own bank
+           instance in the post-pass); antisymmetric side, byte-null unarmed
+           ---- */
         double radS = 0.0;
         if (stOn && st->stWidthOn) {
             st->stWidthCur += st->stWidthSl
                 * (st->stWidthTgt - st->stWidthCur);
             radS = st->stWidthCur * poly_width_bank(st, 0, out[t]);
         }
-        /* ---- STEREO SIDE (Tarabdaar): the pan-weighted taraf direct
-           tap (through its own copy of the tdir shaping bank;
-           linearity = radiating each string panned) + the bow noise
-           at its string's position (both LEGACY staging, disarmed by
-           default since the width unification — seeds 0) + the
-           instrument-width side above. ---- */
+        /* ---- STEREO SIDE: the pan-weighted taraf direct tap (own copy of the
+           tdir shaping bank) + the bow noise at its string + the width side.
+           ---- */
         if (stOn) {
             double tradS = tdirS;
             if (tshape > 0.5) {
@@ -4127,13 +3519,11 @@ void bow_poly_process3(void *vst, int n, int stride,
             }
             outS[t] = radS + tdirect * tradS + noiseDirS;
         }
-        /* ---- modal-jawari drive RECORD (mono lockstep): the jt web
-           is ONE-WAY (drive = the shared junction force F, output
-           adds only) — deferred to the post-pass below ---- */
+        /* ---- modal-jawari drive RECORD: the web is one-way, deferred to the
+           post-pass ---- */
         if (jtFr) jtFr[t] = F;
-        /* per-string cap side-chain: the voice bus's instant-attack
-           peak envelope, recorded per sample for the tick scheduler
-           (out[t] is voice-only here — the web adds in the post-pass) */
+        /* per-string cap side-chain: instant-attack voice-bus peak envelope,
+           recorded per sample (out[t] is voice-only here) */
         if (jtCv) {
             const double v = fabs(out[t]);
             double e = st->jtCapVEnv;
@@ -4149,19 +3539,11 @@ void bow_poly_process3(void *vst, int n, int stride,
         S->senv = pkArr[i];
         if (!(S->senv > 1e-10) && S->kGate <= 1e-9) S->active = 0;
     }
-    /* ---- Tarabdaar drive FX (2026-08-01): the host shapes the recorded
-       drive BEFORE the web hears it — the voice→taraf insert. Runs on
-       the render thread in both modes (async: before the job is
-       published), so the hook's own DSP state stays single-threaded
-       and in order. NULL hook = byte-null. ---- */
-    /* ---- Tarabdaar sitar→taraf inject (2026-08-19): mix the other
-       voice's ring into the recorded drive BEFORE the drive-FX hook,
-       so the voice→taraf insert shapes it too. When this block's
-       drive was dropped (jtFr NULL) the ring still advances, holding
-       stream alignment; a gross backlog (a stalled consumer catching
-       up, e.g. the jt web re-enabled) realigns to the freshest block
-       instead of replaying seconds of stale drive. Empty ring or zero
-       gain touches nothing — byte-null. ---- */
+    /* ---- drive FX (the voice→taraf insert) runs on the render thread in both
+       modes, before the async job is published. NULL hook = byte-null. ---- */
+    /* ---- sitar→taraf inject before the drive-FX hook; a dropped block
+       still advances the ring, a gross backlog realigns. Zero gain =
+       byte-null ---- */
     if (st->sjRing) {
         long long ww = __atomic_load_n(&st->sjW, __ATOMIC_ACQUIRE);
         long long rr = st->sjR;
@@ -4177,12 +3559,9 @@ void bow_poly_process3(void *vst, int n, int stride,
     }
     if (jtFr && st->fxDriveFn)
         st->fxDriveFn(st->fxDriveCtx, jtFr, n);
-    /* ---- modal-jawari POST-PASS ----
-       ASYNC live: publish the drive job (no wait) + mix the web
-       FIFO's completed samples (flat-fill from the last value when
-       the dispatcher is behind — a briefly flattened wash, never a
-       glitch).  SYNC: the mono-lockstep serial replay (bit-exact) or
-       the caller-blocking worker pool. */
+    /* ---- modal-jawari POST-PASS. ASYNC live: publish the job (no wait) and
+       mix the FIFO's completed samples (flat-fill when the dispatcher is
+       behind). SYNC: serial replay (bit-exact) or the caller-blocking pool. */
     if (jtAsyncBlk) {
         if (jtFr) {
             int wj = st->jtDJobW;
@@ -4227,11 +3606,10 @@ void bow_poly_process3(void *vst, int n, int stride,
             st->jtFlatSamples += (long long)(n - take);
         st->jtWebR = rr + take;
     } else if (jtFr) {
-        /* Offline-pull fallback: computes the web on THIS thread with
-           the same string state, scratch and pool the async dispatcher
-           uses — dispatch-owner lock (jtDispMx) makes them mutually
-           exclusive. Only taken when a pool/dispatcher exists; the
-           plain serial engine (parity path) never locks. */
+        /* Offline-pull fallback on THIS thread; jtDispMx excludes the
+           dispatcher
+           (taken only when a pool/dispatcher exists — the serial path never
+           locks) */
         const int dispLock = st->jtPoolInit;
         if (dispLock)
             pthread_mutex_lock(&st->jtDispMx);
@@ -4384,8 +3762,8 @@ void bow_poly_free(void *vst)
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     if (!st) return;
     if (st->njt > 0) {
-        bow_poly_jt_set_async(vst, 0);   /* dispatcher first: it may
-                                            be waiting on the pool */
+        bow_poly_jt_set_async(vst, 0);   /* dispatcher first: it may be waiting
+                                            on the pool */
         jt_pool_stop(st);
         if (st->jtPoolInit) {
             pthread_mutex_destroy(&st->jtMx);

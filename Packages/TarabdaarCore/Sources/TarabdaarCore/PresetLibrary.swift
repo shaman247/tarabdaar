@@ -1,6 +1,6 @@
 import Foundation
 
-/// THE PRESET LIBRARY (2026-07-30) — the app-managed folder of saved
+/// THE PRESET LIBRARY — the app-managed folder of saved
 /// presets.
 ///
 /// The player never sees a file panel: saving asks for a NAME, and every

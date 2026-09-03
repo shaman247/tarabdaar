@@ -1,7 +1,7 @@
 import Foundation
 
-/// A raga: semitone intervals from Sa + a default tonic. Ported from raga.RAGAS;
-/// the table is open for the user to extend.
+/// A raga: semitone intervals from Sa + a default tonic. Seeds the default
+/// preset only — the playing scale lives in the Pitch Pad.
 public struct Raga: Identifiable, Sendable, Hashable, Codable {
     public let id: Int
     public let name: String
@@ -12,10 +12,7 @@ public struct Raga: Identifiable, Sendable, Hashable, Codable {
     }
 }
 
-/// Raga tuning engine — port of `src/raga.py` (JI ratios and the
-/// `build_strings` layout, minus the chromatic taraf row — removed
-/// 2026-07-25). `estimate_tonic` is dropped (it needs a recording); the
-/// tonic is set by the user.
+/// JI ratios and the sympathetic-bank layouts. The tonic is set by the user.
 public enum RagaTuning {
 
     /// Just-intonation swara ratios (semitone offset from Sa → ratio).
@@ -27,41 +24,29 @@ public enum RagaTuning {
     public static let ragas: [Raga] = [
         Raga(id: 1, name: "E♭ harmonic minor", intervals: [0, 2, 3, 5, 7, 8, 11], tonicHint: 311.13),
         Raga(id: 2, name: "Bhairav",           intervals: [0, 1, 4, 5, 7, 8, 11], tonicHint: 293.66),
-        // Pilu session (2026-07): 9-note mixed/thumri scale (both komal+shuddha
-        // ga AND ni). Sa = 328.9 Hz — the recorded session tonic (E4 − 4c, a
-        // semitone below concert F; upstream reports/pilu_pitch_map.md).
+        // Pilu: 9-note mixed scale (both komal and shuddha ga and ni).
         Raga(id: 3, name: "Pilu",              intervals: [0, 2, 3, 4, 5, 7, 9, 10, 11], tonicHint: 328.9),
     ]
     public static func raga(id: Int) -> Raga { ragas.first { $0.id == id } ?? ragas[0] }
 
-    /// The CHROMATIC bridge's pitch grid (2026-09-02): the 12 JI swara
-    /// ratios above, indexed by semitone. A chromatic string's `degree`
-    /// is a semitone into this grid — fixed, whatever the playing scale
-    /// says (the real chromatic set is tuned once and stays; only the
-    /// tonic moves it). Wrapped mod 12 so an out-of-range degree still
-    /// resolves.
+    /// The chromatic bridge's pitch grid: the 12 JI ratios by semitone, fixed
+    /// whatever the playing scale (only the tonic moves it). Wrapped mod 12.
     public static func chromaticRatio(semitone: Int) -> Double {
         jiRatios[((semitone % 12) + 12) % 12] ?? 1.0
     }
 
-    /// The grid as fraction text, by semitone — the chromatic rows' own
-    /// name when the playing scale has no degree at that pitch (the
-    /// naming rule: a pitch the scale can't label shows its ratio).
+    /// The grid as fraction text — a chromatic row's name when the playing
+    /// scale has no degree at that pitch.
     public static let chromaticFractions: [String] = [
         "1/1", "16/15", "9/8", "6/5", "5/4", "4/3",
         "45/32", "3/2", "8/5", "5/3", "16/9", "15/8",
     ]
 
-    /// The CHROMATIC SET's layout (2026-09-02): 15 consecutive semitones
-    /// from low Ga (−8) up to tivra Ma (+6) — the historic
-    /// `chromaticRatios` row of raga.build_strings (0.625 … 1.406),
-    /// re-expressed as (semitone, octave) references into the JI
-    /// chromatic grid, one string per semitone, pitch-sorted. Gain 0.6:
-    /// above the jawari selection's `bow_jt_gmin` (0.5) so the set
-    /// SOUNDS — the deleted 2026-07-25 chromatic choir sat at 0.40 and
-    /// never did — and under the raga rows' 0.7–0.95 (on the instrument
-    /// the raga sets carry the ring; the chromatic set is the haze that
-    /// answers every note). t60 3.0 = the crowd law.
+    /// The chromatic set's layout: 15 consecutive semitones, low Ga (−8) to
+    /// tivra Ma (+6), one string each. Gain 0.6 sits above the jawari
+    /// selection's `bow_jt_gmin` (0.5) so the set sounds, and under the raga
+    /// rows' 0.7–0.95 — the raga sets carry the ring, the chromatic set is
+    /// the haze that answers every note. t60 3.0, the crowd value.
     public static func buildChromaticSpecs() -> [StringSpec] {
         (-8...6).map { k -> StringSpec in
             let octave = Int((Double(k) / 12.0).rounded(.down))
@@ -76,28 +61,14 @@ public enum RagaTuning {
         intervals.map { jiRatios[(($0 % 12) + 12) % 12] ?? 1.0 }
     }
 
-    /// The sympathetic-bank LAYOUT in scale-degree space — ONE flat pool:
-    /// one string per scale degree, emphasized Sa/Pa, the low-octave choir
-    /// and 6 upper-octave repeats. Structural port of `raga.build_strings`,
-    /// re-expressed as (degree, octave) references into the centralized
-    /// scale (2026-07-25) — every string sounds a pitch OF the scale, so
-    /// the whole bank retunes when the scale or the tonic moves. The
-    /// seeded ±cents detune chorus died with the free-ratio model (a
-    /// degree can't be a few cents off itself), and the 15-string
-    /// chromatic row was removed the same day (its 0.40 gain sat below
-    /// the jawari selection's `bow_jt_gmin`, so it never sounded).
-    /// Gains/t60s come from raga.build_strings — the 2026-07 refit
-    /// lengthened the t60s (5/7/9 s); with `B_damp` in-loop f² damping
-    /// only the FUNDAMENTAL keeps that ring, upper partials decay in
-    /// fractions of a second (sympathetic selectivity by harmonic order).
-    ///
-    /// NO DUPLICATE PITCHES (2026-07-26): the historic layout doubled
-    /// Sa/Pa (exact-unison twin rows since the detune removal). The pool
-    /// is one-string-per-pitch now, so each duplicate folds into its
-    /// STRONGEST twin (higher gain, then longer t60 — the doubling row's
-    /// values, which is where the emphasis lived), and the result is
-    /// sorted by pitch. The golden comparison in `ModelTests` applies the
-    /// same fold to the fixture.
+    /// The raga set's layout as (degree, octave) references into the
+    /// centralized scale: one string per degree, emphasized Sa/Pa, a
+    /// low-octave choir and 6 upper-octave repeats — every string sounds a
+    /// pitch OF the scale. With `B_damp` in-loop f² damping only the
+    /// fundamental keeps the listed t60; upper partials decay in fractions
+    /// of a second. One string per pitch: a duplicate folds into its
+    /// strongest twin (higher gain, then longer t60), and the result is
+    /// pitch-sorted.
     public static func buildSpecs(scaleRatios: [Double]) -> [StringSpec] {
         guard !scaleRatios.isEmpty else { return [] }
         let n = scaleRatios.count
@@ -108,17 +79,11 @@ public enum RagaTuning {
         let vadiIdx = n >= 2 ? n - 2 : 0
         let thirdIdx = n > 2 ? 2 : vadiIdx
 
-        // (degree, octave, gain, t60) — the historic list, doublings and
-        // all. 2026-08-01 coherence rev: the refit's 5/7 s crowd t60s
-        // rang so long after a phrase that the wash decoupled from the
-        // playing and read as a pad behind the voice — the CROWD (the
-        // per-degree rows, low choir, upper repeats) shortened ~×0.6.
-        // The three DRONE ANCHORS the buttons auto-map to (Sa, low Sa,
-        // low Pa) keep their fitted 7/9/8 s: on the instrument those ARE
-        // the long-ringing strings, they're consonant with everything,
-        // and their tap ring is character-pinned by
-        // `DroneExcitationTests` (fundamental dominance decays on the
-        // row's own t60). The old crowd values are one git show away.
+        // (degree, octave, gain, t60). The crowd (per-degree rows, low
+        // choir, upper repeats) rings 2.5–4.5 s so the wash stays coupled
+        // to the playing; the three drone anchors (Sa, low Sa, low Pa) ring
+        // 7/9/8 s — the instrument's long strings, consonant with
+        // everything; `DroneExcitationTests` pins their tap ring.
         var rows: [(Int, Int, Double, Double)] = []
         for d in 0..<n { rows.append((d, 0, 0.85, 3.0)) }          // scale-tuned mid
         rows.append((0, 0, 0.95, 7.0))                             //   Sa doubling (anchor)

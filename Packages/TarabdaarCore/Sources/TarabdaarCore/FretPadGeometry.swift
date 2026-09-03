@@ -3,46 +3,23 @@ import Foundation
 
 // MARK: - Fret Pad geometry
 //
-// The **Fret Pad** is the sole 2D playing surface: the scale's pitches drawn
-// as vertical **line segments** (frets) that are **freely positioned** — a
-// fret's `x` is its own layout state (0..1 across the base band), not derived
-// from its pitch. The playable pitch surface is a continuous **field**
-// interpolated from the frets: between the two **closest fret columns
-// horizontally** — each column's pitch resolved by the touch's y (exact
-// inside a fret, y-blended between stacked variants like r/R), then a
-// linear log-pitch x-interpolation between the flanking columns
-// (`fretFieldLog`).
+// The **Fret Pad** is the sole playing surface: the scale's pitches as
+// vertical **frets**, freely positioned (`x` is layout state, 0..1 across the
+// base band). The playable pitch is a continuous **field** (`fretFieldLog`):
+// each column's pitch resolved by the touch's y, then a log-pitch
+// x-interpolation between the two flanking columns. A touch **starting**
+// within `snapDistance` px of a fret and inside its vertical extent snaps to
+// it; elsewhere it plays the field pitch. Drags are continuous (field plus
+// the offset captured at the snap) and never re-snap. The base segments live
+// in a central **band**, flanked by read-only octave copies.
 //
-// Playing: a touch that **starts** within `snapDistance` px of a fret *and*
-// within the fret's vertical extent snaps to that fret's exact pitch; a touch
-// starting elsewhere plays the field pitch — that's how you approach a note
-// from open space (meend). After the onset the drag is always continuous:
-// the pitch follows the field at the cursor plus the constant log-offset
-// captured at the snap, so a snapped onset stays true while vibrato/glides
-// move relative to it. Snapping never re-engages mid-drag.
-//
-// Layout: the editable base segments live in a central **band**; the surface
-// extends `ghostExtentOctaves` band-widths past it on each side (default
-// 0.5 → the flanks show half a band each), tiled with read-only copies of the
-// whole base layout playing an octave down (left) / up (right), clipped to
-// the visible range. The default arrangement is **pitch-aligned**: a fret's
-// x is `log2(ratio)`, so position = frequency and the octave ghosts tile
-// continuously — a piano-like ribbon, S and P centered, shuddha (R G m D N)
-// hanging lower, komal/tivra (r g M d n) standing higher, and every fret
-// crossing the band's centre line.
-//
-// Platform-independent (no SwiftUI). Reuses `PitchPadEngine` (MPE),
-// `VoronoiCell`/`DisplaySeed` (to drive `CellFillsView`), `pitchColor`, and
-// the scale-label helpers from `ScaleDegrees.swift`. See `docs/fret-pad.md`.
+// Platform-independent (no SwiftUI). See `docs/fret-pad.md`.
 
 // MARK: - Model
 
-/// One fret: a vertical line segment whose pitch is a `degreeIndex` into the
-/// enabled Pitch Pad scale degrees (low→high). `x` (0..1 across the base
-/// band) positions it horizontally — **free**, unrelated to its pitch.
-/// `topY`/`bottomY` (0..1, 0 = top of the pad) bound its vertical extent —
-/// the zone where a touch onset snaps to it. `id` is per-process (minted on
-/// decode), like `PitchPoint.id`.
+/// One fret: `degreeIndex` into the enabled scale degrees (low→high), `x`
+/// (0..1 across the base band, free of its pitch), `topY`/`bottomY` (0..1,
+/// 0 = top) bounding the onset-snap zone. `id` is per-process.
 public struct FretSegment: Identifiable, Equatable {
     public let id: UUID
     public var degreeIndex: Int
@@ -66,26 +43,18 @@ public struct FretSegment: Identifiable, Equatable {
     public var height: Double { bottomY - topY }
 }
 
-/// The whole surface: the editable base-band `segments` plus how far the
-/// surface extends past the base band on each side (`ghostExtentOctaves`,
-/// fractional band-widths — 0.5 = half a band of flank each side). The
-/// flanks show read-only octave-repeat copies of the whole base layout
-/// (clipped to the visible range), faint in edit mode.
+/// The whole surface: the editable base-band `segments` plus the flank each
+/// side (`ghostExtentOctaves`, band-widths) showing read-only octave copies.
 public struct FretArrangement: Equatable {
     public var segments: [FretSegment]
     public var ghostExtentOctaves: Double
-    /// The 3 drone buttons' DISPLAY pitches as ratios vs the played tonic
-    /// (2026-07-23; 4 → 3 slots and display-only 2026-07-25). Each button
-    /// plucks a sympathetic string mapped in the Strings tab
-    /// (`InstrumentState.droneStringIds`); these ratios only drive the
-    /// button labels/colors on both surfaces — the Mac derives them from
-    /// the mapped strings' sounding pitches and they ride the ordinary
-    /// arrangement autosave + iPad sync. Default ,Sa · ,Pa · Sa.
+    /// The drone buttons' DISPLAY pitches (ratios vs the tonic) — labels and
+    /// colors only; the Mac derives them from the mapped strings
+    /// (`InstrumentState.droneStringIds`) and they ride the iPad sync.
     public var droneRatios: [Double]
 
-    /// The number of drone buttons/slots — the ONE count the geometry, the
-    /// sync blob, the CC range (102...102+count-1) and the Strings tab's
-    /// drone-string slots all derive from.
+    /// The one drone-slot count the geometry, the sync blob, the CC range
+    /// (102...) and the Strings tab's slots derive from.
     public static let droneCount = 3
 
     public static let defaultDroneRatios = [0.5, 3.0 / 4.0, 1.0]
@@ -102,49 +71,19 @@ public struct FretArrangement: Equatable {
     /// Band-widths the surface spans: the base band plus the flanks each side.
     public var octaveSpan: Double { 1 + 2 * max(0, ghostExtentOctaves) }
 
-    /// `FretLayoutPreset.equalFreq` ("C Equal Freq") — the non-default
-    /// built-in (the name is historic; `keyboardArrangement` is the
-    /// default and what every reset builds, 2026-08-12):
-    /// **pitch-aligned x** — a fret sits at
-    /// `log2(ratio)` across the base band, so its horizontal position IS its
-    /// frequency (log-frequency, the app's pitch space) and the octave ghosts
-    /// at `x ± 1` tile the ribbon continuously. Vertically the svaras keep
-    /// three tiers, but **every fret now crosses the band's centre line**, so
-    /// a horizontal drag down the middle passes through the extent of every
-    /// fret and can snap to any of them:
-    ///
-    /// - **komal/tivra** (r g M d n) — the upper tier (0.108–0.460)
-    /// - **shuddha** (R G m D N) — the lower tier (0.540–0.892)
-    /// - **P** — lower tier, longer (0.510–0.912)
-    /// - **S** — lower tier, longer still (0.470–0.912)
-    ///
-    /// The ordinary frets are all the **same height** (0.352); S and P sit
-    /// with the lower tier but run a little **lower** than it (0.912), and S
-    /// reaches **higher** than P — the tonic is the long key. The two tiers
-    /// are fully **separated**: the upper ends at 0.460, the lower starts at
-    /// 0.540, no shared endpoint anywhere, and S's top (0.470) pokes into
-    /// that gap without touching the tier above.
-    ///
-    /// With a 12-degree scale that reads like a piano keyboard tonic-on-C:
-    /// the komal/tivra frets are the black keys, standing higher and sitting
-    /// between their neighbours at their own pitch.
+    /// `FretLayoutPreset.equalFreq` ("C Equal Freq"): **pitch-aligned x** —
+    /// a fret sits at `log2(ratio)`. Komal/tivra in an upper tier, shuddha in
+    /// a lower one, S and P longer; every fret crosses the centre line.
     public static func defaultArrangement(
         degrees: [(ratio: Double, label: String)]) -> FretArrangement {
         var segments: [FretSegment] = []
         for (i, deg) in degrees.enumerated() {
             guard deg.ratio > 0 else { continue }
-            // x IS the pitch: 0 at the tonic, 1 an octave up (the band's
-            // width). `FretSegment.init` clamps a degree outside [1, 2).
+            // x IS the pitch; `FretSegment.init` clamps a degree outside [1, 2).
             let x = log2(deg.ratio)
             let semis = Int((12.0 * log2(deg.ratio)).rounded())
             let pc = ((semis % 12) + 12) % 12
-            // One height (0.352) for the ordinary frets; the two tiers are
-            // separated by a clear 0.460–0.540 band (no shared endpoint, so
-            // no y belongs to both). S and P join the LOWER tier and are the
-            // long keys — a little lower than their neighbours, S higher at
-            // the top than P, its tip inside the gap but clear of the tier
-            // above. Sized for the half-height surface band
-            // (`Config.fretPadHeightFraction`).
+            // Sized for the half-height band (`Config.fretPadHeightFraction`).
             let band: (top: Double, bottom: Double)
             switch pc {
             case 0:               band = (0.470, 0.912)   // S — the long key
@@ -158,24 +97,10 @@ public struct FretArrangement: Equatable {
         return FretArrangement(segments: segments)
     }
 
-    /// `FretLayoutPreset.keyboard` ("C Keyboard") — the DEFAULT layout
-    /// (again, 2026-08-11 — it was the default until 2026-08-02 too): a
-    /// fresh install's starter arrangement on both Mac and iPad, and what
-    /// "Reset to Scale" / "Reset to Default" build (2026-08-12). Plays
-    /// like a **piano keyboard**: **7 evenly-spaced columns**, one per svara —
-    /// `x = (col + 0.5)/7` for S · R/r · G/g · m/M · P · D/d · N/n — so the
-    /// naturals are equally spaced like white keys and the komal/tivra frets
-    /// **stack above** their shuddha partner in the same column (the black
-    /// key over the white one) rather than taking a position of their own.
-    /// The pitch field y-interpolates inside a stacked column, so sliding up
-    /// the column bends r → R.
-    ///
-    /// - **S and P** (pc 0, 7): centred (0.324–0.676)
-    /// - **shuddha** (R G m D N): lower middle (0.588–0.892)
-    /// - **komal/tivra** (r g M d n): upper middle (0.108–0.412)
-    ///
-    /// The 0.176 gap between a stacked pair is the y-interpolation zone;
-    /// the space toward the pad's top/bottom edges is open approach room.
+    /// `FretLayoutPreset.keyboard` ("C Keyboard") — the DEFAULT layout: **7
+    /// evenly-spaced svara columns** with komal/tivra **stacked above** their
+    /// shuddha partner like black keys over white (the field y-interpolates
+    /// inside a column, so sliding up bends r → R).
     public static func keyboardArrangement(
         degrees: [(ratio: Double, label: String)]) -> FretArrangement {
         // Column per svara (pitch class): S | R/r | G/g | m/M | P | D/d | N/n.
@@ -202,18 +127,12 @@ public struct FretArrangement: Equatable {
 
 // MARK: - Built-in layouts
 
-/// The **built-in fret layouts**, offered in the Fret Pad's Layout menu
-/// beside the player's saved ones (`FretArrangementStore`). Both are built
-/// from the CURRENT scale's degrees, so they follow whatever scale is
-/// loaded — they differ only in where the frets are put.
+/// The built-in fret layouts (Layout menu, beside `FretArrangementStore`'s
+/// saved ones). Both are built from the current scale's degrees.
 public enum FretLayoutPreset: String, CaseIterable, Identifiable {
-    /// Pitch-aligned: `x = log2(ratio)`, one fret per degree at its own
-    /// frequency, komal/tivra standing higher, S and P the long keys.
+    /// Pitch-aligned: `x = log2(ratio)`.
     case equalFreq
-    /// The default layout (2026-08-11): 7 evenly-spaced svara columns with
-    /// the komal/tivra frets stacked above their shuddha partners — white
-    /// keys evenly spaced, black keys above them. "Reset to Scale" and
-    /// "Reset to Default" build this one.
+    /// The default: 7 svara columns, komal/tivra stacked above shuddha.
     case keyboard
 
     public var id: String { rawValue }
@@ -246,8 +165,7 @@ public enum FretLayoutPreset: String, CaseIterable, Identifiable {
 }
 
 /// The ratio a segment plays in the base octave. `nil` if its `degreeIndex`
-/// is out of range (the scale shrank) — the segment is skipped, not deleted,
-/// same rule as the String Pad's `noteRatio`.
+/// is out of range (the scale shrank) — the segment is skipped, not deleted.
 public func fretRatio(_ segment: FretSegment,
                       degrees: [(ratio: Double, label: String)]) -> Double? {
     guard segment.degreeIndex >= 0,
@@ -257,12 +175,8 @@ public func fretRatio(_ segment: FretSegment,
 
 // MARK: - Band
 
-/// The playable **band** within the full surface: full width,
-/// `Config.fretPadHeightFraction` of the height, vertically centered. The
-/// fret arrangement's normalized coordinates span this rect; the space
-/// above/below is dead — only the drone buttons (positioned in FULL-surface
-/// space, `droneButtonRects`) live there. Shared by both platforms so the
-/// Mac tab mirrors the iPad exactly.
+/// The playable **band**: full width, `Config.fretPadHeightFraction` of the
+/// height, centered; above/below is dead except the drone buttons.
 public func fretPadBandRect(in size: CGSize) -> CGRect {
     let h = size.height * Config.fretPadHeightFraction
     return CGRect(x: 0, y: (size.height - h) / 2, width: size.width, height: h)
@@ -270,22 +184,16 @@ public func fretPadBandRect(in size: CGSize) -> CGRect {
 
 // MARK: - Drone buttons
 
-/// The 3 drone buttons' hit rectangles in the FULL surface's padded touch
-/// space (independent of the fret band — the buttons keep the position they
-/// had when the surface was all band): a right-edge column around the upper
-/// quarter. Shared by both platforms' visual layers and touch hit-tests so
-/// they can never disagree. The buttons live INSIDE the playing surface
-/// (claimed at touch ONSET only) — a separate side column would make the
-/// whole right edge dead space and swallow touches aimed at the rightmost
-/// fret.
+/// The drone buttons' hit rectangles in FULL-surface touch space (right-edge
+/// column, upper quarter), shared by both platforms' visuals and hit-tests.
+/// Inside the surface, claimed at onset only, so the right edge stays playable.
 public func droneButtonRects(size: CGSize) -> [CGRect] {
     let w: CGFloat = 56
     let spacing: CGFloat = 8
     let top: CGFloat = 4
     let x = size.width - w - 2
-    // Button size keeps the original 4-slot column's (which ran top →
-    // vertical center); the 3-button stack starts half a button pitch
-    // lower so its vertical center sits where the 4-button column's did.
+    // Height = a quarter of the upper half; the stack of 3 starts half a
+    // pitch down so it is centred on the upper quarter.
     let h = max(20, (size.height * 0.5 - top - 3 * spacing) / 4)
     let y0 = top + (h + spacing) / 2
     return (0..<FretArrangement.droneCount).map { i in
@@ -295,9 +203,8 @@ public func droneButtonRects(size: CGSize) -> [CGRect] {
 
 // MARK: - Band ↔ pixel mapping
 
-/// Pixel x of band coordinate `u` (0..1 spans the base band; `u + k` is the
-/// same position in octave copy `k`). The surface spans `[-extent, 1+extent]`
-/// band units linearly across `width`.
+/// Pixel x of band coordinate `u` (`u + k` = octave copy `k`); the surface
+/// spans `[-extent, 1+extent]` band units across `width`.
 public func fretPixelX(forBandX u: Double, ghostExtentOctaves: Double,
                        width: CGFloat) -> CGFloat {
     let extent = max(0, ghostExtentOctaves)
@@ -315,10 +222,8 @@ public func fretBandX(atPixelX x: CGFloat, ghostExtentOctaves: Double,
 
 // MARK: - Placement (per-fret pixel geometry)
 
-/// A fret resolved to pixel space for one frame: its `x`, vertical extent, the
-/// live (octave-shifted) `ratio`, and its `name` — the scale's own label for
-/// the degree, with `'`/`,` octave marks on the repeats. Ghost copies get an
-/// octave suffix on `id` so they don't collide with the base fret.
+/// A fret resolved to pixel space with its octave-shifted `ratio` and scale
+/// `name`; ghost copies get an octave suffix on `id`.
 public struct FretPlacement: Identifiable {
     public let id: String
     public let segmentID: UUID
@@ -337,11 +242,9 @@ public struct FretPlacement: Identifiable {
     }
 }
 
-/// Resolve every enabled segment to a `FretPlacement` per visible octave
-/// copy — shift 0 is the editable base fret in the central band, ±k are the
-/// read-only ghost repeats of the whole layout one band over (an octave
-/// down/up), clipped to the visible surface — in the surface's logical pixel
-/// space (pre-`edgePad`).
+/// Every enabled segment as a `FretPlacement` per visible octave copy (shift
+/// 0 = the editable base fret, ±k = ghosts one band over), in the surface's
+/// logical pixel space (pre-`edgePad`).
 public func fretPlacements(arrangement: FretArrangement,
                            degrees: [(ratio: Double, label: String)],
                            size: CGSize) -> [FretPlacement] {
@@ -372,28 +275,19 @@ public func fretPlacements(arrangement: FretArrangement,
 
 // MARK: - Pitch field
 
-/// Frets closer together than this (px) count as one **column** for the
-/// pitch field — stacked variants (r over R) share a column, and a fret
-/// nudged a hair off another doesn't create a sliver-thin glide zone.
+/// Frets closer than this (px) share one **column** in the pitch field, so a
+/// fret nudged a hair off another doesn't create a sliver-thin glide zone.
 let fretColumnEps: CGFloat = 0.5
 
 // MARK: Warp law
 
-/// Maximum logistic gain at warp = 1 (`ctl_fret_warp` full). At the top the plateau around
-/// each fret covers most of the gap (center slope ≈ 3.5× linear); 0 is the
-/// identity, and the curve morphs continuously between them.
+/// Maximum logistic gain at warp = 1 (`ctl_fret_warp` full): the plateau
+/// around each fret covers most of the gap (center slope ≈ 3.5× linear).
 let fretWarpMaxGain = 14.0
 
-/// The fret-warp transfer: reshape an interpolation parameter `t` (0…1,
-/// 0 = one fret, 1 = the other) through a **normalized logistic**, so pitch
-/// lingers near each fret and transitions quickly through the middle.
-///
+/// The fret-warp transfer — a normalized logistic on `t` (0…1):
 ///   w(t) = (σ(g·(t−½)) − σ(−g/2)) / (σ(g/2) − σ(−g/2)),  g = 14·amount
-///
-/// Exactly the identity at `amount` 0 (and the g→0 limit), fixed at
-/// w(0)=0 / w(1)=1, symmetric (w(t)+w(1−t)=1 — the midpoint stays the
-/// midpoint), and strictly monotone, so the field stays continuous and
-/// exact on every fret.
+/// Identity at `amount` 0, w(0)=0 / w(1)=1, symmetric, strictly monotone.
 public func fretWarp(_ t: Double, amount: Double) -> Double {
     guard amount > 1e-6 else { return t }
     let g = fretWarpMaxGain * min(amount, 1)
@@ -403,8 +297,7 @@ public func fretWarp(_ t: Double, amount: Double) -> Double {
     return (s - s0) / (s1 - s0)
 }
 
-/// Inverse of `fretWarp` on [0, 1] — used by the contour solver to place an
-/// iso-pitch crossing exactly.
+/// Inverse of `fretWarp` on [0, 1] (the contour solver).
 public func fretWarpInverse(_ w: Double, amount: Double) -> Double {
     guard amount > 1e-6 else { return w }
     let g = fretWarpMaxGain * min(amount, 1)
@@ -424,36 +317,12 @@ func fretColumnXs(_ placements: [FretPlacement]) -> [CGFloat] {
     return columns
 }
 
-/// log2 pitch of the fret field at `pt` — the simplest model that respects
-/// the layout: **interpolate between the closest fret columns horizontally**.
-///
-///   1. A **column** = the frets sharing an x (within `fretColumnEps`).
-///      Its pitch at the touch's y (`fretColumnLog`): **inside** a fret's
-///      vertical extent → exactly that fret's pitch; **between** two stacked
-///      frets → a linear y-interpolation across the gap (so between r and R
-///      you get the blend); **above/below** the column's frets → clamped to
-///      the nearest one.
-///   2. The field at `pt` = the linear log-pitch x-interpolation between the
-///      nearest column at-or-left of `pt.x` and the nearest column right of
-///      it. Beyond the outermost columns the line through the outermost
-///      PAIR extrapolates (the edges keep the local slope instead of going
-///      flat); with a single column its pitch holds everywhere.
-///
-/// Continuous everywhere: crossing a column, both sides agree on the
-/// column's own pitch; within a column, the y-interpolation is continuous;
-/// and only the two flanking columns ever matter, so pitch always moves
-/// TOWARD the neighbor you're dragging at — never toward the layout's mean
-/// (the failure of the earlier global inverse-distance blends). Exactly a
-/// fret's pitch on the fret line (inside its extent). `nil` with no frets.
-///
-/// `warp` (the `ctl_fret_warp` registry param, 0…1 — a LIVE control, on
-/// the Mac the intercepted param value and on the iPad the value relayed
-/// over JOYCON_STATE) reshapes every fret-to-fret
-/// interpolation — the x-blend between columns and the y-blend inside a
-/// stacked column — through `fretWarp`'s logistic, so pitch plateaus around
-/// each fret. 0 keeps the historic linear field exactly. Beyond the
-/// outermost columns the extrapolation stays linear (the warp is only
-/// defined between frets).
+/// log2 pitch of the fret field at `pt`: each **column** (frets within
+/// `fretColumnEps`) resolves its pitch at the touch's y (`fretColumnLog`),
+/// and the field interpolates log-pitch between the columns flanking `pt.x`
+/// (extrapolating beyond the outermost). Continuous, exact on a fret line.
+/// `warp` (`ctl_fret_warp`, 0…1) shapes every blend through `fretWarp`; 0 is
+/// exactly linear. `nil` with no frets.
 public func fretFieldLog(at pt: CGPoint,
                          placements: [FretPlacement],
                          warp: Double = 0) -> Double? {
@@ -475,11 +344,8 @@ public func fretFieldLog(at pt: CGPoint,
     return l + (r - l) * tw
 }
 
-/// A column's log2 pitch at height `y`: exactly a member fret's pitch inside
-/// its vertical extent (overlapping extents: nearest center wins), a
-/// y-interpolation across the gap between two stacked frets (linear, or
-/// `fretWarp`-shaped when `warp` > 0), and clamped to the nearest fret
-/// beyond the column's ends. Continuous in `y`.
+/// A column's log2 pitch at `y`: a fret's pitch inside its extent, a
+/// `fretWarp`-shaped blend between stacked frets, clamped beyond the ends.
 func fretColumnLog(atY y: CGFloat, columnX cx: CGFloat,
                    placements: [FretPlacement], warp: Double = 0) -> Double {
     var inside: FretPlacement? = nil       // extent contains y, nearest center
@@ -518,13 +384,8 @@ func fretColumnLog(atY y: CGFloat, columnX cx: CGFloat,
 
 // MARK: - Field contours (edit-mode visualization)
 
-/// One iso-pitch contour polyline of the fret field. `level` is the log2
-/// pitch it traces; `isBoundary` marks the **territory boundaries** — the
-/// log-midpoints between adjacent sounding pitches, the line where the field
-/// crosses from one pitch's territory into the next — vs the fainter minor
-/// contours (the quarter-pitch lines) that make the warp's plateau/cliff
-/// shape visible: with the warp up they hug the boundaries; at 0 they
-/// sit at the linear quarter positions.
+/// One iso-pitch contour polyline at log2 pitch `level`; `isBoundary` marks
+/// the log-midpoints between adjacent pitches vs the quarter-pitch lines.
 public struct FretFieldContour {
     public let level: Double
     public let isBoundary: Bool
@@ -535,17 +396,10 @@ public struct FretFieldContour {
     }
 }
 
-/// Solve the field's iso-pitch contours over the band, exactly: for each
-/// scanline y and each adjacent column pair `(a, b)` the field is
-/// `l(y) + (r(y) − l(y)) · fretWarp(t)`, so a level crossing sits at
-/// `x = a + fretWarpInverse((c−l)/(r−l)) · (b−a)` — one crossing per pair
-/// per scanline (the warp is monotone). Beyond the outermost columns the
-/// linear extrapolation is solved the same way (no warp there). Levels are
-/// the boundaries (log-midpoints) between adjacent distinct sounding
-/// pitches plus minor quarter-pitch lines. Polylines are per (level,
-/// region), split wherever the level leaves the region, so every returned
-/// run is a continuous curve. Empty with fewer than two columns (the field
-/// is flat in x).
+/// Solve the iso-pitch contours exactly: per scanline and column pair the
+/// field is `l + (r − l) · fretWarp(t)`, so a crossing sits at
+/// `x = a + fretWarpInverse((c−l)/(r−l)) · (b−a)`. Polylines are per (level,
+/// region), split where the level leaves the region.
 public func fretFieldContours(placements: [FretPlacement], size: CGSize,
                               warp: Double,
                               ySamples: Int = 64) -> [FretFieldContour] {
@@ -581,8 +435,7 @@ public func fretFieldContours(placements: [FretPlacement], size: CGSize,
     }
 
     var out: [FretFieldContour] = []
-    // Regions: -1 = left extrapolation, 0..count-2 = the pairs,
-    // count-1 = right extrapolation.
+    // Regions: -1 = left extrapolation, 0..count-2 = pairs, count-1 = right.
     for region in -1...(columns.count - 1) {
         let pair = min(max(region, 0), columns.count - 2)
         let (a, b) = (columns[pair], columns[pair + 1])
@@ -625,11 +478,9 @@ public func fretFieldContours(placements: [FretPlacement], size: CGSize,
 
 // MARK: - Onset snap
 
-/// The fret a touch **onset** at `pt` snaps to: the nearest fret (in x) within
-/// `snapDistance` px whose vertical extent contains `pt.y`. `nil` when the
-/// touch is above/below every nearby fret or in open space — the caller plays
-/// the field pitch instead (that's the approach path). Only called at
-/// onset; drags never re-snap.
+/// The fret a touch **onset** at `pt` snaps to: the nearest in x within
+/// `snapDistance` px whose extent contains `pt.y`; `nil` = play the field
+/// pitch (the approach path). Onset only — drags never re-snap.
 public func fretSnap(at pt: CGPoint, placements: [FretPlacement],
                      snapDistance: CGFloat) -> FretPlacement? {
     var best: FretPlacement? = nil
@@ -646,9 +497,8 @@ public func fretSnap(at pt: CGPoint, placements: [FretPlacement],
 
 // MARK: - Fill cells (sounding highlight)
 
-/// Wrap each fret as a thin-rectangle `VoronoiCell` (stable id, live ratio) so
-/// the shared `CellFillsView` glows the snapped fret keyed by
-/// `engine.sounding.weights` — same mechanism as the String Pad's hexagons.
+/// Each fret as a thin-rectangle `VoronoiCell` so `CellFillsView` glows the
+/// snapped fret keyed by `engine.sounding.weights`.
 public func fretFillCells(_ placements: [FretPlacement],
                           halfWidth: CGFloat = 2.5) -> [VoronoiCell] {
     placements.map { p in
@@ -666,9 +516,8 @@ public func fretFillCells(_ placements: [FretPlacement],
 
 // MARK: - Hit-testing (editing)
 
-/// What a press at `pt` grabs: a segment to move, one of its endpoint
-/// handles, or nothing. (Editing operates on base placements only —
-/// pass `placements` filtered to `!isGhost`.)
+/// What a press grabs: a segment to move, an endpoint handle, or nothing.
+/// Editing operates on base placements only (`!isGhost`).
 public enum FretGrab: Equatable {
     case move(UUID)
     case resizeTop(UUID)

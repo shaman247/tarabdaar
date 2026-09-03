@@ -7,7 +7,7 @@ public struct BowParams: Sendable {
     public var num: [String: Double]
     public var pitchKnotsOct: [Double]
     public var pitchCents: [Double]
-    /// TONIC-RELATIVE knots (2026-07-18, String instrument): the formula
+    /// TONIC-RELATIVE knots (String instrument): the formula
     /// body scales with the open string, so pull(f/tonic) is
     /// tuning-invariant — when present these take precedence and the
     /// correction is interpolated at log2(f0/tonic). Absent (the sarangi

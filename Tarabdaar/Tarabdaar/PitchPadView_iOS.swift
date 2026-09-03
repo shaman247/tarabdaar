@@ -4,36 +4,27 @@ import TarabdaarCore
 import SwiftUI
 import simd
 
-/// The iPad's playing surface is the Fret Pad (`FretPadViewIOS`, below). Touch
-/// position resolves to a pitch via `FretPadGeometry`; `PitchPadEngine` pins a
-/// MIDI note and bends, while a 60 Hz loop streams the RAW tilt report
-/// (`TiltAxisWire` CCs 16/17/18) — the iPad knows nothing about what the
-/// tilts mean; the Mac evaluates its own bindings. Scale + fret editing
-/// live on TarabdaarMac and sync here over USB-MIDI SysEx (the iPad is
-/// perform-only). The MAP dimension-matrix editor was deleted 2026-07-24
-/// along with the iPad's parameter mapping.
+/// The iPad's playing surface is the Fret Pad (`FretPadViewIOS`). Touches
+/// resolve to pitch via `FretPadGeometry` and ride the outbound TLP state with
+/// the RAW tilt axes — the iPad evaluates no bindings. Scale + fret editing
+/// live on the Mac and sync here over TLP events.
 
 // MARK: - Shared pad toolbar (iPad)
 
-/// The common iPad pad toolbar — PANIC, an optional REC toggle, the
-/// scale-sync indicator, live tilt meters, the sounding readout, and the
-/// (read-only) synced tonic. Shared by the playing surface.
+/// The iPad pad toolbar — PANIC, REC, scale-sync, tilt meters, scopes, the
+/// sounding readout and the read-only synced tonic.
 struct PadToolbarIOS: View {
     @ObservedObject var engine: PitchPadEngine
     @ObservedObject var noteManager: NoteManager
     @ObservedObject var scaleSync: ScaleSyncReceiver
-    /// The shared MIDI engine — drives the USB/Bluetooth transport indicators.
+    /// Drives the USB/Bluetooth transport indicators.
     @ObservedObject var midi: MIDIEngine
-    /// When set (Fret Pad), a REC toggle records play strokes for offline
-    /// assist fitting (see `FretGestureRecorder`).
+    /// When set, a REC toggle records play strokes (`FretGestureRecorder`).
     var recorder: FretGestureRecorder? = nil
-    /// When set, the persistent STRIKE SCOPE draws beside the tilt panes —
-    /// the live accelerometer magnitude on the strike law's 0–127 scale.
+    /// When set, the strike scope draws beside the tilt panes.
     var motion: MotionManager? = nil
-    /// When set, the FINGER-ACCEL SCOPE draws beside the strike scope —
-    /// the playing finger's pitch acceleration on the `.fingerAccel`
-    /// dimension's −1…+1 scale (display-only local computation of the
-    /// same `FingerAccelTracker` law the Mac's bindings consume).
+    /// When set, the finger-accel scope draws (display-only local instance of
+    /// the `FingerAccelTracker` law the Mac's bindings consume).
     var fingerAccel: FingerAccelSampler? = nil
     /// Toggles the raw-motion diagnostic overlay (GYRO button).
     @Binding var showGyro: Bool
@@ -49,12 +40,7 @@ struct PadToolbarIOS: View {
             }
             ScaleSyncIndicator(scaleSync: scaleSync)
             Spacer(minLength: 12)
-            // Three tilt squares — the ARM tilts (Mac-calibrated when a
-            // calibration is driving, the iPad's own raw attitude
-            // otherwise), the WRIST attitude (the Joy-Con's fused
-            // pitch/roll/yaw), and the Joy-Con stick. Every axis has one
-            // owner, so nothing grays — a square just dims while its
-            // source is idle.
+            // Tilt squares: ARM, WRIST (Joy-Con fusion), stick.
             ArmTiltPane(localTilts: noteManager.currentTilt,
                         display: scaleSync.joyConTilt)
             WristTiltPane(tilt: scaleSync.joyConTilt)
@@ -68,25 +54,18 @@ struct PadToolbarIOS: View {
             if let fingerAccel {
                 FingerAccelScopePane(history: fingerAccel, motion: motion)
             }
-            // The Mac's radiated voice/taraf levels (JOYCON_STATE vol
-            // bytes, TLP v9) — flat at zero while the link is down. The
-            // motion manager's note timeline colors it like the strike
-            // scope (lighter backdrop + colored traces while sounding).
+            // The Mac's radiated voice/taraf levels (JOYCON_STATE).
             VolumeScopePane(history: scaleSync.volumeHistory,
                             motion: motion)
             Spacer(minLength: 12)
             PadSoundingReadout(sounding: engine.sounding,
                                tonicFractionalMidi: engine.tonicFractionalMidi)
-            // The playing-range OCTAVE SHIFT (Joy-Con dpad ←/→ on the
-            // Mac, relayed over JOYCON_STATE — TLP v11): every played
-            // touch transposes by this many octaves. Dim at 0 so the
-            // chip reads as a state light, not a control.
+            // The playing-range octave shift (Mac dpad, JOYCON_STATE).
             Text("Oct \(engine.octaveShift > 0 ? "+" : "")\(engine.octaveShift)")
                 .font(.padCaption2.monospacedDigit())
                 .foregroundColor(engine.octaveShift == 0 ? .gray : .orange)
                 .fixedSize()
-            // Tonic is set on the Mac (in Hz) and synced over, so it's
-            // read-only here.
+            // Tonic is set on the Mac and synced over — read-only here.
             Text("Tonic \(Scale.noteName(for: engine.tonicMidi))")
                 .font(.padCaption2).foregroundColor(.gray)
                 .fixedSize()
@@ -112,9 +91,8 @@ struct PadToolbarIOS: View {
 
 // MARK: - Sounding readout
 
-/// Compact live Hz / note / cents readout for the active touch, tinted
-/// in its OKLCH hue. Observes only `SoundingState`, so the per-tick ratio
-/// updates re-render just this label.
+/// Live Hz / note / cents readout for the active touch. Observes only
+/// `SoundingState`, so per-tick updates re-render just this label.
 private struct PadSoundingReadout: View {
     @ObservedObject var sounding: SoundingState
     let tonicFractionalMidi: Double
@@ -122,8 +100,7 @@ private struct PadSoundingReadout: View {
     var body: some View {
         let ratio = sounding.ratio
         let text: String = ratio.map { r in
-            // sounding.octaveSemis is the touch's ONSET-captured octave
-            // shift, so a note held across an octave step reads true.
+            // octaveSemis is onset-captured, so a held note reads true.
             let fractionalMidi = tonicFractionalMidi + sounding.octaveSemis
                 + 12.0 * log2(r)
             let freq = 440.0 * pow(2.0, (fractionalMidi - 69.0) / 12.0)
@@ -146,10 +123,8 @@ private struct PadSoundingReadout: View {
 
 // MARK: - Stroke-recording toggle (Fret Pad)
 
-/// REC button for the iPad Fret Pad: records play strokes (raw movements +
-/// fret context) to the app's **Documents/FretRecordings/** folder as JSONL —
-/// visible in the Files app and Finder's device browser — for fitting the
-/// drag-assist parameters to real playing (`tools/fretpad_fit.py`).
+/// REC button: records play strokes to **Documents/FretRecordings/** as JSONL
+/// (visible in Files / Finder) for `tools/fretpad_fit.py`.
 private struct RecToggleIOS: View {
     @ObservedObject var recorder: FretGestureRecorder
 
@@ -175,16 +150,10 @@ private struct RecToggleIOS: View {
 
 // MARK: - Transport indicators + Bluetooth MIDI (BLE-MIDI advertise)
 
-/// USB + Bluetooth transport indicators for the toolbar. Color carries the
-/// state: **green = the transport currently carrying the MIDI** (wired-first,
-/// so USB wins whenever the cable is in), **white = connected but idle**,
-/// **dim gray = absent**. The antenna doubles as the button that presents
-/// the system BLE-MIDI peripheral sheet, so the iPad can advertise itself
-/// and the Mac can connect from Audio MIDI Setup → MIDI Studio → Bluetooth.
-/// The resulting session is an ordinary CoreMIDI endpoint pair —
-/// `MIDIEngine` picks it up automatically and drops it the moment a cable
-/// appears. The connection is per-session: iOS stops advertising when the
-/// session ends, so re-advertise + reconnect after relaunch.
+/// USB + Bluetooth indicators: **green** = carrying the link (wired-first),
+/// **white** = idle, **dim gray** = absent. The antenna presents the system
+/// BLE-MIDI peripheral sheet so the iPad can advertise (the Mac connects from
+/// Audio MIDI Setup → Bluetooth); advertising is per-session.
 private struct TransportIndicatorsIOS: View {
     @ObservedObject var midi: MIDIEngine
     @State private var showBluetoothSheet = false
@@ -215,8 +184,7 @@ private struct TransportIndicatorsIOS: View {
     }
 }
 
-/// `CABTMIDILocalPeripheralViewController` wrapped for SwiftUI — the
-/// advertise toggle lives inside; swipe down to dismiss the sheet.
+/// `CABTMIDILocalPeripheralViewController` wrapped for SwiftUI.
 private struct BluetoothMIDIPeripheralSheet: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UINavigationController {
         UINavigationController(rootViewController: CABTMIDILocalPeripheralViewController())
@@ -227,8 +195,7 @@ private struct BluetoothMIDIPeripheralSheet: UIViewControllerRepresentable {
 
 // MARK: - Scale-sync indicator
 
-/// Mac→iPad scale-sync status: a green dot once the Mac has pushed a scale,
-/// gray until then.
+/// Scale-sync status: green once the Mac has pushed a scale.
 struct ScaleSyncIndicator: View {
     @ObservedObject var scaleSync: ScaleSyncReceiver
 
@@ -246,20 +213,13 @@ struct ScaleSyncIndicator: View {
 
 // MARK: - Tilt pad
 
-/// Dot color for a 3-axis square: the third axis (−1…+1) sweeps
-/// purple → cyan → orange as it goes −1 → 0 → +1 (cyan at neutral).
+/// Third-axis dot color: purple → cyan → orange over −1 → 0 → +1.
 private func thirdAxisColor(_ v: Double) -> Color {
     Color(hue: 0.5 - v * 0.35, saturation: 0.9, brightness: 1.0)
 }
 
-/// The ARM tilts — tilt 1 on x, tilt 2 on y (up = positive), tilt 3 as
-/// the dot color. While the Mac's arm-calibration solve is driving
-/// (`armLive`, round-tripped in `JOYCON_STATE`), the square shows the
-/// CALIBRATED axes — sweeping a calibrated range moves the dot edge to
-/// edge, matching what the tilt bindings actually receive. Without a
-/// calibration (or with the link down) it falls back, dimmed, to the
-/// iPad's own raw attitude (`NoteManager.currentTilt`, ±90° full scale)
-/// — which is then exactly what the Mac applies uncentered.
+/// The ARM tilts (1 on x, 2 on y, 3 as dot color): the Mac's CALIBRATED axes
+/// while `armLive`, else the iPad's raw attitude, dimmed.
 private struct ArmTiltPane: View {
     let localTilts: [Double]
     let display: JoyConTiltDisplay
@@ -277,9 +237,7 @@ private struct ArmTiltPane: View {
     }
 }
 
-/// The WRIST attitude — the Joy-Con's fused pitch (x) / roll (y) / yaw
-/// (dot color), relayed from the Mac's 9-axis fusion (Joy-Con 2 only).
-/// Bright while the fusion streams; parked grey otherwise.
+/// The WRIST attitude — the Joy-Con's fused pitch / roll / yaw, from the Mac.
 private struct WristTiltPane: View {
     let tilt: JoyConTiltDisplay
 
@@ -291,9 +249,7 @@ private struct WristTiltPane: View {
     }
 }
 
-/// The Mac's Joy-Con stick axes (Stick X/Y). Fed by the `JOYCON_STATE`
-/// relay (`ScaleSyncReceiver.joyConTilt`), values already 0…1. Bright
-/// while deflected.
+/// The Mac's Joy-Con stick axes (`JOYCON_STATE` relay). Bright while deflected.
 private struct JoyConTiltPane: View {
     let tilt: JoyConTiltDisplay
 
@@ -304,8 +260,7 @@ private struct JoyConTiltPane: View {
     }
 }
 
-/// Shared 36 pt crosshair square for the tilt panes (values −1…+1,
-/// centre = 0, y up).
+/// Shared 36 pt crosshair square (values −1…+1, centre = 0, y up).
 private struct TiltSquare: View {
     let x: Double
     let y: Double
@@ -336,37 +291,21 @@ private struct TiltSquare: View {
     }
 }
 
-/// PERSISTENT STRIKE SCOPE (2026-08-23): the live accelerometer magnitude
-/// run through the SAME log law as the onset strike estimate
-/// (`MotionSource.strikeScale01` — velocityMinG…MaxG → the 0–127 wire
-/// scale), drawn as a scrolling trace of the last few seconds with the
-/// current value printed at the right. Lets the player watch the whole
-/// gesture — taps, sustained shakes, aftertouch-style pressure wobble —
-/// on exactly the scale their strike numbers speak; the small amber tick
-/// on the right edge holds the LAST ONSET's reading
-/// (`lastTouchVelocity`), so tap and trace can be compared directly.
-/// Polls the non-published 200 Hz `accelHistory3D` at 30 Hz inside a
-/// `TimelineView` (the raw-overlay pattern) — it never subscribes, so
-/// motion samples don't re-render the toolbar.
+/// The strike scope: the strike envelope (0–127 wire scale) as a scrolling
+/// trace with the current value at the right; the amber tick holds the last
+/// onset's reading. Polls the unpublished history at 30 Hz in a
+/// `TimelineView` — never subscribes.
 private struct StrikeScopePane: View {
     let motion: MotionManager
-    /// The onset fade duration (pale yellow at the onset → deep violet,
-    /// the shared magma level ramp, 2026-09-02) — the Mac's
-    /// `ctl_strike_window` blend window, so the color transition on the
-    /// trace shows exactly when a note's Strike bindings have handed over
-    /// to Acceleration.
+    /// The onset color fade — the Mac's `ctl_strike_window` blend window.
     let fadeS: Double
 
     private static let window: TimeInterval = 4.0
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-            // Read the history HERE, in the timeline content, not inside
-            // the Canvas closure: the closure must capture fresh DATA each
-            // tick. Capturing only `motion` (an unchanging class ref) lets
-            // SwiftUI dedupe the "identical" canvas and stop redrawing —
-            // the pane froze after its first frames (2026-08-23 fix; the
-            // raw-motion overlay established the pattern).
+            // Read the history HERE, not inside the Canvas closure: capturing
+            // only the class ref lets SwiftUI dedupe the canvas and it freezes.
             let env = motion.strikeHistory
             let strike = motion.lastTouchVelocity
             let activity = motion.noteActivity
@@ -390,25 +329,13 @@ private struct StrikeScopePane: View {
                              onsets: [TimeInterval],
                              fadeS: Double) {
         let w = size.width, h = size.height
-        // THE TRACE IS THE ENVELOPE (2026-08-23, evening): only the
-        // smoothed control signal the `.strike`/`.acceleration`
-        // dimensions actually consume is drawn — the raw magnitude trace
-        // was retired (its rectified zero-crossings + the log-floor
-        // magnification made smooth playing read as spikes; the envelope
-        // IS the truth the bindings see).
+        // Only the envelope (the control signal the bindings see) is drawn.
         guard let lastT = env.last?.t else { return }
         let bins = max(Int(w), 1)
         let binDur = window / Double(bins)
-        // TIME-QUANTIZED BINS (2026-08-23): anchor the bucket grid to
-        // ABSOLUTE time, not to the moving `lastT − window` origin — the
-        // moving origin re-bucketed the same samples differently on every
-        // redraw and the whole trace shimmered ("jiggled") at the poll
-        // rate. On the quantized grid a sample stays in one bucket for
-        // its lifetime and the trace scrolls by whole bins instead of
-        // re-rasterizing. Decimation is per-bin PEAK-HOLD, never a
-        // sample stride (stride-2 on the 200 Hz stream aliased ~100 Hz
-        // content into two flip-flopping phase states, and a between-
-        // samples tap spike could vanish).
+        // Bins anchor to ABSOLUTE time (a moving origin makes the trace
+        // shimmer); decimation is per-bin peak-hold, never a sample stride
+        // (a stride aliases and can drop a tap spike).
         let t0 = (((lastT - window) / binDur).rounded(.down)) * binDur
         var peak = [Double](repeating: -1.0, count: bins)
         var current = 0.0
@@ -418,16 +345,8 @@ private struct StrikeScopePane: View {
             let b = min(bins - 1, max(0, Int((s.t - t0) / binDur)))
             if s.level > peak[b] { peak[b] = s.level }
         }
-        // PLAYING-STATE COLOR (2026-08-23; magma 2026-09-02): each bin is
-        // colored by what the player was doing AT THAT TIME — pale yellow
-        // at a note onset fading down the shared `ScopeColor.level` ramp
-        // to deep violet over the BLEND WINDOW (`fadeS` — the Mac's
-        // ctl_strike_window, so the color reaching the violet floor
-        // means the note's Strike bindings have fully handed over to
-        // Acceleration), DARK gray while nothing plays. The
-        // activity/onset timelines come from the surface's note
-        // begin/end reports (`MotionManager.noteBegan/noteEnded`); both
-        // are time-ordered, so one linear walk serves all bins.
+        // Color per bin: pale yellow at onset fading down `ScopeColor.level`
+        // over `fadeS`, dark gray while nothing plays (one linear walk).
         var ai = -1        // last activity event with t <= binT
         var oi = -1        // last onset with t <= binT
         var soundingArr = [Bool](repeating: false, count: bins)
@@ -448,10 +367,7 @@ private struct StrikeScopePane: View {
                 colorArr[b] = Color(white: 0.38).opacity(0.9)
             }
         }
-        // NOTE-ACTIVE BACKGROUND (2026-08-23): the frames where a note
-        // sounded get a lighter backdrop — run-length filled under the
-        // trace, so phrases read as blocks at a glance (and the
-        // dark-gray idle trace stays legible against the darker rest).
+        // Note-active backdrop, run-length filled, so phrases read as blocks.
         var b = 0
         while b < bins {
             guard soundingArr[b] else { b += 1; continue }
@@ -463,9 +379,7 @@ private struct StrikeScopePane: View {
                      with: .color(.white.opacity(0.12)))
             b = e + 1
         }
-        // Guide lines at thirds of the scale (≈42 / 85) — over the
-        // backdrop stripes (same opacity; under them they'd vanish
-        // inside phrases), under the trace.
+        // Guide lines at thirds (≈42 / 85) — over the backdrop, under the trace.
         for f in [1.0 / 3.0, 2.0 / 3.0] {
             var p = Path()
             p.move(to: CGPoint(x: 0, y: h * CGFloat(1 - f)))
@@ -485,8 +399,7 @@ private struct StrikeScopePane: View {
             }
             prevPt = pt
         }
-        // Last onset's reading: an amber tick at its height, right edge —
-        // the same number the touch indicator printed.
+        // Last onset's reading: an amber tick at its height, right edge.
         if lastStrike > 0 {
             var tick = Path()
             let y = h - CGFloat(lastStrike) * (h - 2) - 1
@@ -505,19 +418,10 @@ private struct StrikeScopePane: View {
     }
 }
 
-/// FINGER-ACCEL SCOPE (2026-08-24): the playing finger's pitch
-/// acceleration on the `.fingerAccel` dimension's −1…+1 scale — the
-/// strike scope's sibling for the FINGER instead of the wrist. Bipolar:
-/// the centerline is rest/constant-rate meend, up = the pitch's motion
-/// accelerating upward, down = braking or accelerating downward. The
-/// trace is the iPad's own display computation of the shared
-/// `FingerAccelTracker` law (`FingerAccelSampler`, 120 Hz off-main);
-/// the Mac evaluates its own instance from the wire for the bindings.
-/// Same rendering discipline as the strike scope: fresh DATA captured in
-/// the timeline content (never just the class ref — the 2026-08-23
-/// freeze), absolute-time-quantized bins, per-bin decimation by MAX |v|
-/// (never a sample stride), note-activity backdrop from the motion
-/// manager's timeline when available.
+/// The finger-accel scope: the finger's pitch acceleration on the
+/// `.fingerAccel` −1…+1 scale (centerline = rest or constant-rate meend),
+/// from the iPad's own `FingerAccelSampler` instance of the shared law. Same
+/// rendering discipline as the strike scope.
 private struct FingerAccelScopePane: View {
     let history: FingerAccelSampler
     let motion: MotionManager?
@@ -544,9 +448,8 @@ private struct FingerAccelScopePane: View {
         guard let lastT = env.last?.t else { return }
         let bins = max(Int(w), 1)
         let binDur = window / Double(bins)
-        // Absolute-time bin grid (the strike scope's anti-shimmer fix) +
-        // per-bin signed peak-hold: keep the sample of MAX |v| so brief
-        // accel bursts survive decimation with their sign.
+        // Absolute-time bins + per-bin signed peak-hold (max |v| keeps its
+        // sign) so brief bursts survive decimation.
         let t0 = (((lastT - window) / binDur).rounded(.down)) * binDur
         var peak = [Double](repeating: .nan, count: bins)
         var current = 0.0
@@ -556,7 +459,7 @@ private struct FingerAccelScopePane: View {
             let b = min(bins - 1, max(0, Int((s.t - t0) / binDur)))
             if peak[b].isNaN || abs(s.v) > abs(peak[b]) { peak[b] = s.v }
         }
-        // Note-active backdrop, run-length filled like the strike scope.
+        // Note-active backdrop, run-length filled.
         var ai = -1
         var soundingArr = [Bool](repeating: false, count: bins)
         for b in 0..<bins {
@@ -614,30 +517,14 @@ private struct FingerAccelScopePane: View {
     }
 }
 
-/// VOLUME SCOPE (2026-08-24): the Mac's radiated MAIN-VOICE and TARAF
-/// levels — the strike scope's sibling — drawn as two scrolling traces
-/// over the last few seconds on the wire's 0…1 log scale (−60…0 dBFS —
-/// see `TLPVolume`; guide lines at thirds = 20 dB steps), with the
-/// current dB values printed at the right. Lets the player watch the
-/// played voice against the sympathetic ring — how hard a phrase
-/// charges the taraf, how long it carries after the fingers lift —
-/// without looking at the Mac. The data is UNSMOOTHED (second rev: the
-/// Mac meters exact interval RMS per 60 Hz relay slice — no envelope,
-/// so a staccato cut and a taraf damping change read at their true
-/// rates); samples are still change-gated on the wire (60 Hz moving,
-/// the 250 ms link heartbeat at rest), so bins are per-bin peak-hold
-/// with forward-fill between samples. Note-activity dressing matches
-/// the strike scope: frames where a note sounded get the lighter
-/// backdrop and the colored traces (voice orange, taraf cyan); idle
-/// frames sit on the darker ground with both traces gray. Polls the
-/// unpublished `ScaleSyncReceiver.volumeHistory` at 30 Hz inside a
-/// `TimelineView` (level motion never re-renders the toolbar), reading
-/// the history in the timeline content, not the Canvas closure (the
-/// 2026-08-23 frozen-pane capture trap).
+/// The volume scope: the Mac's radiated voice and taraf levels on the wire's
+/// 0…1 log scale (−60…0 dBFS, `TLPVolume`; guides = 20 dB) with the current
+/// dB at the right. Samples are unsmoothed RMS, change-gated on the wire, so
+/// bins peak-hold and forward-fill. Voice orange, taraf cyan while a note
+/// sounds. Polls `ScaleSyncReceiver.volumeHistory` at 30 Hz in a `TimelineView`.
 private struct VolumeScopePane: View {
     let history: VolumeHistory
-    /// The surface's note begin/end timeline (same mach clock as the
-    /// volume samples) — nil = no activity dressing.
+    /// The surface's note timeline (same clock as the samples); nil = none.
     let motion: MotionManager?
 
     private static let window: TimeInterval = 4.0
@@ -666,15 +553,11 @@ private struct VolumeScopePane: View {
                              activity: [(t: TimeInterval, active: Int)]) {
         let w = size.width, h = size.height
         guard !samples.isEmpty else { return }
-        // The trace scrolls with NOW, not with the last (sparse) sample —
-        // a ringing taraf's heartbeat samples still march leftward.
+        // The trace scrolls with NOW, not the last (sparse) sample.
         let now = ProcessInfo.processInfo.systemUptime
         let bins = max(Int(w), 1)
         let binDur = window / Double(bins)
-        // Time-quantized bins (the strike scope's anti-shimmer law) with
-        // per-bin peak-hold; empty bins forward-fill from the previous
-        // value, seeded from the newest sample at or before the left
-        // edge.
+        // Absolute-time bins with peak-hold; empty bins forward-fill.
         let t0 = (((now - window) / binDur).rounded(.down)) * binDur
         var voicePk = [Double](repeating: -1.0, count: bins)
         var tarafPk = [Double](repeating: -1.0, count: bins)
@@ -690,7 +573,7 @@ private struct VolumeScopePane: View {
             if voicePk[b] < 0 { voicePk[b] = vFill } else { vFill = voicePk[b] }
             if tarafPk[b] < 0 { tarafPk[b] = tFill } else { tFill = tarafPk[b] }
         }
-        // Per-bin note activity (linear walk — the timeline is ordered).
+        // Per-bin note activity (the timeline is ordered).
         var ai = -1
         var soundingArr = [Bool](repeating: false, count: bins)
         for b in 0..<bins {
@@ -700,9 +583,7 @@ private struct VolumeScopePane: View {
             }
             soundingArr[b] = ai >= 0 && activity[ai].active > 0
         }
-        // NOTE-ACTIVE BACKGROUND (the strike scope's law): sounding
-        // frames get the lighter backdrop, run-length filled, so phrases
-        // read as blocks and the idle gray traces stay legible.
+        // Note-active backdrop, run-length filled.
         var run = 0
         while run < bins {
             guard soundingArr[run] else { run += 1; continue }
@@ -714,18 +595,14 @@ private struct VolumeScopePane: View {
                      with: .color(.white.opacity(0.12)))
             run = e + 1
         }
-        // Guide lines at thirds of the scale (20 dB steps) — over the
-        // backdrop stripes, under the traces.
+        // Guide lines at thirds (20 dB steps).
         for f in [1.0 / 3.0, 2.0 / 3.0] {
             var p = Path()
             p.move(to: CGPoint(x: 0, y: h * CGFloat(1 - f)))
             p.addLine(to: CGPoint(x: w, y: h * CGFloat(1 - f)))
             ctx.stroke(p, with: .color(.white.opacity(0.12)), lineWidth: 0.5)
         }
-        // Traces, stroked per-pair with the newer bin's playing-state
-        // color: full color while a note sounds, gray otherwise (a
-        // taraf ringing past the release deliberately reads gray, like
-        // the strike scope's idle trace). Taraf under, voice over.
+        // Traces: colored while a note sounds, gray otherwise. Taraf under.
         func stroke(_ values: [Double], active: Color, idle: Color) {
             var prevPt: CGPoint? = nil
             for b in 0..<bins {
@@ -744,8 +621,7 @@ private struct VolumeScopePane: View {
         }
         stroke(tarafPk, active: tarafColor, idle: tarafIdle)
         stroke(voicePk, active: voiceColor, idle: voiceIdle)
-        // Current values in dB (the wire scale is −60…0 dBFS), voice
-        // above taraf, each in its trace color; silence prints nothing.
+        // Current dB values, voice above taraf; silence prints nothing.
         func label(_ v01: Double, _ color: Color, y: CGFloat) {
             guard v01 > 0 else { return }
             let db = Int(((v01 - 1.0) * 60.0).rounded())
@@ -763,21 +639,10 @@ private struct VolumeScopePane: View {
 
 // MARK: - Fret Pad (iPad)
 
-/// The iPad Fret Pad — the free-fret surface, the iPad counterpart of the
-/// Mac [Fret Pad](../../docs/fret-pad.md) tab. Shown when the Mac pushes
-/// `layout == .fretPad`. The segment layout (`FretArrangement`) is its own
-/// state (fret positions and snap zones aren't derivable from the scale),
-/// synced as a third SysEx message and held by
-/// `ScaleSyncReceiver.fretArrangement`. Perform-only — editing stays on the
-/// Mac.
-///
-/// Playing matches the Mac: frets are freely positioned and the pitch is the
-/// continuous fret **field** (`fretFieldLog` — exact on a fret, interpolated
-/// between them); a touch **starting** within the synced Snap distance of a
-/// fret *and* inside its vertical extent snaps to its exact pitch; starting
-/// elsewhere approaches the note freely; drags glide continuously (per-touch
-/// constant log-offset from a snapped onset — never re-snaps). Fully
-/// multitouch: each finger keeps its own snap offset.
+/// The iPad Fret Pad — the counterpart of the Mac [Fret Pad](../../docs/fret-pad.md)
+/// tab, perform-only; the `FretArrangement` arrives as a TLP event
+/// (`ScaleSyncReceiver.fretArrangement`). Same field / onset snap / continuous
+/// drag laws as the Mac, fully multitouch.
 struct FretPadViewIOS: View {
     @ObservedObject var engine: PitchPadEngine
     @ObservedObject var noteManager: NoteManager
@@ -800,20 +665,9 @@ struct FretPadViewIOS: View {
                           midi: midi, recorder: recorder, motion: motion,
                           fingerAccel: fingerAccel,
                           showGyro: $showGyro)
-            // The drone buttons live INSIDE the surface (drawn as an
-            // overlay, hit-tested in the surface's own touch handler) so
-            // the surface keeps its full width — a separate side column
-            // made the whole right edge dead space and swallowed touches
-            // aimed at the rightmost fret.
-            //
-            // The surface view spans the whole area below the toolbar; the
-            // playable fret band (`fretPadBandRect`) is the centered
-            // half-height strip inside it, marked by a hairline border —
-            // the space above/below it is dead, except the drone buttons,
-            // which keep their full-surface position.
-            // Drone buttons hide while a Joy-Con is attached to the Mac
-            // (the controller's arrows play the drones) — the `connected`
-            // bit rides the `0x05` relay, keeping both surfaces in step.
+            // The playable band (`fretPadBandRect`) is the centered half-height
+            // strip; the rest is dead except the drone buttons, which hide
+            // while a Joy-Con is attached to the Mac (JOYCON_STATE).
             FretPadSurfaceIOS(engine: engine, arrangement: arrangement,
                               fieldWarp: scaleSync.joyConTilt.fieldWarp,
                               recorder: recorder,
@@ -836,32 +690,17 @@ struct FretPadViewIOS: View {
 
 // MARK: - Raw motion overlay (diagnostic)
 
-/// On-device 3D view of RAW CoreMotion attitude — the sensor's own
-/// (pitch, roll, yaw) trail over the last ~8 s, BEFORE the yaw
-/// high-pass, the 14-bit quantization and the MIDI wire. Toggled by
-/// the toolbar's GYRO button. Purpose: split sensor problems from
-/// transmission problems — wobble that shows HERE is the sensor (or
-/// CoreMotion's fusion); wobble that only shows on the Mac's Setup
-/// scope is the wire or the Mac pipeline. Same turntable projection
-/// as the Mac's calibration cloud; the Δ readouts are window
-/// peak-to-peak per axis in degrees, directly comparable to the Mac
-/// scope's Δ° labels (yaw here is the RAW drifting axis — the wire
-/// carries its high-passed form, so yaw drift visible here and absent
-/// on the Mac is EXPECTED and correct).
+/// 3D view of RAW CoreMotion attitude over the last ~8 s, before the yaw
+/// high-pass and the wire (GYRO button): wobble HERE is the sensor, wobble
+/// only on the Mac's scope is the wire. Δ readouts are window peak-to-peak in
+/// degrees; raw yaw drift here is expected.
 struct RawMotionOverlay: View {
     let motion: MotionManager
 
     private static let spin = 0.3
     private static let colors: [Color] = [.orange, .green, .cyan]
     private static let names = ["pitch", "roll ", "yaw  "]
-    /// Fixed view scale: ±30° of attitude to the frame edge, the same
-    /// constant as the Mac's "Received motion (3D)" view — the two
-    /// views render motion at identical size, and the zoom no longer
-    /// pumps with the trail's extent (auto-zoom also blew sub-degree
-    /// noise up into a full-frame fuzz ball; at a fixed scale it reads
-    /// as the near-stillness it is, with the Δ° labels carrying the
-    /// magnitude). Only the scale is fixed — the view stays CENTRED on
-    /// the trail mean, since the rest pose is arbitrary.
+    /// Fixed ±30° scale (the Mac view's constant); centred on the trail mean.
     private static let viewRadius = 30.0 * Double.pi / 180
 
     var body: some View {
@@ -941,8 +780,7 @@ struct RawMotionOverlay: View {
             ctx.stroke(path, with: .color(color.opacity(0.3)), lineWidth: 0.5)
         }
 
-        // The trail, age-faded: oldest dim, newest bright — drift reads
-        // as a crawling snake, noise as a fuzz ball around one point.
+        // Age-faded trail: drift reads as a snake, noise as a fuzz ball.
         for i in 1..<pts.count {
             var seg = Path()
             seg.move(to: project(pts[i - 1]))
@@ -962,22 +800,15 @@ struct RawMotionOverlay: View {
     }
 }
 
-/// The accelerometer half of the raw-motion diagnostic: RAW
-/// userAcceleration (g, gravity removed) over the last ~8 s, drawn as
-/// the same turntable trail as `RawMotionOverlay` beside it. The
-/// centre is FIXED at the origin — acceleration has a natural zero, so
-/// taps read as jabs away from the centre and back, and stillness as a
-/// dot. Fixed ±0.5 g scale (the top of the strike-velocity range),
-/// matching the Mac's "Received acceleration (3D)" view for the same
-/// sensor-vs-transmission A/B as the attitude pair.
+/// Raw userAcceleration (g) over the last ~8 s as the same turntable trail,
+/// centred on the origin, fixed ±0.5 g (the Mac view's constant).
 struct RawAccelOverlay: View {
     let motion: MotionManager
 
     private static let spin = 0.3
     private static let colors: [Color] = [.orange, .green, .cyan]
     private static let names = ["x", "y", "z"]
-    /// Fixed view scale: ±0.5 g to the frame edge, the same constant
-    /// as the Mac view.
+    /// Fixed ±0.5 g to the frame edge (the Mac view's constant).
     private static let viewRadius = 0.5
 
     var body: some View {
@@ -1073,13 +904,10 @@ struct RawAccelOverlay: View {
     }
 }
 
-/// Visual layer for the drone buttons (rects: the shared
-/// The CHORD BAR (2026-08-28) — the strip below the playable band: one
-/// derived 3-tone chord per fret column (`scaleChords` / `chordBarCells`,
-/// shared with the Mac surface). The highlighted cell is THIS pad's own
-/// selection — what its outbound frame asserts as the strum chord (TLP
-/// v12). Display only; taps are hit-tested in the surface's UIKit touch
-/// handler like the drone buttons.
+/// The chord bar below the band: one derived triad per fret column
+/// (`chordBarCells`, shared with the Mac). Highlight = THIS pad's own
+/// selection, asserted in its outbound frame. Display only; taps are
+/// hit-tested in the surface's UIKit touch handler.
 private struct ChordBarVisualIOS: View {
     let cells: [ChordBarCell]
     let active: ChordSelection?
@@ -1088,8 +916,7 @@ private struct ChordBarVisualIOS: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             ForEach(cells) { c in
-                // Octave-agnostic (2026-08-30): every octave's cell of
-                // the selected degree lights — it's one pitch-class chord.
+                // Octave-agnostic: every octave's cell of the degree lights.
                 let sel = active?.degree == c.degreeIndex
                 let hue = pitchColor(forRatio: c.rootRatio, lightness: 0.78,
                                      chroma: 0.16)
@@ -1115,14 +942,13 @@ private struct ChordBarVisualIOS: View {
     }
 }
 
-/// `droneButtonRects` in TarabdaarCore) (display only — presses are
+/// Drone buttons (the shared `droneButtonRects`), display only — presses are
 /// hit-tested in the surface's UIKit touch handler, never via SwiftUI
-/// gestures, so button touches and melody multitouch can't interfere).
+/// gestures, so they can't interfere with melody multitouch.
 private struct DroneButtonsVisualIOS: View {
     let ratios: [Double]
-    /// The synced scale's degrees — the buttons are named from the scale
-    /// like every other pitch in the app (`scaleLabel(forRatio:)`); the
-    /// labels ride the scale blob, so the iPad names them the Mac's way.
+    /// The synced scale's degrees — buttons are named by the scale
+    /// (`scaleLabel(forRatio:)`).
     let degrees: [(ratio: Double, label: String)]
     let held: Set<Int>
     let size: CGSize
@@ -1158,63 +984,41 @@ private struct DroneButtonsVisualIOS: View {
 private struct FretPadSurfaceIOS: View {
     @ObservedObject var engine: PitchPadEngine
     let arrangement: FretArrangement
-    /// The Mac's live `ctl_fret_warp` fret pitch-warp (JOYCON_STATE relay,
-    /// TLP v10) — the fret field resolves every onset/move through it, so
-    /// a Mac-side stick binding morphs the pad mid-phrase. 0 (linear)
-    /// while the link is down.
+    /// The Mac's live `ctl_fret_warp` (JOYCON_STATE relay) — every onset/move
+    /// resolves through it. 0 (linear) while the link is down.
     let fieldWarp: Double
     /// Stroke recorder for offline assist fitting (no-op unless armed).
     let recorder: FretGestureRecorder
-    /// While a Joy-Con is attached to the Mac its arrows play the drones,
-    /// so the on-screen buttons hide (visual + hit-test both — the same
-    /// rule as the Mac surface) and their area falls through to the band /
-    /// dead space.
+    /// While a Joy-Con is attached to the Mac its arrows play the drones, so
+    /// the on-screen buttons hide (visual + hit-test).
     let dronesHidden: Bool
-    /// Accelerometer source for the per-onset strike-velocity estimate
-    /// (2026-08-19 — `MotionSource.strikeVelocity01`; rides the onset
-    /// frame's velocity byte, consumed by the Mac's `bow_attack_vel`).
-    /// nil (previews) keeps the flat legacy velocity constant.
+    /// Source of the per-onset strike estimate (`strikeVelocity01` → the
+    /// onset frame's velocity byte → `bow_attack_vel`). nil = flat constant.
     let motion: MotionManager?
     @State private var touchInfos: [TouchInfo] = []
-    /// Per-touch constant log2 offset captured at a snapped onset: the drag
-    /// plays `2^(fieldLog + offset)`, so the snapped pitch is exact at the
-    /// onset point and finger movement glides relative to it. 0 for
-    /// unsnapped (approach) touches; cleared on touch end.
+    /// Per-touch log2 offset captured at a snapped onset (0 if unsnapped).
     @State private var snapOffsets: [Int: Double] = [:]
-    /// Drag assist ("magnetic" intonation at stops/turns — see
-    /// `FretDragAssist`), fully per-touch. The timer drives the settle while
-    /// fingers rest (no touchesMoved events arrive then).
+    /// Drag assist; the timer drives the settle while fingers rest.
     @State private var assist = FretDragAssist()
     @State private var assistTimer: Timer? = nil
-    /// Touches currently holding a drone button (touchId → button index).
-    /// Drone presses are hit-tested HERE, in the surface's own UIKit touch
-    /// handler — not via SwiftUI gestures — so the surface keeps its full
-    /// width and only the 4 button rectangles are claimed; everything
-    /// around/below them plays normally.
+    /// Touches holding a drone button (touchId → button index).
     @State private var droneTouches: [Int: Int] = [:]
-    /// Per-touch feel indicator (moving/stopped ring + pitch readout) — a
-    /// class so the settle-timer closure can feed it without capturing the
-    /// view struct.
+    /// Per-touch indicator — a class so the settle timer can feed it.
     @StateObject private var indicators = TouchIndicatorModel()
 
     private let edgePad: CGFloat = 12
-    /// Horizontal onset-snap half-width in px — the synced `marginPixels`
-    /// (the Mac Fret Pad's Snap slider). 0 = fretless.
+    /// Onset-snap half-width in px — the synced `marginPixels`. 0 = fretless.
     private var snapDistance: CGFloat { CGFloat(engine.marginPixels) }
 
     var body: some View {
         GeometryReader { geo in
             let size = CGSize(width: max(1, geo.size.width - 2 * edgePad),
                               height: max(1, geo.size.height - 2 * edgePad))
-            // The playable band — the frets' coordinate space. Touches
-            // outside it are dead (except the drone buttons, hit-tested in
-            // full-surface space).
+            // The playable band — the frets' coordinate space.
             let band = fretPadBandRect(in: size)
             let degrees = scaleDegrees(from: engine.scale)
             let placements = fretPlacements(arrangement: arrangement,
                                             degrees: degrees, size: band.size)
-            // The chord bar's cells (the strip below the band) — shared
-            // geometry with the Mac surface.
             let chordCells = chordBarCells(arrangement: arrangement,
                                            degrees: degrees,
                                            chords: scaleChords(degrees: degrees),
@@ -1223,9 +1027,7 @@ private struct FretPadSurfaceIOS: View {
             ZStack(alignment: .topLeading) {
                 Color.black
 
-                // The iPad is always in perform mode: fret lines only — no
-                // octave gridlines, labels, or endpoint handles, and the
-                // octave-repeat ghosts styled identically to the base frets.
+                // Always perform mode: fret lines only, ghosts like base frets.
                 Canvas { ctx, _ in
                     ctx.translateBy(x: edgePad, y: edgePad)
                     // Band border — the playable strip against the dead space.
@@ -1247,24 +1049,16 @@ private struct FretPadSurfaceIOS: View {
                               cells: fretFillCells(placements), edgePad: edgePad)
                     .offset(x: band.minX, y: band.minY)
 
-                // Per-touch indicator: a ring that warms as the stop
-                // detector engages, plus an "original → corrected" pitch
-                // readout whenever the sounding pitch differs from the raw
-                // field pitch under the finger.
+                // Per-touch indicator: stop-detector ring + pitch readouts.
                 TouchIndicatorLayerIOS(model: indicators, degrees: degrees,
                                        edgePad: edgePad)
 
-                // The chord bar (display only — taps are hit-tested in
-                // `began` below): the strip below the band. The highlight
-                // is THIS pad's own selection (`engine.chordSelection` —
-                // what its outbound frame asserts).
+                // The chord bar (display only; taps hit-tested in `began`).
                 ChordBarVisualIOS(cells: chordCells,
                                   active: engine.chordSelection,
                                   edgePad: edgePad)
 
-                // Drone buttons (display only — presses are hit-tested in
-                // `began` below): right edge, top → vertical center.
-                // Hidden while a Joy-Con is attached to the Mac.
+                // Drone buttons (display only; hidden with a Joy-Con attached).
                 if !dronesHidden {
                     DroneButtonsVisualIOS(ratios: arrangement.droneRatios,
                                           degrees: degrees,
@@ -1282,8 +1076,7 @@ private struct FretPadSurfaceIOS: View {
                     onTouchEnded: { id in
                         let now = CACurrentMediaTime()
                         // Drone touch: release the button (unless another
-                        // finger still holds the same one) and skip the
-                        // note path entirely.
+                        // finger holds it) and skip the note path.
                         if let d = droneTouches.removeValue(forKey: id) {
                             if !droneTouches.values.contains(d) {
                                 engine.setDrone(d, pressed: false)
@@ -1309,18 +1102,13 @@ private struct FretPadSurfaceIOS: View {
         }
     }
 
-    /// Onset: snap when within the Snap distance of a fret AND inside its
-    /// vertical extent, else play the fret-field pitch (the approach path).
-    /// Registers the touch with the drag assist and starts its settle timer.
+    /// Onset: snap within the Snap distance of a fret inside its extent, else
+    /// play the field pitch. Registers with the drag assist, starts its timer.
     private func began(_ ev: TouchEvent, placements: [FretPlacement],
                        size: CGSize, band: CGRect,
                        chordCells: [ChordBarCell]) {
         let spt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
-        // Drone buttons first (full-surface coords): a touch starting inside
-        // a button rect is a drone press, not a note. (Melody drags that
-        // WANDER into a button keep playing — only onsets are claimed.)
-        // Skipped while hidden (Joy-Con attached) so the area falls through
-        // to the band / dead space like any other point.
+        // Drone buttons first (onsets only; skipped while hidden).
         if !dronesHidden,
            let d = droneButtonRects(size: size).firstIndex(where: { $0.contains(spt) }) {
             let alreadyHeld = droneTouches.values.contains(d)
@@ -1328,9 +1116,7 @@ private struct FretPadSurfaceIOS: View {
             if !alreadyHeld { engine.setDrone(d, pressed: true) }
             return
         }
-        // Chord bar (full-surface coords): a tap in a cell toggles the
-        // strum chord — selection only, nothing sounds until the Mac's
-        // strum plays it. Only onsets are claimed, like the drones.
+        // Chord bar: a tap toggles the strum chord (selection only, onsets).
         if let cell = chordCells.first(where: { $0.rect.contains(spt) }) {
             engine.toggleChordSelection(
                 ChordSelection(degree: cell.degreeIndex,
@@ -1361,12 +1147,8 @@ private struct FretPadSurfaceIOS: View {
         snapOffsets[ev.touchId] = offset
 
         let now = CACurrentMediaTime()
-        // ONSET STRIKE VELOCITY (2026-08-19): the accelerometer spike of
-        // the finger hitting the glass, read from the TRAILING window (the
-        // impact precedes UIKit's touch delivery, so the onset never
-        // waits). Rides the onset frame's velocity byte; inert on the Mac
-        // until `bow_attack_vel` is armed. nil (no motion source) keeps
-        // the flat legacy constant.
+        // Onset strike velocity from the TRAILING accelerometer window (the
+        // impact precedes UIKit's touch delivery, so the onset never waits).
         let vel01 = motion.map { m -> Double in
             let v = m.strikeVelocity01(at: now)
             m.lastTouchVelocity = v
@@ -1380,8 +1162,7 @@ private struct FretPadSurfaceIOS: View {
         assist.setContext(placements: placements, snapDistance: snapDistance)
         assist.begin(touchId: ev.touchId, x: pt.x, y: pt.y,
                      uncorrectedLog: fieldLog + offset, time: now)
-        // Every touch is born stopped — the indicator starts amber. The
-        // strike estimate rides along as the onset ripple.
+        // Every touch is born stopped — the indicator starts amber.
         indicators.begin(ev.touchId, point: spt, stopGate: 1,
                          rawLog: fieldLog, playedLog: onsetLog,
                          strikeVel: vel01)
@@ -1420,16 +1201,13 @@ private struct FretPadSurfaceIOS: View {
                            "stopDwellRamp": assist.stopDwellRamp])
     }
 
-    /// Drag: continuous glide — the fret-field pitch plus this touch's
-    /// constant onset offset, then the drag assist's slewed correction on top
-    /// (magnetic at stops/turns, transparent while gliding). Never re-snaps
-    /// mid-drag; the field and assist are continuous.
+    /// Drag: the field pitch plus this touch's onset offset, then the drag
+    /// assist's slewed correction. Never re-snaps mid-drag.
     private func moved(_ ev: TouchEvent, placements: [FretPlacement],
                        size: CGSize, band: CGRect) {
         // A finger holding a drone button never glides.
         guard droneTouches[ev.touchId] == nil else { return }
-        // Only touches that began in the band play (they registered a snap
-        // offset at onset); a drag may then wander out — the field clamps.
+        // Only touches that began in the band play; a drag may wander out.
         guard let offset = snapOffsets[ev.touchId] else { return }
         let spt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
         let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
@@ -1448,12 +1226,10 @@ private struct FretPadSurfaceIOS: View {
                         u: fieldLog + offset, o: out.log2Pitch, time: now)
     }
 
-    /// 60 Hz settle loop while any touch is down (stops emit no touch
-    /// events). Captures only the class objects (never the view struct); the
-    /// assist reuses the context set on the last touch event.
+    /// 60 Hz settle loop while any touch is down. Captures only the class
+    /// objects (never the view struct).
     private func startAssistTimerIfNeeded() {
-        // The timer self-invalidates when idle (it can't nil this @State),
-        // so check validity, not just presence.
+        // The timer self-invalidates when idle (it can't nil this @State).
         guard assistTimer?.isValid != true else { return }
         let assist = self.assist
         let engine = self.engine
@@ -1476,34 +1252,20 @@ private struct FretPadSurfaceIOS: View {
 
 // MARK: - Per-touch indicator overlay
 
-/// Live per-touch state for the indicator overlay: whether the finger is
-/// moving or stopped (the assist's dwell gate), the raw field pitch under
-/// the finger and the pitch actually sounding. A class (not view `@State`)
-/// so the assist's settle-timer closure can feed it without capturing the
-/// view struct; no-op updates are skipped so a settled hold stops
-/// invalidating the layer.
+/// Live per-touch indicator state (stop gate, raw and sounding pitch). A
+/// class so the settle-timer closure can feed it; no-op updates are skipped.
 private final class TouchIndicatorModel: ObservableObject {
     struct Info {
         var point: CGPoint      // padded-content coords (the canvases' space)
         var stopGate: Double    // 0 = moving … 1 = stopped
         var rawLog: Double      // field pitch under the finger (no snap/assist)
         var playedLog: Double   // the pitch actually sounding
-        // ONSET STRIKE ESTIMATE (2026-08-20): the accelerometer strike
-        // velocity 0…1 captured at this touch's onset (the value that rode
-        // the wire's velocity byte — `MotionSource.strikeVelocity01`).
-        // `hasStrike` false (no motion source) draws nothing, so previews
-        // and the keyboard keep the plain ring. Drawn as a decaying
-        // impact ripple sized by the estimate PLUS a numeric readout
-        // (MIDI-scale 0–127, the sensors.md vocabulary) beside the ring —
-        // the tap's own receipt, readable for calibrating one's touch.
+        // The strike estimate 0…1 captured at onset; `hasStrike` false draws
+        // nothing. Drawn as a ripple plus a 0–127 readout beside the ring.
         var hasStrike = false
         var strikeVel = 0.0
         var bornAt: TimeInterval = 0   // CACurrentMediaTime at onset
-        // Set on release for strike-carrying touches: the info survives as
-        // a GHOST — just the fading velocity number — for
-        // `strikeGhostDuration`, so a staccato tap's reading doesn't
-        // vanish with the finger (the whole point of the number is
-        // calibrating one's strike).
+        // Set on release: the info survives as a fading GHOST number.
         var endedAt: TimeInterval? = nil
     }
 
@@ -1513,11 +1275,9 @@ private final class TouchIndicatorModel: ObservableObject {
     static let strikeFlashDuration: TimeInterval = 0.5
     /// How long the velocity number lingers after release (the ghost).
     static let strikeGhostDuration: TimeInterval = 1.0
-    /// Redraw pulse driver for the ripple: the canvas only invalidates on
-    /// a publish, and a clean staccato touch may never move again after
-    /// its onset — so a short ~15 Hz ticker publishes empty changes while
-    /// any flash is still decaying, then dies. `.common` mode so touch
-    /// tracking doesn't starve it.
+    /// Redraw driver: the canvas only invalidates on a publish and a staccato
+    /// touch may never move, so a ~15 Hz ticker publishes while a flash
+    /// decays. `.common` mode so touch tracking doesn't starve it.
     private var flashTimer: Timer?
     private var flashUntil: TimeInterval = 0
 
@@ -1539,8 +1299,7 @@ private final class TouchIndicatorModel: ObservableObject {
         let t = Timer(timeInterval: 1.0 / 15.0, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             let now = CACurrentMediaTime()
-            // Prune expired ghosts (the mutation publishes; live touches
-            // are untouched — their endedAt is nil).
+            // Prune expired ghosts (the mutation publishes).
             let expired = self.infos.filter {
                 ($0.value.endedAt).map {
                     now - $0 >= Self.strikeGhostDuration
@@ -1578,9 +1337,8 @@ private final class TouchIndicatorModel: ObservableObject {
     }
 
     func end(_ id: Int) {
-        // A strike-carrying touch leaves its velocity number behind as a
-        // fading ghost (readable after a staccato tap); everything else
-        // clears immediately, the historic behavior.
+        // A strike-carrying touch leaves its number as a fading ghost;
+        // everything else clears immediately.
         if var info = infos[id], info.hasStrike {
             info.endedAt = CACurrentMediaTime()
             infos[id] = info
@@ -1591,14 +1349,9 @@ private final class TouchIndicatorModel: ObservableObject {
     }
 }
 
-/// One ring per touch — cool cyan while gliding, warming to amber as the
-/// stop detector engages — plus an "original → corrected" readout above the
-/// finger whenever the sounding pitch differs from the raw field pitch
-/// (onset snap and/or magnet correction), both named in the scale's own
-/// vocabulary with signed cents offsets. At onset a white impact ripple
-/// expands from the ring, sized by the accelerometer strike estimate
-/// (2026-08-20 — the value that rode the wire's velocity byte into
-/// `bow_attack_vel`), so every tap shows the velocity it actually read.
+/// One ring per touch (cyan gliding → amber stopped), an "original →
+/// corrected" readout when the sounding pitch differs from the raw field
+/// pitch, and an onset ripple sized by the strike estimate.
 private struct TouchIndicatorLayerIOS: View {
     @ObservedObject var model: TouchIndicatorModel
     let degrees: [(ratio: Double, label: String)]
@@ -1618,9 +1371,7 @@ private struct TouchIndicatorLayerIOS: View {
     private func draw(_ info: TouchIndicatorModel.Info,
                       in ctx: inout GraphicsContext, size: CGSize,
                       now: TimeInterval) {
-        // GHOST (released strike touch): only the velocity number remains,
-        // fading over the ghost window — a staccato tap's reading stays on
-        // screen long enough to actually read.
+        // Ghost (released strike touch): only the number remains, fading.
         if let ended = info.endedAt {
             let alpha = max(0.0, 1.0 - (now - ended)
                             / TouchIndicatorModel.strikeGhostDuration)
@@ -1633,14 +1384,8 @@ private struct TouchIndicatorLayerIOS: View {
                           green: 0.75 - 0.15 * g,
                           blue: 1.0 - 0.9 * g)
         let radius: CGFloat = 46
-        // ONSET STRIKE RIPPLE (2026-08-20): the accelerometer strike
-        // estimate as the tap's own receipt — an impact ring that expands
-        // from the indicator and fades over ~0.5 s. Reach, brightness and
-        // stroke weight all scale with the estimate: a hard tap throws a
-        // bright wide wave, a gentle placement barely whispers (a faint
-        // ripple at estimate 0 still confirms "estimate read: soft").
-        // Redraws between finger events come from the model's flash
-        // ticker.
+        // Onset strike ripple: expands and fades over ~0.5 s; reach,
+        // brightness and weight scale with the estimate.
         if info.hasStrike {
             let age = now - info.bornAt
             if age >= 0, age < TouchIndicatorModel.strikeFlashDuration {
@@ -1656,8 +1401,7 @@ private struct TouchIndicatorLayerIOS: View {
                 ctx.stroke(ripple, with: .color(.white.opacity(alpha)),
                            lineWidth: 1.5 + 3.5 * CGFloat(v) * CGFloat(1 - t))
             }
-            // The number itself, beside the ring for the note's whole
-            // life — the calibration readout.
+            // The number itself, beside the ring for the note's life.
             drawStrikeNumber(info, alpha: 1.0, in: &ctx, size: size)
         }
         let ring = Path(ellipseIn: CGRect(x: info.point.x - radius,
@@ -1685,11 +1429,8 @@ private struct TouchIndicatorLayerIOS: View {
         ctx.draw(resolved, at: CGPoint(x: cx, y: cy))
     }
 
-    /// The strike estimate as a number — MIDI scale 0–127, the vocabulary
-    /// sensors.md's typical-tap table already speaks (soft ~1–30, medium
-    /// ~50–80, hard ~100–127; `bow_attack_vel` sees value/127). Sits at
-    /// the ring's right, clear of the finger and of the pitch readout
-    /// (which lives above/below); `alpha` fades the released ghost.
+    /// The strike estimate on the 0–127 scale at the ring's right; `alpha`
+    /// fades the released ghost.
     private func drawStrikeNumber(_ info: TouchIndicatorModel.Info,
                                   alpha: Double,
                                   in ctx: inout GraphicsContext,
@@ -1712,9 +1453,8 @@ private struct TouchIndicatorLayerIOS: View {
         ctx.draw(resolved, at: CGPoint(x: cx, y: cy))
     }
 
-    /// A pitch in the scale's own vocabulary: the nearest degree's label
-    /// (any octave, `'`/`,` marks — same rule as the frets) plus its signed
-    /// cents offset when meaningfully off it.
+    /// A pitch in the scale's vocabulary: the nearest degree's label (any
+    /// octave, `'`/`,` marks) plus signed cents when meaningfully off it.
     private func pitchName(_ log2Pitch: Double) -> String {
         guard !degrees.isEmpty else {
             return String(format: "%+.0f¢", log2Pitch * 1200)

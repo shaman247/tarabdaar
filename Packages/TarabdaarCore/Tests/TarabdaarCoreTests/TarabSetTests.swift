@@ -38,7 +38,6 @@ final class TarabSetTests: XCTestCase {
         XCTAssertFalse(allRaga.hasChromatic)
         XCTAssertEqual(base.b, allRaga.b)
         // the per-row level law rides the force-radiation scale
-        // (2026-09-03 — the pickup shape phiO is gone)
         XCTAssertEqual(base.rowForceScale, allRaga.rowForceScale)
         XCTAssertEqual(base.phiD, allRaga.phiD)
         XCTAssertEqual(base.ca, allRaga.ca)

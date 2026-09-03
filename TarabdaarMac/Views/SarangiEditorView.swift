@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The preset header at the top of the **Parameters** tab.
 ///
-/// 2026-07-30: ONE preset, one list, no file panels. A preset is the whole
+/// ONE preset, one list, no file panels. A preset is the whole
 /// rig — the sarangi document (tarab table + tonic + model params), the
 /// physics overrides, every parameter's resting value, the composites and
 /// the tilt bindings. **Save preset…** asks only for a name; the preset

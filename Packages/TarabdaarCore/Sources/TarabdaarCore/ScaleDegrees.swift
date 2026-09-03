@@ -4,10 +4,10 @@ import Foundation
 /// `PitchScale`, the ONE pitch-naming path (the scale's own labels), and the
 /// scale presets the Fret Pad's scale editor offers.
 ///
-/// 2026-07-24: extracted from `StringPadGeometry.swift` and
+/// extracted from `StringPadGeometry.swift` and
 /// `ChordPadGeometry.swift` when those were deleted. Both files were
 /// geometry for the String Pad and Chord Pad — surfaces removed in the
-/// 2026-07-23 simplification — but each still held symbols the surviving
+/// simplification — but each still held symbols the surviving
 /// Fret Pad depends on, which is why they had lingered.
 
 // MARK: - Scale-derived pitch names
@@ -16,10 +16,8 @@ import Foundation
 // own label (`PitchPoint.displayLabel` — the user's text, or the ratio when
 // blank), and every surface that names a pitch — the Fret Pad's fret labels,
 // the drone buttons, the Strings tab's degree dropdowns — reads that same
-// label through the helpers below. There is no second naming vocabulary:
-// the fixed 12-tone sargam table that used to name frets and drones was
-// removed 2026-07-25 because it disagreed with the scale editor's own labels
-// (the default scale's "2-" showed up as "r" on the pad).
+// label through the helpers below. There is no second naming vocabulary
+// (a fixed sargam table would disagree with the scale editor's own labels).
 
 /// The Pitch Pad scale's enabled degrees, sorted low→high, as `(ratio, label)`.
 public func scaleDegrees(from scale: PitchScale) -> [(ratio: Double, label: String)] {
@@ -81,7 +79,7 @@ public enum Temperament {
 }
 
 /// Common selectable scales — the modes plus major/minor variants and
-/// pentatonics, and (2026-09-02) the **12-TET chromatic** scale. These are
+/// pentatonics, and the **12-TET chromatic** scale. These are
 /// **shared**: a preset loads into the one Pitch Pad `PitchScale`
 /// (`PitchPadEngine.loadPreset`), so both the Pitch Pad and the Chord Pad
 /// use it. Each preset is defined by its semitone intervals from the tonic

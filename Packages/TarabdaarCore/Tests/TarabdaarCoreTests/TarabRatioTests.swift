@@ -21,12 +21,12 @@ final class TarabRatioTests: XCTestCase {
         }
     }
 
-    // MARK: - The pool invariant (2026-07-26): sorted by pitch, no
+    // MARK: - The pool invariant : sorted by pitch, no
     // duplicate pitches, ever.
 
     /// The generated default bank is pitch-sorted and one-string-per-pitch
     /// PER BRIDGE (the historic Sa/Pa doubling rows fold into their
-    /// strongest twin; since 2026-09-02 the raga set lists first, then the
+    /// strongest twin;  the raga set lists first, then the
     /// chromatic set, each sorted — a pitch may sit on both bridges).
     func testDefaultBankIsSortedAndDuplicateFree() {
         let state = Presets.state(.sarangiPilu)

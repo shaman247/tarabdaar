@@ -139,8 +139,8 @@ public struct BowFpMask: Sendable {
         return (med, (v / Double(n)).squareRoot())
     }
 
-    /// HOLD-STABLE + SNAP-TO-CELL lookup midi (offline `_apply_fp_mask`,
-    /// 2026-07-15): the fingerprint belongs to the STOPPED POSITION and the
+    /// HOLD-STABLE + SNAP-TO-CELL lookup midi: the fingerprint belongs to
+    /// the STOPPED POSITION and the
     /// hand does not move during a hold, so the LOOKUP pitch follows the
     /// track with hysteresis — it commits only when the pitch stays >0.6 st
     /// away for `runNeed` blocks AND the note has settled (std < 0.3),

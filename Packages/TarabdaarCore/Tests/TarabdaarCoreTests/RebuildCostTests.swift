@@ -70,7 +70,7 @@ final class RebuildCostTests: XCTestCase {
     /// Publishing a freshly built engine must be SILENT. Historically this
     /// was a relative A/B (short pre-roll vs the old 6-block one) because
     /// the chime asymptoted at ~-50 dBFS and no affordable pre-roll could
-    /// do better. The DAMPED SETTLE (2026-08-18) killed the chime at the
+    /// do better. The DAMPED SETTLE killed the chime at the
     /// cause — the taraf is choked while the discarded blocks render, so
     /// the q0 relax dies inside them and the anchors' 7-9 s tails never
     /// ride out — which makes an ABSOLUTE bar meaningful for the first
@@ -102,7 +102,7 @@ final class RebuildCostTests: XCTestCase {
             }
             return peak
         }
-        let long = try publishPeak(settle: 6)        // the pre-2026-07-24 value
+        let long = try publishPeak(settle: 6)        // the old 6-block value
         let short = try publishPeak(settle: StringVoiceSource.settleBlocks)
         print(String(format: """
             PUBLISH CHIME (idle, through the crossfade)

@@ -2,8 +2,7 @@ import TarabdaarCore
 import SwiftUI
 
 /// Combined configuration surface: Audio, MIDI, and Connection in one
-/// scroll-friendly stack. Previously three separate sidebar sections —
-/// folded together so they're one click from the top-level Setup tab.
+/// scroll-friendly stack, one click from the top-level Setup tab.
 struct SetupView: View {
     @ObservedObject var controller: AppController
 

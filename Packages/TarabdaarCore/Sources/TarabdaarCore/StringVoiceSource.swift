@@ -3,27 +3,14 @@ import AVFoundation
 import os
 import SarangiKit
 
-/// The playable STRING-PHYSICS sarangi: an `AVAudioSourceNode` pulling stereo
-/// buffers from a `SarangiKit.BowEngine` — the generic pure-physics bowed gut
-/// string (the C friction kernel at 96 kHz, formula body, modal-jawari taraf
-/// fused in-kernel, analytic Schelleng press envelope, self-calibrated
-/// intonation) that upstream Sarangi Live ships as its ONE live instrument
-/// (the 2026-07-21 String-only simplification). Replaces the v57
-/// `SarangiModelSource` + coupled-network pair as Tarabdaar's "Sarangi (model)"
-/// voice: the kernel IS the whole instrument (played strings + taraf +
-/// body + radiation + room), so it renders STRAIGHT to the mix (`node →
-/// symGain → mainMixerNode`).
-///
-/// Controlled by the long-lived `BowControlMapper` (same CC map as the v57
-/// voice: CC11 expr · CC1 press · CC74 pos · CC2/75 tilt · per-channel MPE
-/// pitch bend — the Tarabdaar extension in `BowControls.swift`). Structural
-/// changes (tonic/tarab strings/param overrides) build a fresh `BowEngine`
-/// OFF the render thread (`buildEngine`) and publish it via `setEngine`; the
-/// mapper keeps held notes/axes across the swap. Runs at the artifact's
-/// native 48 kHz; the receiving mixer input converts to the engine rate.
+/// The String voice: an `AVAudioSourceNode` pulling stereo buffers from a
+/// `SarangiKit.BowEngine` — the pure-physics bowed gut string whose kernel
+/// is the whole instrument (strings + taraf + body + room), rendered straight
+/// to the mix. The long-lived `BowControlMapper` controls it; structural
+/// changes build a fresh engine off the render thread (`buildEngine`) and
+/// publish it via `setEngine`. Native 48 kHz; the mixer input converts.
 public extension BowControlMapper {
-    /// The idle operating point (pair-3 gated medians — the same values the
-    /// mapper's init seeds): what the Setup-tab axis sliders initialize to.
+    /// The idle operating point the mapper seeds (the Setup-tab sliders' initial values).
     static let defaultExpr = 0.251
     static let defaultPress = 0.562
     static let defaultPos = 0.45
@@ -31,27 +18,11 @@ public extension BowControlMapper {
 }
 
 public final class StringVoiceSource {
-    /// Tarabdaar live-default seeds for `bowed_string.json` keys the artifact
-    /// does NOT carry (2026-07-23 stereo rev): the physically-derived
-    /// stereo image (taraf/jt/played pans across the bridge — see
-    /// `BowEngine`'s side path) and the width-decorrelated room. Applied in
-    /// `buildEngine` under any user override; ALSO merged into
-    /// `StringParamStore`'s baseline so the editor shows/resets to these
-    /// and an override landing back on a seed value is dropped.
+    /// Live defaults for keys the artifact does not carry (absent = the
+    /// bit-exact mono path): the stereo image. Overrides win; also merged
+    /// into `StringParamStore`'s baseline.
     public static let liveParamSeeds: [String: Double] = [
-        // 2026-08-01 coherence rev: the 0.7 spread read as an
-        // accompanying chorus around a centred soloist — a real sarangi
-        // is ONE small radiator whose width comes from the room, so the
-        // source halo narrows (0.7 → 0.2) and the room's decorrelated
-        // width carries the image (0.6 → 0.8) instead.
-        // 2026-08-01 WIDTH UNIFICATION: one law — the whole instrument
-        // heard from two observation points (the kernel's diffuse-field
-        // difference bank on voice + wash). The per-source pans
-        // (`bow_st_spread` svara staging, `bow_st_played` noise
-        // positions) are legacy staging, unseeded = disarmed, kept in
-        // the registry for A/B; machinery removal pending the ears
-        // check. Coherence falls with frequency like a real
-        // instrument's; the image never leans.
+        // one width law: the instrument heard from two observation points
         "bow_st_width": 0.2,      // instrument width (two-ear diffuse)
         "bow_rev_width": 0.8,     // room tail L/R decorrelation
     ]
@@ -63,11 +34,7 @@ public final class StringVoiceSource {
     private final class State: @unchecked Sendable {
         var lock = os_unfair_lock()
         var engine: BowEngine?
-        /// The engine being CROSSFADED OUT (2026-07-24). A fresh engine
-        /// starts with empty string/taraf/room state, so an abrupt swap
-        /// silences whatever was ringing (measured: 4.9% of a taraf +
-        /// room tail survives). Keeping the outgoing engine rendering for
-        /// the fade window lets its tail decay instead of vanishing.
+        /// The engine being crossfaded out (keeps rendering so its ring decays).
         var fading: BowEngine?
         var fadePos = 0
         var fadeLen = 0
@@ -77,9 +44,7 @@ public final class StringVoiceSource {
         /// Second buffer pair, used only while a crossfade is running.
         var fadeL: [Double]
         var fadeR: [Double]
-        // render-deadline telemetry: the audition tap records what the
-        // engine renders, so a LATE callback glitches at the device while
-        // the WAV stays clean — this is the only way to see it
+        // render-deadline telemetry (a late callback glitches at the device; a WAV never shows it)
         var maxRenderNs: UInt64 = 0
         var overruns: UInt64 = 0
         var callbacks: UInt64 = 0
@@ -90,10 +55,8 @@ public final class StringVoiceSource {
             fadeR = [Double](repeating: 0, count: maxFrames)
         }
 
-        /// Render `frames` of the current engine, equal-power crossfaded
-        /// with the outgoing one while a fade is running. The audio
-        /// callback's whole body — factored out so tests exercise the
-        /// identical path.
+        /// Render `frames`, equal-power crossfaded with the outgoing engine
+        /// while a fade runs. The audio callback's body; tests share it.
         func renderMix(engine: BowEngine, fading: BowEngine?, frames n: Int,
                        outL: UnsafeMutablePointer<Float>,
                        outR: UnsafeMutablePointer<Float>) {
@@ -107,9 +70,7 @@ public final class StringVoiceSource {
                     }
                 }
                 if let fading {
-                    // Render the outgoing engine too and equal-power mix,
-                    // so its ring decays across the window instead of
-                    // being cut off. Costs 2x voice CPU for the fade only.
+                    // 2x voice CPU for the fade window only.
                     fadeL.withUnsafeMutableBufferPointer { lb in
                         fadeR.withUnsafeMutableBufferPointer { rb in
                             fading.render(frames: m, outL: lb.baseAddress!,
@@ -134,9 +95,8 @@ public final class StringVoiceSource {
                 done += m
             }
             if fading != nil, fadePos >= fadeLen {
-                // Fade finished — drop the reference. The engine object
-                // stays alive in `recentEngines` (control-thread owned),
-                // so this never deallocates on the audio thread.
+                // Fade finished. `recentEngines` still holds the object, so
+                // this never deallocates on the audio thread.
                 os_unfair_lock_lock(&lock)
                 if self.fading === fading { self.fading = nil }
                 os_unfair_lock_unlock(&lock)
@@ -147,11 +107,8 @@ public final class StringVoiceSource {
     // strong refs keep swapped-out engines alive past any in-flight buffer
     private var recentEngines: [BowEngine] = []
 
-    // Runtime base parameters (2026-07-24 composite rework): the last
-    // values pushed by composite parameters, kept here — the long-lived
-    // side — so a structural rebuild (tonic/scale/drone change)
-    // republishes them onto the fresh engine. Defaults = the fitted
-    // sound: build-time jt tone LP, no extra damping, flat tone tilt.
+    // Runtime playing state (`.live` params), cached here so a rebuild
+    // republishes it onto the fresh engine. Defaults = the fitted sound.
     private var jtLpHz = 0.0
     private var jtHpHz = 0.0
     private var jtBody = 0.0
@@ -171,168 +128,129 @@ public final class StringVoiceSource {
     // bow_jt_comp_*: taraf-bus compressor (thresh 0 = off, byte-null)
     private var jtComp = (thresh: 0.0, ratio: 4.0, atkMs: 5.0, relMs: 150.0)
     // bow_jt_cap*: voice-relative taraf cap (hard 0 = off, byte-null);
-    // bus = scope blend, 0 per string … 1 per taraf
+    // bus 0 = per string … 1 = per taraf
     private var jtCap = (hard: 0.0, ratio: 1.0, bus: 0.0)
 
-    /// Radiated-jt tone LP corner (`bow_jt_lp`, runtime path; Hz,
-    /// <= 0 = the build-time state). Control-thread safe.
+    /// Radiated-jt tone LP corner (`bow_jt_lp`; Hz, <= 0 = build-time state). Control-thread safe.
     public func setJtToneLp(hz: Double) {
         jtLpHz = max(hz, 0.0)
         currentEngine()?.setJtToneLp(hz: jtLpHz)
     }
 
-    /// Radiated-jt tone HP corner (`bow_jt_hp`; Hz, <= 0 = bypass) —
-    /// the jawari-formant voicing. Control-thread safe.
+    /// Radiated-jt tone HP corner (`bow_jt_hp`; Hz, <= 0 = bypass). Control-thread safe.
     public func setJtToneHp(hz: Double) {
         jtHpHz = max(hz, 0.0)
         currentEngine()?.setJtToneHp(hz: jtHpHz)
     }
 
-    /// Radiated-jt body-radiation mix (`bow_jt_body`; 0 = bypass) — the
-    /// taraf through the voice's own body bank. Control-thread safe.
+    /// Taraf through the voice's body bank (`bow_jt_body`; 0 = bypass). Control-thread safe.
     public func setJtBody(_ mix01: Double) {
         jtBody = min(max(mix01, 0.0), 1.0)
         currentEngine()?.setJtBody(jtBody)
     }
 
-    /// Taraf charge governor 0..1 (`bow_jt_gov`): 0 = raw physics, 1 =
-    /// each row's ring saturates at its single-strike level (the phrase
-    /// pile-up in the long-t60 anchors is shed at the bridge drive).
-    /// Control-thread safe.
+    /// Taraf charge governor 0..1 (`bow_jt_gov`): 0 = raw physics, 1 = each
+    /// row's ring saturates at its single-strike level. Control-thread safe.
     public func setJtGov(_ amt01: Double) {
         jtGov = min(max(amt01, 0.0), 1.0)
         currentEngine()?.setJtGov(jtGov)
     }
 
-    /// Rows currently asleep under the quiescence gate (always on at
-    /// build via the `bow_jt_gate` bp scalar; 0 with the voice unarmed
-    /// or the gate override-disabled) — telemetry/tests. Safe from any
-    /// thread.
+    /// Rows asleep under the quiescence gate (0 unarmed). Any thread.
     public func jtGateAsleep() -> Int {
         currentEngine()?.jtGateAsleep() ?? 0
     }
 
-    /// Gate probe telemetry (see `BowEngine.jtGateProbe`). Safe from any
-    /// thread; nil with the voice unarmed.
+    /// Gate probe telemetry (see `BowEngine.jtGateProbe`); nil unarmed. Any thread.
     public func jtGateProbe() -> (asleep: Int, total: Int, ringR: Double,
                                   driveR: Double, droneHot: Bool)? {
         currentEngine()?.jtGateProbe()
     }
 
-    /// SCOPE TELEMETRY (2026-09-01): arm the kernel's display-only
-    /// per-row/per-slot meters (see `BowEngine.setScopeArmed`). Runtime
-    /// display state — re-applied across rebuilds. Control thread.
+    /// Arm the kernel's display-only meters (`BowEngine.setScopeArmed`). Control thread.
     public func setScopeArmed(_ on: Bool) {
         scopeOn = on
         currentEngine()?.setScopeArmed(on)
     }
 
-    /// The taraf rows' scope read (see `BowEngine.scopeRows`); empty
-    /// unarmed. Any thread.
+    /// The taraf rows' scope read (`BowEngine.scopeRows`); empty unarmed. Any thread.
     public func scopeRows() -> [BowEngine.ScopeRow] {
         currentEngine()?.scopeRows() ?? []
     }
 
-    /// The played strings' scope read (see `BowEngine.scopeSlots`). Any
-    /// thread.
+    /// The played strings' scope read (`BowEngine.scopeSlots`). Any thread.
     public func scopeSlots() -> [BowEngine.ScopeSlot] {
         currentEngine()?.scopeSlots() ?? []
     }
 
-    /// Master gain (`bow_gain`, .live 2026-08-23): the performance volume
-    /// of the whole radiated instrument, multiplying the fitted trim at
-    /// the engine's ramped output gain — instant (~25 ms glide), no
-    /// rebuild, no debounce, so tilt/strike bindings sweep it in real
-    /// time. Runtime playing state: cached here and re-applied across
-    /// rebuilds. Control-thread safe.
+    /// Master gain (`bow_gain`): the performance volume of the whole radiated
+    /// instrument, ramped (~25 ms) over the fitted trim; 1 = calibrated. Control-thread safe.
     public func setMasterGain(_ g: Double) {
         masterGain = max(g, 0.0)
         currentEngine()?.setMasterGain(masterGain)
     }
 
-    /// Taraf damping 0..1 (`bow_jt_damp`): 0 = natural ring, 1 = choked
-    /// well under a second. Control-thread safe.
+    /// Taraf damping 0..1 (`bow_jt_damp`): 0 = natural ring, 1 = choked. Control-thread safe.
     public func setTarafDamp(_ amt01: Double) {
         tarafDamp = min(max(amt01, 0.0), 1.0)
         currentEngine()?.setTarafDamp(tarafDamp)
     }
 
-    /// Tone tilt -1..1 (`bow_tone_tilt`): -1 = bass bias, 0 = flat,
-    /// +1 = treble bias. Control-thread safe.
+    /// Tone tilt -1..1 (`bow_tone_tilt`): bass … flat … treble. Control-thread safe.
     public func setToneTilt(_ t: Double) {
         toneTilt = min(max(t, -1.0), 1.0)
         currentEngine()?.setToneTilt(toneTilt)
     }
 
-    /// Taraf recruitment profile 0..1 (`bow_jt_sel`): 0.5 = the fitted
-    /// natural resonance profile; below, rows lose bridge drive by
-    /// harmonic distance from the played notes (0 = kin-only); above,
-    /// the profile flattens (1 = every row contributes equally,
-    /// note-independent) — the radiated jt gain compensates throughout
-    /// so the taraf's loudness holds. Control-thread safe.
+    /// Taraf recruitment 0..1 (`bow_jt_sel`): 0 = kin-only, 0.5 = fitted,
+    /// 1 = every row equal; loudness is compensated. Control-thread safe.
     public func setTarafSelectivity(_ s01: Double) {
         tarafSel = min(max(s01, 0.0), 1.0)
         currentEngine()?.setTarafSelectivity(tarafSel)
     }
 
-    /// Harmonic evolution 0…1 (`bow_jt_evolve`): the twang axis — a
-    /// kernel-slewed signed bone offset (BowEngine owns the map).
-    /// Control-thread safe.
+    /// Harmonic evolution 0…1 (`bow_jt_evolve`): a kernel-slewed bone offset. Control-thread safe.
     public func setJtEvolve(_ e01: Double) {
         jtEvolve = min(max(e01, 0.0), 1.0)
         currentEngine()?.setJtEvolve(jtEvolve)
     }
 
     /// Evolution register tilt (`bow_jt_ev_reg`): per-row bone offsets by
-    /// octave from the tonic — + blooms the low anchor rows (the sarod
-    /// drone) while pressing the high web closed. Control-thread safe.
+    /// octave from the tonic (+ blooms the low rows). Control-thread safe.
     public func setJtEvolveReg(_ reg: Double) {
         jtEvolveReg = min(max(reg, -1.0), 1.0)
         currentEngine()?.setJtEvolveRegister(jtEvolveReg)
     }
 
-    /// The chromatic bridge's harmonic evolution 0…1 (`bow_jtc_evolve`,
-    /// 2026-09-02): the twang axis of the chromatic set alone, on its own
-    /// bridge's apex (BowEngine owns the map). Control-thread safe.
+    /// The chromatic bridge's harmonic evolution 0…1 (`bow_jtc_evolve`). Control-thread safe.
     public func setJtEvolveChromatic(_ e01: Double) {
         jtEvolveChrom = min(max(e01, 0.0), 1.0)
         currentEngine()?.setJtEvolveChromatic(jtEvolveChrom)
     }
 
-    /// Sitar twang 0…1 (`bow_twang`): the played strings' grazing bridge
-    /// fold — 0 = plain bridge (byte-exact). Control-thread safe.
+    /// Sitar twang 0…1 (`bow_twang`): the played strings' grazing bridge fold; 0 = byte-null.
     public func setTwang(_ amt01: Double) {
         twang = min(max(amt01, 0.0), 1.0)
         currentEngine()?.setTwang(twang)
     }
 
-    /// Voice→taraf inject-ring gain (2026-08-19): mixes foreign voices'
-    /// rendered output into the jt web's bridge drive — their
-    /// sympathetic halo IS the sarangi taraf. Since 2026-08-21 the
-    /// per-voice levels (`st_taraf` / `tp_taraf`) scale at each
-    /// source's tap, so this is just the shared arm (1 while any
-    /// source drives, else 0). Control-thread safe (the kernel ring
-    /// allocates on the first non-zero push); 0, or armed with nothing
-    /// written, stays byte-null.
+    /// Voice→taraf inject-ring arm: 1 while any foreign voice drives the jt
+    /// web (levels scale at the taps), else 0. The ring allocates on the first
+    /// non-zero push; 0, or armed with nothing written, is byte-null.
     public func setJtInjectGain(_ g: Double) {
         jtInjectGain = max(g, 0.0)
         currentEngine()?.setJtInjectGain(jtInjectGain)
     }
 
-    /// VOICE↔TARAF BALANCE (`bow_bal`, .live 2026-08-24): −1 = voice
-    /// only, 0 = neutral (bit-exact), +1 = taraf only — an attenuator
-    /// pair at the engine's bus merge (never a boost). Runtime playing
-    /// state, re-applied across rebuilds. Control-thread safe.
+    /// Voice↔taraf balance (`bow_bal`): −1 voice only … 0 neutral (byte-null)
+    /// … +1 taraf only; an attenuator pair, never a boost.
     public func setBusBalance(_ b: Double) {
         busBalance = min(max(b, -1.0), 1.0)
         currentEngine()?.setBusBalance(busBalance)
     }
 
-    /// TARAF COMPRESSOR (`bow_jt_comp_*`, .live 2026-08-24): one field
-    /// of the jt-bus compressor — the four are cached together and the
-    /// whole set is pushed to the running engine on every edit (and
-    /// re-applied across rebuilds). Threshold 0 = off, byte-null.
-    /// Control-thread safe.
+    /// One field of the taraf-bus compressor (`bow_jt_comp_*`); the set is
+    /// pushed whole on every edit. Threshold 0 = off, byte-null.
     public enum JtCompField { case thresh, ratio, atkMs, relMs }
     public func setJtCompParam(_ field: JtCompField, _ value: Double) {
         switch field {
@@ -349,14 +267,9 @@ public final class StringVoiceSource {
                           atkMs: jtComp.atkMs, relMs: jtComp.relMs)
     }
 
-    /// PER-STRING VOICE-RELATIVE TARAF CAP (`bow_jt_cap*`, .live;
-    /// per string since 2026-09-01): every sympathetic row held at or
-    /// below `ratio` × the voice bus's own decaying peak, inside the
-    /// kernel's jt tick — the runaway-bloom lever (see
-    /// `BowEngine.setJtCap`); `bus` (`bow_jt_cap_bus`) blends the scope
-    /// from per string (0) to per taraf (1). The triple is cached
-    /// together, pushed whole on every edit and re-applied across
-    /// rebuilds. Hard 0 = off, byte-null. Control-thread safe.
+    /// One field of the voice-relative taraf cap (`bow_jt_cap*`): each row
+    /// held at or below `ratio` × the voice bus's decaying peak, per string
+    /// (`bus` 0) … per taraf (1). Pushed whole. Hard 0 = off, byte-null.
     public enum JtCapField { case hard, ratio, bus }
     public func setJtCapParam(_ field: JtCapField, _ value: Double) {
         switch field {
@@ -372,28 +285,22 @@ public final class StringVoiceSource {
                          bus: jtCap.bus)
     }
 
-    /// BUS VOLUME METER (2026-08-24): arm the engine's voice/taraf bus
-    /// meter for the iPad's volume readout. Runtime state — cached here
-    /// and re-applied across rebuilds. The metered render is bit-exact
-    /// against the unmetered one (`BusMeterTests`). Control-thread safe.
+    /// Arm the voice/taraf bus meter (the volume readout); the metered
+    /// render is bit-exact (`BusMeterTests`). Control-thread safe.
     public func setBusMeter(_ on: Bool) {
         busMeterOn = on
         currentEngine()?.setBusMeter(on)
     }
 
-    /// The (voice, taraf) bus RMS since the previous call (exact
-    /// interval RMS, integrate-and-dump — see `BowEngine.busLevels`) —
-    /// (0, 0) while the voice is unarmed or the meter is off. Safe from
-    /// any thread; one poller owns the dump semantics.
+    /// The (voice, taraf) bus RMS since the previous call (integrate-and-
+    /// dump); (0, 0) unarmed or meter off. One poller. Any thread.
     public func busLevels() -> (voice: Double, taraf: Double) {
         currentEngine()?.busLevels() ?? (0, 0)
     }
 
-    /// Voice→taraf inject write — the ONE render-thread entry point:
-    /// a foreign voice's node callback appends its mono block to the
-    /// current engine's kernel ring (brief state lock, same as the
-    /// render callback's engine fetch). A mid-rebuild write lands on
-    /// the incoming engine only; the fading one's wash just decays.
+    /// Voice→taraf inject write — the ONE render-thread entry point: a
+    /// foreign voice's callback appends its mono block to the current
+    /// engine's ring (brief state lock). Mid-rebuild it lands on the incoming engine only.
     public func jtInjectWrite(_ x: UnsafePointer<Double>, _ n: Int) {
         os_unfair_lock_lock(&state.lock)
         let engine = state.engine
@@ -401,17 +308,12 @@ public final class StringVoiceSource {
         engine?.jtInjectWrite(x, n)
     }
 
-    // FX rack (2026-08-01): the four insert points' settings, kept here —
-    // the long-lived side — like the runtime base parameters above, so a
-    // structural rebuild republishes them onto the fresh engine (the FX
-    // DSP state itself is per-engine; tails restart across a rebuild's
-    // crossfade, settings never snap back).
+    // The four FX insert points' settings, cached like the runtime state
+    // above (tails restart across a rebuild; settings never snap back).
     private var fxSettings = FXPoint.allCases.map { _ in FXSettings() }
 
-    /// Apply one FX registry parameter (`fx_<point>_<field>`) — parses the
-    /// key, updates the cached point settings, and pushes the whole point
-    /// to the running engine. Control-thread safe. Returns false for an
-    /// unrecognised key.
+    /// Apply one FX registry parameter (`fx_<point>_<field>`) and push the
+    /// whole point. False for an unrecognised key. Control-thread safe.
     @discardableResult
     public func setFXParam(_ key: String, _ value: Double) -> Bool {
         guard let (point, field) = FXPoint.parse(key: key),
@@ -455,9 +357,7 @@ public final class StringVoiceSource {
         }
     }
 
-    /// Zero-allocation variant for the realtime harness: renders into
-    /// caller-owned buffers, so per-buffer malloc cannot show up as
-    /// render-deadline jitter.
+    /// Zero-allocation variant for the realtime harness (caller-owned buffers).
     func renderForTesting(frames: Int, into l: inout [Float],
                           _ r: inout [Float]) {
         os_unfair_lock_lock(&state.lock)
@@ -473,8 +373,7 @@ public final class StringVoiceSource {
         }
     }
 
-    /// Pull `frames` through the EXACT audio-callback path (crossfade
-    /// included), for tests and offline analysis. Not for realtime use.
+    /// Pull `frames` through the exact audio-callback path (tests / offline).
     func renderForTesting(frames: Int) -> (l: [Float], r: [Float]) {
         var l = [Float](repeating: 0, count: frames)
         var r = [Float](repeating: 0, count: frames)
@@ -492,28 +391,19 @@ public final class StringVoiceSource {
         return (l, r)
     }
 
-    /// Crossfade length when swapping engines (2026-07-24). A fresh engine
-    /// has no string/taraf/room state, so an abrupt swap cuts whatever is
-    /// ringing; fading the outgoing engine out over this window turns that
-    /// into a natural decay. Long enough to cover a taraf tail's audible
-    /// onset, short enough that the 2x-CPU window stays small.
+    /// Crossfade length when swapping engines (a fresh engine has no ringing
+    /// state, so the outgoing one fades out instead of being cut).
     public static let engineCrossfadeMs = 300.0
 
-    /// Publish a freshly-built engine (brief lock; call on main/control
-    /// thread). Passing nil silences the node. Swapped-out engines are kept
-    /// briefly so an in-flight buffer never reads a freed one, and the
-    /// outgoing engine keeps rendering through a crossfade so its ring
-    /// decays instead of being cut.
+    /// Publish a freshly built engine (brief lock; control thread). nil
+    /// silences the node. Swapped-out engines are retained so an in-flight
+    /// buffer never reads a freed one; the outgoing one crossfades out.
     public func setEngine(_ engine: BowEngine?, crossfadeMs: Double? = nil) {
         if let engine {
-            // Deep enough that an engine still being faded out cannot be
-            // evicted (and thus deallocated) while the audio thread reads
-            // it — builds take tens of ms, the fade is ~180 ms.
+            // deep enough that a fading engine is never freed under the audio thread
             recentEngines.append(engine)
             if recentEngines.count > 8 { recentEngines.removeFirst() }
-            // re-apply the runtime base parameters: they are playing
-            // state, not build state — a rebuild must not snap the
-            // sound back to defaults mid-performance
+            // re-apply the runtime playing state (a rebuild must not snap to defaults)
             if jtLpHz > 0 { engine.setJtToneLp(hz: jtLpHz) }
             if jtHpHz > 0 { engine.setJtToneHp(hz: jtHpHz) }
             if jtBody > 0 { engine.setJtBody(jtBody) }
@@ -540,9 +430,7 @@ public final class StringVoiceSource {
         let ms = crossfadeMs ?? Self.engineCrossfadeMs
         os_unfair_lock_lock(&state.lock)
         let outgoing = state.engine
-        // A swap during a running fade collapses it: the older engine is
-        // dropped and the fade restarts from the one that was audible.
-        // (Nothing is louder for it — both were mid-fade.)
+        // a swap mid-fade restarts the fade from the audible engine
         if engine != nil, let outgoing, ms > 0 {
             state.fading = outgoing
             state.fadeLen = max(1, Int(ms * 0.001 * modelSR))
@@ -562,18 +450,15 @@ public final class StringVoiceSource {
         return state.engine != nil
     }
 
-    /// The currently-published engine (brief lock) — used by the drone
-    /// buttons to reach the jt rows. nil while the voice is unarmed.
+    /// The currently published engine (brief lock); nil unarmed.
     public func currentEngine() -> BowEngine? {
         os_unfair_lock_lock(&state.lock)
         defer { os_unfair_lock_unlock(&state.lock) }
         return state.engine
     }
 
-    /// Async-jt overload telemetry of the current engine — (dropped drive
-    /// blocks, flat-filled samples, web-FIFO fill, async flag). Drops/flats
-    /// growing while playing = the jawari web is missing its realtime
-    /// budget (audible clicking). Safe from any thread.
+    /// Async-jt overload telemetry (dropped drive blocks, flat-filled samples,
+    /// FIFO fill, async flag); growing drops = the web misses realtime. Any thread.
     public func jtStats() -> (drops: Double, flat: Double,
                               fill: Double, on: Double)? {
         os_unfair_lock_lock(&state.lock)
@@ -582,10 +467,8 @@ public final class StringVoiceSource {
         return engine?.jtAsyncStats()
     }
 
-    /// Render-deadline telemetry: (worst callback ms since last call,
-    /// callbacks that exceeded 90% of their buffer duration, total
-    /// callbacks). Overruns growing = device-level glitching the
-    /// audition WAV can NEVER show. Resets the max on read.
+    /// Render-deadline telemetry: (worst callback ms since last call, callbacks
+    /// over 90% of their budget, total). Resets the max on read.
     public func renderStats() -> (maxMs: Double, overruns: UInt64,
                                   callbacks: UInt64) {
         os_unfair_lock_lock(&state.lock)
@@ -596,61 +479,19 @@ public final class StringVoiceSource {
         return r
     }
 
-    /// Reset the playing state (base-voice switch / panic): all notes off;
-    /// the string charge itself rings out (physical state).
+    /// All notes off (panic / instrument switch); the strings ring out.
     public func reset() {
         mapper.midi(0xB0, 123, 0)
     }
 
-    /// Build the pure-physics bowed string for a tonic + tarab bank — the
-    /// port of upstream `BowSource.buildStringEngine` (2026-07-21c), loading
-    /// `bowed_string.json` from the SarangiKit bundle instead of the repo.
-    /// The app tonic is the open string (nail termination + register-force
-    /// reference); the tarab rows are the taraf TUNING (the taraf PHYSICS —
-    /// coupling/pol/damping/tap/jawari — is `bow_*` artifact keys). The
-    /// jawari-class (steel lattice) subset re-runs the python `_jt_load`
-    /// mirror: playing-register rows first, one 60-cent pitch class each
-    /// (row nearest the class MEDIAN — the fitted tables carry deliberate
-    /// near-unison shimmer detunes), remaining cap slots by gain.
-    /// `overrides` = String-editor / audition scalar overrides, applied OVER
-    /// the artifact (pitch knots/cents arrays ride the artifact untouched).
-    /// EXPENSIVE (~tables + kernel init + jt pool spawn) — call off main.
-    /// Discarded blocks of settle pre-roll before a freshly built engine
-    /// is published (4096 frames each, ~85 ms of audio). See the note at
-    /// the pre-roll itself — this is the dominant cost of a rebuild, so it
-    /// is kept to the minimum the choke needs.
-    /// 4 → 5 (2026-07-25): the scale-defined bank rings the doubling
-    /// strings in EXACT unison with their mid-choir twins (no detune any
-    /// more), so the publish chime stacks coherently and decays slower —
-    /// four blocks left it ~2.8 dB above the old 6-block floor.
-    /// 5 → 3 (2026-08-18, the DAMPED SETTLE): with the taraf choked
-    /// through the pre-roll the chime dies inside the discarded blocks
-    /// instead of asymptoting at ~-50 dBFS — measured publish peak
-    /// (stock rig, through the crossfade): 1 block -80 dBFS, 2 -88,
-    /// 3 -93, 5 -102. Three keeps ~13 dB under the -80 bar
-    /// (`testShortPreRollIsNoLouderOnPublishThanTheOldLongOne`) for
-    /// hotter-than-stock rigs, at ~60% of the old rebuild latency.
-    /// 3 → 5 on 2026-09-03 (bridge-force radiation): the choked settle
-    /// chime radiates ~7 dB hotter per block through the contact force
-    /// than through the deleted velocity pickup — the publish peak
-    /// measured −74/−80/−87/−102 dBFS at 3/4/5/8 blocks, so 3 broke the
-    /// −80 dBFS bar and 4 only grazed it (`RebuildCostTests`). ~+140 ms
-    /// of off-thread rebuild latency, never a dropout.
+    /// Settle pre-roll blocks (4096 frames each) rendered and discarded before
+    /// publish — the dominant rebuild cost; the minimum that keeps the publish
+    /// peak under −80 dBFS (`RebuildCostTests`).
     static var settleBlocks = 5
 
-    /// IN-PLACE PARAMETER PUSH (2026-07-24): apply an edit to the RUNNING
-    /// engine instead of building a new one. Recomputes the kernel's
-    /// 61-scalar vector (cheap — the table build is < 1 ms and we keep
-    /// only the scalars) and hands it, plus the merged params, to
-    /// `BowEngine.setLiveParams`. Nothing is reset: the string histories,
-    /// taraf ring, jawari web, room tail and note articulation all carry
-    /// straight through, so there is no rebuild, no settle pre-roll and no
-    /// crossfade.
-    ///
-    /// Returns false when the voice has no engine yet (the caller falls
-    /// back to a build). Only valid for `ParamRegistry.inPlaceKeys` — the
-    /// caller owns that check.
-    ///
+    /// Apply an edit to the RUNNING engine (`BowEngine.setLiveParams`) —
+    /// nothing is reset, no pre-roll or crossfade. False when no engine
+    /// exists yet. Only valid for `ParamRegistry.inPlaceKeys` (caller's check).
     @discardableResult
     public func applyLiveParams(tonicHz: Double,
                                 strings: [ResolvedString],
@@ -666,18 +507,13 @@ public final class StringVoiceSource {
         let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
         let taraf = strings.filter(\.enabled)
             .map { (f: $0.freq, gain: $0.gain, t60: $0.t60) }
-        // Same builder the engine was made with, so the tables are exactly
-        // what a rebuild would have produced. `taraf` MUST be passed here
-        // too (2026-08-01): the bridge-coupling web derives the passive
-        // scalar (scalars[40]) from its voice count — building without the
-        // rows would push a mismatched scalar vector onto an armed kernel.
+        // the same builder as the engine's. `taraf` MUST be passed: the
+        // coupling web derives a passive scalar from its row count, and a
+        // mismatched scalar vector must never reach the armed kernel
         var tables = BowTables.buildOpenString(sr: modelSR * Double(osf),
                                                tonic: tonicHz, bp: bp,
                                                taraf: taraf)
-        // STAGE 3: the body modal bank and the jawari tables are reloaded
-        // in place too, so body/jt parameters are live as well. The jt
-        // build is the expensive part (~3.4 ms) — skip it unless a jt key
-        // is actually involved.
+        // the jawari tables are the expensive part — only when a jt key moved
         if needsJawariTables {
             let plan = Self.jawariRowPlan(bp: bp, tonicHz: tonicHz,
                                           strings: strings, follower: follower)
@@ -690,30 +526,19 @@ public final class StringVoiceSource {
         return true
     }
 
-    /// The modal-jawari ROW SELECTION (the python `_jt_load` mirror,
-    /// upstream 2026-07-21c). The ONE implementation — `buildEngine` and
-    /// the in-place path both call it, so a live jt edit always installs
-    /// tables for exactly the string set the kernel is running. (Until
-    /// 2026-07-25 `buildEngine` kept its own inline copy — the shapes could
-    /// differ and the kernel silently refused every live jt reload.)
+    /// The modal-jawari ROW SELECTION for one bridge: rows ≥ `bow_jt_gmin`,
+    /// playing-register rows first (one 60 ¢ pitch class each, nearest the
+    /// class median), remaining `bow_jt_max` slots by gain. The ONE
+    /// implementation for `buildEngine` and the in-place path — a shape
+    /// mismatch makes the kernel silently refuse a live jt reload.
     ///
-    /// The tarab rows are the ONLY input: the drone buttons pluck existing
-    /// rows (mapped per-slot in the Strings tab) and add nothing here — the
-    /// dedicated-drone-row append (2026-07-23 … 2026-07-25, with its
-    /// ±6 ¢ reuse check and `bow_drone_comp_cents` target shift) is gone.
-    ///
-    /// `follower` (2026-07-25): the melody-follower string, appended LAST
-    /// when enabled — outside the class-coverage selection, the `gmin`
-    /// gate and the `bow_jt_max` cap (its pitch is dynamic, so coverage
-    /// logic doesn't apply). Built at tonic/2 so the fixed mode
-    /// allocation covers the low register (the kernel only TRIMS modes
-    /// as the pitch rises). Appended last so `droneRow(forExactHz:)`
-    /// identity lookups hit the real tarab rows first.
+    /// `follower`: the melody-follower string, appended LAST (outside the
+    /// selection; built at tonic/2 so the mode allocation covers the low
+    /// register — the kernel only trims modes as pitch rises).
     static func jawariRows(bp: BowParams, tonicHz: Double,
                            taraf: [(f: Double, gain: Double, t60: Double)],
                            follower: (gain: Double, t60: Double)? = nil)
         -> [(f: Double, gain: Double, t60: Double)] {
-        // (the python _jt_load mirror, upstream 2026-07-21c)
         func cents(_ f: Double) -> Double {
             var c = (1200.0 * log2(f / tonicHz))
                 .truncatingRemainder(dividingBy: 1200.0)
@@ -768,16 +593,9 @@ public final class StringVoiceSource {
         return jtRows
     }
 
-    /// TWO BRIDGES (2026-09-02): the row plan for a string set carrying
-    /// both bridges — `jawariRows` (the selection above: class coverage,
-    /// `bow_jt_gmin`, `bow_jt_max`) runs PER BRIDGE, so each set is
-    /// selected on its own and a pitch present on both bridges keeps both
-    /// rows. Kernel row order: the raga bridge's rows, then the chromatic
-    /// bridge's, then the follower (last, as before — its index is still
-    /// `rows.count - 1`; `droneRow(forExactHz:)` hits the raga row first).
-    /// The ONE plan `buildEngine` and the in-place path share — the same
-    /// unification rule as `jawariRows` itself. An all-raga set yields
-    /// exactly `jawariRows`' rows with every flag false.
+    /// The row plan for both bridges (`jawariRows` PER BRIDGE): raga rows,
+    /// chromatic rows, then the follower (index `rows.count - 1`). Shared by
+    /// `buildEngine` and the in-place path.
     static func jawariRowPlan(bp: BowParams, tonicHz: Double,
                               strings: [ResolvedString],
                               follower: (gain: Double, t60: Double)? = nil)
@@ -809,33 +627,19 @@ public final class StringVoiceSource {
         -> BowEngine? {
         guard var bp = Presets.bowedStringParams() else { return nil }
         for (k, v) in overrides { bp.num[k] = v }
-        // TARABDAAR LIVE SEEDS (2026-07-23): keys the artifact doesn't
-        // carry (absent = the bit-exact mono path every parity test
-        // runs) get their live defaults here — the physically-derived
-        // stereo side image (per-source pans across the bridge,
-        // kernel-side) + the width-decorrelated room. Overrides (String
-        // editor / audition `string.<key>`) win; 0 = mono. Defined ONCE
-        // in `liveParamSeeds` — `StringParamStore` merges the same dict
-        // into its baseline so the editor's default/reset semantics
-        // agree with the engine.
+        // live seeds for keys the artifact doesn't carry; overrides win
         for (k, v) in liveParamSeeds where bp.num[k] == nil {
             bp.num[k] = v
         }
         let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
-        // taraf TUNING rows from the tarab table (Strings tab / scale sync).
-        // They feed the modal-jawari block (the whole RADIATED sympathetic
-        // response) and — when `bow_cpl_z` > 0 (2026-08-01) — the
-        // bridge-coupling web, one silent comb per row on the passive
-        // junction, so the played strings feel the taraf as a load.
+        // taraf tuning rows: the modal-jawari block radiates them; with
+        // `bow_cpl_z` > 0 they also load the passive junction
         let taraf = strings.filter(\.enabled)
             .map { (f: $0.freq, gain: $0.gain, t60: $0.t60) }
         var tables = BowTables.buildOpenString(sr: sr * Double(osf),
                                                tonic: tonicHz, bp: bp,
                                                taraf: taraf)
-        // MODAL-JAWARI taraf: the shared selection (also the in-place
-        // path's), so live jt edits see exactly these rows — per bridge
-        // since 2026-09-02 (`jawariRowPlan`). The melody follower (when
-        // enabled) is the LAST row, marked for the kernel's live retune.
+        // the shared row plan; the follower is the LAST row, marked for live retune
         let plan = jawariRowPlan(bp: bp, tonicHz: tonicHz, strings: strings,
                                  follower: follower)
         tables.jt = BowTables.buildJawariTables(
@@ -845,63 +649,22 @@ public final class StringVoiceSource {
         let engine = BowEngine(tables: tables, mapper: mapper, bp: bp,
                                sr: sr, rfir: [],
                                eLp: bp.v("bow_rad_lp", 8000.0),
-                               // the room's wet pair is width-decorrelated
-                               // (a real room differs at the two ears);
-                               // the side tank cancels in L+R, so the
-                               // mono fold-down stays pan-invariant
+                               // width-decorrelated wet pair (cancels in L+R)
                                reverbRT60: bp.v("bow_rev_rt60", 1.0),
                                reverbPredelayMs: bp.v("bow_rev_predelay", 15.0),
                                reverbMix: bp.v("bow_rev_mix", 0.08),
                                reverbWidth: bp.v("bow_rev_width", 0.6),
                                fpMask: nil,
                                maxPoly: Int(bp.v("bow_live_poly", 8.0).rounded()))
-        // Trim = the fitted calibration only. The performance master
-        // volume (`bow_gain`, .live) is runtime state — `setEngine`
-        // re-applies the cached value once the engine mounts.
+        // trim = the fitted calibration; `bow_gain` is re-applied by `setEngine`
         engine.outGain = bp.v("bow_live_trim", 0.05)
         engine.seedLiveGains()   // ramp starts from the built values
-        // (Drone-button excitation scalars — bow_drone_level/_onset/
-        // _attack_ms/_release_ms/_onset_decay_ms — are read from bp
-        // inside BowEngine.init, same override path as everything else.)
-        // SETTLE PRE-ROLL (2026-07-23 night): a fresh kernel's jt web
-        // relaxes off the builder's q0 with an audible jawari chime —
-        // every UI-edit rebuild "strummed" on publish. Render and
-        // discard HERE (already off-main) so the engine is quiet when
-        // swapped in; also primes the async-jt FIFO. Deliberately NOT
-        // in BowEngine.init — the parity fixtures need renders from
-        // t = 0.
-        //
-        // LENGTH (2026-07-24): this pre-roll IS the cost of a rebuild —
-        // ~318 ms of a 320 ms build, against ~4 ms for the tables and
-        // the kernel/pool init put together. Measured chime decay on a
-        // fresh engine, per 85 ms block:
-        //     block 0  -33 dBFS   block 1  -45   block 2  -48
-        //     block 3  -49        block 5  -50   block 7  -52
-        // It asymptotes near -50 dBFS, so blocks 5-6 bought ~1 dB for
-        // ~110 ms of build latency. Four blocks reaches -50 dBFS: the
-        // publish is within 1 dB of the old 6-block behavior at 2/3 the
-        // latency (324 ms -> 216 ms), guarded by an A/B test.
-        //
-        // Lengthening `engineCrossfadeMs` does NOT substitute for this:
-        // measured, going 180 -> 450 ms of fade bought only 1 dB, because
-        // what is left after a few blocks is the jt web's steady idle
-        // floor, not a decaying transient. The real fix would be upstream
-        // (a q0 that does not leave the web charged at t = 0).
-        // DAMPED SETTLE (2026-08-18): the upstream fix the LENGTH note
-        // wished for. The chime is the q0 relax — the analytic static
-        // wrap is not an exact equilibrium of the discrete contact, so
-        // the web rings when ticking starts, and the anchors' 7–9 s
-        // natural tails meant no affordable pre-roll could absorb it
-        // (it asymptoted at ~-50 dBFS and rode out audibly for ~10 s
-        // after publish). Choking the taraf HARD while the discarded
-        // blocks render lets the contact settle the wrap to its true
-        // discrete equilibrium with the oscillation killed, then the
-        // natural ring is restored EXACTLY (a pure momentum scalar,
-        // 0 = byte-null) before the engine is published: silent
-        // publish, and the quiescence gate closes on the web within
-        // ~30 ms instead of ~10 s. Measured (RebuildCostTests):
-        // publish peak -50 dBFS (undamped asymptote) → -93 dBFS at the
-        // shipped 3 settle blocks.
+        // SETTLE PRE-ROLL: a fresh jt web relaxes off the builder's q0 with
+        // an audible chime, so `settleBlocks` blocks are rendered and
+        // discarded here (off-main; also primes the async-jt FIFO). NOT in
+        // BowEngine.init — parity fixtures need renders from t = 0. The
+        // taraf is choked through the pre-roll so the contact settles to its
+        // discrete equilibrium; the ring is restored exactly (0 = byte-null).
         engine.setJtSettleDamp(t60: 0.05)
         var prL = [Double](repeating: 0, count: 4096)
         var prR = [Double](repeating: 0, count: 4096)

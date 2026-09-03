@@ -43,7 +43,7 @@ public protocol MotionSource: AnyObject {
     /// to map the accelerometer spike to a MIDI velocity.
     func peakAccelSince(timestamp: TimeInterval) -> PeakResult
 
-    /// STRIKE-SCALE ENVELOPE 0…1 (2026-08-23) — the continuous form of
+    /// STRIKE-SCALE ENVELOPE 0…1 — the continuous form of
     /// the strike measure: `strikeScale01` of the accel magnitude through
     /// a fast-attack / slow-decay tracker, maintained at the source's own
     /// sample rate so taps between report ticks are never missed. The 60
@@ -58,12 +58,12 @@ public extension MotionSource {
     var rawAccel: [Double] { [0, 0, 0] }
     var strikeLevel: Double { 0 }   // sources without an accelerometer
 
-    /// ONSET STRIKE VELOCITY 0…1 at a touch onset (2026-08-19 — the
-    /// revived accelerometer estimate, now consumed by the String voice's
-    /// `bow_attack_vel` velocity→sharpness law): the peak acceleration
+    /// ONSET STRIKE VELOCITY 0…1 at a touch onset (the accelerometer
+    /// estimate consumed by the String voice's `bow_attack_vel`
+    /// velocity→sharpness law): the peak acceleration
     /// magnitude over the TRAILING `Config.velocityLookback` window,
     /// mapped log-scale across [`velocityMinG`, `velocityMaxG`] — the
-    /// same law the deleted 2026-07-24 capture used, but backward-looking:
+    /// window is backward-looking:
     /// UIKit delivers a touch ~10–25 ms after the physical impact, so the
     /// chassis spike is usually already in the 200 Hz ring buffer and the
     /// onset never waits (the old design delayed note-on 20 ms instead).
@@ -79,14 +79,14 @@ public extension MotionSource {
     /// The strike LAW as a pure map: acceleration magnitude (g) → 0…1,
     /// log-scale across [`velocityMinG`, `velocityMaxG`], 0 at or below
     /// the floor. Shared by the onset estimate above and the iPad's
-    /// persistent strike scope (2026-08-23), so the scope's 0–127 trace
+    /// persistent strike scope , so the scope's 0–127 trace
     /// always reads exactly what a tap at that magnitude would send.
     static func strikeScale01(_ g: Double) -> Double {
         StrikeLaw.scale01(g)
     }
 }
 
-/// The strike law as a type-free entry point (2026-09-02): the Mac's
+/// The strike law as a type-free entry point : the Mac's
 /// Joy-Con acceleration dimension runs the same log-scale map + the
 /// same fast-attack/150 ms-decay envelope over the Joy-Con's
 /// gravity-removed acceleration, and it has no `MotionSource` to hang

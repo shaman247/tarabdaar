@@ -21,7 +21,7 @@ class MotionManager: ObservableObject, MotionSource {
     // Most recent touch velocity estimate (for display)
     @Published var lastTouchVelocity: Double = 0.0
 
-    // Rolling history for display (last ~1 second at 200Hz = 200 samples)
+    // Magnitude history for display.
     @Published var accelHistory: [Double] = []
     private let historyLength = Config.accelHistoryLength
 
@@ -36,49 +36,32 @@ class MotionManager: ObservableObject, MotionSource {
     // Peak detection for display
     private var peakDecay: Double = 0.0
 
-    /// STRIKE-SCALE ENVELOPE (2026-08-23, MotionSource requirement): the
-    /// continuous 0…1 strike measure the `.strike` control dimension
-    /// rides — `strikeScale01(magnitude)` through a fast-attack /
-    /// slow-decay tracker, evolved HERE at the full 200 Hz so a tap
-    /// between 60 Hz report ticks still registers at height. Decay in the
-    /// log-mapped domain (≈ linear-in-dB fall, τ 150 ms): fast enough to
-    /// articulate repeated taps, slow enough that a sustained shake reads
-    /// as a plateau. Not @Published — read by the 60 Hz tick.
+    /// Strike-scale envelope (MotionSource): `strikeScale01(magnitude)`
+    /// through a fast-attack / slow-decay tracker (τ 150 ms), evolved at
+    /// 200 Hz so a tap between 60 Hz ticks registers. Not @Published.
     private(set) var strikeLevel: Double = 0.0
     private let strikeLevelDecay =
         exp(-1.0 / (Config.motionUpdateRate * 0.15))
 
-    /// Strike-ENVELOPE history (~8 s at 200 Hz) for the scope's overlay —
-    /// the smoothed control signal the `.strike`/`.acceleration`
-    /// dimensions actually see, drawn over the raw trace. Same
-    /// ring/polling contract as `accelHistory3D`: not @Published.
+    /// Strike-envelope history (~8 s at 200 Hz) for the toolbar scope. Same
+    /// polling contract as `accelHistory3D`: not @Published.
     private(set) var strikeHistory: [(t: TimeInterval, level: Double)] = []
 
-    /// Raw attitude history (last ~8 s at 200 Hz) for the on-device
-    /// raw-motion overlay — the sensor's own values BEFORE the yaw
-    /// high-pass, the 14-bit quantization and the MIDI wire, so
-    /// sensor noise and transmission artifacts can be told apart.
-    /// Deliberately NOT @Published: appended at 200 Hz, readers sample
-    /// it on their own clock (the overlay polls at 30 Hz).
+    /// Raw attitude history (~8 s at 200 Hz) for the raw-motion overlay —
+    /// before the yaw high-pass and the wire. Not @Published: readers poll.
     private(set) var attitudeHistory: [(t: TimeInterval, p: Double, r: Double, y: Double)] = []
 
-    /// Raw per-axis userAcceleration history (last ~8 s at 200 Hz) for
-    /// the accel half of the raw-motion overlay — same contract as
-    /// `attitudeHistory`: not @Published, readers poll on their own
-    /// clock. (`accelHistory` above is the older magnitude-only strike
-    /// display; this one keeps the vector.)
+    /// Raw per-axis userAcceleration history (~8 s at 200 Hz) for the accel
+    /// half of the raw-motion overlay — same contract as `attitudeHistory`.
     private(set) var accelHistory3D: [(t: TimeInterval, x: Double, y: Double, z: Double)] = []
 
     /// Latest raw user acceleration for the wire (MotionSource).
     var rawAccel: [Double] { [userAccelX, userAccelY, userAccelZ] }
 
-    /// Raw attitude scaled to [-1, +1] at a FIXED full scale of ±90°
-    /// (tilt 1 = pitch, 2 = roll, 3 = high-passed yaw). The iPad
-    /// performs no calibration of its own (the 7-point capture was
-    /// removed 2026-08-13): the Mac's guided ARM calibration — the
-    /// app's single tilt calibration — learns its own map from these
-    /// raw axes, and without one they pass through to the Mac's
-    /// control axes as-is (uncentered).
+    /// Raw attitude scaled to [-1, +1] at a fixed ±90° full scale (tilt 1 =
+    /// pitch, 2 = roll, 3 = high-passed yaw). The iPad performs no
+    /// calibration: the Mac's arm calibration maps these raw axes, and
+    /// without one they pass through uncentered.
     var normalizedTilts: [Double] {
         let s = 2.0 / Double.pi
         return [max(-1, min(1, pitch * s)),
@@ -86,28 +69,17 @@ class MotionManager: ObservableObject, MotionSource {
                 max(-1, min(1, yawRelative * s))]
     }
 
-    /// HIGH-PASSED yaw (2026-08-14). Pitch and roll are anchored by
-    /// gravity; yaw is pure gyro integration with NO reference (no
-    /// magnetometer frame), so it drifts unboundedly — a resting iPad
-    /// wandered tens of degrees on tilt 3 over minutes. This
-    /// integrates wrap-safe yaw increments and leaks toward zero with
-    /// a 60 s time constant: drift cancels continuously, playing
-    /// gestures (seconds) pass through untouched, and a twist held
-    /// motionless re-centres over ~a minute (the Mac's ZL re-zero
-    /// stays instant). Also immune to the ±π wrap, which used to rail
-    /// the raw value when the resting heading sat near it.
+    /// High-passed yaw: yaw is unreferenced gyro integration and drifts, so
+    /// wrap-safe increments are integrated and leaked toward zero with a 60 s
+    /// constant — gestures pass through, a held twist re-centres over ~a minute.
     private var yawRelative: Double = 0
     private var lastRawYaw: Double?
     private var lastYawTime: TimeInterval?
     private let yawLeakTau: Double = 60
-    /// Learned yaw drift RATE (rad/s). The leak alone cannot cancel a
-    /// constant drift rate — it passes through and plateaus at
-    /// rate × τ (measured ~0.08°/s → ~5°, a visible slow crawl on
-    /// tilt 3). So the rate itself is estimated while the device is
-    /// quiescent (observed rate under ~0.57°/s — real gestures are far
-    /// above, drift far below) with a slow ~10 s constant, and
-    /// subtracted from every increment. Same idea as `JoyConInput`'s
-    /// gyro-bias learner.
+    /// Learned yaw drift rate (rad/s). A constant drift rate passes the leak
+    /// and plateaus at rate × τ, so the rate is estimated while quiescent
+    /// (observed rate within 0.01 rad/s of the estimate) with a ~10 s
+    /// constant and subtracted from every increment.
     private var yawBias: Double = 0
 
     private func updateYaw(_ rawYaw: Double, timestamp: TimeInterval) {
@@ -196,16 +168,11 @@ class MotionManager: ObservableObject, MotionSource {
         }
     }
 
-    // MARK: - Note activity (strike-scope coloring, 2026-08-23)
+    // MARK: - Note activity (scope coloring)
 
-    /// Melody-note activity timeline for the toolbar strike scope: the
-    /// fret-pad surface reports each sounding touch's begin/end, and the
-    /// scope colors every trace bin by whether a note sounded THEN and how
-    /// recently the last onset fired (white at onset → cyan over ~1 s;
-    /// gray while silent). Id-keyed so a touch that never became a note
-    /// (out-of-band, drones) can't unbalance the count. Deliberately NOT
-    /// @Published — the scope polls at 30 Hz like `accelHistory3D`.
-    /// Main-thread only (touch handlers + the poll).
+    /// Note activity timeline for the toolbar scopes (begin/end per sounding
+    /// touch, onset times). Id-keyed so a touch that never became a note
+    /// can't unbalance the count. Not @Published; main-thread only.
     private(set) var noteActivity: [(t: TimeInterval, active: Int)] = []
     private(set) var noteOnsets: [TimeInterval] = []
     private var soundingNoteIds: Set<Int> = []

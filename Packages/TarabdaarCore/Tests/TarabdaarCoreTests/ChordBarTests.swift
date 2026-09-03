@@ -10,7 +10,7 @@ final class ChordBarTests: XCTestCase {
         pairs.map { (Double($0.0) / Double($0.1), $0.2) }
     }
 
-    // MARK: - Shepard register law (2026-08-30)
+    // MARK: - Shepard register law
 
     /// The I chord's construction: every tone lands its main copy in the
     /// octave below the tonic, Sa itself splits evenly across tonic/2 and

@@ -3,30 +3,22 @@ import QuartzCore
 
 // MARK: - PitchPoint / PitchScale
 
-/// One pitch in a Pitch-Pad scale. A pitch is an exact frequency ratio
-/// over the tonic, stored as `num/den`. `y` is the pitch's vertical
-/// position inside the pad rectangle (0..1, arbitrary), used only by
-/// the layout — it has no effect on the frequency. `label` is an
-/// optional user-facing name (e.g. a scale-degree like `"3-"`); when
-/// empty, the ratio string is shown instead.
+/// One scale pitch: an exact ratio over the tonic (`num/den`), a layout-only
+/// vertical position `y` (0…1) and an optional `label` (blank → the ratio).
 public struct PitchPoint: Identifiable, Equatable {
     public let id: UUID
     public var num: Int
     public var den: Int
     public var y: Double
     public var label: String
-    /// When false the pitch is kept in the scale array (and listed in
-    /// the editor's "Disabled" section) but is excluded from the pad —
-    /// no cell, no disc, not playable — so a smaller scale can be drawn
-    /// from a larger vocabulary and notes toggled back in at will.
+    /// When false the pitch stays in the scale but is excluded from the pad
+    /// (no cell, not playable).
     public var enabled: Bool
 
     /// Equality is CONTENT equality — `id` is UI identity (ForEach), not
-    /// pitch identity, and every sync-blob decode mints fresh UUIDs. With
-    /// the synthesized `==` a re-pushed identical scale compared unequal,
-    /// so `applySyncedState` panicked on EVERY push — invisible while
-    /// panic was a local note-clear, catastrophic once it became a wire
-    /// event (the 2026-08-14 staccato loop).
+    /// pitch identity, and every sync-blob decode mints fresh UUIDs. A
+    /// re-pushed identical scale must compare equal, or `applySyncedState`
+    /// would stop every sounding touch on every push.
     public static func == (a: PitchPoint, b: PitchPoint) -> Bool {
         a.num == b.num && a.den == b.den && a.y == b.y
             && a.label == b.label && a.enabled == b.enabled
@@ -43,13 +35,10 @@ public struct PitchPoint: Identifiable, Equatable {
     }
 
     public var ratio: Double { Double(num) / Double(max(1, den)) }
-    /// X position inside the rectangle. The rectangle spans one octave,
-    /// so `log2(ratio)` lands in [0, 1] for ratios in [1, 2].
+    /// X position inside the one-octave rectangle: `log2(ratio)` ∈ [0, 1].
     public var xFraction: Double { log2(ratio) }
-    /// The ratio rendered as text, e.g. `"3/2"`.
     public var ratioString: String { "\(num)/\(den)" }
-    /// What the pad and editor show for this pitch: the custom `label`
-    /// if set, otherwise the ratio string.
+    /// The pitch's display name: `label` if set, else the ratio string.
     public var displayLabel: String { label.isEmpty ? ratioString : label }
 }
 
@@ -60,21 +49,13 @@ public struct PitchScale: Equatable {
         self.points = points
     }
 
-    /// 12-tone just intonation, laid out like a piano: white-key pitch
-    /// classes sit low in the pad, black-key pitch classes sit high.
-    /// Y-coordinates align with two of the seven command-snap rungs
-    /// (`2/6` for black, `5/6` for white) so dragging existing pitches
-    /// vertically with command held doesn't nudge them off the
-    /// keyboard-like layout. The scale spans the half-open octave
-    /// `[1, 2)` — 2/1 is **not** a member; the octave appears on the
-    /// pad as the upper-octave repeat (ghost) of 1/1.
-    ///
-    /// Degrees are named in **sargam** (`S r R g G m M P d D n N`,
-    /// 2026-07-25) — and since every pitch in the app is named by the scale
-    /// (see `ScaleDegrees.swift`), those are the names the frets, the drone
-    /// buttons and the Strings tab show. **Must stay in step with the bundled
-    /// `TarabdaarMac/Default.json`**, which is what actually loads; this is
-    /// the fallback for a missing/unreadable resource.
+    /// 12-tone just intonation laid out like a piano (white-key classes
+    /// low at y 5/6, black-key classes high at y 2/6 — two command-snap
+    /// rungs). Spans the half-open octave `[1, 2)`; 2/1 appears on the pad
+    /// as the ghost of 1/1. Degrees are named in sargam (`S r R g G m M P
+    /// d D n N`) — the names every fret, drone button and Strings row
+    /// shows. **Must stay in step with the bundled `TarabdaarMac/
+    /// Default.json`**, which is what actually loads; this is the fallback.
     public static var defaultJI: PitchScale {
         // (numerator, denominator, "black key" flag, label)
         let entries: [(Int, Int, Bool, String)] = [
@@ -108,17 +89,14 @@ func gcd(_ a: Int, _ b: Int) -> Int {
     return a
 }
 
-/// Tenney height = num * den (in lowest terms). Lower = simpler in
-/// the music-theoretic sense — 3/2 (Tenney 6) is simpler than 45/32
-/// (Tenney 1440). Kept around as an alternate metric, but the pad's
-/// dedup + gridline height now uses `complexity(num:den:)` below.
+/// Tenney height = num * den in lowest terms. Alternate metric; the pad
+/// uses `complexity(num:den:)`.
 func tenneyHeight(num: Int, den: Int) -> Int {
     let g = gcd(num, den)
     return (num / g) * (den / g)
 }
 
-/// Count prime factors (with multiplicity), the "big omega" function:
-/// Ω(1) = 0, Ω(2·2·3) = 3, Ω(prime) = 1.
+/// Ω(n): prime factors counted with multiplicity.
 func omega(_ n: Int) -> Int {
     var n = abs(n)
     if n <= 1 { return 0 }
@@ -135,21 +113,9 @@ func omega(_ n: Int) -> Int {
     return count
 }
 
-/// Pad-specific complexity score for a fraction:
+/// Pad complexity score (smaller = simpler), in lowest terms:
 ///   Ω(num) + Ω(den) + largestPrimeFactor(num) + largestPrimeFactor(den)
-///
-/// Both halves of the metric pull in the same direction — penalize
-/// long factorizations and penalize use of big primes — but they
-/// disagree on cases like 5/4 (low Ω, prime 5) vs 9/8 (higher Ω,
-/// lower primes), which they're meant to: each emphasis is musically
-/// relevant in different ways. Smaller score = simpler.
-///   1/1   = 0+0+1+1 = 2     (simplest)
-///   2/1   = 1+0+2+1 = 4
-///   3/2   = 1+1+3+2 = 7
-///   4/3   = 2+1+2+3 = 8
-///   9/8   = 2+3+3+2 = 10
-///   5/4   = 1+2+5+2 = 10
-///   45/32 = 3+5+5+2 = 15
+/// e.g. 1/1 = 2, 3/2 = 7, 4/3 = 8, 9/8 = 5/4 = 10, 45/32 = 15.
 public func complexity(num: Int, den: Int) -> Int {
     let g = gcd(num, den)
     let n = num / g
@@ -157,9 +123,7 @@ public func complexity(num: Int, den: Int) -> Int {
     return omega(n) + omega(d) + largestPrimeFactor(n) + largestPrimeFactor(d)
 }
 
-/// Largest prime factor of `n`. Returns 1 for `|n| ≤ 1`. Trial
-/// division is fine here — we only call this on numerators /
-/// denominators that fit inside our Tenney cap (≤ a few hundred).
+/// Largest prime factor of `n` (1 for `|n| ≤ 1`); trial division.
 func largestPrimeFactor(_ n: Int) -> Int {
     var n = abs(n)
     if n <= 1 { return 1 }
@@ -176,9 +140,7 @@ func largestPrimeFactor(_ n: Int) -> Int {
     return largest
 }
 
-/// Largest prime appearing in either side of `num/den` (in lowest
-/// terms). This is what musicians call the "prime limit" of a JI
-/// ratio: 3/2 is 3-limit, 5/4 is 5-limit, 7/4 is 7-limit, etc.
+/// The prime limit of `num/den` in lowest terms.
 func largestPrime(num: Int, den: Int) -> Int {
     let g = gcd(num, den)
     return max(largestPrimeFactor(num / g), largestPrimeFactor(den / g))
@@ -187,12 +149,8 @@ func largestPrime(num: Int, den: Int) -> Int {
 /// Primes ≤ 31 — covers every value the Prime picker exposes.
 private let smallPrimes: [Int] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31]
 
-/// All `maxPrime`-smooth positive integers up to `limit`, sorted
-/// ascending. Generated by a breadth-first frontier expansion that
-/// adds the next layer of products until no new value fits under
-/// `limit`. There's no Ω cap — depth grows as far as the value cap
-/// allows, so e.g. 1024 = 2¹⁰ shows up if 2 is in `primes` and the
-/// limit is ≥ 1024.
+/// All `primes`-smooth positive integers ≤ `limit`, ascending
+/// (breadth-first frontier expansion; no Ω cap).
 func smoothNumbersUpTo(_ limit: Int, primes: [Int]) -> [Int] {
     guard !primes.isEmpty else { return [1] }
     var all: Set<Int> = [1]
@@ -213,29 +171,14 @@ func smoothNumbersUpTo(_ limit: Int, primes: [Int]) -> [Int] {
     return all.sorted()
 }
 
-/// All coprime fractions n/d in [1, 2] (in lowest terms) where both
-/// `n` and `d` are `maxPrime`-smooth (each prime factor ≤ maxPrime).
-/// Generated up to a value cap rather than an Ω cap, so the
-/// frontier keeps expanding "in line with our complexity metric"
-/// — higher-Ω numbers appear naturally once a slot needs them.
-///
-/// Pairs whose log-frequency distance is under 10 cents collapse to
-/// the **simpler** of the two — `complexity(num:den:)` score, lower
-/// wins. Since higher-Ω candidates always have higher complexity
-/// than what's already there, they fill empty 10-cent slots but
-/// never displace simpler representatives; the dedup converges as
-/// soon as every reachable slot is taken.
-///
-/// Cost is dominated by the number of `maxPrime`-smooth integers
-/// ≤ `valueCap`, so callers should cache the result rather than
-/// recompute per frame (see `PitchPadEngine.snapTargets()`).
+/// All coprime `maxPrime`-smooth fractions n/d in [1, 2], with pairs
+/// closer than 10 cents collapsed to the simpler one
+/// (`complexity(num:den:)`). Expensive — callers cache the result
+/// (`PitchPadEngine.snapTargets()`).
 func simpleFractions(maxPrime: Int) -> [(num: Int, den: Int)] {
     let primes = smallPrimes.filter { $0 <= maxPrime }
-    // High enough that the gridline set is "full" for every prime
-    // limit the picker exposes — at maxPrime=2 you only get powers
-    // of 2 up to 8192 (14 numbers), but the 10-cent dedup is hard-
-    // capped by the prime set itself. At maxPrime ≥ 7 the
-    // resulting set already fills most of the 120 reachable slots.
+    // High enough that the gridline set is full for every prime limit
+    // the picker exposes.
     let valueCap = 8192
     let nums = smoothNumbersUpTo(valueCap, primes: primes)
 
@@ -278,10 +221,8 @@ func simpleFractions(maxPrime: Int) -> [(num: Int, den: Int)] {
 
 // MARK: - Best-fraction approximation
 
-/// Stern-Brocot best rational approximation of a real value, capped at
-/// `maxDen`. Used when the user shift-clicks an arbitrary spot — we
-/// pick a clean fraction so the editor list isn't littered with ugly
-/// decimals.
+/// Best rational approximation of `x` with denominator ≤ `maxDen`
+/// (continued fractions) — a clean fraction for a shift-clicked spot.
 public func bestFraction(_ x: Double, maxDen: Int = 256) -> (num: Int, den: Int) {
     guard x.isFinite, x > 0 else { return (1, 1) }
     // Continued-fraction expansion with denominator cap.
@@ -302,11 +243,8 @@ public func bestFraction(_ x: Double, maxDen: Int = 256) -> (num: Int, den: Int)
     return (max(1, h1), max(1, k1))
 }
 
-/// Fold a positive fraction into the half-open octave `[1, 2)` by
-/// repeatedly halving (doubling the denominator) while it's ≥ 2 and
-/// doubling (doubling the numerator) while it's < 1, then reduce to
-/// lowest terms. The result is the same pitch class as `num/den`. Used
-/// when the user types a ratio outside the scale's octave.
+/// Fold a positive fraction into the half-open octave `[1, 2)` and
+/// reduce to lowest terms — the same pitch class.
 public func octaveFolded(num: Int, den: Int) -> (num: Int, den: Int) {
     guard num > 0, den > 0 else { return (1, 1) }
     var n = num, d = den
@@ -318,24 +256,17 @@ public func octaveFolded(num: Int, den: Int) -> (num: Int, den: Int) {
 
 // MARK: - SoundingState
 
-/// The fast-changing "what's playing" state for the Pitch Pad, kept
-/// apart from `PitchPadEngine` so it can be observed in isolation. A
-/// glide updates `ratio` (and the surface updates `weights`) on every
-/// mouse tick; routing those through this small object means only the
-/// Hz readout and the cell-fill layer re-render at that rate, instead
-/// of the entire pad view tree.
+/// The fast-changing "what's playing" state, kept apart from
+/// `PitchPadEngine` so per-tick glide updates re-render only the Hz
+/// readout and the cell fills.
 public final class SoundingState: ObservableObject {
-    /// Frequency ratio of the currently-sounding touch, or `nil` when
-    /// the pad is silent.
+    /// Ratio of the touch that updated last; `nil` when silent.
     @Published public var ratio: Double? = nil
-    /// Per-seed cell-fill weights (`DisplaySeed.id` → weight), summing
-    /// to 1. A single entry at 1 is an exact pitch; two or three mean a
-    /// soft-margin / triple-junction blend. Empty when silent.
+    /// Per-seed cell-fill weights (`DisplaySeed.id` → weight, summing to
+    /// 1); empty when silent.
     @Published public var weights: [String: Double] = [:]
-    /// The ONSET-captured octave shift (semitones) of whichever touch
-    /// updated `ratio` last — the readouts add it so the displayed Hz is
-    /// the pitch actually sounding, even for a note held across an
-    /// octave step (the live `octaveShift` may already differ).
+    /// The ONSET-captured octave shift (semitones) of the touch that
+    /// updated `ratio` last, so the Hz readout shows the sounding pitch.
     @Published public var octaveSemis: Double = 0
 
     public init() {}
@@ -343,46 +274,33 @@ public final class SoundingState: ObservableObject {
 
 // MARK: - PitchPadEngine
 
-/// In-process MIDI engine for the Pitch Pad tab. Each active "finger"
-/// gets its own MPE channel; the pitch is produced by holding a fixed
-/// MIDI note near `tonicMidi` on that channel and bending to the
-/// requested ratio. The bend range is set to `Config.midiPitchBendRange`
-/// at channel-init time (see `bendRangeSemis`) so a full glide fits
-/// inside one bend without retriggering.
-///
-/// MIDI bytes are routed in-process directly to `AudioEngine` via
-/// `MIDIEngine.onLocalEvent`, mirroring `IPadSimulator`. CoreMIDI is
-/// **not** touched — this engine never broadcasts to external sources.
+/// The pad's playing model: the scale, the tonic, the octave shift, the
+/// chord selection and the touch API. Touches are written as
+/// full-resolution fractional-MIDI pitch into an `OutboundPlayState` — on
+/// the Mac pumped in-process into `LinkIngest`, on the iPad serialized to
+/// the wire by `TarabLink`. No MIDI vocabulary; CoreMIDI is never touched.
 public final class PitchPadEngine: ObservableObject {
-    /// The active scale. Seeded from the bundled default (`Default.json`,
-    /// falling back to the in-code `PitchScale.defaultJI`) so the pad
-    /// opens on a scale loaded from disk rather than a hard-coded value.
+    /// The active scale, seeded from the bundled `Default.json` (fallback
+    /// `PitchScale.defaultJI`).
     @Published public var scale: PitchScale = ScaleStore.loadDefault() {
         didSet {
-            // A chord-bar selection referencing a degree the new scale no
-            // longer has is cleared (a smaller-or-equal scale keeps it —
-            // the chord itself re-derives from the new degrees).
+            // Clear a chord selection whose degree the new scale lacks.
             if let sel = chordSelection,
                sel.degree >= scaleDegrees(from: scale).count {
                 setChordSelection(nil)
             }
         }
     }
-    /// Name of the currently-loaded user scale, shown in the toolbar's
-    /// Scale menu. `nil` means the default or an unsaved working scale —
-    /// "Save" then routes to "Save As…" since there's no name to
-    /// overwrite.
+    /// Name of the loaded user scale; `nil` = the default or an unsaved
+    /// working scale ("Save" then routes to "Save As…").
     @Published public var currentScaleName: String? = nil
-    /// The tonic's integer note anchor — the "1/1". ALWAYS starts at
-    /// `defaultTonicMidi` (D4): the tonic is not persisted on either side, so
-    /// every launch opens on D4 and the session tonic is set fresh from the
+    /// The tonic's integer note anchor. Not persisted — every launch opens
+    /// on `defaultTonicMidi` (D4) and the session tonic is set from the
     /// Fret Pad tab.
     @Published public var tonicMidi: Int = PitchPadEngine.defaultTonicMidi
-    /// Fractional tonic refinement in CENTS (±50) on top of `tonicMidi` —
-    /// together they are THE app tonic, set in Hz from the Fret Pad tab
-    /// (`setTonic(hz:)`) and mirrored everywhere else (tarab, drones, iPad
-    /// sync). Kept split (note + cents) so the MIDI/sync plumbing keeps its
-    /// integer note anchor.
+    /// Fractional tonic refinement in CENTS (±50) on `tonicMidi`; together
+    /// they are THE app tonic, set in Hz from the Fret Pad tab and
+    /// mirrored everywhere (tarab, drones, iPad sync).
     @Published public var tonicCents: Double = 0
 
     /// The tonic as an absolute frequency — the ONE Hz value everything
@@ -391,14 +309,14 @@ public final class PitchPadEngine: ObservableObject {
         440.0 * pow(2.0, (tonicFractionalMidi - 69.0) / 12.0)
     }
 
-    /// Set the tonic from a frequency: nearest MIDI note + cents remainder.
+    /// Set the tonic from a frequency.
     public func setTonic(hz: Double) {
         guard hz > 20, hz < 4000 else { return }
         setTonic(fractionalMidi: 69.0 + 12.0 * log2(hz / 440.0))
     }
 
-    /// Set the tonic from a fractional MIDI note, re-split into the integer
-    /// anchor + a ±50¢ remainder (the range the sync blob encodes).
+    /// Set the tonic from a fractional MIDI note: integer anchor + ±50¢
+    /// remainder (the range the sync blob encodes).
     public func setTonic(fractionalMidi: Double) {
         let clamped = max(Double(Self.tonicNoteRange.lowerBound),
                           min(Double(Self.tonicNoteRange.upperBound), fractionalMidi))
@@ -407,16 +325,14 @@ public final class PitchPadEngine: ObservableObject {
         tonicCents = (clamped - Double(note)) * 100.0
     }
 
-    /// Set the tonic's integer note anchor, KEEPING the current cents offset —
-    /// so a fine tuning (e.g. −14¢ against a reference) survives picking a
-    /// different note. Used by the Fret Pad's note menu.
+    /// Set the integer note anchor, KEEPING the cents offset (the Fret
+    /// Pad's note menu).
     public func setTonic(midi: Int) {
         tonicMidi = max(Self.tonicNoteRange.lowerBound,
                         min(Self.tonicNoteRange.upperBound, midi))
     }
 
-    /// The MIDI notes the tonic anchor may take — whole octaves, C1…B7.
-    /// Bounds both the typed Hz and the Fret Pad's note menu.
+    /// The MIDI notes the tonic anchor may take (C1…B7).
     public static let tonicNoteRange = 24...107
 
     /// The tonic every launch opens on: **D4** (293.665 Hz).
@@ -424,18 +340,12 @@ public final class PitchPadEngine: ObservableObject {
 
     public var tonicFractionalMidi: Double { Double(tonicMidi) + tonicCents / 100.0 }
 
-    /// PLAYING-RANGE OCTAVE SHIFT (2026-08-27): whole-octave transpose of
-    /// every played touch, ±3 (Joy-Con dpad ←/→ on the Mac; relayed to
-    /// the iPad as the JOYCON_STATE `octave` byte, TLP v11). Applied at
-    /// the ONE outbound-pitch point (`noteOn`/`glide`), so the fret
-    /// field, snapping and drag assist are untouched — and it is
-    /// **ONSET-CAPTURED per touch (2026-08-28)**: a note keeps the shift
-    /// it was born with for its whole life, glides included, so stepping
-    /// the octave mid-phrase never yanks a sounding note; only the NEXT
-    /// onset takes the new range (the attack-family rule, not the
-    /// fieldWarp live rule). Drones and the tarab are degree-resolved
-    /// elsewhere and never shift. Not persisted — like the tonic, every
-    /// launch opens at 0.
+    /// Playing-range octave shift, ±3 (Joy-Con dpad on the Mac; relayed
+    /// to the iPad as the JOYCON_STATE `octave` byte). Applied at the ONE
+    /// outbound-pitch point (`noteOn`/`glide`) and ONSET-CAPTURED per
+    /// touch: a note keeps its birth shift through every glide, only the
+    /// NEXT onset takes the new range. Drones and the tarab never shift.
+    /// Not persisted.
     @Published public var octaveShift: Int = 0 {
         didSet {
             let c = min(max(octaveShift, Self.octaveShiftRange.lowerBound),
@@ -448,55 +358,28 @@ public final class PitchPadEngine: ObservableObject {
     public var octaveShiftSemis: Double { Double(octaveShift) * 12.0 }
 
     @Published public var velocity: Int = 92
-    /// Half-width of the soft interpolation zone around each cell
-    /// boundary, in pixels. See `docs/pitch-pad.md` (Inner & outer
-    /// polygons) for the geometry. Bound to the **Margin** slider in
-    /// the pad toolbar; default 16 px matches the original visual.
+    /// Half-width (px) of the soft interpolation zone around each cell
+    /// boundary — the toolbar's Margin slider.
     @Published public var marginPixels: Double = 16
-    /// Performance mode hides the editing chrome on the pad surface —
-    /// the per-pitch control discs and the 1/1 / 2/1 octave boundary
-    /// lines — leaving the cell outlines, the black field, and the live
-    /// sounding fills. Lets the pad read as a cleaner playing surface
-    /// once a scale is dialed in. Toggled from the pad toolbar; editing
-    /// gestures (drag a handle, shift-click) still work, they just have
-    /// no visible handles to aim at.
+    /// Hides the pad's editing chrome (control discs, octave lines);
+    /// editing gestures still work.
     @Published public var performanceMode: Bool = false
-    /// Which playing surface the iPad should show, pushed from the Mac via
-    /// the synced state. The iPad's `ContentView` observes this to swap
-    /// between the Pitch Pad and Chord Pad surfaces. Unused on the Mac.
+    /// Which playing surface the iPad shows, pushed from the Mac via the
+    /// synced state. Unused on the Mac.
     @Published public var layout: PadLayout = .pitchPad
-    /// High-frequency "what's sounding" state, split out of the engine
-    /// into its own observable so that the per-tick updates during a
-    /// glide only re-render the two tiny views that show them (the Hz
-    /// readout and the cell fills) — not the whole pad. Were these
-    /// `@Published` on the engine, every glide tick would re-evaluate
-    /// the toolbar's sliders/pickers, all cell borders, and all 12
-    /// control discs. `ratio` / `weights` are written by
-    /// `noteOn` / `glide` / `noteOff` and the surface's gesture
-    /// handlers; see `SoundingState`.
     public let sounding = SoundingState()
-    /// Prime-limit filter for snap targets. `5` is classical 5-limit
-    /// just intonation (primes 2, 3, 5 only). `7` brings in
-    /// septimal ratios like 7/4, 7/5, 7/6. `11`+ enters xenharmonic
-    /// territory. Changing this invalidates the snap-targets cache.
+    /// Prime-limit filter for snap targets (5 = classical 5-limit JI).
+    /// Changing it invalidates the snap-targets cache.
     @Published public var primeLimit: Int = 5 {
         didSet {
             if oldValue != primeLimit { snapTargetsCache = nil }
         }
     }
 
-    /// Cached snap fractions for the current `primeLimit`. The
-    /// enumeration cost grows quickly (`O(N²)` where N is the count
-    /// of `maxOmega`-smooth numbers under `primeLimit`), so we only
-    /// recompute when the user moves the prime picker rather than on
-    /// every drag-tick render.
     private var snapTargetsCache: [(num: Int, den: Int)]? = nil
 
-    /// Memoized accessor for the current snap-target set. See
-    /// `simpleFractions(maxPrime:)` for the underlying rule. 2/1 is
-    /// filtered out: the scale spans the half-open octave `[1, 2)`, so
-    /// the octave itself isn't a snappable degree (it lives on the pad
-    /// as 1/1's upper-octave repeat instead).
+    /// Memoized `simpleFractions(maxPrime:)` for the current `primeLimit`,
+    /// without 2/1 (the scale spans `[1, 2)`).
     public func snapTargets() -> [(num: Int, den: Int)] {
         if let c = snapTargetsCache { return c }
         let computed = simpleFractions(maxPrime: primeLimit).filter {
@@ -506,43 +389,34 @@ public final class PitchPadEngine: ObservableObject {
         return computed
     }
 
-    /// The outbound performance snapshot this pad writes into. On the iPad
-    /// it is the app-wide state the TarabLink paced sender serializes; on
-    /// the Mac each pad owns one, pumped synchronously into the local
-    /// `LinkIngest` (`LocalLinkPump`) — one emission path on both
-    /// platforms, no MIDI vocabulary anywhere.
+    /// The outbound snapshot this pad writes into: on the iPad the
+    /// app-wide state `TarabLink` serializes; on the Mac the pad's own,
+    /// pumped synchronously into the local `LinkIngest`.
     private let playState: OutboundPlayState
     private weak var audio: AudioEngine?
     /// Mac in-process lane (nil on iPad).
     private let localPump: LocalLinkPump?
 
-    /// The local lane's ingest (nil on iPad) — where the Mac hangs the
-    /// `.fingerAccel` control taps so local pads and audition scores
-    /// drive the dimension exactly like the wire does.
+    /// The local lane's ingest (nil on iPad) — where the Mac hangs its
+    /// `.fingerAccel` taps so local pads drive the dimension like the wire.
     public var localIngest: LinkIngest? { localPump?.ingest }
 
     /// Fired on `panic()` so the iPad owner can send the reliable PANIC
-    /// event alongside the cleared state (nil on the Mac).
+    /// event (nil on the Mac).
     public var onPanic: (() -> Void)?
 
-    /// Per-touch frequency ratio (touchId → ratio). Each finger keeps its
-    /// own pitch; `sounding.ratio` is display-only and reflects whichever
-    /// touch updated last.
+    /// Per-touch ratio; `sounding.ratio` is display-only.
     private var currentRatio: [Int: Double] = [:]
-    /// Per-touch cell-fill weights (touchId → seed-id → weight). The
-    /// published `sounding.weights` is the per-seed **max** across these, so
-    /// every active finger's cell stays lit simultaneously (polyphonic
-    /// fills, no flicker).
+    /// Per-touch cell-fill weights; `sounding.weights` is the per-seed max
+    /// across them, so every finger's cell stays lit.
     private var touchWeights: [Int: [String: Double]] = [:]
-    /// Per-touch octave shift in semitones, CAPTURED at onset — glides
-    /// replay this, never the live `octaveShiftSemis`, so a mid-hold
-    /// octave step can't jump a sounding note (0 for exempt notes).
+    /// Per-touch octave shift (semitones) CAPTURED at onset — glides replay
+    /// it, never the live `octaveShiftSemis`.
     private var touchOctaveSemis: [Int: Double] = [:]
 
     /// Mac path: the pad drives the local `AudioEngine` through its own
-    /// `OutboundPlayState` → `LinkIngest` pump — the same frame-diff path
-    /// the iPad wire uses, delivered synchronously in-process. Coexists
-    /// with a linked iPad (distinct wire-id namespaces).
+    /// `OutboundPlayState` → `LinkIngest` pump — the wire's frame-diff path,
+    /// in-process. Coexists with a linked iPad (distinct id namespaces).
     public init(audio: AudioEngine) {
         self.audio = audio
         let state = OutboundPlayState()
@@ -551,50 +425,31 @@ public final class PitchPadEngine: ObservableObject {
                                        ingest: LinkIngest(sink: audio))
     }
 
-    /// iPad path: the pad writes into the injected app-wide
-    /// `OutboundPlayState`; `TarabLink`'s 120 Hz paced sender (off-main)
-    /// serializes it to the wire. No local audio, no MIDI.
+    /// iPad path: writes into the app-wide `OutboundPlayState` that
+    /// `TarabLink` paces onto the wire. No local audio.
     public init(state: OutboundPlayState) {
         self.audio = nil
         self.playState = state
         self.localPump = nil
     }
 
-    /// The performance-expression level the Mac pads hold (the old flat
-    /// CC11) — the pads have no tilt source, so without this the String
-    /// voice idles near its fitted median anyway; kept settable for parity
-    /// with the historic behavior. 0–127; applied in `start()`.
+    /// The performance-expression level the Mac pads hold (0–127, applied
+    /// in `start()`) — the pads have no tilt source, so the axis is pinned.
     public var macExpressionLevel: UInt8 = 100
 
     public func start() {
-        // Mac only: pin the expression axis (the iPad has no audio here).
         audio?.setPerformanceExpression(Double(macExpressionLevel) / 127.0)
     }
 
     // MARK: - Touch API
 
-    /// Begin a note. `ratio` is the exact frequency ratio above the
-    /// tonic, in [1, 2] (clamped). The touchId namespace is the
-    /// caller's; `noteOff(touchId:)` must reuse the same id.
-    ///
-    /// The pitch goes into the outbound state as FULL-RESOLUTION
-    /// fractional MIDI (`tonicFractionalMidi + 12·log2(ratio)`) — no
-    /// nearest-semitone pinning, no note+bend split, no MPE channel: the
-    /// wire's state frame carries onset and exact pitch atomically.
-    /// `velocity01` — per-note ONSET STRIKE VELOCITY 0…1 (2026-08-19: the
-    /// iPad's accelerometer estimate; consumed on the Mac by the String
-    /// voice's `bow_attack_vel` velocity→sharpness law). nil = the flat
-    /// `velocity` constant, the historic behavior.
-    /// `octaveShifted: false` exempts the note from the playing-range
-    /// octave shift (the Joy-Con strum: its members carry their OWN
-    /// octaves, an anchor gesture like the drones). The captured 0
-    /// holds through any glide, like every onset-captured shift.
-    /// `exprScale` (0…1, default 1 = neutral) — the note's expression
-    /// scale (the strum chord's loudness, 2026-08-28); in-process only,
-    /// live-updatable through `setTouchExpr` while held.
-    /// `glideExempt: true` keeps the note out of the GLIDE QUEUE
-    /// (2026-08-31; the strum chord — its members land milliseconds
-    /// apart and must never chain into a glissando); in-process only.
+    /// Begin a note at `ratio` above the tonic; `noteOff` must reuse the
+    /// caller's `touchId`. The pitch enters the outbound state as
+    /// fractional MIDI (`tonicFractionalMidi + octave + 12·log2(ratio)`).
+    /// `velocity01`: onset strike velocity (nil = the flat `velocity`).
+    /// `octaveShifted: false` exempts the note from the octave shift (the
+    /// strum chord). `exprScale` (1 = neutral) and `glideExempt` are the
+    /// strum chord's in-process expression and glide-queue exemption.
     public func noteOn(touchId: Int, ratio: Double,
                        weights: [String: Double] = [:],
                        velocity01: Double? = nil,
@@ -604,8 +459,7 @@ public final class PitchPadEngine: ObservableObject {
         let r = clampRatio(ratio)
         currentRatio[touchId] = r
         touchWeights[touchId] = weights
-        // Capture the octave shift for this touch's whole life (glides
-        // replay it) — a mid-hold octave step must not move this note.
+        // Captured for the touch's whole life — glides replay it.
         let octSemis = octaveShifted ? octaveShiftSemis : 0
         touchOctaveSemis[touchId] = octSemis
         let pitchSemis = tonicFractionalMidi + octSemis + 12.0 * log2(r)
@@ -617,16 +471,14 @@ public final class PitchPadEngine: ObservableObject {
         refreshSoundingWeights()
     }
 
-    /// Live expression-scale update for a held note (the strum chord's
-    /// swell) — a change-gated write into the outbound state, delivered
-    /// like a glide (in-process; the wire carries no expression).
+    /// Live expression update for a held note (the strum chord's swell);
+    /// in-process only.
     public func setTouchExpr(touchId: Int, exprScale: Double) {
         guard currentRatio[touchId] != nil else { return }
         playState.touchExpr(touchId, exprScale)
     }
 
-    /// Recompute the published fill weights as the per-seed max across all
-    /// active touches, so concurrent fingers each light their own cell.
+    /// Published fill weights = the per-seed max across active touches.
     private func refreshSoundingWeights() {
         var merged: [String: Double] = [:]
         for w in touchWeights.values {
@@ -637,26 +489,20 @@ public final class PitchPadEngine: ObservableObject {
         if merged != sounding.weights { sounding.weights = merged }
     }
 
-    /// Glide an already-held note to a new ratio. Just a pitch write into
-    /// the outbound state (change-gated inside) — the Mac ramps to each
-    /// update within one render block (no meend smoother since
-    /// 2026-08-24: meend IS the finger's trajectory), and the wire
-    /// carries at most one fresh frame per sender tick regardless of how
-    /// fast the finger reports.
+    /// Glide a held note to a new ratio: a change-gated pitch write into
+    /// the outbound state. The Mac ramps to each update within one render
+    /// block — meend IS the finger's trajectory — and the wire carries at
+    /// most one fresh frame per sender tick.
     public func glide(touchId: Int, ratio: Double,
                       weights: [String: Double]? = nil) {
         guard currentRatio[touchId] != nil else { return }
         let r = clampRatio(ratio)
         currentRatio[touchId] = r
-        // Update this touch's fill weights independently of the pitch, so
-        // every active finger's cell stays lit (no flicker when fingers
-        // take turns updating).
         if let weights, touchWeights[touchId] != weights {
             touchWeights[touchId] = weights
             refreshSoundingWeights()
         }
-        // The ONSET-captured shift, never the live one — a glide is the
-        // same note continuing, so it stays in its birth octave.
+        // The ONSET-captured shift, never the live one.
         let octSemis = touchOctaveSemis[touchId] ?? octaveShiftSemis
         playState.touchGlide(touchId,
                              pitchSemis: tonicFractionalMidi + octSemis
@@ -678,21 +524,17 @@ public final class PitchPadEngine: ObservableObject {
         }
     }
 
-    /// Drone button `index` (0–2) press/release (Fret Pad): a held-state
-    /// bit in the outbound frame — on the Mac the local pump diffs it into
-    /// `AudioEngine.setDronePressed`, on the iPad it rides the state frame
-    /// (latest-wins, stuck-drone safe by construction).
+    /// Drone button `index` (0–2) press/release: a held-state bit in the
+    /// outbound frame (latest-wins, stuck-drone safe by construction).
     public func setDrone(_ index: Int, pressed: Bool) {
         playState.setDrone(index, pressed)
     }
 
-    // MARK: - Chord bar (2026-08-28)
+    // MARK: - Chord bar
 
-    /// THIS surface's active strum chord (the chord bar below the fret
-    /// band) — what its own cells highlight. Rides the outbound frame as
-    /// held state (TLP v12); the Mac side consumes the change edges
-    /// (`LinkIngest.onChordSelect`) into the strum. Performance state:
-    /// not persisted, cleared implicitly at launch.
+    /// This surface's active strum chord (the chord bar). Rides the
+    /// outbound frame as held state; the Mac acts on the change edges
+    /// (`LinkIngest.onChordSelect`). Not persisted.
     @Published public private(set) var chordSelection: ChordSelection?
 
     /// Set (or clear, with nil) the chord selection outright.
@@ -701,18 +543,15 @@ public final class PitchPadEngine: ObservableObject {
         playState.setChordSelection(sel)
     }
 
-    /// The tap gesture: tapping any cell of the selected DEGREE deselects
-    /// it, any other cell selects that chord. Octave-agnostic
-    /// (2026-08-30): chords are pitch-class objects — the tapped cell's
-    /// octave normalizes to 0 (the Shepard register law fixes the
-    /// sounding register; see `shepardChordNotes`).
+    /// The tap gesture: a cell of the selected DEGREE deselects, any other
+    /// selects. Octave-agnostic — the octave normalizes to 0 (the Shepard
+    /// register law in `shepardChordNotes` fixes the sounding register).
     public func toggleChordSelection(_ sel: ChordSelection) {
         setChordSelection(chordSelection?.degree == sel.degree
             ? nil : ChordSelection(degree: sel.degree, octave: 0))
     }
 
-    /// The user-facing PANIC (buttons): clears everything held AND fires
-    /// the reliable wire panic event via `onPanic`.
+    /// The user-facing PANIC: clears everything held AND fires `onPanic`.
     public func panic() {
         stopSoundingTouches()
         onPanic?()
@@ -720,8 +559,7 @@ public final class PitchPadEngine: ObservableObject {
 
     /// Internal all-off for scale/layout/preset swaps: clears held touches
     /// WITHOUT the wire event. A scale application must never broadcast a
-    /// panic — the far side would kill its own unrelated notes (the
-    /// 2026-08-14 staccato loop's second leg).
+    /// panic — the far side would kill its own unrelated notes.
     public func stopSoundingTouches() {
         playState.clearAll()
         currentRatio.removeAll()
@@ -733,18 +571,14 @@ public final class PitchPadEngine: ObservableObject {
 
     // MARK: - Scale save / load
 
-    /// Persist the current scale under `name` and mark it as the loaded
-    /// scale. Silently no-ops on a write failure (e.g. a bad name); the
-    /// in-memory scale is unaffected.
+    /// Persist the current scale under `name`; no-op on a write failure.
     public func saveScale(name: String) {
         guard (try? ScaleStore.save(scale, name: name)) != nil else { return }
         currentScaleName = name
     }
 
-    /// Replace the active scale with the saved scale `name`. Stops any
-    /// sounding touches first — the old scale's seeds are about to
-    /// vanish, so leaving a note hanging on a removed cell would strand
-    /// it. No-ops if the file can't be read.
+    /// Load the saved scale `name`, stopping sounding touches first (a
+    /// note on a vanished cell would be stranded).
     public func loadScale(name: String) {
         guard let loaded = try? ScaleStore.load(name: name) else { return }
         stopSoundingTouches()
@@ -752,22 +586,15 @@ public final class PitchPadEngine: ObservableObject {
         currentScaleName = name
     }
 
-    /// Delete a saved scale. If it was the loaded one, the in-memory
-    /// scale stays put but loses its name (becomes an unsaved working
-    /// scale).
+    /// Delete a saved scale; the in-memory scale stays but loses its name.
     public func deleteScale(name: String) {
         try? ScaleStore.delete(name: name)
         if currentScaleName == name { currentScaleName = nil }
     }
 
-    /// Apply state pushed from the Mac over SysEx (iPad sync): the scale
-    /// plus the tonic and margin performance params. Stops any sounding
-    /// touches first — the incoming scale's cells replace the old ones, so a
-    /// note left on a vanished cell would be stranded — then swaps in the new
-    /// values. Persistence is handled by the receiver (`SyncedScaleStore`).
+    /// Apply state pushed from the Mac (iPad sync). Stops sounding touches
+    /// when the cells change. Persistence is the receiver's job.
     public func applySyncedState(_ state: SyncedScaleState) {
-        // Stop sounding touches when the cells are about to change out from
-        // under a held note — either the scale or the playing surface itself.
         if state.scale != scale || state.layout != layout { stopSoundingTouches() }
         scale = state.scale
         tonicMidi = state.tonicMidi
@@ -777,11 +604,7 @@ public final class PitchPadEngine: ObservableObject {
         currentScaleName = nil
     }
 
-    /// Load a built-in scale preset (a mode / major-minor / pentatonic) into
-    /// the working scale. Shared by the Pitch Pad and Chord Pad — both read
-    /// this one `scale`. Stops any sounding touches first (the cells are
-    /// about to change) and clears the loaded-scale name (it becomes an
-    /// unsaved working scale seeded from the preset).
+    /// Load a built-in scale preset as an unsaved working scale.
     public func loadPreset(_ preset: ScalePreset) {
         stopSoundingTouches()
         scale = preset.pitchScale
@@ -797,15 +620,8 @@ public final class PitchPadEngine: ObservableObject {
 
     // MARK: - Internals
 
-    /// Clamp to a safety range. The octave-extended pad only reaches
-    /// `[2^-0.5, 2^1.5]`, but the Mac computer-keyboard player
-    /// (`KeyboardNotePlayer`) ribbons several octaves out, so the bound is
-    /// a generous ±5 octaves — wide enough to never collapse a played key
-    /// in practice while still rejecting nonsense. Safe regardless of
-    /// width: the played note is pinned to the nearest semitone of `r` and
-    /// bent from there, so even an extreme ratio stays inside
-    /// `bendRangeSemis` (the bend only ever carries the sub-semitone
-    /// residue) and lands on a valid MIDI note number.
+    /// Safety clamp, ±5 octaves: the Mac keyboard player ribbons several
+    /// octaves out; nonsense is still rejected.
     private func clampRatio(_ r: Double) -> Double {
         if !r.isFinite { return 1.0 }
         return max(1.0 / 32.0, min(32.0, r))

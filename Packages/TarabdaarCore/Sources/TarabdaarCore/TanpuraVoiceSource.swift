@@ -3,20 +3,12 @@ import AVFoundation
 import os
 import SarangiKit
 
-/// The playable TANPURA: an `AVAudioSourceNode` pulling stereo buffers from a
-/// `SarangiKit.TanpuraEngine` — the r7 modal-contact plucked drone ported from
-/// Sarangi Live (2026-08-04). The engine mounts one permanently-settled kernel
-/// slot per pitch of the centralized scale's JI degree grid (octaves ×0.25 …
-/// ×4 around the tonic — the same ratio range the drone buttons and the sync
-/// blob speak), so the drone buttons and the main-instrument frets both pluck
-/// exact scale pitches; there is no note-off (tanpura strings ring).
-///
-/// Second source on the graph (`node → symGain → mainMixerNode`, beside the
-/// String voice's node) at the artifact's native 48 kHz. Structural changes
-/// (tonic/scale) build a fresh engine OFF the render thread (`buildEngine` —
-/// the mount+settle pass is ~seconds of CPU) and publish it via `setEngine`
-/// with the same equal-power crossfade law as `StringVoiceSource`, so ringing
-/// strings decay across a swap instead of being cut.
+/// The playable TANPURA: an `AVAudioSourceNode` over a `TanpuraEngine` that
+/// mounts one settled slot per pitch of the scale's JI grid (×0.25 … ×4 around
+/// the tonic), so drone buttons and frets pluck exact scale pitches. Second
+/// source on the graph (`node → symGain → mainMixerNode`, 48 kHz). Tonic/scale
+/// changes build a fresh engine OFF the render thread (`buildEngine`) and
+/// publish it via `setEngine` with an equal-power crossfade.
 public final class TanpuraVoiceSource {
     public let node: AVAudioSourceNode
     public let modelSR: Double
@@ -24,9 +16,8 @@ public final class TanpuraVoiceSource {
     private final class State: @unchecked Sendable {
         var lock = os_unfair_lock()
         var engine: TanpuraEngine?
-        /// The engine being CROSSFADED OUT — same law as the String voice:
-        /// a fresh engine starts silent, so an abrupt swap would cut
-        /// whatever is ringing (and a tanpura is ALWAYS ringing).
+        /// The engine being crossfaded out (a fresh engine starts silent;
+        /// an abrupt swap would cut what is ringing).
         var fading: TanpuraEngine?
         var fadePos = 0
         var fadeLen = 0
@@ -35,32 +26,24 @@ public final class TanpuraVoiceSource {
         var bufR: [Double]
         var fadeL: [Double]
         var fadeR: [Double]
-        /// VOICE→TARAF tap (2026-08-19, sitar; 2026-08-21, tanpura):
-        /// when set, the render callback hands each finished block
-        /// (mono mixdown, post-crossfade) to the sink — this voice
-        /// feeds the String kernel's jt inject ring with exactly what
-        /// it radiates. Published under the state lock; the sink must
-        /// be render-thread safe (`StringVoiceSource.jtInjectWrite` is).
+        /// Voice→taraf tap: each finished block (mono mixdown,
+        /// post-crossfade) goes to the sink — the String kernel's jt
+        /// inject ring. Published under the state lock; the sink must be
+        /// render-thread safe (`StringVoiceSource.jtInjectWrite` is).
         var injectSink: ((UnsafePointer<Double>, Int) -> Void)?
-        /// Per-source taraf drive (`st_taraf` / `tp_taraf`, 2026-08-21):
-        /// scales the mono mixdown BEFORE the sink, so the sitar and the
-        /// tanpura can share the one kernel inject ring at independent
-        /// levels (the kernel-side gain is just an arm flag now). 0 =
-        /// the sink is skipped entirely — nothing is written, byte-null.
+        /// Per-source taraf drive (`st_taraf` / `tp_taraf`), applied
+        /// BEFORE the sink so sitar and tanpura share the ring at
+        /// independent levels. 0 = the sink is skipped (byte-null).
         var injectGain = 0.0
         var monoBuf: [Double]
-        /// OUTPUT LEVEL METER (2026-08-24): the node's finished output,
-        /// INTEGRATE-AND-DUMP like `BowEngine`'s bus meter (second rev —
-        /// no envelope, no smoothing): the callback accumulates the mono
-        /// mixdown's sum of squares, `outputLevel()` returns the exact
-        /// RMS since its previous call. Written by the render callback
-        /// under the state lock.
+        /// Output level meter, integrate-and-dump: the callback
+        /// accumulates the mono mixdown's sum of squares under the state
+        /// lock; `outputLevel()` returns the exact RMS since its last call.
         var meterSum = 0.0
         var meterFrames = 0
         var meterLast = 0.0
 
-        /// Fold one finished output buffer into the interval accumulator
-        /// (render thread; brief lock).
+        /// Fold one finished buffer into the interval accumulator.
         func meterOutput(outL: UnsafePointer<Float>,
                          outR: UnsafePointer<Float>, frames n: Int) {
             var s = 0.0
@@ -81,9 +64,8 @@ public final class TanpuraVoiceSource {
             monoBuf = [Double](repeating: 0, count: maxFrames)
         }
 
-        /// Mono-mix `n` finished output frames into the sink at the
-        /// source's taraf drive, chunked to the preallocated scratch
-        /// (no render-thread allocation).
+        /// Mono-mix `n` frames into the sink at the taraf drive, chunked
+        /// to the preallocated scratch (no render-thread allocation).
         func feedSink(_ sink: (UnsafePointer<Double>, Int) -> Void,
                       gain: Double,
                       outL: UnsafePointer<Float>,
@@ -151,9 +133,8 @@ public final class TanpuraVoiceSource {
     // strong refs keep swapped-out engines alive past any in-flight buffer
     private var recentEngines: [TanpuraEngine] = []
 
-    /// Output trim override (`tp_gain`) — playing state, kept here on the
-    /// long-lived side so a structural rebuild re-applies it instead of
-    /// snapping back to the artifact's fitted trim. nil = artifact value.
+    /// Output trim override (`tp_gain`): playing state, re-applied after a
+    /// structural rebuild. nil = artifact value.
     private var outGainOverride: Double?
 
     public init(sr: Double = 48000) {
@@ -189,10 +170,8 @@ public final class TanpuraVoiceSource {
         }
     }
 
-    /// RMS of the node's output (mono mixdown, output units) since the
-    /// previous call — exact interval RMS, no smoothing; the previous
-    /// reading repeats when nothing rendered in between. 0 while
-    /// unarmed/silent. Safe from any thread; poll at UI rate.
+    /// Exact RMS of the node's output (mono mixdown) since the previous
+    /// call; repeats the last reading when nothing rendered. Any thread.
     public func outputLevel() -> Double {
         os_unfair_lock_lock(&state.lock)
         defer { os_unfair_lock_unlock(&state.lock) }
@@ -231,9 +210,8 @@ public final class TanpuraVoiceSource {
         return (l, r)
     }
 
-    /// Publish a freshly-built engine (brief lock; call on main/control
-    /// thread). Passing nil silences the node. Swapped-out engines are kept
-    /// briefly so an in-flight buffer never reads a freed one.
+    /// Publish a freshly-built engine (control thread). nil silences the
+    /// node. Swapped-out engines are retained past any in-flight buffer.
     public func setEngine(_ engine: TanpuraEngine?, crossfadeMs: Double? = nil) {
         if let engine {
             recentEngines.append(engine)
@@ -262,49 +240,37 @@ public final class TanpuraVoiceSource {
         return state.engine != nil
     }
 
-    /// Install/clear the voice→taraf render tap (control thread). The
-    /// sink receives every finished output block (mono mixdown, scaled
-    /// by the inject gain) on the render thread — wire it to
-    /// `StringVoiceSource.jtInjectWrite` so this voice's radiation
-    /// charges the sarangi jt web. Both the sitar and the tanpura
-    /// instances set one; the per-source gain keeps their drives
-    /// independent on the shared kernel ring.
+    /// Install/clear the voice→taraf render tap (control thread); wire it
+    /// to `StringVoiceSource.jtInjectWrite`.
     public func setInjectSink(_ sink: ((UnsafePointer<Double>, Int) -> Void)?) {
         os_unfair_lock_lock(&state.lock)
         state.injectSink = sink
         os_unfair_lock_unlock(&state.lock)
     }
 
-    /// This voice's taraf drive (`st_taraf` / `tp_taraf`), applied to
-    /// the mono mixdown BEFORE the sink (control thread). 0 = the tap
-    /// writes nothing (byte-null); the value is playing state — it
-    /// survives engine rebuilds (the tap is per-source, not per-engine).
+    /// This voice's taraf drive (control thread). 0 = byte-null; playing
+    /// state, survives engine rebuilds.
     public func setInjectGain(_ g: Double) {
         os_unfair_lock_lock(&state.lock)
         state.injectGain = max(g, 0.0)
         os_unfair_lock_unlock(&state.lock)
     }
 
-    /// The currently-published engine (brief lock) — pluck target for the
-    /// drone buttons and the main-instrument note routing.
+    /// The currently-published engine — the pluck target.
     public func currentEngine() -> TanpuraEngine? {
         os_unfair_lock_lock(&state.lock)
         defer { os_unfair_lock_unlock(&state.lock) }
         return state.engine
     }
 
-    /// Output trim (`tp_gain`), live — plain scalar store on the running
-    /// engine (the drone-setter contract), cached across rebuilds.
+    /// Output trim (`tp_gain`), live; cached across rebuilds.
     public func setOutGain(_ g: Double) {
         outGainOverride = g
         currentEngine()?.outGain = g
     }
 
-    /// The mounted JI slot grid for a tonic + scale: every degree ratio in
-    /// octaves ×1/4 … ×4 of the tonic — the ratio range the drone buttons
-    /// (0.25 … 4.0 on the sync blob) and the fret field live in. Sorted
-    /// ascending; ~4·degrees + 1 slots (a 12-degree scale ≈ the Sarangi
-    /// Live keyboard's 49).
+    /// The mounted JI slot grid: every degree ratio in octaves ×1/4 … ×4 of
+    /// the tonic, sorted ascending (~4·degrees + 1 slots).
     public static func slotFrequencies(tonicHz: Double,
                                        scaleRatios: [Double]) -> [Double] {
         guard tonicHz > 0 else { return [] }
@@ -324,28 +290,12 @@ public final class TanpuraVoiceSource {
         return freqs
     }
 
-    /// Build the tanpura for a tonic + scale — mounts and settles one slot
-    /// per grid pitch. ~seconds of CPU: call OFF the main/audio thread and
-    /// publish via `setEngine`. nil when `tanpura_live.json` is missing.
-    /// `shapeAlign`/`shapeFocus`/`shapeSpread`/`shapeQuiet` (2026-08-05)
-    /// build the scale-shaped-overtones transform from the SAME scale
-    /// the grid mounts — all 0 (the defaults) is the physical tanpura,
-    /// and the engine build is unchanged.
-    /// `registerComp` (2026-08-15, `tp_jiva_comp`): the register
-    /// calibration — per-slot jiva thread-height targets that keep every
-    /// pitch in the low-register graze regime (level buzziness + laddered
-    /// cascade; `TanpuraTables.registerCompThreadMul`). 0 = the fitted
-    /// geometry, byte-identical build.
-    /// `cascade` (2026-08-15, `tp_cascade`): slows the higher slots'
-    /// harmonic cascade toward the 104 Hz anchor's pace — a further
-    /// pitch-graded thread lift (clamped at the fitted height) plus an
-    /// HF-sustain stretch (`TanpuraTables.cascadeThreadLift` /
-    /// `.cascadeHFT60Mul`). 0 = calibration-only build.
-    /// `artifact` (2026-08-19): which fitted instrument the engine
-    /// mounts — the tanpura (default) or the SITAR (`sitar_live.json`,
-    /// the r7 model retuned to sitar1.wav; the sitar voice is a second
-    /// TanpuraVoiceSource built with `.sitar`). nil params = missing
-    /// bundle resource.
+    /// Build the engine for a tonic + scale — seconds of CPU: call OFF the
+    /// main/audio thread, publish via `setEngine`; nil if the artifact is
+    /// missing. `shape*` = scale-shaped overtones; `registerComp`
+    /// (`tp_jiva_comp`) / `cascade` (`tp_cascade`) = per-slot thread
+    /// calibration; all 0 = the fitted instrument, byte-identical.
+    /// `artifact` selects the tanpura or the SITAR (a second source).
     public enum Artifact { case tanpura, sitar }
 
     public static func buildEngine(tonicHz: Double,
@@ -364,12 +314,9 @@ public final class TanpuraVoiceSource {
         guard let params = loaded else { return nil }
         var freqs = slotFrequencies(tonicHz: tonicHz, scaleRatios: scaleRatios)
         if artifact == .sitar {
-            // the sitar's scale-model ladder is bench-stable to
-            // ~1.5 kHz (above it the sim can't hold enough sub-Nyquist
-            // modes to resolve the contact and the string
-            // self-oscillates — a real sitar tops out ~1.4 kHz too);
-            // higher grid slots simply don't mount, and a fret above
-            // the cap finds no slot within the 60¢ pluck tolerance
+            // the sitar ladder is simulable to ~1.5 kHz (above it the
+            // contact is under-resolved and self-oscillates); higher
+            // slots do not mount, so frets above the cap find no slot
             freqs = freqs.filter { $0 <= 1500.0 }
         }
         guard !freqs.isEmpty else { return nil }

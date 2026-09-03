@@ -1,12 +1,11 @@
 import SwiftUI
 
-/// Shared scope colour scales (2026-09-02). ONE level ramp for every scope
-/// on both devices — the Mac Scope tab's sounding-string trajectories and
-/// the iPad strike scope's onset fade — so "how loud / how fresh" reads
-/// the same everywhere: **magma** (black → violet → magenta → orange →
-/// pale yellow), perceptually uniform and legible on the dark grounds the
-/// scopes use. The cyan→white ramp it replaces washed out at the top
-/// (viridis was tried for an hour the same day and swapped for magma).
+/// Shared scope colour scales. ONE level ramp for every scope on both
+/// devices — the Mac Scope tab's sounding-string trajectories and the
+/// iPad strike scope's onset fade — so "how loud / how fresh" reads the
+/// same everywhere: **magma** (black → violet → magenta → orange → pale
+/// yellow), perceptually uniform and legible on the dark grounds the
+/// scopes use.
 public enum ScopeColor {
     /// Matplotlib's magma, Matt Zucker's 6th-order polynomial fit
     /// (max error < 1/255 per channel). `t` 0…1, clamped.

@@ -1,15 +1,11 @@
 import Foundation
 
-/// The iPad-side outbound performance snapshot: the single mutable truth
-/// the paced sender serializes into PERF_STATE frames.
-///
-/// Producers (touch handlers, the 60 Hz motion tick, drone buttons) do
-/// O(1) locked writes from any thread; the sender snapshots under the same
-/// lock. Wire touch ids are assigned here from a wrapping u16 counter —
-/// callers key by their own touch token (UITouch identity, script voice
-/// index, …) and never see wire ids. `onsetSeq` is stamped from a global
-/// articulation counter so even a wrapped, reused id reads as a fresh
-/// onset on the far side.
+/// The outbound performance snapshot: the single mutable truth the paced
+/// sender serializes into PERF_STATE frames. Producers do O(1) locked
+/// writes from any thread; the sender snapshots under the same lock. Wire
+/// touch ids are assigned here — callers key by their own token and never
+/// see them; `onsetSeq` comes from a global articulation counter so a
+/// reused id still reads as a fresh onset.
 public final class OutboundPlayState {
     private let lock = NSLock()
     private struct Touch {
@@ -18,36 +14,28 @@ public final class OutboundPlayState {
         let velocity: UInt8
         var pressure: UInt8
         var pitch: Float
-        /// In-process only (the Mac strum chord's expression) — see
-        /// `TLPTouch.exprScale`. Wire frames never carry it.
+        /// In-process only — see `TLPTouch.exprScale`.
         var exprScale: Double
-        /// In-process only (the strum chord's glide-queue exemption) —
-        /// see `TLPTouch.glideExempt`. Wire frames never carry it.
+        /// In-process only — see `TLPTouch.glideExempt`.
         let glideExempt: Bool
     }
     private var touches: [(token: AnyHashable, touch: Touch)] = []
     /// Wire ids carry a per-instance namespace in the top 4 bits so two
-    /// states feeding one sink (the Mac's pitchPad + fretPad preview pads)
-    /// can never collide; the low 12 bits wrap per instance.
+    /// states feeding one sink never collide; the low 12 bits wrap.
     private let idNamespace: UInt16
     private var nextWireId: UInt16 = 0
     private var nextOnsetSeq: UInt8 = 0
     private static let namespaceCounter = NSLock()
     private static var nextNamespace: UInt16 = 0
-    /// Tilt axes, −1…+1 each (rest = 0, the app-wide tilt convention
-    /// since 2026-08-18).
+    /// Tilt axes, −1…+1 each (rest = 0).
     private var tilt: [Double] = [0, 0, 0]
     /// Raw user acceleration in g (gravity removed), for the Mac's
-    /// received-motion diagnostics. Written by the same motion tick as
-    /// the tilt; the sensor floor never repeats exactly, so this keeps
-    /// the sender dirty at the tick rate — which the tilt's own
-    /// sub-quantum jitter already did.
+    /// received-motion diagnostics.
     private var accelG: [Double] = [0, 0, 0]
     /// Strike-scale envelope, already quantized to the wire byte.
     private var strikeByte: UInt8 = 0
     private var droneMask: UInt8 = 0
-    /// The chord bar's active strum chord (TLP v12) — held state like the
-    /// drone mask; nil = none selected.
+    /// The chord bar's active strum chord (held state; nil = none).
     private var chordSelection: ChordSelection?
     private var backgrounded = false
     private var stateSeq: UInt16 = 0
@@ -82,8 +70,7 @@ public final class OutboundPlayState {
         markDirtyLockedThenNotify()
     }
 
-    /// Live expression update for a held touch (in-process only — the
-    /// wire serializes no expression; the Mac strum chord's swell).
+    /// Live expression update for a held touch (in-process only).
     public func touchExpr(_ token: AnyHashable, _ exprScale: Double) {
         lock.lock()
         guard let i = touches.firstIndex(where: { $0.token == token }),
@@ -117,11 +104,9 @@ public final class OutboundPlayState {
         markDirtyLockedThenNotify()
     }
 
-    /// value ∈ −1…+1 (rest = 0).
     /// The NEWEST sounding touch's (wire id, fractional-MIDI pitch), or
-    /// nil while nothing sounds — the `touches` array is append-ordered,
-    /// so the last entry is the newest. Display-only read (the iPad's
-    /// finger-accel scope samples it at UI rate); any thread.
+    /// nil while nothing sounds (`touches` is append-ordered). Display-only
+    /// read (the iPad's finger-accel scope); any thread.
     public func newestTouch() -> (id: UInt16, pitchSemis: Double)? {
         lock.lock()
         defer { lock.unlock() }
@@ -149,10 +134,9 @@ public final class OutboundPlayState {
         markDirtyLockedThenNotify()
     }
 
-    /// Strike-scale accelerometer envelope 0…1 (`.strike` dimension).
-    /// Gated on the WIRE BYTE, not the Double: the envelope decays
-    /// continuously at the report rate, and float-level gating would mark
-    /// the frame dirty on every tick even at rest.
+    /// Strike-scale envelope 0…1. Gated on the WIRE BYTE, not the Double:
+    /// the envelope decays continuously, and float gating would dirty the
+    /// frame every tick even at rest.
     public func setStrike(_ value: Double) {
         lock.lock()
         let b = clamp255(value)
@@ -174,8 +158,7 @@ public final class OutboundPlayState {
         markDirtyLockedThenNotify()
     }
 
-    /// The chord bar's selection (nil = none) — change-gated held state,
-    /// like the drone mask.
+    /// The chord bar's selection (nil = none), change-gated.
     public func setChordSelection(_ sel: ChordSelection?) {
         lock.lock()
         guard chordSelection != sel else { lock.unlock(); return }
@@ -190,8 +173,8 @@ public final class OutboundPlayState {
         markDirtyLockedThenNotify()
     }
 
-    /// Panic / teardown: clears everything held. (The panic EVENT is the
-    /// caller's job — this is just the state side.)
+    /// Panic / teardown: clears everything held (the panic EVENT is the
+    /// caller's job).
     public func clearAll() {
         lock.lock()
         touches.removeAll()
@@ -201,9 +184,8 @@ public final class OutboundPlayState {
 
     // MARK: sender (link queue)
 
-    /// Snapshot the current state as a wire frame, bumping stateSeq and
-    /// clearing the dirty flag. `force` = heartbeat (emit even when clean).
-    /// Returns nil when clean and not forced.
+    /// Snapshot the state as a wire frame, bumping stateSeq and clearing
+    /// the dirty flag; nil when clean unless `force` (heartbeat).
     public func snapshotFrame(timestampUs: UInt32, force: Bool = false) -> TLPPerfState? {
         lock.lock()
         defer { lock.unlock() }

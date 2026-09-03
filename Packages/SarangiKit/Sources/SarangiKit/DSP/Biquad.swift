@@ -20,7 +20,7 @@ public struct Biquad: Sendable {
         self.a1 = a1 / a0; self.a2 = a2 / a0
     }
 
-    /// TARABDAAR (2026-07-24): adopt another section's COEFFICIENTS while
+    /// TARABDAAR : adopt another section's COEFFICIENTS while
     /// keeping this one's delay state — the click-free way to retune a
     /// filter that is already running (a live parameter edit).
     public mutating func copyCoefficients(from o: Biquad) {

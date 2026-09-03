@@ -1,16 +1,12 @@
 #ifndef TANPURA_KERNEL_H
 #define TANPURA_KERNEL_H
 
-/* TANPURA live kernel (2026-08-01): the r7 tanpura model as a playable
-   slot instrument — one slot per keyboard note, mounted+settled at
-   engine build, plucked at note-on, auto-idling when silent. Physics =
-   scripts/tanpura_tool.c semantics (modal rotation, implicit grid
-   contact, x4 deep substep, contact-mediated polarization). Tables
-   from Swift (TanpuraTables, LOCKSTEP with tanpura_model.build_tables
-   via params/tanpura_live.json). All calls single-threaded except
-   tanpura_render vs pluck/damp, which only flip per-slot flags and
-   add displacement — call them from the render thread's MIDI hand-off
-   (the engine serializes). */
+/* TANPURA live kernel: one slot per mounted pitch, settled at build,
+   plucked at note-on, auto-idling when quiet. THREADING: sync path
+   (tanpura_render) — pluck/damp/bend/release/set_touch/set_drive/
+   prepluck_bend mutate slots directly, so drain them on the render
+   thread ahead of the render; pool path (tanpura_render_async) — ONLY
+   tanpura_event/tanpura_event2 (SPSC, one producer) may touch a slot. */
 
 void *tanpura_create(int nslots);
 void tanpura_free(void *ctx);
@@ -34,13 +30,13 @@ void tanpura_mount(void *ctx, int slot, int M, int J,
                    double pol_g, double pol_th, double pol_rt,
                    int ramp_n);
 
-/* build-time: settle slot onto the static wrap (n samples at the
-   heavy-damping rotation), store the equilibrium as the slot's q0 */
+/* build-time: settle the slot onto the static wrap (n internal
+   samples) and store the equilibrium as q0. Off the audio thread. */
 void tanpura_settle(void *ctx, int slot, long n);
 
-/* ---- FD continuum slots (round 20, the live hybrid): kc arrives
-   PRE-DIVIDED by MU; steps_per_out = internal FD steps per 48 kHz
-   output sample ---- */
+/* ---- FD continuum slots (not mounted by TanpuraEngine); kc arrives
+   PRE-DIVIDED by MU. set_oversample = internal steps per output
+   sample, modal slots too. ---- */
 void tanpura_set_oversample(void *ctx, int slot, int steps);
 void tanpura_mount_fd(void *ctx, int slot, int N,
                       const double *b, const double *pshape,
@@ -57,71 +53,41 @@ int tanpura_active_count(void *ctx);
 /* scope telemetry: a slot's output envelope (0 idle) — display only */
 double tanpura_slot_env(void *ctx, int slot);
 
-/* ---- live pitch bend + note-off release (Tarabdaar 2026-08-05, the
-   main-instrument glide law) ---- bend: retune a mounted modal slot
-   by `ratio` vs its mount pitch — every mode's rotation angle is
-   rescaled from the base tables (damping envelope preserved) and the
-   SAV response tables refreshed; modes bent past the output Nyquist
-   are silenced, not aliased (they re-grow from contact when bent
-   back). release: extra broadband amplitude decay at `rate` 1/s
-   (t60 = ln(1000)/rate) toward the settled wrap — the string stays
-   seated on the bone; rate 0 restores the natural ring. A pluck
-   clears the release. These two mutate directly — sync-path/
-   single-thread contract like tanpura_pluck; the pool path MUST go
-   through tanpura_event2 (applied by the dispatcher, serialized
-   with rendering). */
+/* bend: retune a mounted modal slot by `ratio` vs its mount pitch
+   (clamped 0.25..4; envelope preserved; modes past the output Nyquist
+   silenced, not aliased). release: extra broadband decay at `rate` 1/s
+   (t60 = ln(1000)/rate) toward the settled wrap; 0 = natural ring; a
+   pluck clears it. Sync-path contract; pool path = ops 1/2. */
 void tanpura_bend(void *ctx, int slot, double ratio);
 void tanpura_release(void *ctx, int slot, double rate);
-/* pluck isolation + pluck drive (Tarabdaar 2026-08-15; STRING-BANK
-   rework, same day). touch 0..1: stored per slot; at each pluck
-   above 0, the ringing string MIGRATES to a history clone — a
-   separate string with the full jawari simulation, frozen at its
-   own pitch, its ring scaled by touch (1 = survives in full) — and
-   the pluck lands on settled state (0 = legacy ride-the-ring). The
-   kernel keeps the N most recently played strings (tanpura_set_poly,
-   0..16, default 6); overflow evicts the OLDEST clone into its
-   owner's linear ghost bank (full band; spectral-split above 2*f0
-   only when the evictee shares the plucked slot, whose fresh
-   fundamental replaces it in the same instant), poly 0 skips clones
-   entirely (split-ghost handoff — no history strings). A releasing
-   (note-off) string is never resurrected into the ghost. The pluck
-   bundle sends op 6 (pre-pluck bend) rather than op 1: a pitch
-   change migrates the old string BEFORE the primary retunes; glide
-   bends (op 1) retune the primary only and never migrate. drive
-   (clamped
-   0.05..20, 1 = fitted, bit-exact): each subsequent pluck drives
-   the string drive-times harder into the jawari while the slot's
-   output gain rides 1/drive — contact engagement (mellow<->buzzy)
-   decoupled from radiated level. Modal slots only (the FD path
-   keeps its round-21 fdTouch instead). Same sync-path contract as
-   bend/release; pool path rides ops 3/4. */
+/* touch 0..1 (per slot): above 0 each pluck migrates the ringing
+   string to a history clone (frozen pitch, ring scaled by touch) and
+   lands on settled state; 0 = rides the ring. tanpura_set_poly (0..16,
+   default 6) clones stay alive; overflow evicts the OLDEST into its
+   owner's linear ghost bank; poly 0 = split-ghost handoff, no clones.
+   Pluck bundles send op 6 (pre-pluck bend) so a pitch change migrates
+   BEFORE the retune; glide bends (op 1) never migrate. drive
+   (0.05..20; 1 = fitted, bit-exact): pluck drive-times harder with
+   output gain 1/drive. Modal slots only; pool path = ops 3/4/6. */
 void tanpura_set_touch(void *ctx, int slot, double touch);
 void tanpura_set_drive(void *ctx, int slot, double drive);
 void tanpura_prepluck_bend(void *ctx, int slot, double ratio);
 /* string-bank size: live history strings before ghost eviction
    (0..16; atomic store, callable any time from any thread) */
 void tanpura_set_poly(void *ctx, int n);
-/* generalized note event, SPSC like tanpura_event: op 0 = note
-   (val = amp; < 0 damps, slot -1 damps all), op 1 = glide bend
-   (val = ratio), op 2 = release (val = rate 1/s, 0 = held),
-   op 3 = pluck touch (val 0..1), op 4 = pluck drive (val 0.05..20),
-   op 6 = pre-pluck bend (val = ratio; migrates history first) */
+/* generalized note event (SPSC): op 0 note (amp; < 0 damps, slot -1
+   all), 1 glide bend, 2 release (rate 1/s), 3 touch, 4 drive, 6 pre-pluck bend */
 void tanpura_event2(void *ctx, int slot, int op, double val);
 
-/* render n mono samples, ADDING into out (caller zeros) — the SYNC
-   path (tests/bench/serial fallback; deep budget 3) */
+/* render n mono samples, ADDING into out — the SYNC path */
 void tanpura_render(void *ctx, int n, double *out);
 
-/* ---- ASYNC one-block-late pool (the jt live pattern, 2026-08-01):
-   the audio callback never computes — it reads completed audio and
-   enqueues the next block; a dispatcher + workers render slots in
-   parallel with NO deep budget (every slot gets its full substeps —
-   the sync path's budget-degradation clicks cannot happen). Constant
-   one-block latency; overload fade-fills + counts an underrun. ---- */
+/* ---- ASYNC one-block-late pool: the callback reads completed audio
+   and enqueues the next block; dispatcher + workers render in parallel.
+   Overload fade-fills + counts an underrun. ---- */
 void tanpura_set_threads(void *ctx, int nworkers);  /* build-time only */
 int tanpura_pool_size(void *ctx);
-/* note event, MIDI-thread-safe SPSC (pool path): amp < 0 damps the
-   slot, slot -1 damps all */
+/* note event (pool path): amp < 0 damps the slot, slot -1 damps all */
 void tanpura_event(void *ctx, int slot, double amp);
 void tanpura_render_async(void *ctx, int n, double *out);
 long tanpura_underruns(void *ctx);

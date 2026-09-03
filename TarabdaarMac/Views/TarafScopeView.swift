@@ -2,7 +2,7 @@ import SarangiKit
 import TarabdaarCore
 import SwiftUI
 
-/// The **Taraf** tab (⌘9, 2026-09-02): every modal-jawari sympathetic
+/// The **Taraf** tab (⌘9): every modal-jawari sympathetic
 /// row, pitch-sorted, one strip each —
 ///
 /// - the scale label (`follow` for the melody follower, `·c` for a
@@ -10,12 +10,10 @@ import SwiftUI
 ///   quiescence gate), its Hz and its radiated level (bar + dB);
 /// - the **modal energy spectrum** — the string's energy per mode, p_k²
 ///   (the kernel's per-mode velocity envelopes squared), 16 modes on 40 dB
-///   under the row's own peak. Since 2026-09-03 the rows radiate their
-///   bridge contact force, which weighs every mode flat in these units,
-///   so this is also the row's radiated spectrum up to a constant — the
-///   jawari's upward cascade as it happens and as it is heard. (The
-///   pickup-era "radiated vs modal" pair, with its |sin(k·π·0.9)| comb
-///   overlay, went with the pickup.)
+///   under the row's own peak. The rows radiate their bridge contact
+///   force, which weighs every mode flat in these units, so this is also
+///   the row's radiated spectrum up to a constant — the jawari's upward
+///   cascade as it happens and as it is heard.
 /// - the spectral centroid (mode units, EMA-smoothed like the lane hue).
 ///
 /// Reads the same `ScopeModel` as the Scope tab (60 Hz poll of

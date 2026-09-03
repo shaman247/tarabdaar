@@ -3,32 +3,17 @@ import os.lock
 import Accelerate
 import CBowKernel
 
-/// The playable TANPURA: the r7 modal-jawari tanpura model as a live
-/// instrument, ported from Sarangi Live 2026-08-04. Every slot owns a
-/// permanently-mounted kernel string, settled onto its static wrap ONCE
-/// at build (through the kernel itself — the jt startup-ping law);
-/// `pluck` strikes the slot (velocity scales the pluck displacement),
-/// re-plucking a ringing slot re-plucks the same string. Drone plucks
-/// have no note-off (tanpura strings ring — the instrument's nature);
-/// the main-instrument path additionally drives `bend` (live retune,
-/// the fret glide) and `release` (note-off = much-faster decay toward
-/// the settled wrap; 2026-08-05).
-/// Inactive slots cost nothing; the kernel auto-idles quiet slots.
-/// Post chain: fitted body/capture EQ FIR -> trim -> light mono room.
-///
-/// TARABDAAR DIVERGENCE from the Sarangi Live original: slots mount at
-/// CALLER-SUPPLIED exact frequencies (the centralized scale's JI degree
-/// grid) instead of the fixed 12-TET keyboard range, with the artifact's
-/// per-note `pitchCents` wrap correction interpolated in log-pitch
-/// (MIDI-note) space — the curve is smooth and spans +5..+9 c, so the
-/// interpolation error is sub-cent. The retired FD-continuum path was
-/// not ported (upstream retired it by ear, round 23).
+/// The playable TANPURA: one permanently-mounted kernel string per slot,
+/// settled ONCE at build, mounted at CALLER-SUPPLIED exact Hz (the scale's
+/// JI grid) with the `pitchCents` wrap correction interpolated in note
+/// space. `pluck` strikes (no note-off for drones — tanpura strings
+/// ring); the main-instrument path adds `bend` (fret glide) and
+/// `release`. Post chain: body EQ FIR -> trim -> light mono room.
 public final class TanpuraEngine: @unchecked Sendable {
     private let ctx: UnsafeMutableRawPointer
     private let p: TanpuraParams
-    /// body EQ as a BLOCK vDSP convolution (a 513-tap per-sample Swift
-    /// FIR measured ~1x RT alone — the naive loop is not audio-thread
-    /// material). taps reversed for vDSP_convD's correlation form.
+    /// body EQ as a BLOCK vDSP convolution; taps reversed for
+    /// vDSP_convD's correlation form
     private let firTapsRev: [Double]
     private var firHist: [Double]
     private var firTmp: [Double]
@@ -36,27 +21,22 @@ public final class TanpuraEngine: @unchecked Sendable {
     private var mono: [Double]
     public var outGain: Double
 
-    /// The mounted slot pitches, in Hz, exactly as requested (sounding
-    /// pitch — the wrap-pull correction is applied inside the tables).
+    /// Mounted slot pitches (sounding Hz, exactly as requested).
     public let slotFrequencies: [Double]
     private let slotLogF: [Double]
-    /// SCOPE TELEMETRY (2026-09-01): each slot's last commanded bend
-    /// ratio (pluck retune / live bend), so the Scope tab can place a
-    /// ringing string at its SOUNDING pitch after the touch has gone.
+    /// Scope telemetry: each slot's last commanded bend ratio (places a
+    /// ringing string at its SOUNDING pitch after the touch has gone).
     private let scopeRatio = OSAllocatedUnfairLock(initialState: [Double]())
 
-    /// pending note events (sync path: audio thread drains; pool
-    /// path: producers serialize through this lock into the kernel's
-    /// SPSC event ring). op mirrors tanpura_event2: 0 = pluck,
-    /// 1 = glide bend, 2 = release rate, 3 = pluck touch,
-    /// 4 = pluck drive, 6 = pre-pluck bend.
+    /// pending note events (sync path: the audio thread drains; pool
+    /// path: producers serialize through the lock into the kernel's
+    /// SPSC ring). op = tanpura_event2's.
     private struct Ev { var slot: Int; var op: Int32; var val: Double }
     private let evLock = OSAllocatedUnfairLock(initialState: [Ev]())
     private var pooled = false
 
-    /// The wrap-pull pitch correction for an arbitrary sounding Hz:
-    /// linear interpolation of the artifact's per-12-TET-note
-    /// `pitchCents` in note space, clamped at the calibrated ends.
+    /// Wrap-pull correction for a sounding Hz: linear interpolation of
+    /// the per-12-TET-note `pitchCents` in note space, clamped.
     public static func centsCorrection(forHz f0: Double,
                                        params: TanpuraParams) -> Double {
         guard !params.pitchCents.isEmpty, f0 > 0 else { return 0 }
@@ -70,21 +50,11 @@ public final class TanpuraEngine: @unchecked Sendable {
         return params.pitchCents[i] * (1 - t) + params.pitchCents[i + 1] * t
     }
 
-    /// Build + settle one slot per requested frequency; arms the ASYNC
-    /// worker pool (workers > 1) — the callback then never computes (the
-    /// jt live law: a callback that waits on workers chirps under load,
-    /// and a budget-degraded solve clicks; one block of latency on a
-    /// plucked drone is inaudible). CALL OFF the audio thread — the
-    /// settle pass is ~seconds of CPU and the pool spawn is build-time
-    /// only.
-    /// `shaping` (2026-08-05): the scale-shaped-overtones transform,
-    /// applied per slot at table build (nil = the physical tanpura).
-    /// The slot's seed is its frequency in mHz — stable across grid
-    /// rebuilds, so `spread`'s per-string jitter is reproducible.
-    /// `threadHMul` (2026-08-15, register calibration): per-slot jiva
-    /// thread-height multiplier by sounding Hz (nil = fitted geometry).
-    /// `hfT60Mul` (same day, cascade slowing): per-slot HF-damping
-    /// stretch by sounding Hz (nil = fitted t60 law).
+    /// Build + settle one slot per frequency and arm the ASYNC pool
+    /// (workers > 1) so the callback never computes. CALL OFF the audio
+    /// thread (seconds of CPU). `shaping` = scale-shaped overtones (slot
+    /// seed = Hz in mHz, stable across rebuilds); `threadHMul` /
+    /// `hfT60Mul` = per-slot register calibration / cascade slowing.
     public init?(params: TanpuraParams, frequencies: [Double],
                  workers: Int = 8, shaping: TanpuraShaping? = nil,
                  threadHMul: ((Double) -> Double)? = nil,
@@ -116,8 +86,7 @@ public final class TanpuraEngine: @unchecked Sendable {
                 slotSeed: UInt64((f0 * 1000.0).rounded()),
                 threadHMul: threadHMul?(f0) ?? 1.0,
                 hfT60Mul: hfT60Mul?(f0) ?? 1.0)
-            // implicit array->pointer bridging (valid for the call;
-            // the kernel deep-copies every table at mount)
+            // the kernel deep-copies every table at mount
             tanpura_mount(ctx, Int32(i), Int32(t.M), Int32(t.J),
                           t.ca, t.cb, t.ca4, t.cb4, t.ca2, t.cb2,
                           t.cas, t.cbs, t.wd, t.caw, t.cbw, t.wdw,
@@ -160,31 +129,13 @@ public final class TanpuraEngine: @unchecked Sendable {
         return bestD * 1200.0 <= toleranceCents ? best : nil
     }
 
-    /// The pluck amplitude for a slot: the role's total displacement
-    /// scaled by velocity (gentle floor — a tanpura is never hammered)
-    /// and an optional caller scale (the drone-level trim).
-    /// `bendRatio` retunes the slot at the pluck (main-instrument
-    /// exact pitch: nearest slot bent to the fret's Hz) — sent as its
-    /// own event ahead of the pluck, so it also NORMALIZES a slot a
-    /// previous note left bent (the default 1.0 is a no-op kernel-side
-    /// when the slot is already unbent).
-    /// `touch` (2026-08-15; STRING-BANK rework same day): above 0,
-    /// each pluck is a SEPARATE STRING — the ringing string migrates
-    /// to a history clone (full jawari simulation at its own frozen
-    /// pitch, scaled by `touch`; 1 = rings on in full) and the pluck
-    /// lands on settled state. The kernel keeps the N most recently
-    /// played strings alive (`setPolyphony`); overflow evicts the
-    /// oldest into its owner's linear ghost bank, and polyphony 0
-    /// skips clones entirely (spectral-split ghost — the previous
-    /// behavior). 0 = legacy: the pluck rides the ringing string and
-    /// the phase lottery decides the character.
-    /// `drive` (1 = the fitted pluck, bit-exact) plucks the string
-    /// `drive`-times harder into the jawari while the slot's output
-    /// gain rides 1/drive — the mellow↔buzzy contact-engagement axis
-    /// at the calibrated radiated level (the SAV contact is a power
-    /// law, so engagement depth IS the buzz conversion). Both ride
-    /// the same event stream as the pluck, so they are
-    /// sample-synchronous with it.
+    /// Pluck: the role's displacement scaled by velocity (gentle floor)
+    /// and `scale`. `bendRatio` retunes the slot ahead of the pluck (the
+    /// fret's exact Hz; also normalizes a slot left bent). `touch` > 0
+    /// migrates the ringing string to a history clone (frozen pitch,
+    /// scaled by `touch`) so each pluck is a SEPARATE STRING; 0 = rides
+    /// the ring. `drive` (1 = fitted) plucks `drive`-times harder with
+    /// output gain 1/drive — the mellow↔buzzy axis at constant level.
     public func pluck(slot: Int, velocity: Int, scale: Double = 1.0,
                       bendRatio: Double = 1.0, touch: Double = 0.0,
                       drive: Double = 1.0) {
@@ -198,12 +149,10 @@ public final class TanpuraEngine: @unchecked Sendable {
         guard amp > 0 else { return }
         scopeRatio.withLock { if slot < $0.count { $0[slot] = bendRatio } }
         if pooled {
-            // the lock serializes producers into the kernel's SPSC ring
             evLock.withLock { _ in
                 tanpura_event2(ctx, Int32(slot), 3, touch)
                 tanpura_event2(ctx, Int32(slot), 4, drive)
-                // op 6, not op 1: a PRE-PLUCK bend — when the pitch
-                // changes, the ringing string migrates to its clone
+                // op 6: a PRE-PLUCK bend migrates the ringing string
                 // BEFORE the retune, so history keeps its own pitch
                 tanpura_event2(ctx, Int32(slot), 6, bendRatio)
                 tanpura_event2(ctx, Int32(slot), 0, amp)
@@ -218,10 +167,8 @@ public final class TanpuraEngine: @unchecked Sendable {
         }
     }
 
-    /// Live-retune a slot's ringing string: `ratio` vs its mounted
-    /// pitch (the kernel clamps to 0.25…4 and silences modes bent past
-    /// the output Nyquist). The main-instrument glide path drives this
-    /// from the MPE per-channel pitch bend.
+    /// Live-retune a ringing slot: `ratio` vs its mounted pitch (kernel
+    /// clamps 0.25…4; modes past the output Nyquist are silenced).
     public func bend(slot: Int, ratio: Double) {
         guard slot >= 0, slot < slotFrequencies.count, ratio > 0
         else { return }
@@ -238,9 +185,7 @@ public final class TanpuraEngine: @unchecked Sendable {
     }
 
     /// Note-off release: extra broadband decay at `rate` 1/s
-    /// (t60 = ln(1000)/rate) toward the settled wrap — much faster
-    /// than the natural ring, but still a decay, not a hard damp.
-    /// Rate 0 restores the natural ring; a pluck clears it.
+    /// (t60 = ln(1000)/rate) toward the wrap. 0 = natural ring.
     public func release(slot: Int, rate: Double) {
         guard slot >= 0, slot < slotFrequencies.count else { return }
         let r = max(0.0, rate)
@@ -255,11 +200,8 @@ public final class TanpuraEngine: @unchecked Sendable {
         }
     }
 
-    /// The string bank's size: how many history strings (previous
-    /// plucks, full jawari simulation each) stay alive before the
-    /// oldest is evicted to the linear ghost tier. 0 = no history
-    /// strings (evict straight to the ghost). Thread-safe, applies
-    /// immediately.
+    /// History strings kept alive before the oldest is evicted to the
+    /// ghost tier (0 = none). Thread-safe, immediate.
     public func setPolyphony(_ n: Int) {
         tanpura_set_poly(ctx, Int32(n))
     }
@@ -275,16 +217,14 @@ public final class TanpuraEngine: @unchecked Sendable {
         }
     }
 
-    /// telemetry: async underruns + divergence-guard resets (a click
-    /// hunt reads these — both should stay at their startup values)
+    /// telemetry: async underruns + divergence-guard resets
     public var underruns: Int { Int(tanpura_underruns(ctx)) }
     public var resetCount: Int { Int(tanpura_reset_count(ctx)) }
 
     public var activeStrings: Int { Int(tanpura_active_count(ctx)) }
 
-    /// SCOPE TELEMETRY (2026-09-01): every slot's sounding pitch (mounted
-    /// × last commanded bend) and output envelope (the kernel's auto-idle
-    /// meter, output units; 0 = idle). Racy display read; poll at UI rate.
+    /// Scope telemetry: every slot's sounding pitch and output envelope
+    /// (0 = idle). Racy display read; poll at UI rate.
     public func scopeSlots() -> [(hz: Double, level: Double)] {
         let ratios = scopeRatio.withLock { $0 }
         return slotFrequencies.indices.map { i in

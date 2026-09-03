@@ -46,8 +46,7 @@ final class TarafRemovalParityTests: XCTestCase {
         return u.appendingPathComponent("build/taraf_removal_ref.raw")
     }
 
-    /// The phrase lives in `BusPhrase` (shared with BusMeterTests /
-    /// TarafCapTests since 2026-09-01): two overlapping notes with
+    /// The phrase lives in `BusPhrase`: two overlapping notes with
     /// expression and a release tail, so the string, the body, the
     /// jawari web and the room all contribute to the comparison. The
     /// unmetered NEUTRAL render is cached there and rendered at most
@@ -78,7 +77,7 @@ final class TarafRemovalParityTests: XCTestCase {
     }
     /// The blessed render's SHA-256. Re-bless DELIBERATELY when the shipped
     /// sound changes (write mode: `TARABDAAR_TARAF_REF=write`), and say why
-    /// in the commit. Last bless 2026-09-03: bridge-force radiation + the
+    /// in the commit. Last bless: bridge-force radiation + the
     /// 5-block settle pre-roll.
     private static let referenceSHA256 =
         "fde438455d331f510bff81eb54cbe55a538d3052b4697db007c3f6bdd661909f"

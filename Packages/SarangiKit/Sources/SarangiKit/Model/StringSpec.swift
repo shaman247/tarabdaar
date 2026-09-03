@@ -1,46 +1,23 @@
 import Foundation
 
-// (`StringGroup` — the chromatic / scale-tuned / low-octave / upper-octave
-// choir tag — was deleted 2026-07-25: the 15-string chromatic row was removed
-// outright (its 0.40 gain sat below the jawari selection's `bow_jt_gmin`, so
-// it never sounded) and the remaining strings became ONE flat pool. The
-// TWO-SET taraf below (2026-09-02) is not that grouping revived: it is two
-// physically separate BRIDGES, each with its own jawari — the real
-// sarangi's layout.)
-
-/// Which bridge a sympathetic string sits on (2026-09-02). The real
-/// sarangi carries its tarab in two families: the CHROMATIC set — ~15
-/// strings through the main bridge, tuned semitone by semitone — and the
-/// RAGA sets on separate small bridges, tuned to the notes of the raga.
-/// Each bridge has its own jawari, so each set has its own contact
-/// physics: the raga set rides the `bow_jt_*` bridge, the chromatic set
-/// the `bow_jtc_*` one (per-row geometry + per-row contact law in the
-/// kernel). Persisted as a string; absent = `.raga` (every pre-split
-/// document is all raga strings).
+/// Which bridge a sympathetic string sits on. As on the instrument: the
+/// CHROMATIC set (~15 strings through the main bridge, tuned by semitone) and
+/// the RAGA set (side bridges, tuned to the raga). Each bridge has its own
+/// jawari: raga rows ride the `bow_jt_*` contact law, chromatic rows the
+/// `bow_jtc_*` one. Persisted as a string; absent decodes as `.raga`.
 public enum TarabSet: String, Codable, Sendable, Hashable, CaseIterable {
     case raga, chromatic
 }
 
-/// An editable / persisted sympathetic string (UI row). Carries a stable id
-/// for SwiftUI lists; `resolved(tonic:ratios:)` is the DSP-facing value the
-/// bank consumes.
+/// An editable / persisted sympathetic string (UI row). Stable id for
+/// SwiftUI lists; `resolved(tonic:scaleRatios:)` is the DSP-facing value.
 ///
-/// SCALE-DEFINED (2026-07-25): the pitch is a **scale degree + octave**, not
-/// a free ratio. `degree` indexes `InstrumentState.scaleRatios` — the ONE
-/// centralized scale, mirrored from the Pitch Pad — and `octave` shifts it
-/// by whole octaves, so a string can only ever sound a pitch of the scale
-/// and the whole bank retunes when the scale or the tonic moves. Absolute
-/// Hz exists nowhere in the document; it is minted at resolve time only.
-/// CHROMATIC strings (`set == .chromatic`, 2026-09-02) are the one
-/// exception to "a pitch of the scale": their `degree` is a SEMITONE
-/// (0…11) into the fixed JI chromatic grid (`RagaTuning.chromaticRatio`)
-/// off the same tonic — still no ratio or Hz in the document, and still
-/// a tonic move retunes them; a scale edit deliberately does NOT (the
-/// chromatic set is tuned once, whatever the raga).
-/// (The ratio-defined era — free `ratio` per string, and before it absolute
-/// `freq` — ended the same day it began; persisted documents were migrated
-/// in place, and the fitted-Hz Pilu table, which a degree can't express,
-/// was retired with the string-table law itself.)
+/// The pitch is a **scale degree + octave**: a raga string's `degree`
+/// indexes `InstrumentState.scaleRatios` (the one centralized scale), so it
+/// can only sound a pitch of the scale and retunes with the scale or tonic.
+/// A chromatic string's `degree` is a semitone (0…11) into the fixed JI grid
+/// (`RagaTuning.chromaticRatio`): a tonic move retunes it, a scale edit does
+/// not. No ratio or Hz exists in the document — Hz is minted at resolve time.
 public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
     public var id: UUID
     /// Index into the document's `scaleRatios` (0 = Sa). Clamped at resolve
@@ -48,12 +25,11 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
     public var degree: Int
     /// Whole-octave shift (the UI offers −2…+2; generation uses −1/0/+1).
     public var octave: Int
-    /// Per-string loudness — the ONE level knob. (A separate `weight`
-    /// multiplier existed briefly and was folded in 2026-07-25.)
+    /// Per-string loudness — the one level knob.
     public var gain: Double
     public var t60: Double
     public var enabled: Bool
-    /// The bridge this string sits on (2026-09-02) — see `TarabSet`.
+    /// The bridge this string sits on — see `TarabSet`.
     public var set: TarabSet
 
     public init(id: UUID = UUID(), degree: Int, octave: Int = 0,
@@ -65,9 +41,8 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
     }
 
     // Tolerant decode: `octave`, `enabled` and `set` default when absent;
-    // retired keys older documents carry (`ratio`/`freq`/`group`/`weight`/
-    // `bright`/`raga`) are simply ignored. `degree` is required —
-    // pre-degree documents were migrated in place, not decoded compatibly.
+    // retired keys (`ratio`/`freq`/`group`/`weight`/`bright`/`raga`) decode
+    // away ignored; `degree` is required.
     private enum CodingKeys: String, CodingKey { case id, degree, octave, gain, t60, enabled, set }
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -80,12 +55,10 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
         set = (try? c.decode(TarabSet.self, forKey: .set)) ?? .raga
     }
 
-    /// The string's frequency ratio vs the tonic, under a scale. A raga
-    /// string's degree clamps into the scale (an out-of-range row keeps
-    /// sounding the top degree rather than going silent or crashing after
-    /// the scale shrinks); a chromatic string reads the fixed JI chromatic
-    /// grid instead (its degree is a semitone, wrapped mod 12) and ignores
-    /// the scale entirely.
+    /// Frequency ratio vs the tonic under a scale. A raga degree clamps into
+    /// the scale (a row survives the scale shrinking by sounding the top
+    /// degree); a chromatic degree reads the fixed JI grid (mod 12) and
+    /// ignores the scale.
     public func ratio(in scaleRatios: [Double]) -> Double {
         if set == .chromatic {
             return RagaTuning.chromaticRatio(semitone: degree)
@@ -96,10 +69,9 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
         return scaleRatios[d] * pow(2.0, Double(octave))
     }
 
-    /// Absolute Hz is minted here: degree ratio × 2^octave × tonic,
-    /// quantized to MILLIHERTZ (the grid the whole pipeline shares — the
-    /// drone press path finds its jt row by exact nominal Hz, so resolve
-    /// must be deterministic to the bit).
+    /// Absolute Hz is minted here: ratio × tonic, quantized to millihertz —
+    /// the drone press path finds its jt row by exact nominal Hz, so this
+    /// must be deterministic to the bit.
     public func resolved(tonic: Double, scaleRatios: [Double]) -> ResolvedString {
         ResolvedString(freq: (ratio(in: scaleRatios) * tonic * 1000).rounded() / 1000,
                        gain: gain, t60: t60, enabled: enabled,
@@ -113,18 +85,11 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
     }
 }
 
-// (`DroneStringSpec` — the dedicated drone strings' per-slot enable/gain/t60
-// — lived here for one day, 2026-07-25. The drone buttons now reference
-// ordinary tarab rows by id: `InstrumentState.droneStringIds`.)
-
-/// The MELODY-FOLLOWER sympathetic string (2026-07-25): ONE special string
-/// whose pitch is not a scale degree — it live-retunes to the highest note
-/// being played (kernel-side, `bow_poly_jt_track_*`), so it always rings in
-/// sympathy with the melody. Configured in the Strings tab with the same
-/// Gain / t60 / On knobs as any row; it has no degree/octave and cannot be
-/// a drone-button target (it has no stable nominal Hz). Default DISABLED —
-/// off it adds no jt row and the render is byte-identical
-/// (`TarafRemovalParityTests` unchanged).
+/// The melody-follower sympathetic string: one special string whose pitch
+/// live-retunes kernel-side (`bow_poly_jt_track_*`) to the highest note
+/// being played. Same Gain / t60 / On knobs as any row; no degree/octave,
+/// and it cannot be a drone-button target (no stable nominal Hz). Default
+/// disabled = no jt row, byte-null.
 public struct FollowerSpec: Codable, Sendable, Hashable {
     public var gain: Double
     public var t60: Double
@@ -142,8 +107,8 @@ public struct ResolvedString: Sendable, Hashable {
     public var t60: Double
     /// The Strings tab's per-row on/off toggle.
     public var enabled: Bool
-    /// On the chromatic bridge (2026-09-02): the jawari builder bakes this
-    /// row with the `bow_jtc_*` geometry/contact law instead of `bow_jt_*`.
+    /// On the chromatic bridge: the jawari builder bakes this row with the
+    /// `bow_jtc_*` contact law instead of `bow_jt_*`.
     public var chromatic: Bool
     public init(freq: Double, gain: Double, t60: Double, enabled: Bool = true,
                 chromatic: Bool = false) {

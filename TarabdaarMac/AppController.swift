@@ -5,50 +5,33 @@ import Foundation
 import SarangiKit
 import TarabdaarCore
 
-/// Mac-side wiring. The Mac is a MIDI sound module that receives MPE
-/// input over USB-MIDI and owns every Mac-side knob: the sarangi model
-/// (String voice) tuning + physics, the sympathetic-string table, and
-/// the Fret Pad layout. The played voice is the sarangi **String model**
-/// (`StringVoiceSource` / `BowEngine`) — the only voice. The iPad is
-/// purely a MIDI controller; the one thing this side pushes to it is the
-/// Pitch Pad scale + Fret Pad layout, sent as SysEx over USB (see
-/// `startScaleSync`); tilts come back as a raw report the Mac interprets.
-///
-/// Architecture:
-///   `MIDIInput`  →  `AudioEngine` (String voice)  →  speakers
-///   `AppController` holds settings and pushes them into `AudioEngine`
-///   on change. No `NoteManager` on the Mac — that class is iPad-only.
+/// Mac-side wiring: owns every Mac-side knob (voice physics, tarab table,
+/// Fret Pad layout, composites, bindings), evaluates every control axis,
+/// and pushes settings into `AudioEngine`. The iPad streams TLP frames in
+/// (`MIDIInput` → `TarabLink` → `LinkIngest` → `AudioEngine`); the Mac
+/// pushes back the scale + layout (`startScaleSync`) and JOYCON_STATE.
 
 final class AppController: ObservableObject {
     let audio: AudioEngine
     let midi: MIDIEngine
     let midiIn: MIDIInput
-    /// The TarabLink host end (2026-08-14): ONE protocol over the CoreMIDI
-    /// SysEx tunnel — `midiIn` reassembles inbound TLP SysEx, `midi` sends
-    /// outbound (wired-first). Performance frames diff through `ingest`
-    /// into the engines; the legacy MIDI vocabulary is off the wire.
+    /// The TarabLink host end: `midiIn` reassembles inbound TLP SysEx,
+    /// `midi` sends outbound (wired-first); frames diff through `ingest`.
     let link = TarabLink(role: .host)
     let ingest: LinkIngest
 
-    /// Mac-side iPad simulator (Simulator tab). Owns its own
-    /// `NoteManager` + `MockMotionSource`. Constructed lazily here so
-    /// `MacMainWindow` can hand a single live instance to the view.
-    /// Public so the tab's view can grab `.simulator.noteManager` etc.
+    /// Headless iPad simulator behind the audition pipeline. Owns its own
+    /// `NoteManager` + `MockMotionSource`.
     let simulator: IPadSimulator
     let audition: AuditionRunner
-    /// Joy-Con / game-controller input (2026-08-05): a Bluetooth left
-    /// Joy-Con supplements the iPad. Wired in `start()` into the SAME
-    /// funnels the iPad's MIDI stream drives — stick → tilt evaluation,
-    /// directional buttons → drone buttons — so both inputs coexist
-    /// (last writer wins) and the iPad works with or without it.
+    /// Joy-Con / game-controller input, wired in `start()` into the same
+    /// funnels the iPad drives (control axes, drone buttons, strum).
     let joyCon = JoyConInput()
-    /// The scale/tonic model, no longer shown as its own surface — the Fret
-    /// Pad reads from it. Owns its own MPE-style MIDIEngine.
+    /// The shared scale/tonic model — the Fret Pad reads from it; the
+    /// keyboard player and the strum play through it.
     let pitchPad: PitchPadEngine
-    /// Fret Pad tab — the sole playing surface: vertical fret segments whose
-    /// x-position is their pitch, with onset-only snapping. Reuses a
-    /// `PitchPadEngine` as the MPE emitter. `pitchPad` (no longer shown) is kept
-    /// as the underlying scale/tonic model that the Fret Pad reads from.
+    /// The Fret Pad engine — the sole playing surface (fret segments whose
+    /// x-position is their pitch, onset-only snapping).
     let fretPad: PitchPadEngine
     /// Computer-keyboard note input. App-wide while enabled; plays the
     /// active scale through `pitchPad`. See `KeyboardNotePlayer`.
@@ -58,15 +41,12 @@ final class AppController: ObservableObject {
     /// by a sink in `start()`; edited live from the tab.
     @Published var fretArrangement = FretArrangement(segments: [])
 
-    /// The saved layout the working arrangement came from, for the Layout
-    /// menu's checkmark and its "Save “name”" item. `nil` = an unsaved
-    /// working layout (a fresh build from a `FretLayoutPreset`, or hand
-    /// edits since a load — the edits themselves don't clear it, same rule
-    /// as `PitchPadEngine.currentScaleName`). Not persisted.
+    /// The saved layout the working arrangement came from (Layout menu
+    /// checkmark); `nil` = unsaved. Hand edits don't clear it. Not persisted.
     @Published var fretLayoutName: String? = nil
 
-    /// Which playing surface the iPad shows. The Mac drives it; it rides the
-    /// synced SysEx state to the iPad. Persisted.
+    /// Which surface the iPad shows; rides the synced scale state. Persisted
+    /// (always forced to `.fretPad` in `init`).
     @Published var ipadLayout: PadLayout =
         PadLayout(rawValue: UserDefaults.standard
             .integer(forKey: "tarabdaar.ipadLayout")) ?? .pitchPad {
@@ -75,21 +55,18 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// Which voice the played (fret) notes drive (2026-08-04): the String
-    /// bowed voice (default) or the tanpura, which plucks the nearest scale
-    /// pitch at the exact bent onset. NOT persisted (2026-08-20) — every
-    /// launch starts on the String bowed voice; presets can still switch it.
-    /// Live tab picker.
+    /// The played voice: the String bow (default), or Tanpura / Sitar plucks
+    /// at the exact bent onset. NOT persisted — every launch starts on the
+    /// String voice; presets can switch it. Live tab picker.
     @Published var mainInstrument: AudioEngine.MainInstrument = .string {
         didSet {
             audio.setMainInstrument(mainInstrument)
         }
     }
 
-    /// Which voice the Fret Pad drone buttons drive (2026-08-04): the
-    /// tanpura (default — press = pluck, hold = re-pluck cycle, release =
-    /// ring out) or the legacy sympathetic-string jt swell. Persisted;
-    /// Strings tab toggle.
+    /// Which voice the drone buttons drive: the tanpura (default — press =
+    /// pluck, hold = re-pluck cycle, release = ring out) or the sympathetic
+    /// jt swell. Persisted; Strings tab.
     @Published var droneVoice: AudioEngine.DroneVoiceMode =
         AudioEngine.DroneVoiceMode(rawValue: UserDefaults.standard
             .string(forKey: "tarabdaar.droneVoice.v1") ?? "") ?? .tanpura {
@@ -100,12 +77,9 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// TILT CONTROL bindings (2026-07-24), Mac-owned and Mac-EVALUATED
-    /// (`applyTiltAxis`): per tilt 1/2/3 an arbitrary set of mapped
-    /// parameters with configurable endpoints, edited in the Controls
-    /// tab. Nothing syncs to the iPad — the controller streams only its
-    /// raw tilt report (`TiltAxisWire`), and edits here take effect
-    /// immediately. Persisted via the `DimensionMapping` store.
+    /// Control-axis bindings, Mac-owned and Mac-evaluated (`applyTiltAxis`):
+    /// per axis a set of targets with transfer curves, edited in the
+    /// Controls tab. Nothing syncs to the iPad. Persisted.
     @Published var tiltMapping: DimensionMapping = DimensionMapping.load() {
         didSet {
             tiltMapping.save()
@@ -113,40 +87,27 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// Raw-tilt evaluation (2026-07-24): the controller streams only its
-    /// three raw tilt values (`TiltAxisWire`); the Mac evaluates
-    /// its own tilt bindings here. Per axis: the bound targets + transfer
-    /// curves, in a MIDI-thread-readable snapshot (delivery arrives on the
-    /// CoreMIDI thread). A target is a composite parameter OR any single
-    /// registry parameter.
+    /// Per axis: the bound targets (composite or parameter) + curves,
+    /// snapshotted under `compositeLock` for the link/CoreMIDI threads.
     private var tiltEvalByAxis: [[(target: MapTarget,
                                    binding: DimensionBinding)]] =
         Array(repeating: [], count: ControlAxes.dims.count)
 
-    /// Last value seen per iPad wire axis (CoreMIDI thread only) — the
-    /// heartbeat duplicate-drop for the uncalibrated passthrough.
+    /// Last value per iPad wire axis (CoreMIDI thread only) — duplicate-drop
+    /// for the uncalibrated passthrough.
     private var lastRawArmTilt: [Double?] = [nil, nil, nil]
 
-    /// THE STRIKE→ACCELERATION BLEND (2026-08-23). The `.strike` and
-    /// `.acceleration` dimensions share ONE measurement (the PERF_STATE
-    /// strike byte); their bindings are evaluated JOINTLY in
-    /// `evaluateStrikeBlend` — per target, (1−w)·strike + w·accel with w
-    /// ramping 0→1 over the 2 s per-note window (`StrikeBlendWindow`,
-    /// newest-sounding-note rule) and an unbound side reading as the
-    /// target's default. Neither axis may be fed through `applyTiltAxis`
-    /// (double-apply). Everything below `strikeLock`: the window, the
-    /// last measurement, and the per-target change gate.
+    /// THE STRIKE→ACCELERATION BLEND. `.strike` and `.acceleration` share
+    /// ONE measurement (the PERF_STATE strike byte) and are evaluated
+    /// JOINTLY in `evaluateStrikeBlend`: per target (1−w)·strike + w·accel,
+    /// w ramping 0→1 over the per-note window (`StrikeBlendWindow`). NEVER
+    /// fed through `applyTiltAxis` (double-apply). State under `strikeLock`.
     static let strikeAxisIndex =
         ControlAxes.dims.firstIndex(of: .strike) ?? 5
     static let accelAxisIndex =
         ControlAxes.dims.firstIndex(of: .acceleration) ?? 6
-    /// THE FRET PITCH WARP (2026-08-25): the live value of the
-    /// `ctl_fret_warp` control param — the fret field's logistic
-    /// reshaping amount. Written only by the `applyParamToVoice`
-    /// interception (which hops to main), so the Parameters-tab resting
-    /// value AND a tilt/stick binding's live output both land here; read
-    /// by the Mac Fret Pad surface (field + contours) and relayed to the
-    /// iPad over JOYCON_STATE (where the pad's own field reads it).
+    /// The live `ctl_fret_warp` value, written only by the `applyParamToVoice`
+    /// interception (main); read by the Mac pad, relayed over JOYCON_STATE.
     @Published private(set) var fretFieldWarp: Double = 0
 
     private let strikeLock = NSLock()
@@ -154,29 +115,18 @@ final class AppController: ObservableObject {
     private var strikeMeasure = 0.0        // last wire value 0…1
     private var lastBlendOut: [MapTarget: Double] = [:]
     /// 30 Hz re-evaluation while strike/accel bindings exist: the WEIGHT
-    /// keeps moving through the note window even when the measurement is
-    /// still (the wire is change-gated, so measurement events alone would
-    /// freeze the blend mid-slide).
+    /// moves through the note window even when the measurement is still.
     private var strikeTimer: DispatchSourceTimer?
 
-    /// THE FINGER-ACCEL DIMENSION (2026-08-24). `.fingerAccel` is the
-    /// playing finger's pitch acceleration (−1…+1, `FingerAccelTracker`
-    /// — the shared law the iPad's toolbar scope also renders), fed from
-    /// the ingest touch taps (wire AND the local pads/auditions,
-    /// namespaced so their u16 ids can't collide) under the
-    /// newest-sounding-touch rule, plus a 30 Hz decay tick while bound
-    /// (frames are change-gated, so a finger coming to REST would
-    /// otherwise freeze the value at its last reading). A plain bipolar
-    /// axis: applies through `applyTiltAxis` like a tilt — no blend.
+    /// THE FINGER-ACCEL DIMENSION: the newest sounding finger's pitch
+    /// acceleration (−1…+1, `FingerAccelTracker`), fed from the ingest touch
+    /// taps (wire + local lanes) plus a 30 Hz decay tick while bound (frames
+    /// are change-gated). A plain bipolar axis via `applyTiltAxis`.
     static let fingerAxisIndex =
         ControlAxes.dims.firstIndex(of: .fingerAccel) ?? 7
-    /// THE JOY-CON WRIST + ACCELERATION AXES (2026-09-02). Wrist ↕/↔/⟲
-    /// come from `JoyConInput.wristCal` (the Joy-Con's fused attitude
-    /// through its own guided calibration) as plain bipolar axes; Joy-Con
-    /// Accel is the gravity-removed acceleration through the strike
-    /// law's envelope, 0…1 — UNIPOLAR, so it maps onto the axis' −1…+1
-    /// as `2·level − 1` and the binding curve reads rest at x 0 (the
-    /// `.acceleration` convention).
+    /// THE JOY-CON WRIST + ACCELERATION AXES. Wrist ↕/↔/⟲ from
+    /// `JoyConInput.wristCal`, bipolar; Joy-Con Accel is UNIPOLAR 0…1,
+    /// mapped onto the axis as `2·level − 1` so the curve reads rest at x 0.
     static let wristAxisIndices = (
         ControlAxes.dims.firstIndex(of: .tilt4) ?? 8,
         ControlAxes.dims.firstIndex(of: .wrist2) ?? 9,
@@ -191,12 +141,8 @@ final class AppController: ObservableObject {
     private var fingerActive = false
     private var fingerTimer: DispatchSourceTimer?
 
-    /// SCOPE (2026-09-01): every touch currently DOWN with its latest
-    /// finger pitch — both lanes (wire + the Mac pads/keyboard/auditions),
-    /// oldest first. Read straight from the finger registry above, which
-    /// tracks touches whether or not the `.fingerAccel` axis is bound; it
-    /// is the finger's truth ABOVE the glide queue, so a parked or queued
-    /// finger shows here even while the voice sounds elsewhere.
+    /// Every touch currently DOWN with its latest finger pitch, oldest first
+    /// — the finger's truth ABOVE the glide queue (parked fingers included).
     func currentTouches() -> [(id: Int, pitchSemis: Double)] {
         fingerLock.lock()
         defer { fingerLock.unlock() }
@@ -222,9 +168,8 @@ final class AppController: ObservableObject {
         if isNewest { fingerEvaluate() }
     }
 
-    /// Sample the tracker (touch events + the 30 Hz tick) and drive the
-    /// axis on change. Feeding the SAME pitch again decays the tracker,
-    /// so the tick alone relaxes a resting finger to 0.
+    /// Sample the tracker and drive the axis on change. Re-feeding the
+    /// same pitch decays it, so the tick alone relaxes a rest finger to 0.
     private func fingerEvaluate() {
         fingerLock.lock()
         guard fingerActive else { fingerLock.unlock(); return }
@@ -266,17 +211,16 @@ final class AppController: ObservableObject {
         compositeLock.lock()
         tiltEvalByAxis = byAxis
         compositeLock.unlock()
-        // Strike/accel blend: forget the change gate (an edit must
-        // re-apply even if the value lands where it was) and run the
-        // 30 Hz weight timer only while the pair has bindings.
+        // Strike/accel blend: clear the change gate (an edit must re-apply)
+        // and run the weight timer only while the pair has bindings.
         let strikeActive = !(byAxis[Self.strikeAxisIndex].isEmpty
                              && byAxis[Self.accelAxisIndex].isEmpty)
         strikeLock.lock()
         lastBlendOut.removeAll()
         strikeLock.unlock()
         updateStrikeTimer(active: strikeActive)
-        // Finger-accel axis: track/tick only while it has bindings; a
-        // fresh binding starts from a clean tracker (no stale spike).
+        // Finger-accel: track/tick only while bound; a fresh binding starts
+        // from a clean tracker.
         let fingerBound = !byAxis[Self.fingerAxisIndex].isEmpty
         fingerLock.lock()
         if fingerBound != fingerActive {
@@ -303,16 +247,9 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// Evaluate the Strike/Acceleration pair against the shared
-    /// measurement: for every target bound on EITHER dimension, output =
-    /// (1−w)·strikeOut + w·accelOut — a side without a binding evaluates
-    /// to the target's DEFAULT (registry default for a parameter, 0 =
-    /// rest for a composite), which is what turns "expression [0, 1] on
-    /// Strike, unbound on Acceleration (default 0.4)" into the
-    /// interpolated range [0.2, 0.7] at w = 0.5. Change-gated per target
-    /// so the always-on timer applies nothing once the blend settles.
-    /// Runs on the link thread (measurement/gate events) and the blend
-    /// timer (weight motion); downstream applies are MIDI-thread-safe.
+    /// Evaluate the pair: for every target bound on EITHER dimension,
+    /// (1−w)·strikeOut + w·accelOut, an unbound side reading the target's
+    /// DEFAULT. Change-gated per target. Link thread + blend timer.
     private func evaluateStrikeBlend() {
         compositeLock.lock()
         let sBind = tiltEvalByAxis[Self.strikeAxisIndex]
@@ -359,21 +296,8 @@ final class AppController: ObservableObject {
         queueRebuildValues(rebuild)
     }
 
-    /// Apply one control-axis value (axis 0…5, value −1…+1 with rest 0 —
-    /// the app-wide tilt convention since 2026-08-18): evaluate each
-    /// bound target's transfer curve in the target's native units and
-    /// drive it — a composite through `applyComposite`, a single parameter
-    /// through the unified apply. The persisted curves keep their 0…1
-    /// x-domain (axis −1…+1 ↔ x 0…1), so saved bindings needed no
-    /// migration. Called on the MIDI thread (all
-    /// downstream paths are thread-safe).
-    /// Relay the Joy-Con-side axis values to the iPad's toolbar squares —
-    /// the Mac's latest-wins JOYCON_STATE frame. The link paces and
-    /// coalesces (at most one fresh frame per tick, 250 ms heartbeat), so
-    /// the old 20 Hz cap and the force-resend-on-edges dance are gone: the
-    /// `connected` bit rides EVERY frame and the heartbeat guarantees its
-    /// edges arrive. `force` still skips pacing for the connect edges and
-    /// the state push (acting as state, not display).
+    /// Relay the axis values to the iPad as the latest-wins JOYCON_STATE
+    /// frame (link-paced); `force` skips pacing for the STATE fields.
     private func sendJoyConDisplay(force: Bool = false) {
         let s = lastStickAxes
         strikeLock.lock()
@@ -396,13 +320,9 @@ final class AppController: ObservableObject {
             octaveShift: pitchPad.octaveShift), force: force)
     }
 
-    /// Joy-Con dpad ←/→ (2026-08-27): step the playing range down/up one
-    /// whole octave, clamped ±3 (`PitchPadEngine.octaveShiftRange`). The
-    /// shift lives in the shared pad engine — the ONE outbound-pitch
-    /// point on both platforms — and the iPad learns it through the
-    /// JOYCON_STATE `octave` byte (TLP v11), forced like the connect
-    /// edges: it is state, not display, so it must beat the pacing.
-    /// Main thread (the Joy-Con handlers land there).
+    /// Dpad ←/→: step the playing range one octave (clamped). The shift
+    /// lives in the shared pad engine — the ONE outbound-pitch point — and
+    /// reaches the iPad as the forced JOYCON_STATE `octave` byte. Main thread.
     private func shiftOctave(_ delta: Int) {
         let next = min(max(pitchPad.octaveShift + delta,
                            PitchPadEngine.octaveShiftRange.lowerBound),
@@ -412,11 +332,8 @@ final class AppController: ObservableObject {
         sendJoyConDisplay(force: true)
     }
 
-    /// The iPad raw-tilt funnel. With an arm calibration, the solve
-    /// consumes the report and drives axes 0–2 (rest = 0, extremes ±1);
-    /// without one, the raw axes pass straight through, uncentered. The duplicate-drop
-    /// guards the in-process CC path (LinkIngest change-gates the wire
-    /// path already; a second gate is harmless).
+    /// The iPad raw-tilt funnel: an arm calibration consumes the report and
+    /// drives axes 0–2; otherwise the raw axes pass through, duplicate-dropped.
     private func handleRawTilt(_ axis: Int, _ value: Double) {
         if !joyCon.feedArmTilt(axis, value) {
             if axis >= 0, axis < lastRawArmTilt.count,
@@ -427,6 +344,9 @@ final class AppController: ObservableObject {
         }
     }
 
+    /// Apply one control-axis value (−1…+1, rest 0 ↔ curve x 0…1): drive each
+    /// bound target in native units — a composite via `applyComposite`, a
+    /// parameter via the unified apply. Off-main; downstream is thread-safe.
     private func applyTiltAxis(_ axis: Int, _ value: Double) {
         guard axis >= 0, axis < ControlAxes.dims.count else { return }
         compositeLock.lock()
@@ -448,12 +368,8 @@ final class AppController: ObservableObject {
         queueRebuildValues(rebuild)
     }
 
-    /// COMPOSITE PARAMETERS (2026-07-24): named 0…1 controls built from
-    /// BASE parameters (the Sarangi-tab physics scalars + the runtime
-    /// pseudo-keys) — each member sweeps its own lo→hi range as the
-    /// composite goes 0→1. Edited in the Controls tab; tilts bind to them
-    /// by name. Ships with Taraf Purity / Taraf Decay / Tone Tilt as
-    /// editable defaults. Persisted as JSON.
+    /// COMPOSITE PARAMETERS: named 0…1 controls whose members each sweep
+    /// their own lo→hi range. Controls tab; axes bind by slot. Persisted.
     @Published var composites: [CompositeParam] = AppController.loadComposites() {
         didSet {
             AppController.saveComposites(composites)
@@ -477,23 +393,17 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// MIDI-thread-readable snapshot of the composite member sets, keyed
-    /// by slot CC (the delivery from `AudioEngine.onCompositeCC` arrives
-    /// on the CoreMIDI thread).
+    /// Off-main-readable snapshot of the composite member sets, keyed by
+    /// slot CC.
     private let compositeLock = NSLock()
     private var compositeMembersByCC: [UInt8: [CompositeMember]] = [:]
     /// Rebuild-path member values pending a (debounced) main-thread apply.
     private var pendingRebuildMembers: [String: Double] = [:]
     private var rebuildFlushScheduled = false
 
-    /// RESTING PARAMETER VALUES (2026-07-24 unification) for every `.live`
-    /// and `.hybrid` registry parameter — the ones whose value does NOT
-    /// live in the `bowed_string.json` override dict (`.rebuild`
-    /// parameters are stored by `StringParamStore`). Edited in the
-    /// Parameters tab, applied instantly to the String voice. Composites
-    /// and direct tilt bindings modulate ON TOP of these; a parameter
-    /// nothing is driving sits at its resting value. Persisted as JSON
-    /// (key inherited from the old control-defaults dict).
+    /// RESTING VALUES for every `.live`/`.hybrid` parameter (`.rebuild` ones
+    /// live in `StringParamStore`). Parameters tab; composites and bindings
+    /// modulate ON TOP of these. Persisted as JSON.
     @Published var paramValues: [String: Double] = AppController.loadParamValues() {
         didSet {
             AppController.saveParamValues(paramValues)
@@ -507,12 +417,8 @@ final class AppController: ObservableObject {
         var d: [String: Double] = [:]
         if let data = UserDefaults.standard.data(forKey: paramValuesKey),
            let saved = try? JSONDecoder().decode([String: Double].self, from: data) {
-            // Only keys the registry still knows. The pre-unification
-            // scaler keys (`bow_jaw_gain`, `bow_vibrato`) drop out here —
-            // `bow_vib_cents` owns the vibrato one now, its resting value
-            // coming from `restFraction × headroom` — and so do the
-            // sympathetic-web keys (`bow_taraf_*`/`bow_open_*`) left in a
-            // profile saved before the web was deleted.
+            // Only non-rebuild keys the registry still knows; retired keys
+            // in a saved profile drop out here.
             for (k, v) in saved where ParamRegistry.spec(k)?.apply != .rebuild {
                 if ParamRegistry.spec(k) != nil { d[k] = v }
             }
@@ -528,15 +434,12 @@ final class AppController: ObservableObject {
 
     // MARK: - Unified parameter access (Parameters tab / composites / tilts)
 
-    /// The build-time headroom of a `.hybrid` parameter: the value its
-    /// tables were built with (override, else artifact, else the authored
-    /// default). Cached under `compositeLock` so the MIDI thread can read
-    /// it without touching the `@Published` store.
+    /// A `.hybrid` parameter's build-time headroom (override, else artifact,
+    /// else default), cached under `compositeLock` for off-main reads.
     private var hybridHeadroom: [String: Double] = [:]
 
-    /// Re-read the headroom cache. `values` defaults to the store's current
-    /// dict; pass one explicitly from a `@Published` sink (which fires
-    /// before the store's own property is updated).
+    /// Re-read the headroom cache. Pass `values` from a `@Published` sink
+    /// (which fires before the store's own property updates).
     private func refreshHybridHeadroom(from values: [String: Double]? = nil) {
         let v = values ?? stringParams.values
         var h: [String: Double] = [:]
@@ -556,10 +459,9 @@ final class AppController: ObservableObject {
         return h ?? ParamRegistry.spec(key)?.def ?? 0
     }
 
-    /// The resting value of any parameter, in native units: `.rebuild`
-    /// parameters read the physics store (artifact + overrides), `.live`
-    /// and `.hybrid` read `paramValues` — a hybrid with no stored value
-    /// rests at `restFraction × headroom` (full fitted buzz, no vibrato).
+    /// The resting value of any parameter, native units: `.rebuild` reads
+    /// the physics store, `.live`/`.hybrid` read `paramValues` — a hybrid
+    /// with no stored value rests at `restFraction × headroom`.
     func paramValue(_ key: String) -> Double {
         guard let spec = ParamRegistry.spec(key) else { return 0 }
         switch spec.apply {
@@ -597,8 +499,8 @@ final class AppController: ObservableObject {
         case .live:
             paramValues[key] = value           // didSet applies
         case .hybrid:
-            // Above the built headroom the build scalar has to move (that
-            // rebuilds); at or below it the kernel's scaler covers it.
+            // Above the built headroom the build scalar must move (rebuild);
+            // at or below it the kernel's scaler covers it.
             if value > headroom(key) + 1e-12 {
                 stringParams.set(key, value)   // raises the headroom
                 refreshHybridHeadroom()
@@ -616,11 +518,8 @@ final class AppController: ObservableObject {
         case .live:
             paramValues.removeValue(forKey: key)
         case .hybrid:
-            // Drop any RAISED headroom first, then the resting value —
-            // back to `restFraction × artifact`. Only touch the physics
-            // store if the headroom actually moved: resetting a hybrid
-            // that never went above its built value (the common case —
-            // double-clicking "vibrato depth") must not cost a rebuild.
+            // Drop a RAISED headroom first — but only touch the physics store
+            // if it actually moved, so a plain reset costs no rebuild.
             if stringParams.values[key] != stringParams.artifactValue(key) {
                 stringParams.reset(key)
                 refreshHybridHeadroom()
@@ -629,37 +528,29 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// Reset every parameter to the shipped default: clears the physics
-    /// overrides (the Sarangi Live artifact) and every resting value.
+    /// Reset every parameter: clears the physics overrides and every
+    /// resting value.
     func resetAllParams() {
         stringParams.resetToDefault()
         refreshHybridHeadroom()
         paramValues.removeAll()
     }
 
-    /// Push every `.live`/`.hybrid` resting value to the String voice.
-    /// Called at startup, after a Parameters-tab edit, and after a rebuild
-    /// that could have moved a hybrid's headroom. (Composites and tilts
-    /// re-assert their own values on the next event, so this is the
-    /// baseline.)
+    /// Push every `.live`/`.hybrid` resting value to the voice — the
+    /// baseline composites and bindings modulate on top of.
     func applyRestingParams() {
         for spec in ParamRegistry.storedKeys {
             _ = applyParamToVoice(spec.key, paramValue(spec.key))
         }
     }
 
-    /// THE unified apply: push `value` (native units) for `key` into the
-    /// voice. Returns nil when it took effect immediately, or the value
-    /// the caller must funnel through the debounced rebuild path (a
-    /// `.rebuild` parameter, or a `.hybrid` pushed above its headroom).
-    /// Thread-safe — callable from the MIDI thread.
+    /// THE unified apply (thread-safe). Returns nil when the value took
+    /// effect, else the value to funnel through the debounced rebuild path.
     @discardableResult
     func applyParamToVoice(_ key: String, _ value: Double) -> Double? {
         guard let spec = ParamRegistry.spec(key) else { return nil }
-        // Control-layer key: the strike→acceleration blend window — not a
-        // voice parameter. Updates the window, forces a blend
-        // re-evaluation (the change gate clears), and relays the new
-        // value to the iPad's scope fade over JOYCON_STATE.
+        // Control-layer key: the strike→acceleration blend window. Updates
+        // the window, forces a blend re-evaluation, relays to the iPad.
         if key == "ctl_strike_window" {
             strikeLock.lock()
             strikeWindow.windowS = max(value, 0.05)
@@ -670,11 +561,8 @@ final class AppController: ObservableObject {
             }
             return nil
         }
-        // Control-layer keys: the controller strum — the chord's
-        // expression (pushed live to the held notes so a bound stick
-        // swells the ringing chord) and the accel-trigger threshold
-        // (0–127 strike-byte units; ≥127 = off). Consumed by the strum
-        // machinery, not the voice.
+        // Control-layer keys: the strum chord's expression (pushed live to
+        // the held notes) and the accel-trigger threshold (0–127; ≥127 = off).
         if key == "ctl_strum_expr" {
             let v = min(max(value, 0), 1)
             strumExpr = v
@@ -691,19 +579,13 @@ final class AppController: ObservableObject {
             strumThresh01 = value >= 126.5 ? .infinity : value / 127.0
             return nil
         }
-        // Control-layer keys: the GLIDE QUEUE (2026-08-31) — queued
-        // glissandi. Consumed by the sequencer in front of the voice
-        // routing, not the voice itself.
+        // Control-layer keys: the glide queue's sequencer.
         if key.hasPrefix("ctl_glide_") {
             audio.glideQueue.setControl(key, value)
             return nil
         }
-        // Control-layer key: the fret pitch warp — pad geometry, not a
-        // voice parameter. Publishes the live value for the Mac surface
-        // and relays it to the iPad's field over JOYCON_STATE (paced +
-        // coalesced by the link, so a stick binding at input rate costs
-        // at most one frame per link tick). The GLIDE QUEUE shares the
-        // value: its trajectories curve linear → logistic with it.
+        // Control-layer key: the fret pitch warp — published for the Mac pad,
+        // relayed to the iPad (link-paced), shapes the glide queue.
         if key == "ctl_fret_warp" {
             let v = min(max(value, 0), 1)
             audio.glideQueue.setWarp(v)
@@ -736,13 +618,8 @@ final class AppController: ObservableObject {
     // jt overload watchdog (see start())
     private var jtStatsTimer: Timer?
 
-    /// VOLUME READOUT relay (2026-08-24): 60 Hz poll of the radiated
-    /// voice/taraf levels (`AudioEngine.volumeLevels` — integrate-and-
-    /// dump, so each poll reads the exact RMS of its own ~16.7 ms slice;
-    /// this timer is the ONE poller that owns the dump) → the
-    /// JOYCON_STATE vol bytes (TLP v9) for the iPad toolbar's volume
-    /// scope. Change-gated on the encoded bytes (here AND in the link),
-    /// so a silent instrument costs one poll and no wire traffic.
+    /// VOLUME READOUT relay: 60 Hz poll of `AudioEngine.volumeLevels`
+    /// (integrate-and-dump — the ONE poller) → JOYCON_STATE, change-gated.
     private var volMeterTimer: DispatchSourceTimer?
     private var lastVolBytes: (UInt8, UInt8) = (0, 0)  // timer queue only
 
@@ -765,62 +642,32 @@ final class AppController: ObservableObject {
 
     // MARK: - Controller strum (Joy-Con L)
 
-    /// CONTROLLER STRUM (reworked 2026-08-28 to a HELD CHORD, main queue
-    /// only): pressing L sounds ALL the configured strum strings
-    /// (`InstrumentState.strumStringIds`, Strings tab) at once as
-    /// ordinary NOTES IN THE MAIN VOICE — through the shared `pitchPad`
-    /// engine, the same in-process touch path the Mac pad and the
-    /// keyboard player use. The notes therefore sound on whichever main
-    /// instrument is selected (String bow / Tanpura / Sitar plucks),
-    /// allocate fresh strings under the normal laws, charge the taraf
-    /// like played notes, and carry a firm strike velocity for the
-    /// `bow_attack_vel` articulation law. The chord SUSTAINS while the
-    /// button is held and note-offs on release — no sweep, no fixed
-    /// gate (the same-day staggered-staccato version and its
-    /// `ctl_strum_stagger`/`ctl_strum_gate` knobs are gone). Touch ids
-    /// are GENERATION-scoped so a re-press retriggers through fresh ids,
-    /// and a press always closes any chord still held (a lost release
-    /// edge must never leak a ringing note).
-    ///
-    /// Two triggers hold the chord (2026-08-28): the L button
-    /// (`strumLHeld`) and the ACCEL TRIGGER (`strumAccelHeld` — the
-    /// iPad's strike envelope crossing `ctl_strum_thresh`); the chord
-    /// releases only when neither holds it. `ctl_strum_expr` is the
-    /// chord's EXPRESSION (Joy-Con stick Y by default): applied at the
-    /// strike and pushed live to the held notes so the ringing chord
-    /// swells with the stick.
-    /// THE CHORD BAR (2026-08-28): the strip below the Fret Pad's band
-    /// offers a derived 3-tone chord per fret (`scaleChords` — see
-    /// ChordBar.swift); the ACTIVE selection is what the strum plays,
-    /// falling back to the Strings tab's configured set when nothing is
-    /// selected — and a selection change lands IMMEDIATELY: a chord
-    /// ringing at the edge retunes in place (`retuneStrumChord`).
-    /// Fed from BOTH surfaces through the same edge path: iPad
-    /// taps ride the PERF_STATE chord bytes (TLP v12) into
-    /// `ingest.onChordSelect`, Mac taps go `tapChord` → the shared
-    /// `pitchPad` → the local pump → `localIngest.onChordSelect` — so
-    /// this published value is always what the next strum will sound.
-    /// Performance state, never persisted.
+    /// CONTROLLER STRUM (main queue only): a HELD CHORD sounded as ordinary
+    /// notes in the MAIN voice through the shared `pitchPad` engine (fresh
+    /// strings, taraf charge, firm strike velocity). Held by the L button
+    /// (`strumLHeld`) and/or the ACCEL TRIGGER (`strumAccelHeld` — the strike
+    /// envelope crossing `ctl_strum_thresh`); a press always closes any
+    /// chord still held; ids are GENERATION-scoped so a re-press retriggers.
+    /// THE CHORD BAR's ACTIVE selection (iPad taps via the PERF_STATE chord
+    /// bytes, Mac taps via `tapChord` → the local pump) is what the strum
+    /// plays, else the Strings tab's configured set; a change while ringing
+    /// retunes in place. Performance state, never persisted.
     @Published var strumChord: ChordSelection?
 
     private var strumGen = 0
-    /// The ringing chord's touches with their Shepard octave-copy weights
-    /// (weight 1.0 for the configured fallback set) — each note's live
-    /// expression is `strumExpr × weight`.
+    /// The ringing chord's touches + Shepard weights (1.0 for the configured
+    /// set); each note's live expression is `strumExpr × weight`.
     private var strumHeld: [(id: Int, weight: Double)] = []
     private var strumLHeld = false
     private var strumAccelHeld = false
     private var strumExpr = 1.0                 // ctl_strum_expr
-    /// `ctl_strum_thresh` mapped to the 0…1 strike domain; ≥127 = off
-    /// (.infinity — never crossed, and an armed hold releases on the
-    /// next strike event since every value sits below ∞).
+    /// `ctl_strum_thresh` in the 0…1 strike domain; ≥127 = off (.infinity).
     private var strumThresh01 = Double.infinity
-    /// Accel-trigger retrigger cooldown deadline (systemUptime): armed
-    /// for 100 ms at each accel release so a jittery envelope can't
-    /// re-strike instantly. Main-queue only. The L button ignores it.
+    /// Accel-trigger cooldown deadline (systemUptime): 100 ms after each
+    /// accel release so a jittery envelope can't re-strike. Main-queue only.
     private var strumAccelCooldownUntil: TimeInterval = 0
-    /// Distinct touchId namespace on the shared engine, far from the
-    /// pad's mouse counter and the keyboard player's 1_000_000 base.
+    /// Distinct touchId namespace on the shared engine (the keyboard player
+    /// uses 1_000_000).
     private static let strumTouchBase = 2_000_000
 
     func strum(pressed: Bool) {
@@ -832,23 +679,16 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// The Mac chord bar's tap gesture: toggles against the ACTIVE chord
-    /// (whichever surface set it), routed through the shared engine so
-    /// the same edge path updates `strumChord`. Octave-agnostic
-    /// (2026-08-30): compared and stored by DEGREE alone (octave 0 —
-    /// tapping any octave's cell of the selected degree deselects).
+    /// The Mac chord bar's tap: toggles against the ACTIVE chord through
+    /// the shared engine's edge path. Octave-agnostic (stored as octave 0).
     func tapChord(_ sel: ChordSelection) {
         pitchPad.setChordSelection(strumChord?.degree == sel.degree
             ? nil : ChordSelection(degree: sel.degree, octave: 0))
     }
 
-    /// What the next strum sounds, as (ratio, weight) pairs: the active
-    /// chord-bar chord under the SHEPARD REGISTER LAW (2026-08-30,
-    /// `shepardChordNotes` — pitch-class chord centered in the octave
-    /// below the tonic, octave copies raised-cosine weighted so a VII
-    /// chord sits no higher than a I chord and any octave's cell sounds
-    /// identically), else the configured strum set at weight 1. A
-    /// selection dangling past a scale shrink falls back silently.
+    /// What the next strum sounds, as (ratio, weight): the active chord under
+    /// the SHEPARD REGISTER LAW (`shepardChordNotes` — centered in the octave
+    /// below the tonic, raised-cosine weights), else the configured set at 1.
     private func strumNotes() -> [(ratio: Double, weight: Double)] {
         if let sel = strumChord {
             let degs = scaleDegrees(from: pitchPad.scale)
@@ -867,11 +707,8 @@ final class AppController: ObservableObject {
         let gen = strumGen
         for (i, note) in strumNotes().enumerated() {
             let touch = Self.strumTouchBase + (gen % 1024) * 64 + i
-            // The strum is a fixed-register anchor (its members carry
-            // their own octaves, like the drones) — exempt from the
-            // playing-range octave shift, and from the glide queue (the
-            // chord's near-simultaneous onsets must never chain into a
-            // glissando).
+            // A fixed-register anchor: exempt from the octave shift and from
+            // the glide queue (near-simultaneous onsets must not chain).
             pitchPad.noteOn(touchId: touch, ratio: note.ratio,
                             velocity01: 0.9, octaveShifted: false,
                             exprScale: strumExpr * note.weight,
@@ -885,15 +722,9 @@ final class AppController: ObservableObject {
         strumHeld.removeAll()
     }
 
-    /// A chord-selection change while the chord is RINGING switches the
-    /// held notes in place (2026-08-29): members glide to the new chord's
-    /// pitches (one render block on the bow, a kernel-side retune on the
-    /// plucked mains — no new attack) and take their new Shepard weights
-    /// live, a shrinking chord note-offs the surplus, a growing one
-    /// strikes the extra members fresh. Ids stay index-deterministic
-    /// within the generation, so a shrink→grow within one hold reuses
-    /// released ids safely (a touchOn on a reused token is a retrigger by
-    /// onsetSeq).
+    /// A selection change while RINGING retunes the held notes in place (no
+    /// new attack); a shrinking chord note-offs the surplus, a growing one
+    /// strikes the extra members. Ids are index-deterministic per generation.
     private func retuneStrumChord() {
         guard !strumHeld.isEmpty else { return }
         let notes = strumNotes()
@@ -922,16 +753,9 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// The accel trigger's edge detector, fed by every strike-envelope
-    /// change (the link receive queue) and the link-drop reset. Rising
-    /// through the threshold strikes the chord; falling back below the
-    /// SAME threshold releases immediately — unless L is holding — and
-    /// arms a 100 ms retrigger cooldown so a jittery envelope hovering at
-    /// the threshold can't machine-gun the chord (2026-08-29: the release
-    /// cooldown replaced the 60% release hysteresis). State is
-    /// main-owned, so the edges hop queues (the cheap pre-check reads are
-    /// benign races: the main block re-tests before acting; the cooldown
-    /// clock is main-only).
+    /// The accel trigger's edge detector (link receive queue): rising
+    /// through the threshold strikes; falling below releases (unless L
+    /// holds) and arms the cooldown. Edges hop to main, which re-tests.
     private func strumAccelSense(_ v: Double) {
         let up = !strumAccelHeld && v >= strumThresh01
         let down = strumAccelHeld && v < strumThresh01
@@ -951,12 +775,8 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// Latest axis values for the iPad display relay (main queue):
-    /// stick = Joy-Con stick, wrist = the Joy-Con's fused attitude
-    /// (nil until the fusion runs / after detach), arm = the
-    /// arm-calibration solve's three calibrated iPad tilts (nil while
-    /// no calibration is driving — the iPad's own raw square is the
-    /// truth then).
+    /// Latest axis values for the iPad display relay (main queue). Wrist is
+    /// nil until the fusion runs; arm is nil while no calibration drives.
     private var lastStickAxes: (Double, Double) = (0, 0)
     private var lastWristTilt: (Double, Double, Double)?
     private var lastArmAxes: (Double, Double, Double)?
@@ -967,20 +787,14 @@ final class AppController: ObservableObject {
 
     // MARK: - Sarangi model
     //
-    // The played voice is the ported `SarangiKit` **String model** (`BowEngine`
-    // + `CBowKernel`), owned by `sarangi` (`SarangiStore`): raga + tonic and the
-    // editable sympathetic-string table live there (independent of the played
-    // Pitch Pad scale). The tarab rows tune the String voice's in-kernel taraf.
-    // Edited in the Strings tab; the String physics scalars in the Sarangi tab.
+    // The String voice's document is owned by `sarangi` (`SarangiStore`): the
+    // sympathetic-string table that tunes the in-kernel taraf (Strings tab).
 
-    /// The ported sarangi model's editable state + engine bridge (tarab tuning).
+    /// The sarangi document's editable state + engine bridge (tarab tuning).
     let sarangi: SarangiStore
 
-    /// Backing store for the `.rebuild` (and `.hybrid` headroom) half of
-    /// the parameter list: the `bowed_string.json` scalars + persisted
-    /// overrides. Reached through `setParamValue`/`paramValue` from the
-    /// Parameters tab; pushes into `AudioEngine.stringVoiceOverrides` with
-    /// a debounced engine rebuild.
+    /// Store for the `.rebuild` (and `.hybrid` headroom) parameters: artifact
+    /// scalars + persisted overrides, applied through a debounced rebuild.
     let stringParams: StringParamStore
 
     // MARK: - Init / lifecycle
@@ -994,42 +808,29 @@ final class AppController: ObservableObject {
         self.midiIn = midiIn
         self.ingest = LinkIngest(sink: audio)
         midiIn.audioEngine = audio
-        // Simulator + audition runner. The simulator's back-ref to
-        // `self` is wired below after all stored properties are set,
-        // since Swift forbids referencing `self` until init completes.
+        // Simulator + audition runner (back-ref wired after init).
         let sim = IPadSimulator(audio: audio)
         self.simulator = sim
         self.audition = AuditionRunner(simulator: sim, audio: audio)
-        // The scale/tonic model, no longer shown as its own surface — the Fret
-        // Pad reads from it. Kept alive so scale edits + the keyboard still work.
         self.pitchPad = PitchPadEngine(audio: audio)
-        // The Fret Pad is the sole playing surface, driven off `pitchPad`'s scale.
         self.fretPad = PitchPadEngine(audio: audio)
         self.fretPad.tonicMidi = self.pitchPad.tonicMidi
-        // Fret Pad Snap default: 24 px (not the shared 16) — fitted to real
-        // iPad onsets (2026-07-16 phrase recording: worst onset 14.9 px, so
-        // 16 left zero headroom; 24 ≈ 43¢ stays under the 40 px minimum fret
-        // gap). Syncs to the iPad while the Fret Pad layout is active.
+        // Fret Pad Snap: 24 px (not the shared 16), fitted to real iPad
+        // onsets — ≈43¢, under the 40 px minimum fret gap. Synced to the iPad.
         self.fretPad.marginPixels = 24
-        // Computer-keyboard player drives the scale engine directly.
         self.keyboard = KeyboardNotePlayer(engine: self.pitchPad)
         // Restore the last-edited arrangement, or build a starter from the
-        // current scale's degrees. (Assigning here doesn't fire the autosave
-        // sink — that's wired in `start()`.)
+        // scale. (The autosave sink is wired in `start()`.)
         self.fretArrangement = FretArrangementStore.loadCurrent()
             ?? FretArrangement.keyboardArrangement(
                 degrees: scaleDegrees(from: self.pitchPad.scale))
-        // The sarangi model owns its own tuning + strings (independent of the
-        // Pitch Pad). Constructing the store loads the persisted/default state
-        // and builds the initial tarab tuning.
+        // Loads the persisted/default document and builds the tarab tuning.
         self.sarangi = SarangiStore(audio: audio)
-        // The String voice's physics overrides (seeds the engine's override
-        // dict before the first BowEngine is built below).
+        // Physics overrides — seeds the engine before the first BowEngine.
         self.stringParams = StringParamStore(audio: audio)
 
-        // Restore the output device rate on a clean quit (⌘Q / menu Quit); the
-        // engine forced it to 44.1 kHz to drop the output resampler. SIGKILL
-        // from Xcode's Stop button skips this.
+        // Restore the output device rate on a clean quit (the engine forces
+        // 44.1 kHz to drop the output resampler). SIGKILL skips this.
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
@@ -1038,34 +839,26 @@ final class AppController: ObservableObject {
             self?.audio.restoreOutputDeviceRate()
         }
 
-        // The String model is the only voice — arm it. It builds off the tarab
-        // tuning + tonic that `SarangiStore` just pushed. The Mac pads hold a
-        // flat CC11 per note (no tilt source); 32 ≈ the fitted expr median
-        // (the surfaces span ~16 dB around it).
+        // Arm the String voice. The Mac pads hold a flat CC11 per note; 32 ≈
+        // the fitted expression median (the surfaces span ~16 dB around it).
         audio.setSarangiModelVoiceEnabled(true)
         pitchPad.macExpressionLevel = 32
         fretPad.macExpressionLevel = 32
 
-        // The tanpura voice (2026-08-04) is always armed beside the String
-        // voice — it is the default drone voice and the alternative main
-        // instrument. Its JI slot grid builds off-main in `start()` once
-        // the scale pipeline runs. Restore the persisted routing choices.
+        // The tanpura voice is always armed beside the String voice; its JI
+        // slot grid builds off-main in `start()`. Restore the routing choices.
         audio.setTanpuraVoiceEnabled(true)
         audio.setMainInstrument(mainInstrument)
         audio.setDroneVoiceMode(droneVoice)
 
-        // Now that all stored properties are set, wire the simulator's
-        // CC route back to this controller so its in-process MIDI hits
-        // the same handling as a real iPad-over-USB note.
+        // Wire the simulator's CC route back to this controller.
         simulator.controller = self
 
-        // The Fret Pad is the only playing surface, so the iPad always performs
-        // it. Force the synced layout (a stale persisted value could be another
-        // pad that no longer exists on either side).
+        // The Fret Pad is the only surface — force the synced layout.
         ipadLayout = .fretPad
     }
 
-    /// Combine subscriptions that push the Pitch Pad scale to the iPad.
+    /// Combine subscriptions (scale sync, autosaves, tarab/tanpura pushes).
     private var cancellables = Set<AnyCancellable>()
 
     func start() {
@@ -1076,40 +869,30 @@ final class AppController: ObservableObject {
         fretPad.start()
         audition.start()
         startScaleSync()
-        // Composite parameters + raw-tilt evaluation: snapshots for the
-        // MIDI-thread deliveries, then accept the controller's raw tilt
-        // report (the Mac evaluates its own tilt bindings) and direct
-        // slot-CC drives (auditions / external hardware).
+        // Snapshots for the off-main deliveries, then the baseline values.
         rebuildCompositeSnapshot()
         rebuildTiltEvalSnapshot()
         refreshHybridHeadroom()      // build depths behind the hybrid knobs
         applyRestingParams()         // resting values for every live param
-        // A physics edit (Parameters tab, preset load, audition script)
-        // can move a hybrid parameter's build headroom — keep the cache in
-        // step. `@Published` fires before the store's own property is
-        // updated, so read the value the sink carries.
+        // A physics edit can move a hybrid's headroom — keep the cache in step
+        // (`@Published` fires before the property updates: use the sink value).
         stringParams.$values
             .sink { [weak self] v in self?.refreshHybridHeadroom(from: v) }
             .store(in: &cancellables)
-        // The iPad's raw tilt is the ONLY tilt sensor (2026-08-13,
-        // arm-only calibration — the Joy-Con is out of the tilt path).
-        // Two delivery paths into the same handler: the TarabLink state
-        // frame (the shipping wire — change-gated inside LinkIngest) and
-        // the in-process tilt CCs (audition scores).
+        // The iPad's raw tilt: the TarabLink state frame (change-gated in
+        // LinkIngest) and the in-process tilt CCs (audition scores).
         ingest.onTiltAxis = { [weak self] axis, value in
             self?.handleRawTilt(axis, value)
         }
         audio.onTiltAxis = { [weak self] axis, value in
             self?.handleRawTilt(axis, value)
         }
-        // Raw accelerometer off the same frames — display only (the
-        // Setup tab's received-acceleration view), no bindings.
+        // Raw accelerometer off the same frames — display only.
         ingest.onAccel = { [weak self] x, y, z in
             self?.joyCon.feedAccel(x, y, z)
         }
-        // The strike envelope (TLP v6): the measurement behind the
-        // `.strike`/`.acceleration` pair. Change-gated in LinkIngest;
-        // the 30 Hz blend timer keeps the WEIGHT moving between events.
+        // The strike envelope: the measurement behind the `.strike` /
+        // `.acceleration` pair. Change-gated in LinkIngest.
         ingest.onStrike = { [weak self] v in
             guard let self else { return }
             self.strikeLock.lock()
@@ -1120,8 +903,7 @@ final class AppController: ObservableObject {
             self.strumAccelSense(v)
         }
         // Note-lifecycle edges anchor the per-note blend windows (a
-        // retrigger re-anchors its id; releases fall back to the
-        // survivor's own un-reset age).
+        // retrigger re-anchors; releases fall back to the survivor's age).
         ingest.onTouchGate = { [weak self] id, on in
             guard let self else { return }
             let now = ProcessInfo.processInfo.systemUptime
@@ -1131,9 +913,8 @@ final class AppController: ObservableObject {
             self.strikeLock.unlock()
             self.fingerGate(0, id, on)
         }
-        // The `.fingerAccel` dimension's pitch feed — the wire lane plus
-        // the Mac pads/auditions' local lane, id-namespaced (source 0/1)
-        // so the two u16 spaces can't collide in the tracker.
+        // The `.fingerAccel` pitch feed — wire lane (source 0) + the local
+        // pads/auditions lane (source 1), so the u16 id spaces can't collide.
         ingest.onTouchPitch = { [weak self] id, pitch in
             self?.fingerPitchUpdate(0, id, pitch)
         }
@@ -1143,11 +924,8 @@ final class AppController: ObservableObject {
         pitchPad.localIngest?.onTouchPitch = { [weak self] id, pitch in
             self?.fingerPitchUpdate(1, id, pitch)
         }
-        // The chord bar's selection edges (TLP v12) — the wire lane (iPad
-        // taps) and the local lane (the Mac bar via `tapChord`) both land
-        // in `strumChord`, so the published value is always what the next
-        // strum sounds — and a chord RINGING at the edge retunes to the
-        // new selection in place (2026-08-29).
+        // Chord-bar selection edges from both lanes (iPad taps, the Mac bar via
+        // `tapChord`) land in `strumChord`; a RINGING chord retunes in place.
         let chordEdge: (ChordSelection?) -> Void = { [weak self] sel in
             DispatchQueue.main.async {
                 guard let self, self.strumChord != sel else { return }
@@ -1157,11 +935,9 @@ final class AppController: ObservableObject {
         }
         ingest.onChordSelect = chordEdge
         pitchPad.localIngest?.onChordSelect = chordEdge
-        // TarabLink: inbound TLP SysEx from MIDIInput's reassembler;
-        // outbound through the same wired-first SysEx send the legacy
-        // blobs used ("iPad" name match; BLE bypasses the filter inside).
-        // Events keep the match-nothing → send-to-all safety net; state
-        // streams just drop when the iPad is absent.
+        // TarabLink: inbound TLP SysEx from MIDIInput's reassembler; outbound via
+        // the wired-first SysEx send ("iPad" name match; BLE bypasses the
+        // filter). Events fall back to send-to-all; state frames just drop.
         midiIn.onSysEx = { [weak self] bytes in
             self?.link.receivedSysEx(bytes)
         }
@@ -1176,8 +952,7 @@ final class AppController: ObservableObject {
             guard let self else { return }
             NSLog("Tarabdaar: link stale — releasing everything held")
             self.ingest.linkDidDrop()
-            // No more frames: the strike measurement rests at 0 (the
-            // gate edges above already cleared the blend anchors).
+            // No more frames: the strike measurement rests at 0.
             self.strikeLock.lock()
             self.strikeMeasure = 0
             self.strikeLock.unlock()
@@ -1190,8 +965,7 @@ final class AppController: ObservableObject {
             case .resyncRequest:
                 DispatchQueue.main.async { self?.pushCurrentState() }
             case .panic:
-                // Kill the WIRE's touches/drones only — never the Mac's
-                // local pads (surgical, see LinkIngest.linkDidDrop).
+                // Kill the WIRE's touches/drones only — never the Mac's pads.
                 NSLog("TarabLink: panic from pad")
                 self?.ingest.linkDidDrop()
             default:
@@ -1203,16 +977,13 @@ final class AppController: ObservableObject {
                   status.isUp ? 1 : 0, status.isStale ? 1 : 0,
                   status.rttMs.map { String(format: "%.1fms", $0) } ?? "–")
         }
-        // A destination appearing/vanishing (iPad plugged, BLE session up
-        // or down) → re-greet; the scale-sync trigger below re-pushes.
+        // A destination appearing/vanishing → re-greet; scale sync re-pushes.
         midi.$destinationCount
             .removeDuplicates()
             .sink { [weak self] _ in self?.link.kick() }
             .store(in: &cancellables)
         link.start()
-        // TLPDBG: env-gated headless self-test — drives the REAL fret pad
-        // engine in the full app context and logs the readout, so the pad
-        // path can be observed without UI events.
+        // TLPDBG_SELFTEST: env-gated headless self-test of the fret pad path.
         if ProcessInfo.processInfo.environment["TLPDBG_SELFTEST"] != nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 guard let self else { return }
@@ -1236,20 +1007,15 @@ final class AppController: ObservableObject {
         audio.onCompositeCC = { [weak self] cc, value in
             self?.applyComposite(slotCC: cc, value: value)
         }
-        // Joy-Con: the printed arrows pluck the drone buttons, L strums
-        // all three. The control axes: arm 0–2 (the iPad's tilts,
-        // calibrated through the arm solve or raw when uncalibrated),
-        // stick 3/4, and since 2026-09-02 the Joy-Con's wrist ↕/↔/⟲ +
-        // acceleration (`wristAxisIndices` / `jcAccelAxisIndex`) — each
-        // axis has exactly one source.
+        // Joy-Con. Control axes: arm 0–2 (the iPad's tilts), stick 3/4, wrist
+        // + acceleration (`wristAxisIndices` / `jcAccelAxisIndex`).
         joyCon.onArmAxes = { [weak self] t1, t2, t3 in
             guard let self else { return }
             self.applyTiltAxis(0, t1)
             self.applyTiltAxis(1, t2)
             self.applyTiltAxis(2, t3)
-            // Mirror the calibrated arm axes to the iPad's arm square
-            // (main thread — armTick hops before calling; the link
-            // paces the actual sends).
+            // Mirror the calibrated arm axes to the iPad's arm square (main
+            // thread; the link paces the sends).
             self.lastArmAxes = (t1, t2, t3)
             self.sendJoyConDisplay()
         }
@@ -1278,16 +1044,12 @@ final class AppController: ObservableObject {
             guard let self else { return }
             switch control {
             case .dpadLeft:
-                // ←/→ step the playing range an octave (2026-08-27;
-                // they were drone buttons 0/2 before — ↓ keeps drone 1).
+                // ←/→ step the playing range an octave.
                 guard pressed else { return }
                 self.shiftOctave(-1)
             case .dpadDown:
-                // During a running arm/wrist calibration, dpad-down
-                // steps BACK one phase (mirror of dpad-up = advance);
-                // it's a drone button otherwise. The release still
-                // clears the drone so a press held across the capture
-                // start can't stick.
+                // During a capture, ↓ steps BACK one phase (↑ advances); it is
+                // drone button 1 otherwise. The release still clears the drone.
                 if self.joyCon.capturingCalibrator != nil {
                     if pressed { self.joyCon.redoPreviousCalibrationStep() }
                     else { self.audio.setDronePressed(1, false) }
@@ -1298,36 +1060,23 @@ final class AppController: ObservableObject {
                 guard pressed else { return }
                 self.shiftOctave(+1)
             case .l:
-                // Sound the CONFIGURED string set as a HELD MAIN-VOICE
-                // chord (reworked 2026-08-28; before that: a staccato
-                // sweep, the drone voice, and originally the three
-                // drone buttons): all the Strings tab's strum members
-                // at once while L is held, released with the button —
-                // default low Sa · low Pa, remappable to raga chords
-                // (members are scale degrees, so a chord follows the
-                // scale). See `strum(pressed:)`.
+                // L holds the strum chord — see `strum(pressed:)`.
                 self.strum(pressed: pressed)
             case .zl:
-                // ZL re-zeroes the arm AND wrist axes: the CURRENT
-                // poses become rest (0 on all six).
+                // ZL re-zeroes the arm AND wrist axes at the current poses.
                 guard pressed else { return }
                 self.joyCon.recenterBody()
             case .sl, .sr, .stickClick, .minus, .capture:
-                // Unassigned — SL/SR freed by the 2026-08-21 shoulder
-                // split, the misc inputs surfaced the same day; all
-                // visible in the panel chips.
+                // Unassigned — visible in the panel chips.
                 break
             case .dpadUp:
-                // Advances a running arm/wrist calibration (no-op
-                // otherwise) so the controller hand can step phases alone.
+                // Advances a running calibration (no-op otherwise).
                 guard pressed else { return }
                 self.joyCon.advanceCalibration()
             }
         }
-        // The `0x05` relay's `connected` bit hides the drone buttons on
-        // both surfaces (the controller plays the drones), so its edges
-        // must arrive even when no axis is moving: push immediately on
-        // attach/disconnect, bypassing the display rate cap.
+        // The `connected` bit hides the drone buttons on both surfaces, so
+        // its edges must arrive even when no axis moves: force a push.
         joyCon.$connectedName
             .map { $0 != nil }
             .removeDuplicates()
@@ -1335,13 +1084,10 @@ final class AppController: ObservableObject {
             .sink { [weak self] _ in self?.sendJoyConDisplay(force: true) }
             .store(in: &cancellables)
         joyCon.start()
-        // (sendJoyConDisplay below relays the stick + wrist axes to the
-        // iPad's toolbar squares.)
         // Voice/taraf volume readout → iPad (JOYCON_STATE vol bytes).
         startVolMeterRelay()
-        // jt overload watchdog: the String voice's async jawari web drops
-        // drive blocks / flat-fills when it misses its realtime budget —
-        // audible clicking. Log only when the counters GROW.
+        // jt overload watchdog: the async jawari web drops blocks / flat-fills
+        // past its realtime budget (audible clicking). Log when counters GROW.
         jtStatsTimer = Timer.scheduledTimer(withTimeInterval: 5.0,
                                             repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -1358,16 +1104,11 @@ final class AppController: ObservableObject {
                     self.lastJtFlat = s.flat
                 }
             }
-            // quiescence-gate probe (2026-08-17): names what blocks the
-            // idle web from sleeping — ring×N = rows still ringing above
-            // the floor, drive×N = bridge drive above the wake bound,
-            // "drone" = jt drone drive held. Ratios are the period's max;
-            // > 1 blocks. Logged only while any row is awake.
+            // Quiescence-gate probe: what keeps the idle web awake (ring = rows
+            // above the floor, drive = bridge drive, drone). Ratios > 1 block.
             let g = self.audio.stringVoiceJtGateProbe()
             let awake = g.map { $0.total > 0 && $0.asleep < $0.total } ?? false
-            // the first ~30 s log unconditionally (startup diagnosis:
-            // distinguishes "all asleep" from "voice/gate not armed");
-            // after that only while any row is awake.
+            // The first ~30 s log unconditionally; then only while awake.
             if self.jtGateLogTicks < 6 || awake {
                 self.jtGateLogTicks += 1
                 if let g {
@@ -1378,8 +1119,8 @@ final class AppController: ObservableObject {
                     NSLog("Tarabdaar: jt gate — no String voice")
                 }
             }
-            // main-callback deadline: overruns glitch at the DEVICE (the
-            // audition WAV can't show them) — log whenever they grow
+            // Render overruns glitch at the DEVICE (an audition WAV can't
+            // show them) — log whenever they grow.
             if let r = self.audio.stringVoiceRenderStats() {
                 if r.overruns > self.lastRenderOverruns {
                     NSLog("Tarabdaar: render OVERRUN — +%llu late callbacks (worst %.2f ms this period, total %llu/%llu)",
@@ -1389,8 +1130,7 @@ final class AppController: ObservableObject {
                 self.lastRenderOverruns = r.overruns
             }
         }
-        // Keep the Fret Pad's tonic locked to the scale engine's. Independent
-        // of `startScaleSync` (which pushes scale state to the iPad).
+        // Keep the Fret Pad engine's tonic locked to the scale engine's.
         pitchPad.$tonicMidi
             .sink { [weak self] in self?.fretPad.tonicMidi = $0 }
             .store(in: &cancellables)
@@ -1398,27 +1138,18 @@ final class AppController: ObservableObject {
             .sink { [weak self] in self?.fretPad.tonicCents = $0 }
             .store(in: &cancellables)
 
-        // The tonic ALWAYS starts at D4 (`PitchPadEngine.defaultTonicMidi`),
-        // every launch. It is DELIBERATELY not persisted — the session tonic
-        // is a per-sitting decision, and a stale restored tonic silently
-        // retunes the whole instrument (frets, tarab, drones all resolve
-        // against it). Do not "restore" the `tarabdaar.tonicHz` UserDefaults
-        // key that used to live here.
+        // The tonic starts at D4 every launch — DELIBERATELY not persisted: a
+        // stale restored tonic silently retunes the whole instrument.
 
-        // Auto-save the Fret Pad arrangement. Debounced so a drag-edit
-        // doesn't write to disk every frame.
+        // Auto-save the Fret Pad arrangement (debounced).
         $fretArrangement
             .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
             .sink { FretArrangementStore.saveCurrent($0) }
             .store(in: &cancellables)
 
-        // Drone-button DISPLAY ratios (2026-07-25): each button plucks a
-        // MAPPED sympathetic string (Strings tab; the audio path addresses
-        // the row directly), so the arrangement's `droneRatios` are now
-        // purely visual — the mapped strings' sounding pitches vs the
-        // PLAYED tonic, driving the scale labels/colors on both surfaces
-        // (and riding the existing autosave + iPad sync). An unmapped slot
-        // keeps its last ratio and is simply inert.
+        // Drone-button DISPLAY ratios: the buttons pluck MAPPED tarab strings,
+        // so `droneRatios` are purely visual (labels/colors on both surfaces).
+        // An unmapped slot keeps its last ratio and is inert.
         Publishers.CombineLatest3(
             sarangi.$state.map(\.droneStringFreqs).removeDuplicates(),
             pitchPad.$tonicMidi.removeDuplicates(),
@@ -1440,10 +1171,8 @@ final class AppController: ObservableObject {
         }
         .store(in: &cancellables)
 
-        // Push the centralized scale into the tarab document whenever the
-        // scale or tonic changes. The pitches ALWAYS follow (strings are
-        // degree-defined); `autoSyncToScale` only governs whether the row
-        // LAYOUT regenerates too. Debounced to coalesce drag edits.
+        // Push the scale into the tarab document. Pitches ALWAYS follow; the
+        // row LAYOUT regenerates only when the degree count changes.
         Publishers.MergeMany([
             pitchPad.$scale.map { _ in () }.eraseToAnyPublisher(),
             pitchPad.$tonicMidi.map { _ in () }.eraseToAnyPublisher(),
@@ -1454,10 +1183,8 @@ final class AppController: ObservableObject {
         .store(in: &cancellables)
         syncTarabFromScale()        // match the scale on launch
 
-        // Rebuild the tanpura's JI slot grid on a scale/tonic change. Far
-        // heavier debounce than the tarab push — a tanpura build is
-        // ~seconds of CPU (mount + settle every slot), so drag edits must
-        // fully settle first, and an unchanged tuning is skipped outright.
+        // Rebuild the tanpura's JI slot grid on a scale/tonic change. Heavier
+        // debounce than the tarab push — a tanpura build is ~seconds of CPU.
         Publishers.MergeMany([
             pitchPad.$scale.map { _ in () }.eraseToAnyPublisher(),
             pitchPad.$tonicMidi.map { _ in () }.eraseToAnyPublisher(),
@@ -1481,9 +1208,8 @@ final class AppController: ObservableObject {
            last.ratios == ratios { return }
         lastTanpuraSync = (tonic, ratios)
         audio.rebuildTanpura(tonic: tonic, scaleRatios: ratios)
-        // the sitar mounts the same JI grid from its own artifact —
-        // rebuildSitar no-ops until the voice has been armed (first
-        // switch to the Sitar main instrument)
+        // The sitar mounts the same JI grid from its own artifact — a no-op
+        // until the voice has been armed (first switch to Sitar).
         audio.rebuildSitar(tonic: tonic, scaleRatios: ratios)
     }
 
@@ -1502,10 +1228,8 @@ final class AppController: ObservableObject {
         fretLayoutName = nil
     }
 
-    /// Save the working arrangement under `name` (replacing any layout of
-    /// that name) and adopt the name. Silently no-ops if the name is empty
-    /// or reserved, or the write fails — same best-effort rule as the
-    /// autosave and the scale store.
+    /// Save the working arrangement under `name` and adopt the name.
+    /// Silently no-ops on an empty/reserved name or a failed write.
     func saveFretLayout(name: String) {
         guard let saved = try? FretArrangementStore.save(fretArrangement,
                                                          name: name) else { return }
@@ -1530,25 +1254,19 @@ final class AppController: ObservableObject {
 
     // MARK: - Sarangi tarab ↔ Pitch Pad scale
 
-    /// Push the current Pitch Pad scale (tonic Hz + degree ratios) into the
-    /// tarab document. Pitches always follow; the row layout regenerates
-    /// when the degree count changed or under `force` (the Strings tab's
-    /// "Regenerate" button).
+    /// Push the scale into the tarab document. Pitches always follow; the row
+    /// layout regenerates when the degree count changed or under `force`.
     func syncTarabFromScale(force: Bool = false) {
         let ratios = scaleDegrees(from: pitchPad.scale).map(\.ratio)
         sarangi.syncTarabToScale(tonicHz: pitchPad.tonicHz, ratios: ratios, force: force)
     }
 
-    // MARK: - iPad scale sync (Mac → iPad over SysEx)
+    // MARK: - iPad scale sync (Mac → iPad over TLP events)
 
-    /// TarabdaarMac edits, Tarabdaar performs: push the current Pitch Pad state
-    /// (scale + tonic + margin) to the iPad whenever any of it changes
-    /// (debounced to coalesce drag edits) and whenever a MIDI destination
-    /// appears (the iPad plugging in). One-way; the only cross-device state,
-    /// carried as a SysEx blob on the same USB cable. See `PitchScaleSysEx`.
+    /// Push the scale state and the fret arrangement to the iPad whenever
+    /// any of it changes (debounced) or a MIDI destination appears. One-way;
+    /// the only cross-device state.
     private func startScaleSync() {
-        // Any of: scale edit, tonic change, margin change, or a new
-        // destination → push the whole current state.
         let triggers: [AnyPublisher<Void, Never>] = [
             pitchPad.$scale.map { _ in () }.eraseToAnyPublisher(),
             pitchPad.$tonicMidi.map { _ in () }.eraseToAnyPublisher(),
@@ -1565,11 +1283,8 @@ final class AppController: ObservableObject {
             .store(in: &cancellables)
     }
 
-    /// Rate limit for `pushCurrentState`: pushes are edge-triggered (edits,
-    /// connects, resync requests), so ≥300 ms apart is always enough — and
-    /// a peer bug that requests resync per frame must not be able to storm
-    /// the wire. Coalescing, not dropping: a too-soon call schedules one
-    /// trailing push.
+    /// Rate limit for `pushCurrentState` (≥300 ms apart — a peer requesting
+    /// resync per frame must not storm the wire). Coalescing, not dropping.
     private var lastStatePush: CFAbsoluteTime = 0
     private var statePushScheduled = false
 
@@ -1592,9 +1307,7 @@ final class AppController: ObservableObject {
     }
 
     private func pushCurrentStateNow() {
-        // The iPad shows one surface at a time, so push the margin of the
-        // surface that's active — each pad owns its own margin slider.
-        // The Fret Pad is the only surface now; its Snap slider is the margin.
+        // The active surface's margin (the Fret Pad's Snap slider).
         let margin = ipadLayout == .fretPad ? fretPad.marginPixels
                                             : pitchPad.marginPixels
         let state = SyncedScaleState(points: pitchPad.scale.points,
@@ -1602,23 +1315,16 @@ final class AppController: ObservableObject {
                                      tonicCents: pitchPad.tonicCents,
                                      marginPixels: margin,
                                      layout: ipadLayout)
-        // TLP events over the tunnel (2026-08-14): the payloads are the
-        // SAME v4/v6 binary blobs the legacy SysEx carried — just without
-        // the base64 inflation. Reliable events, so the match-nothing →
-        // send-to-all safety net applies inside the link's send wiring.
         link.send(event: .scaleState(blob: PitchScaleSysEx.encodeBlob(state)))
-        // The Fret Pad's segment layout is its own state (not derivable from
-        // the scale), so push it as a second event while it's active.
         if ipadLayout == .fretPad {
             link.send(event: .fretArrangement(
                 blob: FretArrangementSysEx.encodeBlob(fretArrangement)))
         }
-        // A freshly-linked iPad must also learn the Joy-Con `connected`
-        // flag (drone buttons hidden?) — ride the state push.
+        // A freshly-linked iPad must also learn the JOYCON_STATE fields.
         sendJoyConDisplay(force: true)
     }
 
-    // MARK: - Composite parameters (2026-07-24)
+    // MARK: - Composite parameters
 
     private func rebuildCompositeSnapshot() {
         compositeLock.lock()
@@ -1627,13 +1333,8 @@ final class AppController: ObservableObject {
         compositeLock.unlock()
     }
 
-    /// Apply a composite's value 0-1: every member sweeps its lo-hi range
-    /// through the unified apply. Live (and hybrid-downward) members take
-    /// effect immediately — thread-safe engine setters, chunk-rate
-    /// smoothed downstream; members that need a rebuild go through the
-    /// String-override path on main, debounced (that path persists +
-    /// rebuilds the engine — too heavy per-CC). Called on the MIDI thread
-    /// for tilt-driven values and on main for UI/audition drives.
+    /// Apply a composite's value 0…1: every member sweeps its lo→hi range via
+    /// the unified apply; rebuild members go through the debounced flush.
     func applyComposite(slotCC: UInt8, value: Double) {
         compositeLock.lock()
         let members = compositeMembersByCC[slotCC] ?? []
@@ -1678,9 +1379,8 @@ final class AppController: ObservableObject {
         applyComposite(slotCC: CompositeParam.slotCCs[slot], value: value)
     }
 
-    /// The user-facing name for a tilt target: a composite slot shows its
-    /// composite's name (an empty slot shows "Composite N (empty)"), a
-    /// parameter shows its registry label. No CC numbers.
+    /// The user-facing name for a target: the composite's name (or
+    /// "Composite N (empty)"), else the parameter's registry label.
     func targetDisplayName(_ t: MapTarget) -> String {
         guard let slot = t.compositeSlot else { return t.label }
         if let c = composites.first(where: { $0.slot == slot }) {
@@ -1762,9 +1462,8 @@ final class AppController: ObservableObject {
         ControlAxes.dims.filter { tiltMapping.isConnected(target, $0) }
     }
 
-    /// Bind a target to a tilt over its full native range. For a parameter
-    /// whose resting value sits at one end (vibrato depth 0, jawari buzz
-    /// full) that reads naturally; endpoints are draggable afterwards.
+    /// Bind a target to an axis over its full native range; endpoints are
+    /// draggable afterwards.
     func addTiltBinding(_ target: MapTarget, dim: InputDimension) {
         var m = tiltMapping
         let r = target.defaultRange
@@ -1782,8 +1481,7 @@ final class AppController: ObservableObject {
         pm.bindings.removeAll { $0.dimension == dim }
         m.mappings[target.storageKey] = pm
         tiltMapping = m
-        // A parameter that is no longer driven must fall back to its
-        // resting value — nothing else will push it.
+        // An undriven parameter falls back to its resting value.
         if let key = target.paramKey, pm.bindings.isEmpty {
             _ = applyParamToVoice(key, paramValue(key))
         }
@@ -1797,10 +1495,8 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// Set a binding's endpoints. `fromCenter` = the rest-zero shape used
-    /// by the taraf axes: flat at `lo` through the resting half of the
-    /// throw, sweeping to `hi` past neutral — `(0,lo) (0.5,lo) (1,hi)`.
-    /// Off = plain linear `(0,lo) (1,hi)`.
+    /// Set a binding's endpoints. `fromCenter` = flat at `lo` through the
+    /// resting half, sweeping to `hi` past neutral; off = plain linear.
     func setTiltBinding(_ target: MapTarget, dim: InputDimension,
                         lo: Double, hi: Double, fromCenter: Bool) {
         var m = tiltMapping
@@ -1832,10 +1528,8 @@ final class AppController: ObservableObject {
 
     // MARK: - Presets
 
-    /// Capture the whole rig: the sarangi document, the physics overrides,
-    /// every parameter's resting value, the composites and the tilt
-    /// bindings. One preset is one rig (2026-07-30 — the instrument/
-    /// controls split was folded back together).
+    /// Capture the whole rig: sarangi document, physics overrides, resting
+    /// values, composites, bindings, voice routing. One preset = one rig.
     func capturePreset(name: String) -> TarabdaarPreset {
         var p = TarabdaarPreset()
         p.name = name
@@ -1850,9 +1544,7 @@ final class AppController: ObservableObject {
         return p
     }
 
-    /// Apply whatever sections `p` carries. Sections the file lacks are
-    /// skipped, so a split-era `.tarabdaarmap` (controls only) still loads
-    /// and never disturbs the instrument.
+    /// Apply whatever sections `p` carries; missing sections are skipped.
     func applyPreset(_ p: TarabdaarPreset) {
         if let inst = p.instrument {
             sarangi.replaceState(inst)
@@ -1880,9 +1572,8 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// The shipped default, as a full rig: the generated sarangi bank,
-    /// untouched artifact physics (all overrides + resting values
-    /// cleared), the default composites and the default tilt bindings.
+    /// The shipped default as a full rig: generated bank, artifact physics,
+    /// default composites and bindings, String voice, tanpura drones.
     func loadFactoryPreset(_ preset: Preset) {
         sarangi.loadSarangiLiveDefault(preset)
         resetAllParams()
@@ -1894,15 +1585,12 @@ final class AppController: ObservableObject {
 
     // MARK: The preset library — no file panels
 
-    /// Saved presets live in the app-managed library
-    /// (`Application Support/Tarabdaar/Presets/`, one `.tarabdaar` file per
-    /// preset) and appear in the Load-preset menu by name. Saving asks
-    /// for a name, never a location.
+    /// Saved presets live in the app-managed library (one `.tarabdaar` file
+    /// each) and appear in the Load-preset menu by name. No file panels.
     let presetLibrary = PresetLibrary.standard()
 
-    /// The library's preset names, for the Load-preset menu. Refreshed on
-    /// every save/delete and whenever the toolbar appears (so a file
-    /// dropped into the folder shows up too).
+    /// The library's preset names, refreshed on save/delete and whenever
+    /// the toolbar appears.
     @Published private(set) var savedPresetNames: [String] = []
 
     func refreshPresetLibrary() {
@@ -1933,44 +1621,26 @@ final class AppController: ObservableObject {
         refreshPresetLibrary()
     }
 
-    /// Public entry for the iPad-simulator's in-process CC delivery. CC → Mac
-    /// param mappings were removed with the master-FX bus; expression and the
-    /// tilt axes reach the String voice through the MIDI path directly, so this
-    /// is now a no-op kept for the simulator's call site.
+    /// No-op kept for the simulator's call site.
     func handleSimulatorCC(cc: Int, value: Int) {}
 
-    /// Programmatic entry point used by audition scores' `voiceParam`
-    /// events. Names match the parameters below; values are passed through
-    /// in each parameter's natural units. Unknown names log and noop so a
-    /// typo in a score doesn't take down the runner.
+    /// Entry point for audition scores' `voiceParam` events, values in each
+    /// parameter's natural units. Unknown names log and no-op.
     func setVoiceParam(name: String, value: Double) {
         switch name {
-        // Drone buttons: "drone1".."drone3", value > 0.5 = press, else
-        // release — lets a score audition the jawari-taraf drones.
+        // Drone buttons: "drone1".."drone3", value > 0.5 = press.
         case "drone1", "drone2", "drone3":
             let i = Int(String(name.dropFirst(5)))! - 1
             audio.setDronePressed(i, value > 0.5)
-        // Controller strum: value > 0.5 = press (the main-voice chord
-        // sounds and holds), ≤ 0.5 = release (note-off) — the Joy-Con L
-        // path, so a score must send both edges.
+        // Strum: > 0.5 = press (chord holds), ≤ 0.5 = release — send both.
         case "strum":
             strum(pressed: value > 0.5)
-        // Chord bar selection: value = the degree index to select (root
-        // octave 0 — the base band), negative = deselect. Routed through
-        // the shared engine so the full edge path is exercised.
+        // Chord bar: value = degree index (octave 0), negative = deselect.
         case "chord":
             pitchPad.setChordSelection(value < 0 ? nil
                 : ChordSelection(degree: Int(value), octave: 0))
-        // Tilt performance axes (the iPad tilts' CC71/73/72 targets):
-        // purity/decay 0..1, tone tilt -1..1. Runtime playing state —
-        // NOT `string.<key>` build scalars (no engine rebuild).
-        // Composite parameters (drive the same member sweeps the tilts
-        // do; the legacy names map onto the default slots — stringToneTilt
-        // keeps its historical -1…1 range):
-        // Main instrument (2026-08-19, the sitar): 0 = String,
-        // 1 = Tanpura, 2 = Sitar — lets a score audition the plucked
-        // voices (the sitar arms + builds on first switch: give the
-        // score a few seconds before its first note).
+        // Main instrument: 0 = String, 1 = Tanpura, 2 = Sitar (the sitar arms
+        // + builds on first switch — give the score a few seconds).
         case "instrument":
             let all: [AudioEngine.MainInstrument] = [.string, .tanpura, .sitar]
             let i = Int(value.rounded())
@@ -1978,30 +1648,21 @@ final class AppController: ObservableObject {
         case "stringPurity":     applyComposite(slot: 0, value: clamp(value, 0, 1))
         case "stringTarafDecay": applyComposite(slot: 1, value: clamp(value, 0, 1))
         case "stringToneTilt":   applyComposite(slot: 2, value: (clamp(value, -1, 1) + 1) / 2)
-        // Generic form: "composite1".."composite8" with value 0…1.
+        // Composites: the default-slot names above (stringToneTilt takes
+        // −1…1) or "composite1".."composite8" with 0…1.
         case let n where n.hasPrefix("composite") && Int(n.dropFirst(9)) != nil:
             applyComposite(slot: Int(n.dropFirst(9))! - 1,
                            value: clamp(value, 0, 1))
         default:
-            // The `sarangi.<paramId>` route was deleted 2026-07-24: it wrote
-            // the coupled network's scalars and the FX rack, neither of which
-            // exists any more, so every such event was silently inert. The
-            // tarab table has no audition path (it is a structural document,
-            // edited in the Strings tab).
-            //
-            // Any registry parameter: "string.<key>" (historical) or
-            // "param.<key>". Routed through the unified setter — the same
-            // path the Parameters-tab sliders take — so a scripted sweep
-            // shows in the UI, persists like a hand edit, and applies
-            // live when the parameter can (`.live` / `.hybrid`).
+            // Any registry parameter: "string.<key>" or "param.<key>", via the
+            // unified setter (the Parameters-tab path: visible, persisted, live).
             for prefix in ["string.", "param."] where name.hasPrefix(prefix) {
                 let key = String(name.dropFirst(prefix.count))
                 if ParamRegistry.spec(key) != nil {
                     setParamValue(key, value)
                 } else {
-                    // Unknown to the registry but possibly a real artifact
-                    // scalar (the fit can carry keys the editor doesn't
-                    // list) — keep the raw override path for those.
+                    // Not in the registry but possibly a real artifact scalar
+                    // — keep the raw override path.
                     stringParams.setAuditionParam(key, value)
                 }
                 return

@@ -33,7 +33,7 @@ public enum Config {
     /// Output IO buffer for JITTER-PRONE transports — monitor audio over the
     /// video link (DisplayPort/HDMI: packetized, clock recovered monitor-side),
     /// Bluetooth, AirPlay. Those cannot sustain the ~3 ms callback cadence of
-    /// the low buffer: measured 2026-08-17 on an AORUS FO32U2P over DisplayPort,
+    /// the low buffer: measured on an AORUS FO32U2P over DisplayPort,
     /// every voice crackled at 128 frames while the same render was clean on
     /// the headphone DAC. 512 frames ≈ 11.6 ms — fine for monitor speakers,
     /// which are not a performance monitor.
@@ -53,10 +53,9 @@ public enum Config {
     public static let velocityMinG: Double = 0.01  // softest tap acceleration
     public static let velocityMaxG: Double = 0.5   // hardest tap acceleration
     /// TRAILING accel window a fret-pad onset scans for its strike spike
-    /// (`MotionSource.strikeVelocity01` — 2026-08-19). Backward-looking:
+    /// (`MotionSource.strikeVelocity01`). Backward-looking:
     /// UIKit touch delivery lags the physical impact ~10–25 ms, so the
-    /// spike is usually already buffered and the onset never waits (the
-    /// deleted 2026-07-24 capture delayed note-on `velocityDelay` instead).
+    /// spike is usually already buffered and the onset never waits.
     /// Must stay under `accelBufferDuration`.
     public static let velocityLookback: TimeInterval = 0.05
 

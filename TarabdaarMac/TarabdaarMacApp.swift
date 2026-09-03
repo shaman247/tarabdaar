@@ -6,7 +6,7 @@ struct TarabdaarMacApp: App {
     @StateObject private var controller = AppController()
 
     init() {
-        // Starpad/TarabPad → Tarabdaar identity migration (2026-08-13). Must run
+        // Starpad/TarabPad → Tarabdaar identity migration . Must run
         // before AppController exists — its stores read UserDefaults and
         // the preset library at init.
         LegacyMigration.runIfNeeded()

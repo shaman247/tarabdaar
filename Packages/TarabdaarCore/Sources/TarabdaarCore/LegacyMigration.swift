@@ -3,8 +3,8 @@ import Foundation
 #if os(macOS)
 
 /// One-time migration from the app's earlier identities. The app was
-/// renamed **Starpad → TarabPad** on 2026-08-12 and **TarabPad →
-/// Tarabdaar** on 2026-08-13, before anything shipped under the interim
+/// renamed **Starpad → TarabPad**  and **TarabPad →
+/// Tarabdaar** , before anything shipped under the interim
 /// name — so an existing install is either Starpad-era (the common case)
 /// or a one-day TarabPad build, and both are migrated here.
 ///

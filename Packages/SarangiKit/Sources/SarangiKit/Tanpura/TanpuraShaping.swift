@@ -1,6 +1,6 @@
 import Foundation
 
-/// SCALE-SHAPED OVERTONES (2026-08-05): the "altered tanpura" — a
+/// SCALE-SHAPED OVERTONES : the "altered tanpura" — a
 /// per-mode transform applied at table build that bends the overtone
 /// cascade toward the configured scale, beyond what a physical
 /// tanpura's string can do. Two axes, both 0 = physical:

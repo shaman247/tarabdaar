@@ -4,7 +4,7 @@ import SarangiKit
 
 /// Shared render harness for the parity-phrase suites
 /// (TarafRemovalParityTests, BusMeterTests, TarafCapTests): ONE parity
-/// phrase, ONE deterministic build, and — the point (2026-08-31) —
+/// phrase, ONE deterministic build, and — the point —
 /// CACHED neutral baselines. CAUTION: the phrase and build here feed
 /// the PARITY HASH (`TarafRemovalParityTests`) — any edit to the
 /// events, expression, block size or length fails the pinned SHA-256

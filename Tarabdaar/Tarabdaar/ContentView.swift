@@ -29,7 +29,7 @@ struct ContentView: View {
     /// every body evaluation, and @Published REPLAYS its value to each new
     /// subscriber — so every re-render kicked the link, every kick's
     /// resync made the Mac push, every push re-rendered this view…
-    /// the 2026-08-14 staccato feedback loop's engine. One durable sink
+    /// the staccato feedback loop's engine. One durable sink
     /// with `dropFirst()` (skip the subscription replay) instead.
     private final class SubscriptionBox { var c: AnyCancellable? }
     @State private var subscriptions = SubscriptionBox()

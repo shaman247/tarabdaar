@@ -1,24 +1,18 @@
 import Foundation
 
-/// What the Mac-side ingest drives. `AudioEngine` conforms; tests use a
-/// recording mock. All methods must be thread-safe — they are called on
-/// the link receive queue (the CoreMIDI thread's old role).
+/// What the Mac-side ingest drives (`AudioEngine`; tests use a mock).
+/// Called on the link receive queue — must be thread-safe.
 public protocol LinkPerformanceSink: AnyObject {
     func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double)
     func touchGlide(_ id: UInt16, pitchSemis: Double)
     func touchOff(_ id: UInt16)
     func touchesAllOff()
     func setDronePressed(_ index: Int, _ pressed: Bool)
-    /// Per-touch expression scale (2026-08-28, IN-PROCESS ONLY — wire
-    /// frames always decode 1.0): the Mac strum chord's live loudness.
-    /// Delivered BEFORE `touchOn` for a fresh touch whose scale ≠ 1 (so
-    /// onset consumers — the tanpura pluck level — see it), and on any
-    /// change while the touch is held. Default implementation is a no-op.
+    /// Per-touch expression scale (in-process only; the strum chord).
+    /// Delivered BEFORE `touchOn` when ≠ 1, and on change while held.
     func touchExpr(_ id: UInt16, exprScale: Double)
-    /// GLIDE-QUEUE exemption mark (2026-08-31, IN-PROCESS ONLY — wire
-    /// frames always decode false): the Mac strum chord's touches must
-    /// pass through the glide sequencer untouched. Delivered BEFORE the
-    /// flagged touch's `touchOn`. Default implementation is a no-op.
+    /// Glide-queue exemption (in-process only; the strum chord). Delivered
+    /// BEFORE the touch's `touchOn`.
     func touchGlideExempt(_ id: UInt16)
 }
 
@@ -32,51 +26,36 @@ extension AudioEngine: LinkPerformanceSink {}
 /// Mac-side ingestion of TLP performance state: diffs consecutive
 /// PERF_STATE frames into touch on/glide/off + drone edges + tilt changes.
 ///
-/// Frame semantics (the redesign's core): each frame is the COMPLETE touch
-/// set — an id absent from the new frame is a note-off, a new id is a
-/// note-on, a changed onsetSeq on a present id is a retrigger (an off+on
-/// that collapsed into one frame under latest-wins coalescing). Apply
-/// order per frame: removals → additions/retriggers → pitch updates —
-/// the same sequence a MIDI stream would have produced, so the mapper's
-/// allocation/steal laws behave identically (every note-on mounts a
-/// fresh string since 2026-08-24).
+/// Each frame is the COMPLETE touch set — an id absent from the new frame
+/// is a note-off, a new id is a note-on, a changed onsetSeq on a present
+/// id is a retrigger (an off+on collapsed into one frame by latest-wins
+/// coalescing). Apply order per frame: removals → additions/retriggers →
+/// pitch updates. Every note-on mounts a fresh string.
 ///
 /// NOT thread-safe — confine to the link receive queue. Sequence gating
 /// (drop-non-newer stateSeq) happens upstream in the link; `apply` assumes
 /// frames arrive in order.
 public final class LinkIngest {
     public weak var sink: LinkPerformanceSink?
-    /// Raw tilt delivery, (axis 0…2, value −1…+1, rest 0) — same contract
-    /// as the old `AudioEngine.onTiltAxis`: fired only on change (the
-    /// heartbeat's unchanged repeats are dropped HERE, absorbing the
-    /// dedupe AppController used to do). Handler must be thread-safe.
+    /// Raw tilt (axis 0…2, −1…+1, rest 0), fired only on change — the
+    /// heartbeat's repeats are dropped here. All handlers below fire on the
+    /// link receive queue and must be thread-safe.
     public var onTiltAxis: ((Int, Double) -> Void)?
-    /// Raw accelerometer delivery, (x, y, z) in g — display-only
-    /// diagnostics (the Setup tab's received-acceleration view). Fired
-    /// on change. Handler must be thread-safe.
+    /// Raw accelerometer (x, y, z) in g, on change — display diagnostics.
     public var onAccel: ((Double, Double, Double) -> Void)?
-    /// Strike-scale envelope delivery, 0…1 (TLP v6) — the raw value
-    /// behind the `.strike`/`.acceleration` dimension pair. Fired on
-    /// change (byte-gated by the producer, so a resting iPad is silent
-    /// here). Handler must be thread-safe.
+    /// Strike-scale envelope 0…1 (the `.strike`/`.acceleration` pair), on
+    /// change — byte-gated by the producer, so a resting iPad is silent.
     public var onStrike: ((Double) -> Void)?
-    /// Note-lifecycle edges for the strike blend window (2026-08-23):
-    /// (id, true) at every fresh articulation — a new touch AND a
-    /// retrigger (new onsetSeq), which re-anchors that id's window —
-    /// (id, false) at release and on the drop path. Fires alongside the
-    /// sink calls on the link receive queue.
+    /// Note-lifecycle edges for the strike blend window: (id, true) at
+    /// every fresh articulation (new touch or retrigger), (id, false) at
+    /// release and on the drop path.
     public var onTouchGate: ((UInt16, Bool) -> Void)?
-    /// Per-touch pitch delivery (2026-08-24): (id, fractional-MIDI pitch)
-    /// at every touch-on/retrigger AND every glide update — the raw feed
-    /// behind the `.fingerAccel` dimension (`FingerAccelTracker` in
-    /// AppController). Fires alongside the sink calls on the link receive
-    /// queue; handler must be thread-safe.
+    /// Per-touch pitch (id, fractional MIDI) at every onset and glide — the
+    /// `.fingerAccel` feed.
     public var onTouchPitch: ((UInt16, Double) -> Void)?
-    /// CHORD BAR selection delivery (TLP v12, 2026-08-28): the frame's
-    /// held chord selection, fired on CHANGE only (like the drone mask's
-    /// edges — heartbeat repeats are silent, so a Mac-local selection is
-    /// not clobbered by an idle iPad). nil = deselected. Handler must be
-    /// thread-safe.
+    /// Chord bar selection, on CHANGE only (heartbeat repeats are silent,
+    /// so a Mac-local selection is not clobbered by an idle iPad); nil =
+    /// deselected.
     public var onChordSelect: ((ChordSelection?) -> Void)?
 
     private var last: TLPPerfState?
@@ -148,8 +127,7 @@ public final class LinkIngest {
             }
         }
 
-        // Chord bar selection: change-gated (a reconnect's first frame
-        // delivers a non-default selection — prev is nil then).
+        // Chord bar selection: change-gated (prev is nil on reconnect).
         if frame.chordSelection != (prev?.chordSelection ?? nil) {
             onChordSelect?(frame.chordSelection)
         }
@@ -164,8 +142,7 @@ public final class LinkIngest {
             }
         }
 
-        // Accelerometer: s16 ↔ ±accelFullScaleG g, change-gated as a
-        // vector (the three axes always travel together).
+        // Accelerometer: s16 ↔ ±accelFullScaleG g, change-gated as a vector.
         let a = (frame.accelX, frame.accelY, frame.accelZ)
         if a != lastAccel {
             lastAccel = a
@@ -173,18 +150,17 @@ public final class LinkIngest {
             onAccel?(Double(a.0) * s, Double(a.1) * s, Double(a.2) * s)
         }
 
-        // Strike-scale envelope (v6): byte ↔ 0…1, change-gated.
+        // Strike-scale envelope: byte ↔ 0…1, change-gated.
         if frame.strike != lastStrike {
             lastStrike = frame.strike
             onStrike?(Double(frame.strike) / 255.0)
         }
     }
 
-    /// The kill path — link dropped/stale, or the peer sent PANIC. It is
+    /// The kill path — link dropped/stale, or the peer sent PANIC.
     /// SURGICAL: only the touches and drones THIS ingest's frames
-    /// introduced are released (it knows them from its last frame) — a
-    /// wire event must never be able to kill the Mac's local-pad notes
-    /// (the 2026-08-14 staccato loop's blast radius).
+    /// introduced are released — a wire event must never be able to kill
+    /// the Mac's local-pad notes.
     public func linkDidDrop() {
         let prev = last
         last = nil

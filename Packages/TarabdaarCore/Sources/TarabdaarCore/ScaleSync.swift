@@ -3,8 +3,7 @@ import Foundation
 
 // MARK: - Synced state
 
-/// Which playing surface the iPad should show. TarabdaarMac drives this; the
-/// iPad performs whichever layout is pushed (see `SyncedScaleState.layout`).
+/// Which playing surface the iPad shows; pushed from the Mac.
 public enum PadLayout: Int, Codable, CaseIterable, Identifiable {
     case pitchPad = 0
     case chordPad = 1
@@ -22,17 +21,13 @@ public enum PadLayout: Int, Codable, CaseIterable, Identifiable {
     }
 }
 
-/// The state TarabdaarMac pushes to the iPad: the scale, the two performance
-/// parameters that shape how it sounds and plays — `tonicMidi` (which MIDI
-/// note 1/1 maps to) and `marginPixels` (the soft-interpolation half-width) —
-/// and the active `layout` (which surface the iPad shows). Codable so it can
-/// be persisted on the iPad for offline relaunch.
+/// The state the Mac pushes to the iPad: the scale, the tonic
+/// (`tonicMidi` + `tonicCents`), `marginPixels` and the active `layout`.
 public struct SyncedScaleState: Codable, Equatable {
     public var points: [PitchPoint]
     public var tonicMidi: Int
-    /// Fractional tonic refinement in cents (±50) — the tonic is set in Hz
-    /// on the Mac and rarely lands exactly on a MIDI note; without this the
-    /// iPad would play up to a quarter-tone off the Mac's tarab.
+    /// Fractional tonic refinement in cents (±50) — the Mac's Hz tonic
+    /// rarely lands exactly on a MIDI note.
     public var tonicCents: Double
     public var marginPixels: Double
     public var layout: PadLayout
@@ -51,31 +46,20 @@ public struct SyncedScaleState: Codable, Equatable {
 
 // MARK: - SysEx scale codec
 
-/// Encodes / decodes a `SyncedScaleState` as a MIDI SysEx message so the Mac
-/// can push the current Pitch Pad scale + tonic + margin to the iPad over the
-/// existing USB-MIDI cable. This is the one deliberate exception to Tarabdaar's
-/// "no SysEx, no shared state" rule — TarabdaarMac edits, Tarabdaar performs.
+/// The scale-state codec. `encodeBlob`/`decodeBlob` produce the blob that
+/// rides the TLP `SCALE_STATE` event; `encode`/`decode` wrap it as
+/// `F0 7D 01 <base64 blob> F7`, the form the iPad's persisted store holds.
 ///
-/// Wire format: `F0 7D 01 <base64(binary blob) as ASCII> F7`.
-///   - `0x7D` is the standard non-commercial / educational SysEx ID.
-///   - `0x01` is the Tarabdaar "scale" message subtype.
-///   - The payload is base64 (all bytes ASCII ≤ 127, so 7-bit-safe) of a
-///     **compact binary** blob — far smaller than JSON so it survives the
-///     iOS USB-MIDI SysEx bridge comfortably. Blob layout:
-///       `[ver:1][tonic:1][tonicCents14: 2×7-bit][margin:1][layout:1][count:1]`
-///       then per point
-///       `[num14: 2×7-bit][den14: 2×7-bit][y:1][enabled:1][labelLen:1][label UTF-8…]`.
-///     v4 added the fractional tonic (centi-cents above −50 ¢, so ±50 ¢ at
-///     0.01 ¢ resolution) — older blobs are rejected; both apps ship the
-///     format together, like the fret-arrangement blob.
+/// Blob (v4): `[ver][tonic][tonicCents14: 2×7-bit][margin][layout][count]`
+/// then per point `[num14][den14][y][enabled][labelLen][label UTF-8…]`;
+/// tonicCents14 = centi-cents above −50 ¢. Other versions are rejected —
+/// both apps ship the format together.
 public enum PitchScaleSysEx {
     public static let nonCommercialID: UInt8 = 0x7D
     public static let scaleSubID: UInt8 = 0x01
     private static let version: UInt8 = 4
 
-    /// The raw binary blob — the TLP `SCALE_STATE` event payload (the
-    /// SysEx + base64 wrapper below exists only for the persisted store's
-    /// byte-compatibility and any legacy sender).
+    /// The raw binary blob — the TLP `SCALE_STATE` event payload.
     public static func encodeBlob(_ state: SyncedScaleState) -> [UInt8] {
         let tonic = UInt8(max(0, min(127, state.tonicMidi)))
         // centi-cents above −50 ¢: 0…10000, fits 14 bits
@@ -108,9 +92,7 @@ public enum PitchScaleSysEx {
         return out
     }
 
-    /// Decode a complete SysEx byte run (with or without the framing
-    /// `F0`/`F7`). Returns nil if the header doesn't match or the payload
-    /// can't be parsed.
+    /// Decode the SysEx form (framing `F0`/`F7` optional); nil on mismatch.
     public static func decode(_ bytes: [UInt8]) -> SyncedScaleState? {
         var b = bytes
         if b.first == 0xF0 { b.removeFirst() }
@@ -154,9 +136,7 @@ public enum PitchScaleSysEx {
 
 // MARK: - Persistence (iPad)
 
-/// Persists the last synced state on the iPad so it survives an offline
-/// relaunch. Stored as the compact SysEx blob in `UserDefaults` (small, and
-/// reuses the wire codec). iPad-only; the Mac never reads/writes this.
+/// iPad-only persistence of the last synced state (SysEx-wrapped blob).
 public enum SyncedScaleStore {
     private static let key = "tarabdaar.syncedScaleState.v3"
 
@@ -170,33 +150,20 @@ public enum SyncedScaleStore {
     }
 }
 
-// MARK: - SysEx String-Pad arrangement codec
-/// (The String Pad's `F0 7D 02` arrangement SysEx and its sync store were
-/// deleted 2026-07-24 with the rest of that surface's remnants — subtype
-/// 0x02 stays unused so the numbering of 0x01/0x03 is untouched.)
+// MARK: - Fret-Pad arrangement codec
+// (Subtypes 0x02 and 0x04 are retired — do not reuse.)
 
-
-/// Encodes / decodes a `FretArrangement` as a **third** Tarabdaar SysEx message
-/// (subtype `0x03`), so the Mac can push the Fret Pad's segment layout to the
-/// iPad alongside the scale. Like the String Pad's arrangement, the fret
-/// layout is its own state (the vertical snap zones aren't derivable from the
-/// scale) — sent only while the Fret Pad is the active layout.
+/// The Fret-Pad arrangement codec (subtype `0x03`): the blob that rides the
+/// TLP `FRET_ARRANGEMENT` event, SysEx-wrapped as `F0 7D 03 <base64> F7`
+/// for the iPad's persisted store. Sent only while the Fret Pad is the
+/// active layout.
 ///
-/// Wire format: `F0 7D 03 <base64(binary blob) as ASCII> F7`. Blob layout:
-///   `[ver:1][ghostQuarterOctaves:1][flags:1][count:1]` then per segment
-///   `[degreeIndex:1][x14: 2×7-bit][topY:1][bottomY:1][enabled:1]` (x is the
-///   free band position, quantized to 14 bits; y to 7 bits; the ghost extent
-///   rides as quarter-octaves, so 0.5 → 2; `flags` is RESERVED — its only
-///   bit was tap legato, deleted 2026-08-02, so it now writes 0 and decodes
-///   ignored; the byte stays for blob-layout compatibility), then the
-///   `FretArrangement.droneCount` (3) drone-button ratios as 14-bit
-///   cents-above-−1200 (2×7-bit each, so the 0.25–4.0 ratio range fits).
-///   Blob v2 replaced v1's integer octaves-per-side with the fractional
-///   extent; v3 added the flags byte; v4 added the free per-segment x;
-///   v5 added the drone ratios; v6 dropped from 4 to 3 drones (older blobs
-///   are rejected — both apps ship the format together).
-///   (The fret pitch warp is deliberately NOT in this blob: `ctl_fret_warp`
-///   is a live registry param, streamed to the iPad over JOYCON_STATE.)
+/// Blob (v6): `[ver][ghostQuarterOctaves][flags][count]`, per segment
+/// `[degreeIndex][x14: 2×7-bit][topY][bottomY][enabled]`, then the 3
+/// drone-button ratios as 14-bit cents above −1200 (0.25–4.0). `flags` is
+/// RESERVED (written 0, decoded ignored). Other versions are rejected.
+/// The fret pitch warp is deliberately NOT here — `ctl_fret_warp` is a
+/// live registry param relayed over JOYCON_STATE.
 public enum FretArrangementSysEx {
     public static let nonCommercialID: UInt8 = 0x7D
     public static let arrangementSubID: UInt8 = 0x03
@@ -278,9 +245,7 @@ public enum FretArrangementSysEx {
     }
 }
 
-/// Persists the last synced Fret-Pad arrangement on the iPad (UserDefaults,
-/// stored as the compact SysEx blob), so it survives an offline relaunch.
-/// iPad-only; the Mac never reads/writes this.
+/// iPad-only persistence of the last synced arrangement (SysEx-wrapped).
 public enum FretArrangementSyncStore {
     private static let key = "tarabdaar.syncedFretArrangement.v1"
 
@@ -294,37 +259,22 @@ public enum FretArrangementSyncStore {
     }
 }
 
-// MARK: - SysEx Joy-Con tilt display codec
+// MARK: - Legacy Joy-Con tilt display codec
 
-/// The THIRD live Tarabdaar SysEx message (2026-08-05, subtype `0x05` —
-/// `0x02`/`0x04` are retired, do not reuse): the Mac's Joy-Con tilt
-/// values, pushed to
-/// the iPad as a DISPLAY-ONLY stream so the player can see all tilts at
-/// a glance on the pad. Not state — nothing persists, nothing on the
-/// iPad acts on it; a missed message just means a stale dot for a
-/// frame. Sent change-gated (the Joy-Con path already quantizes), one
-/// 7-byte message per update: `F0 7D 05 <x> <y> <active> F7`, x/y
-/// 0…127 = tilt 0…1, active 0/1 (0 = stick at rest, the iPad's own
-/// motion owns the tilts).
+/// Per-message Joy-Con display SysEx (subtype `0x05`): `F0 7D 05 <sx> <sy>
+/// <w1> <w2> <flags> F7`, axes 0…127 ↔ −1…+1, flags bit 0 stick / 1 body
+/// / 2 connected; a 7-byte stick-only form also decodes. The shipping
+/// stream is TLP JOYCON_STATE; this is `finalize`'s legacy decode fallback.
 public enum JoyConTiltSysEx {
     public static let nonCommercialID: UInt8 = 0x7D
     public static let subtype: UInt8 = 0x05
 
-    /// v3 (2026-08-12, 9 bytes): `F0 7D 05 <sx> <sy> <w1> <w2> <flags>
-    /// F7` — the Joy-Con stick axes and the two calibrated WRIST body
-    /// axes, all 0…127 = 0…1. Flags: bit 0 = stick deflected, bit 1 =
-    /// the body solve is driving (arm axes show on the iPad's own
-    /// square — its motion IS the arm sensor), bit 2 (2026-08-13) = a
-    /// Joy-Con is ATTACHED — the one flag the iPad acts on: the drone
-    /// buttons hide on both surfaces while the controller plays the
-    /// drones, so the Mac re-sends this message on connect/disconnect
-    /// and with every scale push, not just while axes move. The 7-byte
-    /// v1 still decodes (as a stick-only frame).
+    /// Encode the 9-byte form.
     public static func encode(stickX: Double, stickY: Double,
                               wrist1: Double, wrist2: Double,
                               stickLive: Bool, bodyLive: Bool,
                               connected: Bool) -> [UInt8] {
-        // Axes −1…+1 (the 2026-08-18 convention) → the legacy 0…127 wire.
+        // Axes −1…+1 → 0…127.
         func b(_ v: Double) -> UInt8 {
             UInt8((max(-1.0, min(1.0, v)) + 1) / 2 * 127.0 + 0.5)
         }
@@ -338,7 +288,7 @@ public enum JoyConTiltSysEx {
         guard bytes.count >= 7, bytes.first == 0xF0, bytes.last == 0xF7,
               bytes[1] == nonCommercialID, bytes[2] == subtype
         else { return nil }
-        // Legacy 7-bit axes decode to the −1…+1 display convention.
+        // 7-bit axes → the −1…+1 display convention.
         func ax(_ b: UInt8) -> Double { Double(b) / 127.0 * 2.0 - 1.0 }
         if bytes.count == 9 {
             return JoyConTiltDisplay(stickX: ax(bytes[3]),
@@ -359,16 +309,10 @@ public enum JoyConTiltSysEx {
     }
 }
 
-/// One Mac→iPad tilt display frame (all values −1…+1, centre 0 — the
-/// app-wide tilt convention since 2026-08-18): the Joy-Con stick
-/// axes, the three wrist attitude axes (the Joy-Con's fused
-/// pitch/roll/yaw, 2026-08-18), and the three Mac-evaluated ARM axes
-/// (the iPad tilts after the arm-calibration solve — `armLive` says a
-/// calibration is driving them; without one the iPad's own raw square
-/// is already the truth). Liveness flags dim the panes — plus
-/// `connected` (2026-08-13), the one field the iPad ACTS on: while a
-/// Joy-Con is attached to the Mac its arrows play the drones, so both
-/// surfaces hide their drone buttons.
+/// One Mac→iPad display frame (axes −1…+1): Joy-Con stick, fused wrist
+/// attitude, Mac-evaluated ARM axes (`armLive` = a calibration drives
+/// them), liveness flags, and the fields the iPad ACTS on: `connected`
+/// (hides the drone buttons), `fieldWarp`, `octaveShift`.
 public struct JoyConTiltDisplay: Equatable {
     public var stickX: Double
     public var stickY: Double
@@ -382,23 +326,14 @@ public struct JoyConTiltDisplay: Equatable {
     public var bodyLive: Bool
     public var armLive: Bool
     public var connected: Bool
-    /// The Mac's `ctl_strike_window` blend window (s), relayed so the
-    /// iPad scope's white→cyan onset fade tracks the window that
-    /// actually governs the strike→acceleration blend (TLP v7). 2.0
-    /// when never received (link down, legacy sender).
+    /// `ctl_strike_window` (s), for the iPad scope's onset fade. 2.0 when
+    /// never received.
     public var strikeWindowS: Double
-    /// The Mac's `ctl_fret_warp` fret pitch-warp amount (0…1, TLP v10) —
-    /// with `connected` one of the fields the pad ACTS on: the fret
-    /// field resolves touch pitch through it, so a Mac-side binding
-    /// (e.g. the Joy-Con stick) performs the warp live. 0 when never
-    /// received (link down = the linear field).
+    /// `ctl_fret_warp` (0…1); the fret field resolves touch pitch through
+    /// it. 0 when never received.
     public var fieldWarp: Double
-    /// The Mac's playing-range OCTAVE SHIFT in whole octaves (−3…+3,
-    /// TLP v11 — Joy-Con dpad ←/→). Acted on by the pad through
-    /// `PitchPadEngine.octaveShift` — ONSET-captured per touch, so a
-    /// sounding note keeps its birth octave and only new onsets take
-    /// the new range — and shown in the toolbar. 0 when never received
-    /// (link down = no shift).
+    /// The playing-range octave shift (−3…+3), ONSET-captured per touch by
+    /// `PitchPadEngine.octaveShift`. 0 when never received.
     public var octaveShift: Int
 
     public init(stickX: Double, stickY: Double, wrist1: Double,
@@ -434,61 +369,38 @@ public struct JoyConTiltDisplay: Equatable {
 
 // MARK: - iPad SysEx receiver
 
-/// Receives the scale pushed from the Mac over USB-MIDI and reassembles the
-/// incoming SysEx (which CoreMIDI may split across packets/callbacks) into a
-/// `PitchScale`. On a complete, valid scale message it hops to the main
-/// thread and fires `onScale`.
-///
-/// **Two receive paths, both feeding the same accumulator:**
-///   1. An **input port connected to every source** — the Mac, sending to
-///      the iPad over USB, appears on the iPad as a *source*; this is how
-///      USB-incoming MIDI is actually caught (mirrors the Mac's `MIDIInput`,
-///      which is the proven iPad→Mac path in reverse).
-///   2. A **virtual destination** ("Tarabdaar Scale") as a belt-and-suspenders
-///      named target, in case a host routes to it directly.
-/// Connections are refreshed on every CoreMIDI setup change, so plugging the
-/// Mac in after launch still connects.
-///
-/// This is the iPad's only MIDI input — it does not touch the iPad's MPE
-/// output (`MIDIEngine`). Channel-voice traffic that leaks in (e.g. the
-/// iPad's own notes looping back) is ignored; only SysEx is parsed.
+/// The iPad's CoreMIDI SysEx receiver: reassembles incoming SysEx (split
+/// across packets/callbacks) and routes each complete message — TLP
+/// envelopes to `TarabLink` via `onSysEx`, legacy blobs to the appliers.
+/// Two receive paths feed the same per-source accumulator: an input port
+/// connected to every source (the Mac appears on the iPad as a source) and
+/// a virtual destination ("Tarabdaar Scale"). Connections refresh on every
+/// CoreMIDI setup change. Only SysEx is parsed.
 public final class ScaleSyncReceiver: ObservableObject {
-    /// Bumped on every successfully-applied scale, for an optional UI pill.
+    /// Bumped on every applied scale.
     @Published public private(set) var syncCount: Int = 0
 
-    /// The last synced Fret-Pad arrangement (its own SysEx message, subtype
-    /// `0x03`), for the iPad Fret Pad surface. Seeded from the persisted store
-    /// on `start()` and updated on each push.
+    /// The last synced arrangement (seeded from the store on `start()`).
     @Published public private(set) var fretArrangement: FretArrangement?
 
-    /// The Mac's Joy-Con tilt display stream (subtype `0x05`) — nothing
-    /// persists. `active == false` means the stick is at rest and the
-    /// iPad's own motion owns the tilts. The axes are display-only;
-    /// `connected` is the one field the surface acts on (drone buttons
-    /// hide while a controller plays the drones).
+    /// The Mac's Joy-Con display stream (not persisted); the surface acts
+    /// on `connected`, `fieldWarp` and `octaveShift`.
     @Published public private(set) var joyConTilt = JoyConTiltDisplay.idle
 
-    /// Fired on the main thread with each decoded state (scale + tonic +
-    /// margin). The receiver also persists it via `SyncedScaleStore`.
+    /// Fired on main with each applied state (also persisted here).
     public var onState: ((SyncedScaleState) -> Void)?
 
-    /// TarabLink tunnel routing (2026-08-14): a complete inbound SysEx
-    /// whose header is the TLP envelope (`F0 7D 10`) is handed here RAW —
-    /// on the CoreMIDI thread — for `TarabLink.receivedSysEx`. The link
-    /// decodes and calls back into the appliers below, so the published
-    /// state and its persistence are identical to the legacy SysEx path.
+    /// A complete TLP-envelope SysEx (`F0 7D 10`), handed RAW on the
+    /// CoreMIDI thread to `TarabLink.receivedSysEx`.
     public var onSysEx: (([UInt8]) -> Void)?
 
     private var client = MIDIClientRef()
     private var inputPort = MIDIPortRef()
     private var destination = MIDIEndpointRef()
 
-    /// SysEx reassembly, PER SOURCE (2026-08-14): one shared buffer
-    /// corrupts when two sources carry SysEx concurrently (runs interleave
-    /// across callbacks and each collision aborts the in-flight frame).
-    /// Keyed by the input-port connection refCon (= the source endpoint
-    /// ref); the virtual-destination path uses a sentinel key. Guarded
-    /// since the paths can fire on different CoreMIDI threads.
+    /// SysEx reassembly PER SOURCE (a shared buffer corrupts under
+    /// concurrent sources), keyed by the connection refCon; the virtual
+    /// destination uses a sentinel key. Locked across CoreMIDI threads.
     private struct SysExRun {
         var buffer: [UInt8] = []
         var receiving = false
@@ -501,8 +413,6 @@ public final class ScaleSyncReceiver: ObservableObject {
 
     public func start() {
         guard client == 0 else { return }
-        // Seed the Fret-Pad arrangement from the last persisted push so the
-        // surface is populated on an offline relaunch.
         fretArrangement = FretArrangementSyncStore.load()
         let cs = MIDIClientCreateWithBlock("Tarabdaar Scale In" as CFString, &client) { [weak self] _ in
             self?.connectAllSources()
@@ -541,8 +451,7 @@ public final class ScaleSyncReceiver: ObservableObject {
         guard inputPort != 0 else { return }
         let n = MIDIGetNumberOfSources()
         for i in 0..<n {
-            // Idempotent: connecting an already-connected source is a no-op.
-            // The source ref rides as the refCon → per-source reassembly.
+            // Idempotent; the source ref rides as the refCon.
             let src = MIDIGetSource(i)
             MIDIPortConnectSource(inputPort, src,
                                   UnsafeMutableRawPointer(bitPattern: UInt(src)))
@@ -615,8 +524,7 @@ public final class ScaleSyncReceiver: ObservableObject {
             onSysEx?(bytes)
             return
         }
-        // Legacy per-message SysEx (0x01/0x03/0x05) — nothing ships these
-        // any more; kept one release as a decode fallback.
+        // Legacy per-message SysEx (0x01/0x03/0x05): decode fallback.
         if let state = PitchScaleSysEx.decode(bytes) {
             applyState(state)
         } else if let arrangement = FretArrangementSysEx.decode(bytes) {
@@ -647,28 +555,21 @@ public final class ScaleSyncReceiver: ObservableObject {
 
     public func applyJoyCon(_ tilt: JoyConTiltDisplay) {
         DispatchQueue.main.async { [weak self] in
-            // Change-gated (2026-08-24): JOYCON_STATE frames stream at up
-            // to 30 Hz while the volume readout moves; an unchanged tilt
-            // display must not re-render every toolbar pane each frame.
+            // Change-gated: frames stream at up to 30 Hz; an unchanged
+            // display must not re-render the toolbar.
             guard let self, self.joyConTilt != tilt else { return }
             self.joyConTilt = tilt
         }
     }
 
-    /// VOLUME READOUT history (2026-08-24): the Mac's radiated voice/
-    /// taraf levels — the JOYCON_STATE vol bytes on the `TLPVolume` 0…1
-    /// log scale — stamped with receive time. Deliberately NOT
-    /// `@Published`: frames arrive at up to 30 Hz while sound plays, and
-    /// the toolbar's volume scope polls this at UI rate inside a
-    /// `TimelineView` instead (the strike scope's pattern), so level
-    /// motion never re-renders the toolbar.
+    /// Volume readout history (the JOYCON_STATE vol bytes, `TLPVolume`
+    /// scale). Deliberately NOT `@Published`: the toolbar scope polls it in
+    /// a `TimelineView`, so level motion never re-renders the toolbar.
     public let volumeHistory = VolumeHistory()
 }
 
-/// Thread-safe rolling buffer of received (voice, taraf) volume levels
-/// (0…1 log scale — see `TLPVolume`). Samples are sparse: change-gated
-/// 30 Hz while levels move, the link's 250 ms heartbeat at rest — the
-/// scope forward-fills between them.
+/// Thread-safe rolling buffer of received (voice, taraf) levels; samples
+/// are sparse and the scope forward-fills.
 public final class VolumeHistory {
     public struct Sample: Sendable {
         public let t: TimeInterval        // ProcessInfo systemUptime
@@ -677,9 +578,7 @@ public final class VolumeHistory {
     }
     private let lock = NSLock()
     private var samples: [Sample] = []
-    /// Retention window — comfortably longer than any display window, so
-    /// the scope always has the one sample preceding its left edge to
-    /// forward-fill from.
+    /// Retention window, longer than any display window.
     private static let window: TimeInterval = 8.0
 
     public init() {}

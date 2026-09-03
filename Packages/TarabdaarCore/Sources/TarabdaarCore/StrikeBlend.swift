@@ -1,6 +1,6 @@
 import Foundation
 
-/// THE STRIKE→ACCELERATION BLEND WINDOW (2026-08-23). The `.strike` and
+/// THE STRIKE→ACCELERATION BLEND WINDOW . The `.strike` and
 /// `.acceleration` dimensions ride the SAME measurement (the PERF_STATE
 /// strike-envelope byte); what separates them is TIME SINCE THE NOTE
 /// STARTED: at onset the measurement drives the Strike bindings fully,
@@ -16,7 +16,7 @@ import Foundation
 ///  * anchors are PER NOTE (wire touch id): a new onset never rewrites an
 ///    older sounding note's window;
 ///  * while notes sound, the NEWEST sounding note's age drives the weight
-///    (user decision 2026-08-23: a fresh tap always gets full Strike
+///    (a fresh tap always gets full Strike
 ///    treatment, even mid-legato — the cost that the shared parameters
 ///    swing back under the older note too is inherent to global targets,
 ///    and the measurement itself spikes at the tap anyway);
@@ -29,7 +29,7 @@ import Foundation
 /// Retriggers (same id, new onsetSeq) re-anchor that id. Not thread-safe
 /// — the owner serializes access (AppController's strike lock).
 public struct StrikeBlendWindow {
-    /// Configurable since 2026-08-23 (`ctl_strike_window`, Parameters
+    /// Configurable  (`ctl_strike_window`, Parameters
     /// tab); the owner clamps writes. Anchors survive a change — only
     /// the ramp length moves.
     public var windowS: Double

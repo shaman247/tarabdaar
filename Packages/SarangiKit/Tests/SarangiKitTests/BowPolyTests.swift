@@ -35,7 +35,7 @@ final class BowPolyTests: XCTestCase {
     }
 
     /// Overlays swept by the rigid-bridge mount checks.
-    /// DEFAULT-VALUE LAW (2026-07-17h): the shipped artifacts null both of
+    /// DEFAULT-VALUE LAW : the shipped artifacts null both of
     /// these, and the poly kernel shipped a round mounting its strings in
     /// the WRONG friction state (full static grip instead of fresh contact)
     /// because parity had only ever been measured at `bow_age_a` 0. Any
@@ -46,7 +46,7 @@ final class BowPolyTests: XCTestCase {
         ("bow_age_a 1.0", ["bow_age_a": 1.0]),
         ("bow_tors_c 0.35", ["bow_tors_c": 0.35]),  // round-10 fitted value
         ("age 0.5 + tors 0.35", ["bow_age_a": 0.5, "bow_tors_c": 0.35]),
-        // continuum-release contact (2026-07-19d, hand-ported to poly)
+        // continuum-release contact (hand-ported to poly)
         ("bow_cr_w 0.15", ["bow_cr_w": 0.15]),
         ("cr_w .15 + cr_ms .06 + age .5",
          ["bow_cr_w": 0.15, "bow_cr_ms": 0.06, "bow_age_a": 0.5]),
@@ -177,9 +177,7 @@ final class BowPolyTests: XCTestCase {
     // ------------------------------------------------------------------ //
 
     /// Driven from the SHIPPING artifact + the fitted tarab, so this is the
-    /// instrument the app actually plays under a maximum-force chord. (It
-    /// used to be configured from the coupled network's table-export golden,
-    /// which went with the vendored machinery, 2026-07-24.)
+    /// instrument the app actually plays under a maximum-force chord.
     func testPolyEightNoteChordStaysBoundedAndReleases() throws {
         guard let bp = Presets.bowedStringParams() else {
             throw XCTSkip("bowed_string.json not available in this bundle")

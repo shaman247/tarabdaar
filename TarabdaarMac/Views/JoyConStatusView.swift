@@ -203,7 +203,7 @@ struct JoyConStatusView: View {
             intro: "The iPad's tilt calibration: the iPad streams raw attitude and this capture learns the whole map — rest pose, movement directions and ranges (rest = 0 on every axis). Needs only the iPad on the arm; the Joy-Con is optional (dpad-up advances, dpad-down steps back, ZL re-zeroes the rest pose). Four phases. Start each sweep from rest and end near rest if you can — all seven rest readings are merged robustly, and a reading that isn't at rest is simply ignored, never a redo. A one-sided or duplicate sweep clears itself and repeats on the spot.")
     }
 
-    /// The WRIST calibration (2026-09-02): the same guided capture over
+    /// The WRIST calibration : the same guided capture over
     /// the Joy-Con's fused attitude — wrist up/down, in/out, rotation
     /// → the Wrist ↕/↔/⟲ control axes. Shown once the Joy-Con's motion
     /// fusion is live (or a calibration already exists).
@@ -228,7 +228,7 @@ struct JoyConStatusView: View {
         }
     }
 
-    /// The Joy-Con 2 fused pair (2026-08-15) — the analogs of the
+    /// The Joy-Con 2 fused pair — the analogs of the
     /// iPad's received motion/acceleration views, from the 9-axis
     /// fusion: orientation in 3D space (mag-pinned yaw once the
     /// hard-iron estimate is earned) and gravity-removed linear
@@ -319,7 +319,7 @@ struct JoyConStatusView: View {
 /// overlay this is the transmission A/B; the wire's yaw is the
 /// HIGH-PASSED, bias-corrected axis, so raw yaw drift visible on the
 /// iPad and absent there is correct behaviour) and the Joy-Con 2's
-/// fused attitude (2026-08-15).
+/// fused attitude .
 private struct ReceivedMotionView: View {
     /// Sampled fresh inside each 60 Hz timeline tick (attitude in
     /// radians). Deliberately not observed state: the TimelineView
@@ -535,7 +535,7 @@ private struct VectorTrailView: View {
 
 // MARK: - Guided calibration panel + sample cloud (3D)
 
-/// One guided-calibration panel (2026-09-02: shared by the arm and the
+/// One guided-calibration panel (shared by the arm and the
 /// wrist): the start button or the running phase prompt, the live
 /// verdict line, the calibrated axes readout and the rotating sample
 /// cloud with the fitted model.

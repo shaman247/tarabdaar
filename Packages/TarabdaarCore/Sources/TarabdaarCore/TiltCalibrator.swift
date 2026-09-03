@@ -2,12 +2,10 @@ import Combine
 import Foundation
 import simd
 
-/// THE GUIDED THREE-SWEEP TILT CALIBRATION (extracted 2026-09-02 from
-/// `JoyConInput`'s arm calibration so the Joy-Con WRIST can run the
-/// same capture on its own feature stream). One instance = one
-/// three-dimensional attitude stream → three −1…+1 control axes (rest
-/// = 0, sweep extremes = ±1, the app-wide tilt convention since
-/// 2026-08-18). The Mac holds two: the ARM (the iPad's raw tilt
+/// THE GUIDED THREE-SWEEP TILT CALIBRATION, shared by the iPad ARM and
+/// the Joy-Con WRIST. One instance = one three-dimensional attitude
+/// stream → three −1…+1 control axes (rest = 0, sweep extremes = ±1,
+/// the app-wide tilt convention). The Mac holds two: the ARM (the iPad's raw tilt
 /// report, `tarabdaar.armCal.v2`) and the WRIST (the Joy-Con's fused
 /// attitude, `tarabdaar.wristCal.v1`).
 ///
@@ -71,7 +69,7 @@ public final class TiltCalibrator: ObservableObject {
             self.smoothAlpha = smoothAlpha
         }
 
-        /// The iPad ARM calibration (2026-08-13): feature = the iPad's
+        /// The iPad ARM calibration : feature = the iPad's
         /// raw tilt report (pitch/roll/high-passed yaw at ±90° full
         /// scale). α 0.25: the report is 7-bit-quantized attitude and a
         /// resting arm flickers ±1–2 steps across quantization
@@ -92,7 +90,7 @@ public final class TiltCalibrator: ObservableObject {
             legacyKey01: "tarabdaar.armCal.v1",
             smoothAlpha: 0.25)
 
-        /// The Joy-Con WRIST calibration (2026-09-02): feature = the
+        /// The Joy-Con WRIST calibration : feature = the
         /// Joy-Con's fused attitude (gravity pitch/roll + drift-learned
         /// relative yaw, all at ±90° full scale). The fusion is already
         /// smooth, so a lighter EMA keeps the axes responsive.

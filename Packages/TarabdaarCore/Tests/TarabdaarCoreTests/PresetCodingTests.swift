@@ -54,7 +54,7 @@ final class PresetCodingTests: XCTestCase {
         XCTAssertNil(back.stringOverrides)
         XCTAssertNil(back.paramValues)
         XCTAssertNotNil(back.tiltMapping)
-        // 5 since 2026-08-28: makeDefault seeds the strum-expression
+        // 5  makeDefault seeds the strum-expression
         // binding (ctl_strum_expr on Stick Y) beside the four classics.
         XCTAssertEqual(back.sections(), ["5 tilt bindings"])
     }
@@ -64,6 +64,6 @@ final class PresetCodingTests: XCTestCase {
         XCTAssertThrowsError(try TarabdaarPreset.decode(Data("not json".utf8)))
     }
 
-    // MARK: - Split-era files (2026-07-24 → 2026-07-30)
+    // MARK: - Partial and older files
 
 }

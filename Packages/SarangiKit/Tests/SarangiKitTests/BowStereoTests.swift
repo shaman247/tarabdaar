@@ -9,12 +9,12 @@ final class BowStereoTests: XCTestCase {
         bp.num["bow_jt_gain"] = 1.0
         if stereo {
             // the LEGACY pan staging (disarmed by default since the
-            // 2026-08-01 width unification) — still armable explicitly
+            // width unification) — still armable explicitly
             bp.num["bow_st_spread"] = 0.7
             bp.num["bow_st_played"] = 0.15
         }
         if widthOnly {
-            // the instrument-width bank ALONE (2026-08-01): pans all
+            // the instrument-width bank ALONE : pans all
             // zero — the side stream carries only the second
             // observation point (voice bus + jt-wash bus instances)
             bp.num["bow_st_width"] = 0.6

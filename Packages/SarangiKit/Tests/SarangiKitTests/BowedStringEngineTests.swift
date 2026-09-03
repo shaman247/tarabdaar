@@ -18,7 +18,7 @@ final class BowedStringEngineTests: XCTestCase {
             "bow_noise_dir": 0.12, "bow_noise_dir_hi": 6000.0,
             // topology: bridge mobility ON since the formula body
             "bow_kret": 0.35, "bow_yinf": 0.08, "bow_zload": 1.0, "bow_os": 2,
-            // formula modal body (2026-07-16b; mobile since the taraf round)
+            // formula modal body (mobile since the taraf round)
             "bow_body_modes": 12,
             "bow_body_air_ratio": 0.9, "bow_body_scale": 1.0,
             "bow_body_spacing": 0.55, "bow_body_jitter": 0.35,

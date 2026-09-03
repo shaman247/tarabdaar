@@ -1,73 +1,22 @@
 import Foundation
 
-/// TLP — the TarabLink Protocol. ONE transport-agnostic binary vocabulary
-/// for everything that crosses the iPad↔Mac link, replacing the MIDI
-/// shoehorning (MPE note+bend, tilt CC pairs, base64-in-SysEx blobs).
+/// TLP — the TarabLink Protocol: the transport-agnostic binary vocabulary
+/// for everything that crosses the iPad↔Mac link.
 ///
 /// Frame classes by type byte:
 ///   0x01–0x3F  events        — reliable, never dropped, never coalesced
 ///   0x40–0x5F  state frames  — latest-wins, coalescable per type
 ///
 /// All integers little-endian; floats IEEE-754 binary32 LE. Encode/decode
-/// is explicit byte-table code (no struct overlay, no alignment trust).
-/// Decoders return nil on any truncation or bounds violation — never trap
-/// on wire input.
+/// is explicit byte-table code. Decoders return nil on any truncation or
+/// bounds violation — never trap on wire input.
 public enum TLP {
-    /// v2 (2026-08-14): PERF_STATE grew the three raw accelerometer
-    /// fields. Both apps ship from this repo in lockstep; the HELLO
-    /// range check refuses a v1 peer cleanly instead of silently
-    /// dropping every reshaped frame.
-    /// v3 (2026-08-18): JOYCON_STATE grew the three Mac-evaluated arm
-    /// axes and the third wrist axis (+ the arm-live flag) so the iPad
-    /// toolbar can display the calibrated tilts, not just raw attitude.
-    /// v4/v5 (2026-08-18): each PERF_STATE touch grew flag-gated
-    /// `posY`/`fretY` bytes and the host streamed `LINGER_STATE 0x42`
-    /// back — the fret-linger expression decay + y-depth auto-vibrato.
-    /// REMOVED in v8 (2026-08-23): the feature was cut, the touch record
-    /// is back to its pre-v4 shape and 0x42 is retired.
-    /// v6 (2026-08-23): PERF_STATE grew the header `strike` byte — the
-    /// iPad's accelerometer STRIKE-SCALE envelope (`strikeScale01` with a
-    /// fast-attack / ~150 ms-decay tracker, 0–255 ↔ 0…1) — feeding the
-    /// Mac's `.strike` control dimension. Same lockstep rule as every
-    /// layout bump: install both sides together (the half-working symptom
-    /// is "drones and tilt work, touches are silent").
-    /// v7 (2026-08-23, later): JOYCON_STATE grew `strikeWin` — the Mac's
-    /// `ctl_strike_window` blend-window parameter in 50 ms units (0 =
-    /// unset → the viewer's 2 s default), so the iPad scope's
-    /// white→cyan onset fade tracks the window that actually governs the
-    /// strike→acceleration blend.
-    /// v8 (2026-08-23, later): the fret-linger/auto-vibrato feature was
-    /// REMOVED — each PERF_STATE touch dropped its v4/v5 `flags`/`posY`/
-    /// `fretY` bytes (back to the 9-byte pre-v4 record) and the Mac→iPad
-    /// `LINGER_STATE 0x42` frame is retired.
-    /// v9 (2026-08-24): JOYCON_STATE grew the two VOLUME READOUT bytes —
-    /// the Mac's radiated main-voice and taraf levels (`volVoice`/
-    /// `volTaraf`, `TLPVolume` log mapping) for the iPad toolbar's
-    /// volume scope.
-    /// v10 (2026-08-25): JOYCON_STATE grew `fieldWarp` — the Mac's
-    /// `ctl_fret_warp` registry param (0–255 ↔ 0…1), the fret pitch-warp
-    /// amount. The iPad EVALUATES the fret field, so this is the one
-    /// JOYCON_STATE field beyond `connected` the pad acts on: every touch
-    /// onset/move resolves its pitch through the latest relayed warp,
-    /// making the warp live-performable (a stick binding morphs the pad
-    /// between fretless-linear and hard-quantized mid-phrase).
-    /// v11 (2026-08-27): JOYCON_STATE grew `octave` — the Mac's playing-
-    /// range OCTAVE SHIFT (Joy-Con dpad ←/→, ±3, i8 bit pattern). Like
-    /// `fieldWarp` the pad ACTS on it (through `PitchPadEngine.
-    /// octaveShift`) and the toolbar shows the current offset. Unlike
-    /// fieldWarp it is ONSET-CAPTURED per touch (2026-08-28): a sounding
-    /// note keeps its birth octave through every glide; only the next
-    /// onset takes the new range.
-    /// v12 (2026-08-28): PERF_STATE grew the two CHORD BAR selection
-    /// bytes — `chordDegree` (u8, 0xFF = none) + `chordOctave` (i8 bit
-    /// pattern): the pad's active strum chord (the chord bar below the
-    /// fret band), held state like `droneMask`. The Mac acts on the
-    /// change edges; the strum (Joy-Con L / accel trigger) plays the
-    /// selected chord instead of the configured strum set.
+    /// Protocol version — both apps ship in lockstep; the HELLO range check
+    /// refuses a mismatched peer cleanly (the symptom otherwise: "drones and
+    /// tilt work, touches are silent").
     public static let versionMin: UInt16 = 12
     public static let versionMax: UInt16 = 12
-    /// Hard cap on an encoded frame; the largest real payload is the scale
-    /// blob at a few hundred bytes.
+    /// Hard cap on an encoded frame.
     public static let maxFrameBytes = 1024
     /// HELLO magic 'TRBL' (LE u32).
     public static let helloMagic: UInt32 = 0x4C42_5254
@@ -82,23 +31,17 @@ public enum TLP {
     public static let typeResyncRequest: UInt8 = 0x1F
     public static let typePerfState: UInt8 = 0x40
     public static let typeJoyConState: UInt8 = 0x41
-    // 0x42 LINGER_STATE: retired with the fret-linger feature (v8) — do
-    // not reuse.
+    // 0x42 is retired — do not reuse.
 
-    /// Wrap-aware "candidate is newer than last" for u16 sequence numbers
-    /// (window 32768). Used for both stateSeq drop-non-newer and eventSeq
-    /// drop-already-seen across lane switchover.
+    /// Wrap-aware "candidate is newer than last" for u16 sequence numbers.
     public static func isNewer(_ candidate: UInt16, than last: UInt16) -> Bool {
         let d = candidate &- last
         return d != 0 && d < 0x8000
     }
 }
 
-/// The JOYCON_STATE volume-readout byte mapping (TLP v9, 2026-08-24):
-/// linear amplitude → one log-scaled wire byte. 0 = silence (at or below
-/// the −60 dBFS floor); 1…255 span −60…0 dBFS linearly in dB, so the
-/// byte over 255 IS the iPad meter's 0…1 display height (log display —
-/// equal pixel steps are equal dB steps).
+/// The volume-readout byte: 0 = silence (≤ −60 dBFS), 1…255 span −60…0
+/// dBFS linearly in dB, so byte/255 is the iPad meter's display height.
 public enum TLPVolume {
     public static let floorDb = -60.0
 
@@ -121,29 +64,22 @@ public enum TLPRole: UInt8, Equatable, Sendable {
     case host = 1   // Mac
 }
 
-/// One active touch inside a PERF_STATE frame (9 bytes on the wire).
-/// `pitch` is a fractional MIDI note number (69.0 = A440) — f32 gives
-/// ~0.0008 ¢ steps in the playing register vs the old bend wire's 0.586 ¢.
-/// `onsetSeq` bumps on each fresh articulation of this id, so a lift +
-/// re-press survives latest-wins coalescing as a retrigger.
+/// One active touch inside a PERF_STATE frame — 9 bytes on the wire:
+/// `id u16 · onsetSeq u8 · velocity u8 · pressure u8 · pitch f32`.
+/// `pitch` is a fractional MIDI note number (69.0 = A440). `onsetSeq`
+/// bumps on each fresh articulation of this id, so a lift + re-press
+/// survives latest-wins coalescing as a retrigger.
 public struct TLPTouch: Equatable, Sendable {
     public var id: UInt16
     public var onsetSeq: UInt8
     public var velocity: UInt8      // 0–255 onset velocity
     public var pressure: UInt8      // 0–255, 0 if unavailable
     public var pitch: Float         // fractional MIDI note
-    /// IN-PROCESS ONLY (2026-08-28): per-touch expression scale 0…1 —
-    /// the Mac strum chord's live loudness (`ctl_strum_expr`). NOT on
-    /// the wire: the encoder skips it and decoded frames always carry
-    /// 1.0 (neutral), so the 9-byte touch record and every iPad path
-    /// are untouched. It survives only the Mac's LocalLinkPump lane,
-    /// which passes these structs without serializing.
+    /// IN-PROCESS ONLY (the Mac strum chord's live loudness): not encoded;
+    /// decoded frames carry 1.0.
     public var exprScale: Double
-    /// IN-PROCESS ONLY (2026-08-31), like `exprScale`: marks a touch the
-    /// GLIDE QUEUE must pass through untouched (the Mac strum chord —
-    /// its members land milliseconds apart and must never chain into a
-    /// glissando). NOT on the wire: the encoder skips it and decoded
-    /// frames always carry `false`, so iPad touches always participate.
+    /// IN-PROCESS ONLY (the strum chord's glide-queue exemption): not
+    /// encoded; decoded frames carry `false`.
     public var glideExempt: Bool
 
     public init(id: UInt16, onsetSeq: UInt8, velocity: UInt8,
@@ -160,14 +96,16 @@ public struct TLPTouch: Equatable, Sendable {
 }
 
 /// iPad→Mac: the whole performance in one atomic frame — the COMPLETE set
-/// of active touches (absence = note-off; presence with a new onsetSeq =
-/// retrigger), tilt, and the held drone buttons. Latest frame is the truth,
-/// so coalescing can never lose a release.
+/// of active touches (absence = note-off; a new onsetSeq = retrigger),
+/// tilt, accelerometer, strike, drone buttons and chord selection. The
+/// latest frame is the truth, so coalescing can never lose a release.
+///
+/// Layout: `type u8 · flags u8 · stateSeq u16 · timestampUs u32 ·
+/// tilt s16×3 · accel s16×3 · droneMask u8 · strike u8 · chordDegree u8 ·
+/// chordOctave i8 · count u8 · touches (9 B each)`.
 public struct TLPPerfState: Equatable, Sendable {
     public static let flagBackgrounded: UInt8 = 1 << 0
-    /// Accelerometer wire full scale in g: ±32767 ↔ ±4 g (~0.12 mg
-    /// steps). `userAcceleration` peaks a few g on the hardest strikes;
-    /// diagnostic display, so clipping beyond that is acceptable.
+    /// Accelerometer wire full scale: ±32767 ↔ ±4 g (diagnostic display).
     public static let accelFullScaleG = 4.0
 
     public var flags: UInt8
@@ -180,16 +118,11 @@ public struct TLPPerfState: Equatable, Sendable {
     public var accelY: Int16
     public var accelZ: Int16
     public var droneMask: UInt8           // bits 0–2 = drone buttons held
-    /// TLP v6 (2026-08-23): the accelerometer STRIKE-SCALE envelope,
-    /// 0–255 ↔ 0…1 on the shared strike law (`MotionSource.strikeScale01`
-    /// through the iPad's fast-attack/slow-decay tracker) — the `.strike`
-    /// control dimension's wire value. 0 for producers without an
-    /// accelerometer (the Mac's local pads).
+    /// The accelerometer strike-scale envelope, 0–255 ↔ 0…1 — the
+    /// `.strike` dimension's wire value; 0 without an accelerometer.
     public var strike: UInt8
-    /// TLP v12 (2026-08-28): the CHORD BAR selection — the active strum
-    /// chord's degree index (0xFF = none selected) and its octave shift
-    /// as an i8 bit pattern. Held state like `droneMask`: the Mac acts
-    /// on the change edges.
+    /// The chord bar selection: degree index (0xFF = none) and octave as
+    /// an i8 bit pattern. Held state; the Mac acts on the change edges.
     public var chordDegree: UInt8
     public var chordOctave: UInt8
     public var touches: [TLPTouch]
@@ -226,13 +159,14 @@ public struct TLPPerfState: Equatable, Sendable {
     }
 }
 
-/// Mac→iPad: the tilt display frame (replaces SysEx 0x05) — the Joy-Con
-/// stick, the Joy-Con fused wrist attitude, and (v3) the Mac-evaluated
-/// ARM axes (the iPad tilts after the arm-calibration solve, round-tripped
-/// so the iPad can show what actually drives the bindings). Display axes
-/// plus the one acted-on bit (`connected`, bit 2 — hides the drone
-/// buttons). Latest-wins with a heartbeat floor, so `connected` always
-/// arrives without the old force-resend-on-edges dance.
+/// Mac→iPad: the display frame — Joy-Con stick, wrist attitude, the
+/// Mac-evaluated ARM axes, the volume readout and the relayed controls.
+/// The pad ACTS on `connected` (flag bit 2, hides the drone buttons),
+/// `fieldWarp` and `octave`. Latest-wins with a heartbeat floor.
+///
+/// Layout: `type u8 · flags u8 · stateSeq u16 · timestampUs u32 · stickX
+/// stickY wrist1 wrist2 wrist3 arm1 arm2 arm3 strikeWin volVoice volTaraf
+/// fieldWarp octave (u8 each)`.
 public struct TLPJoyConState: Equatable, Sendable {
     public static let flagStickLive: UInt8 = 1 << 0
     public static let flagBodyLive: UInt8 = 1 << 1
@@ -247,26 +181,19 @@ public struct TLPJoyConState: Equatable, Sendable {
     public var wrist1: UInt8
     public var wrist2: UInt8
     public var wrist3: UInt8
-    /// TLP v7: the strike→acceleration blend window in 50 ms units
-    /// (0 = unset → the viewer's 2 s default) — the iPad scope's onset
-    /// fade tracks the Mac's `ctl_strike_window` through this.
+    /// `ctl_strike_window` in 50 ms units (0 = unset → the viewer's 2 s
+    /// default), for the iPad scope's onset fade.
     public var strikeWin: UInt8
     public var arm1: UInt8
     public var arm2: UInt8
     public var arm3: UInt8
-    /// TLP v9 (2026-08-24): the VOLUME READOUT — the Mac's radiated
-    /// main-voice and taraf levels on the `TLPVolume` log scale (0 =
-    /// silence, 255 = 0 dBFS), for the iPad toolbar's volume scope.
+    /// The Mac's radiated voice and taraf levels (`TLPVolume` log scale).
     public var volVoice: UInt8
     public var volTaraf: UInt8
-    /// TLP v10 (2026-08-25): the Mac's `ctl_fret_warp` fret pitch-warp
-    /// amount (0–255 ↔ 0…1) — acted on by the pad: the fret field
-    /// resolves touch pitch through it (`fretFieldLog(warp:)`).
+    /// `ctl_fret_warp` (0–255 ↔ 0…1) — acted on by the pad's fret field.
     public var fieldWarp: UInt8
-    /// TLP v11 (2026-08-27): the Mac's playing-range OCTAVE SHIFT as an
-    /// i8 bit pattern (−3…+3; Joy-Con dpad ←/→) — acted on by the pad:
-    /// every onset/move transposes by whole octaves, and the toolbar
-    /// shows the offset. 0 = no shift (the never-received default).
+    /// The playing-range octave shift, i8 bit pattern (−3…+3) — acted on
+    /// by the pad.
     public var octave: UInt8
 
     public init(flags: UInt8, stateSeq: UInt16, timestampUs: UInt32,
@@ -294,10 +221,8 @@ public struct TLPJoyConState: Equatable, Sendable {
     }
 }
 
-/// The reliable channel: link bring-up, latency measurement, panic, and the
-/// Mac→iPad sync payloads. Scale/arrangement carry the EXISTING blob bytes
-/// (v4/v6) raw — the codecs and iPad-side persistence are untouched; only
-/// the base64+SysEx wrapper died.
+/// The reliable channel: bring-up, latency, panic, and the Mac→iPad sync
+/// payloads (the codecs' raw `encodeBlob` bytes).
 public enum TLPEvent: Equatable, Sendable {
     case hello(minVer: UInt16, maxVer: UInt16, role: TLPRole)
     case ping(id: UInt8, t1: UInt32)
@@ -314,8 +239,7 @@ public enum TLPFrame: Equatable, Sendable {
     case joyConState(TLPJoyConState)
     case event(seq: UInt16, TLPEvent)
 
-    /// The wire type byte (drives outbox coalescing: state types coalesce
-    /// per type, events never do).
+    /// The wire type byte (state types coalesce per type, events never).
     public var typeByte: UInt8 {
         switch self {
         case .perfState: return TLP.typePerfState
@@ -408,10 +332,8 @@ extension TLPFrame {
 // MARK: - Decode
 
 extension TLPFrame {
-    /// Decodes one complete frame. nil on truncation, unknown EVENT type,
-    /// bad magic, or trailing garbage. Unknown STATE types (0x42–0x5F)
-    /// also return nil here — callers treat nil state as skippable
-    /// forward-compat, nil events as a wire error worth logging.
+    /// Decodes one complete frame; nil on truncation, unknown type, bad
+    /// magic or trailing garbage.
     public static func decode(_ bytes: [UInt8]) -> TLPFrame? {
         guard bytes.count <= TLP.maxFrameBytes else { return nil }
         var r = TLPReader(bytes)

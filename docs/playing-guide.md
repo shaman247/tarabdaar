@@ -1,135 +1,65 @@
 # Playing Guide
 
-## Physical Setup
+## Physical setup
 
-1. Hold the iPad in landscape orientation (home button / USB-C on the right)
-2. Rest the iPad on your inner forearm, screen facing up
-3. The **Fret Pad** fills the screen below the slim toolbar; your fingers play it from above
-4. Tilting your arm controls whatever expression you've mapped (aftertouch, CCs)
+1. Hold the iPad in landscape orientation (USB-C port on the right).
+2. Rest the iPad on your inner forearm, screen facing up.
+3. The **Fret Pad** fills the screen below the slim toolbar; your fingers play it from above.
+4. Tilting your arm drives whatever the Mac's Controls tab binds to the arm axes.
 
-## Calibration: one step, on the Mac (2026-08-13)
+## Connecting
 
-The iPad needs no calibration and has no first-launch wizard — it streams
-its raw orientation continuously. The app's single tilt calibration is the
-**arm calibration** on the Mac's **Setup tab (⌘7)**, which fits the three
-arm control axes from the iPad on your forearm (no Joy-Con needed):
+Plug the iPad into the Mac over USB, or pair it over Bluetooth (BLE-MIDI — see [MIDI & Audio](midi-and-audio.md)). On the Mac, **Audio MIDI Setup › Window › Show MIDI Studio** must show the iPad enabled. Launch TarabdaarMac; the top-bar pill reads `MIDI: N src` once it sees the iPad, and the first touch sounds immediately — no settings to sync.
+
+## Calibration: one step, on the Mac
+
+The iPad needs no calibration — it streams raw orientation continuously. The app's tilt calibration is the **arm calibration** on the Mac's **Setup tab (⌘7)**, which fits the three arm control axes from the iPad on your forearm:
 
 1. **Rest** — hold the arm still in playing position
 2. **Sweep the arm up and down**
 3. **Sweep the arm inward and outward**
 4. **Rotate the arm inward and outward**
 
-Start each sweep from rest and end near rest if you can (an off-rest
-ending is tolerated). Advance with the panel's Next button or the
-Joy-Con's dpad-up; dpad-down redoes the previous phase; ZL re-zeroes the
-rest pose any time. The calibration persists across launches. Without
-one, the iPad's raw axes drive the tilts directly — playable, but
-uncentered ("rest" is wherever your arm actually rests). The Joy-Con
-**stick** has its own separate calibration on the same tab.
+Start each sweep from rest and end near rest if you can. Advance with the panel's Next button or the Joy-Con's dpad-up; dpad-down redoes the previous phase; ZL re-zeroes the rest pose any time. The calibration persists across launches. Without one, the iPad's raw axes drive the tilts directly — playable, but uncentered. With a Joy-Con, the **wrist calibration** (same procedure over the Joy-Con's attitude) and the **stick calibration** live on the same tab. See [Sensors](sensors.md).
 
-## Playing Notes
+## Playing notes
 
-Touch a fret on the Fret Pad to sound its pitch. Each fret is a vertical
-segment placed freely across the surface; a touch that starts within the
-Snap distance of a fret (and inside its vertical extent) snaps to that
-fret's exact pitch, while starting in open space approaches the pitch
-through the continuous fret field. The base layout sits in a central band
-and repeats up and down as read-only octave-ghost copies. Press-to-sound
-**drone buttons** live inside the right edge.
+Touch a fret on the Fret Pad to sound its pitch. Each fret is a vertical segment placed freely across the surface; a touch that starts within the Snap distance of a fret (and inside its vertical extent) snaps to that fret's exact pitch, while starting in open space plays the continuous fret field — the approach path into a note. The base layout sits in a central band and repeats up and down as read-only octave-ghost copies. Press-to-sound **drone buttons** sit inside the right edge, and the **chord bar** strip below the band selects a triad for the Joy-Con strum. See [Fret Pad](fret-pad.md).
 
-Multiple fingers play polyphonically — each touch is an independent voice
-on its own MPE channel. See [Fret Pad](fret-pad.md) for the full surface.
+Multiple fingers play polyphonically — every touch mounts its own fresh string on the Mac. There is no mono/poly toggle.
 
 ## Gliding
 
-Drag a finger across the pad for a continuous pitch slide. Crossing a cell
-boundary doesn't retrigger — the held note bends, so the pitch glides
-smoothly from one degree to the next.
+Drag a finger for a continuous pitch slide: the held note bends through the fret field, and the pitch follows your finger at wire rate — every meend is your own movement. A gated **drag assist** lands stops on frets without warping fast transit or vibrato. The **fret warp** parameter (`ctl_fret_warp`, bindable to a tilt or stick axis) morphs the field between fretless-linear and near-quantized mid-phrase.
 
-The boundary between two cells is a soft margin (set by the Mac's **Margin**
-slider, default 16 px): inside a cell's inner polygon the exact ratio
-sounds; in the strip between two cells the pitch is a log-frequency blend
-of the two, hitting their geometric mean on the shared bisector; at a
-three-cell junction it blends all three. The sounding cell(s) fill with
-their hue, cross-faded by the same weights that drive the pitch, so you can
-see exactly where you are between degrees.
+With the **glide queue** armed (`ctl_glide_on`), a new touch that overlaps a sounding one becomes a waypoint instead of a new note: the sounding voice glides through the queued pitches, and releasing the owner glides back to the most recent parked finger. Off by default. See [Glide System](glide-system.md).
 
-There is no stop-snapping — the pad always plays your exact finger
-position (or the soft blend), so microtonal inflection between degrees is
-on tap. Lift the finger to release that voice.
+## Vibrato and expression
 
-## Vibrato & tilt expression
+Vibrato is a **playing technique**, not an automatic LFO: the pitch tracks your finger, so rocking it bends the pitch with the motion.
 
-Vibrato is a **playing technique**, not an automatic LFO: the pitch tracks
-your finger directly, so wiggling left/right — rocking across a cell
-boundary into the soft margin — bends the pitch with the motion. (The old
-automatic vibrato LFO and its Vibrato Depth/Rate/Intensity mapping params
-have been removed.)
+Everything else comes from the **dimensions** the Mac's **Controls tab (⌘4)** binds to composites (Taraf Purity, Taraf Decay, Tone Tilt, Expression) or to any single parameter, with a curve per binding:
 
-Other expression comes from **tilt** (and the sliders / pressure if you map
-them). In the **MAP** matrix, bind a tilt axis to **Aftertouch** or a **CC**
-to drive the String voice's expression axes (expression, taraf purity/decay,
-tone tilt). The pad's 60 Hz loop overlays this on every held touch.
+- **Arm ↕/↔/⟲** — the iPad's tilt axes through the arm calibration (bipolar, rest = 0)
+- **Wrist ↕/↔/⟲** and the **Joy-Con stick** X/Y — with a Joy-Con attached
+- **Strike / Acceleration** — the accelerometer strike envelope, blended per note from attack to sustain over `ctl_strike_window`
+- **Finger accel** — the playing finger's signed pitch acceleration (rest and constant-rate meend = 0)
+- **Joy-Con accel** — the controller's own acceleration magnitude
 
-## Expression Dimensions
+The iPad toolbar shows each source live (arm/wrist/stick squares, the strike and finger-accel scopes, the Mac's radiated volume). See [Sensors](sensors.md).
 
-Parameters can have multiple **dimensions** bound to them simultaneously. Configure mappings via the **MAP** button in the toolbar. Each binding defines a Catmull-Rom spline curve (2–4 control points) that maps the dimension's input range to the parameter's output range. When multiple dimensions are bound, sliders (when touched) override tilts, and the dimension with the highest deviation from center wins among same-type inputs.
+## Octave shift and strum (Joy-Con)
 
-On the Fret Pad, expression is driven by the **global** dimensions — Tilt 1/2/3 and Slider 1/2. The per-note dimensions (Pressure, Key Y) are inherited from the old keyboard and currently read their idle value on the pad, so map aftertouch/CCs to a tilt or slider.
+Dpad ←/→ shift the playing range by whole octaves (±3; the toolbars read "Oct +1"); a sounding note keeps its octave, the next onset takes the new one. Drones, the tarab and the strum do not shift. The strum plays the configured chord — or the chord-bar selection — on the sympathetic strings.
 
-**Internal parameters**: Velocity, Glide Speed, Compression, Amplitude, Drag Smoothing, Glide Curve.
+## Scale editing (on the Mac)
 
-**MIDI output parameters**: Aftertouch (channel pressure), CC74 Slide, CC1 Modwheel, CC11 Expression, CC71 Resonance, CC73 Attack, CC75 Decay. MIDI CCs are only sent when mapped to a dimension (not "None"), and are sent per-voice on each voice's MPE channel.
+The iPad is **perform-only**. Scales are designed on the Mac's Fret Pad tab (⌘3): the scale list editor (add/remove/disable pitches, snap to simple fractions, the Scales presets including 12-TET Chromatic) and the tonic in Hz. Edits sync to the iPad within a moment; the iPad opens on the last scale it received. See [Scales & Tuning](scales-and-tuning.md).
 
-**Available dimensions**:
-- **Arm ↕/↔/⟲**: the iPad's tilt axes through the Mac's arm calibration (global, same for all voices; raw and uncentered if uncalibrated)
-- **Pressure**: Accelerometer strike intensity at note onset (per-note). When no parameter uses Pressure, the velocity capture delay is skipped for zero-latency note onset.
-- **Key Y**: Finger's vertical position on the key (0 = bottom, 1 = top; normalized to key height for black keys). Updated continuously as you slide.
-- **Slider 1/2**: Horizontal sliders in the channel readout, operated by the non-dominant hand. Value snaps back to a default when released.
-- **None**: Fixed at midpoint
+## Instruments
 
-**Defaults**: Velocity → Pressure, Glide Speed/Compression/Amplitude/Aftertouch → Tilt 1. All others → unbound. Each binding starts as a linear 2-point curve matching the parameter's default range.
+The Live tab (⌘1) picks the played voice: **String** (bowed, the default), **Tanpura** or **Sitar** (plucked — a fret touch plucks at the exact bent pitch, drags retune the ringing string). The Strings tab's drone Voice picker chooses the Tanpura or the sympathetic strings for the drone buttons.
 
-With an arm calibration, "neutral" is the rest pose you captured (0.5 on every axis); uncalibrated, the values are raw and uncentered.
+## PANIC
 
-## MIDI Setup
-
-1. Connect the iPad to the Mac via USB.
-2. On the Mac: open **Audio MIDI Setup** > **Window > Show MIDI Studio** > Enable iPad.
-3. Launch TarabdaarMac. The top-bar pill turns green when it sees the iPad as a MIDI source. The first Note On from the iPad plays the sarangi String voice on the Mac immediately — no settings sync, just MPE on the wire.
-
-The iPad also appears as a standard MPE MIDI source to any other host on the Mac (Ableton, Logic, etc.). To route to those:
-
-1. In Ableton: **Preferences > Link, Tempo & MIDI** > enable the iPad as MIDI input.
-2. Set your instrument's pitch bend range to **±48 semitones**.
-3. Enable **MPE mode** on the track.
-
-Tarabdaar sends:
-- Note on/off with accelerometer-derived velocity
-- Pitch bend (continuous; glides + finger-driven pitch movement)
-- Channel pressure / aftertouch (dimension-mapped)
-- MIDI CCs 1, 11, 71, 73, 74, 75 (dimension-mapped, only sent when mapped to a dimension)
-
-## Scale Editing (on the Mac)
-
-The iPad is **perform-only** — there's no scale editor on it. Scales are
-designed on **TarabdaarMac**'s Fret Pad tab (the scale list editor: add/remove/
-disable pitches, snap to simple fractions) and **synced to the iPad over the
-USB cable** automatically: edit a pitch on the Mac and the iPad's frets
-re-lay-out within a moment. The iPad opens on the last scale it received (and
-on the built-in default if it has never been synced). See
-[Scales & Tuning](scales-and-tuning.md) and
-[MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad). The
-frets always play exact ratios, so all tuning is just intonation.
-
-## Polyphony
-
-The pad is always polyphonic — there's no mono/poly toggle. Each finger
-sounds an independent voice on its own MPE channel, glides on its own as
-you drag, and releases when you lift. Tilt expression (aftertouch / CCs)
-applies to all held voices.
-
-## PANIC Button
-
-If a note gets stuck, tap the red **PANIC** button in the toolbar. This
-sends all-notes-off on all 16 MIDI channels and clears all touch state.
+If a note sticks, tap the red **PANIC** button in the iPad toolbar: it clears every touch, and the Mac releases all strings.

@@ -3,100 +3,67 @@ import Foundation
 import QuartzCore
 import SarangiKit
 
-/// macOS audio plumbing for the sarangi **String voice** — the only voice.
+/// macOS audio plumbing for the three voices — the String voice
+/// (`StringVoiceSource`; the kernel is the whole instrument: strings +
+/// taraf + body + room) and the plucked tanpura / sitar
+/// (`TanpuraVoiceSource`) — summed through `symGain`:
 ///
-/// The played voice is the pure-physics bowed gut string (`StringVoiceSource`
-/// wrapping `SarangiKit.BowEngine`, the C friction kernel with the modal-jawari
-/// taraf fused in-kernel). The kernel is the WHOLE instrument (played strings +
-/// taraf + body + radiation + room), so its source node connects DIRECTLY to
-/// `symGain`, which feeds the engine's main mixer:
+///   `{string, tanpura, sitar}.node → symGain → mainMixerNode → output`
 ///
-///   `stringVoiceSource.node → symGain → mainMixerNode → output`
-///
-/// MPE MIDI arrives at `sendHostedMIDI` and is routed to the String voice's
-/// `BowControlMapper` (`routeSarangiModelMIDI`); the Fret Pad drone buttons
-/// (CC 102–104) drive the kernel's jawari-taraf drone rows. The tarab tuning
-/// (from the Strings tab, pushed via `rebuildSarangi`) tunes the kernel's taraf;
-/// the String physics scalars ride `stringVoiceOverrides`.
-///
-/// Sym public methods acquire `lock` and swap/configure the String engine.
+/// Touches arrive on the TLP path (via the glide queue); in-process MIDI at
+/// `sendHostedMIDI`. Public methods take `lock` for state and release it
+/// before calling into an engine.
 public class AudioEngine: ObservableObject {
     private let engine = AVAudioEngine()
-    /// Output-gain stage for the String voice source node. Pinned at unity —
-    /// the kernel is the complete played voice and feeds `mainMixerNode` directly.
+    /// Summing stage for the three source nodes, pinned at unity.
     private let symGain = AVAudioMixerNode()
     private let lock = NSLock()
 
-    // MARK: - Sarangi model source (the String pure-physics bowed gut string)
+    // MARK: - String voice source
 
-    /// The String-physics source (`StringVoiceSource` wrapping
-    /// `SarangiKit.BowEngine` — the C friction kernel with the modal-jawari
-    /// taraf fused in-kernel). The kernel is the WHOLE instrument (played
-    /// strings + taraf + body + radiation + room), so its node connects
-    /// DIRECTLY to `symGain`. Runs at the artifact's native 48 kHz; the mixer
-    /// input converts to the engine rate. Kept attached; connected on enable.
+    /// The String voice (native 48 kHz; the mixer input converts). Kept
+    /// attached; connected on enable.
     private var stringVoiceSource: StringVoiceSource?
-    /// Test hook (@testable) — the render path's source, for asserting the
-    /// touch layer drives the same mapper the render thread reads.
+    /// Test hook: the render path's source.
     var stringVoiceSourceForTesting: StringVoiceSource? { stringVoiceSource }
     private var stringVoiceAttached = false
     private var stringVoiceConnected = false
-    /// Guarded by `lock`. The String voice is the only voice, so this is armed
-    /// once at startup and stays on.
+    /// Guarded by `lock`. Armed once at startup and stays on.
     private var useSarangiModelVoice = false
-    /// Last structural tarab push, retained so the String engine can be
-    /// (re)built from the current tuning when the voice is enabled later.
+    /// Last structural tarab push, retained for (re)builds.
     private var lastSarangiStrings: [ResolvedString] = []
     private var lastSarangiTonic: Double = 261.63
-    /// The melody-follower string (2026-07-25): (gain, t60) when enabled,
-    /// nil when off — pushed with every `rebuildSarangi` like the rows.
+    /// The melody-follower string: (gain, t60) when enabled, nil when off.
     private var lastSarangiFollower: (gain: Double, t60: Double)?
-    /// String-editor / audition scalar overrides applied OVER the
-    /// `bowed_string.json` artifact at every String engine build.
+    /// Scalar overrides applied over `bowed_string.json` at every build.
     public var stringVoiceOverrides: [String: Double] = [:]
-    /// Drone buttons (Fret Pad, 2026-07-23; string-mapped 2026-07-25):
-    /// each of the 3 buttons plucks ONE mapped sympathetic string —
-    /// `droneFreqs` holds the mapped rows' nominal Hz
-    /// (`InstrumentState.droneStringFreqs`, pushed with every
-    /// `rebuildSarangi`; nil = unmapped/disabled → button inert). A press
-    /// finds the jt row by identity (`BowEngine.droneRow(forExactHz:)`) —
-    /// no dedicated rows, no nearest-pitch matching. Guarded by `lock`
-    /// with `droneHeld` (presses arrive on the MIDI thread, config on
-    /// main).
+    /// Drone buttons: each plucks ONE mapped sympathetic string, found by
+    /// identity on its nominal Hz (`droneFreqs`; nil = unmapped → inert).
+    /// Guarded by `lock` with `droneHeld` (presses arrive on the MIDI thread).
     private var droneFreqs = [Double?](repeating: nil,
                                        count: FretArrangement.droneCount)
     private var droneHeld = [Bool](repeating: false,
                                    count: FretArrangement.droneCount)
-    /// Serial build queue for the String engine (tables + kernel init + jt
-    /// worker-pool spawn are too heavy for the main thread); `stringBuildGen`
-    /// discards builds that were superseded while in flight.
+    /// Serial off-main build queue for the String engine; `stringBuildGen`
+    /// discards builds superseded while in flight.
     private let stringBuildQueue = DispatchQueue(label: "tarabdaar.string.build",
                                                  qos: .userInitiated)
     private var stringBuildGen = 0
 
-    // MARK: - Tanpura voice (r7 modal-contact plucked drone, 2026-08-04)
+    // MARK: - Tanpura voice
 
-    /// Which voice the Fret Pad drone buttons drive. Default `.tanpura` —
-    /// the ported tanpura plucks the mapped pitch (press = pluck, hold =
-    /// periodic re-pluck, release = ring out); `.sympathetic` restores the
-    /// legacy jt-row drive (swell while held).
+    /// Which voice the drone buttons drive: `.tanpura` (default; press =
+    /// pluck, hold = re-pluck cycle) or `.sympathetic` (jt-row swell while held).
     public enum DroneVoiceMode: String, CaseIterable, Sendable {
         case tanpura, sympathetic
     }
-    /// Which voice the played (fret) notes drive. The String bowed voice is
-    /// the default; `.tanpura` routes note-ons to tanpura plucks at the
-    /// exact bent pitch (nearest mounted scale slot); `.sitar` (2026-08-19)
-    /// does the same on the SITAR engine — the r7 modal-contact model
-    /// retuned to sitar1.wav (`sitar_live.json`), whose rendered output
-    /// also drives the sarangi jt taraf sympathetically (`st_taraf` →
-    /// `bow_poly_jt_inject_*`): the sitar's taraf halo IS the String
-    /// voice's tarab bank, tuned from the Strings tab.
+    /// Which voice the fret notes drive: `.string` (default) bows; `.tanpura`
+    /// / `.sitar` pluck the nearest slot bent to the exact pitch.
     public enum MainInstrument: String, CaseIterable, Sendable {
         case string, tanpura, sitar
     }
 
-    /// Second source on the graph (`node → symGain`), beside the String
-    /// voice. Kept attached; engine (re)built off-main per tonic + scale.
+    /// Second source on the graph. Kept attached; engine (re)built off-main per tonic + scale.
     private var tanpuraSource: TanpuraVoiceSource?
     private var tanpuraAttached = false
     private var tanpuraConnected = false
@@ -106,109 +73,69 @@ public class AudioEngine: ObservableObject {
     /// Last structural scale push, retained for (re)builds. Guarded by `lock`.
     private var lastTanpuraTonic: Double = 261.63
     private var lastTanpuraRatios: [Double] = []
-    /// Main-instrument plucks wait for the pitch bend that immediately
-    /// follows the pad's note-on (the bend carries the exact fret pitch;
-    /// the note number alone is only the nearest semitone). Guarded by
-    /// `lock`; keyed by MPE channel.
+    /// MIDI path: a main-instrument pluck waits for the pitch bend that
+    /// follows the note-on (it carries the exact pitch). Guarded by `lock`.
     private var tanpuraPendingPluck: [UInt8: (note: UInt8, vel: UInt8)] = [:]
-    /// The slot each ringing main-instrument note plucked (2026-08-05):
-    /// while the channel's note holds, its MPE pitch bends live-retune
-    /// this slot (the fret glide); note-off fast-releases it. Cleared on
-    /// instrument switch and engine rebuild (slots change).
+    /// The slot each ringing main-instrument note plucked (bends retune it,
+    /// note-off releases it). Cleared on instrument switch and rebuild.
     private var tanpuraChannelSlot: [UInt8: Int] = [:]
-    /// Touch-id twin of `tanpuraChannelSlot` for the TarabLink path (the
-    /// wire carries touches, not MPE channels).
+    /// Touch-id twin of `tanpuraChannelSlot` for the TLP path.
     private var tanpuraTouchSlot: [UInt16: Int] = [:]
-    /// Per-button cancellation token for the hold re-pluck cycle. Guarded
-    /// by `lock`; bumping a slot's generation orphans its timer chain.
+    /// Per-button generation token for the hold re-pluck cycle. Guarded by `lock`.
     private var droneCycleGen = [Int](repeating: 0,
                                       count: FretArrangement.droneCount)
-    /// Live tanpura trims (`tp_*` registry params). Guarded by `lock`
-    /// except `tanpuraGainOverride` (main-thread config, applied at source
-    /// creation; live path goes through `TanpuraVoiceSource.setOutGain`).
+    /// Live tanpura trims (`tp_*`). Guarded by `lock` except
+    /// `tanpuraGainOverride` (main-thread config).
     private var tanpuraDroneLevel = 1.0
     private var tanpuraDroneCycleSec = 2.5
     private var tanpuraPluckLevel = 1.0
     private var tanpuraReleaseT60 = 0.4
-    /// Pluck consistency + character (2026-08-15): `tp_pluck_touch`
-    /// blends the string's pre-pluck state toward its settled wrap at each
-    /// pluck (0 = legacy ride-the-ring, 1 = identical plucks);
-    /// `tp_pluck_drive` drives the string that many times harder into the
-    /// jawari at the calibrated radiated level (mellow↔buzzy). Read at
-    /// pluck time and passed per pluck, so they need no re-apply after an
-    /// engine rebuild. Guarded by `lock`.
+    /// `tp_pluck_touch`: pre-pluck state blended toward the settled wrap
+    /// (1 = identical plucks); `tp_pluck_drive`: drive into the jawari at
+    /// the calibrated level. Passed per pluck. Guarded by `lock`.
     private var tanpuraPluckTouch = 0.0
     private var tanpuraPluckDrive = 1.0
-    /// Tanpura→taraf drive (2026-08-21, `tp_taraf`): how strongly the
-    /// tanpura's rendered output charges the sarangi jt web — the drone
-    /// buttons ring the Strings-tab taraf as though the tanpura were
-    /// part of the bowed instrument. Same inject ring as the sitar's
-    /// halo, at its own per-source gain (`TanpuraVoiceSource
-    /// .setInjectGain`); the kernel-side gain is just the shared arm
-    /// (`updateJtInjectArm`). Guarded by `lock`; the 4.0 default must
-    /// match the registry (`TanpuraVoiceTests`).
+    /// `tp_taraf`: per-source gain at the tanpura's jt inject tap (the
+    /// kernel-side gain is the shared arm). Guarded by `lock`; default = registry.
     private var tanpuraTarafDrive = 4.0
-    /// String bank (2026-08-15, `tp_poly`): how many history strings —
-    /// previous plucks, each a full jawari simulation at its own frozen
-    /// pitch — stay alive before the oldest is evicted to the linear
-    /// ghost tier. Applied live to the running engine AND passed to
-    /// fresh builds. Guarded by `lock`; the 6 default must match the
-    /// registry (`TanpuraVoiceTests`).
+    /// `tp_poly`: previous plucks kept as full jawari simulations before
+    /// dropping to the ghost tier. Guarded by `lock`; default = registry.
     private var tanpuraPoly = 6.0
     private var tanpuraGainOverride: Double?
-    /// Scale-shaped overtones (2026-08-05, `tp_shape_*`). Registry-live
-    /// like the trims above, but they parameterize the TABLE BUILD — an
-    /// edit schedules a debounced full tanpura rebuild (seconds of CPU;
-    /// the Parameters-tab drag must settle first, same reasoning as the
-    /// scale pipeline's 750 ms). Guarded by `lock`.
+    /// `tp_shape_*`: table-build params — an edit schedules a debounced full
+    /// tanpura rebuild (seconds of CPU). Guarded by `lock`.
     private var tanpuraShapeAlign = 0.0
     private var tanpuraShapeFocus = 0.0
     private var tanpuraShapeSpread = 0.0
     private var tanpuraShapeQuiet = 0.0
-    /// Register calibration (2026-08-15, `tp_jiva_comp`): 1 = every slot's
-    /// jiva thread height retargeted so the whole register keeps the
-    /// low-Sa graze regime (level buzziness, laddered cascade); 0 = the
-    /// fitted geometry. Table-build param like the shapes — edits ride the
-    /// same debounced rebuild. Guarded by `lock`. The 1.0 default must
-    /// match the registry (`TanpuraVoiceTests`).
+    /// `tp_jiva_comp`: 1 = every slot keeps the low-Sa graze regime, 0 = the
+    /// fitted geometry. Table-build param. Guarded by `lock`; default = registry.
     private var tanpuraJivaComp = 1.0
-    /// Cascade slowing (2026-08-15, `tp_cascade`): pitch-graded thread
-    /// lift + HF-sustain stretch that slows the higher slots' harmonic
-    /// cascade toward low Sa's pace. Same rebuild discipline; the 1.0
-    /// default must match the registry.
+    /// `tp_cascade`: slows the higher slots' cascade toward low Sa's pace. Table-build param.
     private var tanpuraCascade = 1.0
     /// Pending debounced shape rebuild (main-thread mutate only).
     private var tanpuraShapeRebuildWork: DispatchWorkItem?
 
-    // MARK: - Sitar voice (2026-08-19)
+    // MARK: - Sitar voice
 
-    /// Third source on the graph (`node → symGain`) — a second
-    /// `TanpuraVoiceSource` mounted from the SITAR artifact. Armed
-    /// lazily on the first switch to `.sitar` and kept armed (idle
-    /// strings cost ~nothing; switch-back is instant). Its render tap
-    /// feeds the String kernel's jt inject ring — the sympathetic halo.
+    /// Third source: a `TanpuraVoiceSource` on the sitar artifact. Armed lazily
+    /// on the first `.sitar` switch and kept armed; its tap feeds the jt inject ring.
     private var sitarSource: TanpuraVoiceSource?
     private var sitarAttached = false
     private var sitarConnected = false
     private var sitarBuildGen = 0
-    /// Live sitar trims (`st_*` registry params). Guarded by `lock`
-    /// except `sitarGainOverride` (same contract as the tanpura's).
-    /// Defaults must match the registry (`SitarVoiceTests`).
+    /// Live sitar trims (`st_*`). Guarded by `lock` except
+    /// `sitarGainOverride`; defaults = registry.
     private var sitarPluckLevel = 1.0
     private var sitarReleaseT60 = 0.15
     private var sitarPluckTouch = 1.0
     private var sitarPluckDrive = 1.0
     private var sitarPoly = 4.0
-    /// Sitar→taraf drive (`st_taraf`) — since 2026-08-21 a per-source
-    /// gain on the sitar's inject tap (see `tanpuraTarafDrive`), so the
-    /// tanpura's `tp_taraf` rides the same kernel ring independently.
-    /// Guarded by `lock`; the 4.0 default must match the registry
-    /// (`SitarVoiceTests`).
+    /// `st_taraf`: per-source gain at the sitar's jt inject tap. Guarded by `lock`.
     private var sitarTarafDrive = 4.0
     private var sitarGainOverride: Double?
 
-    /// The plucked-voice source a main instrument routes to (nil = the
-    /// String voice — not a plucked engine). Callers hold `lock`.
+    /// The plucked source a main instrument routes to (nil = String). Callers hold `lock`.
     private func pluckSourceLocked(_ inst: MainInstrument) -> TanpuraVoiceSource? {
         switch inst {
         case .string: return nil
@@ -217,57 +144,46 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// The per-instrument pluck trims (level / isolation / drive /
-    /// release t60). Callers hold `lock`.
+    /// Per-instrument pluck trims. Callers hold `lock`.
     private func pluckTrimsLocked(_ inst: MainInstrument)
         -> (level: Double, touch: Double, drive: Double, relT60: Double) {
         inst == .sitar
             ? (sitarPluckLevel, sitarPluckTouch, sitarPluckDrive, sitarReleaseT60)
             : (tanpuraPluckLevel, tanpuraPluckTouch, tanpuraPluckDrive, tanpuraReleaseT60)
     }
-    /// The tanpura build is SECONDS of CPU (mount + settle every slot), so
-    /// it gets its own serial queue below the String voice's priority.
+    /// The tanpura build is seconds of CPU — its own utility-QoS serial queue.
     private let tanpuraBuildQueue = DispatchQueue(label: "tarabdaar.tanpura.build",
                                                   qos: .utility)
     private var tanpuraBuildGen = 0
 
     @Published public var isRunning = false
 
-    // MARK: - MPE bookkeeping (Live-tab readout)
+    // MARK: - In-process MIDI bookkeeping (Live-tab readout)
 
-    /// Currently-sounding note number per MPE channel (one note per channel
-    /// in MPE). Tracked MPE bookkeeping; guarded by `lock`.
+    /// Currently-sounding note per MIDI channel. Guarded by `lock`.
     private var hostedChannelNote: [UInt8: UInt8] = [:]
-    /// Current 14-bit pitch-bend value per MPE channel (8192 = centre). Tracked
-    /// MPE bookkeeping; guarded by `lock`.
+    /// 14-bit pitch bend per channel (8192 = centre). Guarded by `lock`.
     private var hostedChannelBend: [UInt8: Int] = [:]
-    /// Most recent CC11 (Expression) value per MPE channel, 0…127. Mirrored
-    /// here only to surface the live "volume" readout in the Mac Live tab.
+    /// Latest CC11 per channel, 0…127 — the Live tab's volume readout.
     /// Guarded by `lock`.
     private var hostedChannelExpr: [UInt8: UInt8] = [:]
-    /// Still-held note channels in play order, most-recent **last**. The
-    /// Live tab's pitch/volume graphs track the last entry — the voice
-    /// struck most recently — and on its release fall back deterministically
-    /// to the next-most-recent. Guarded by `lock`.
+    /// Still-held channels in play order, most-recent last; the readout
+    /// tracks the last entry. Guarded by `lock`.
     private var heldChannelOrder: [UInt8] = []
 
-    // Touch-keyed twins for the TarabLink path (full-resolution pitch, no
-    // note+bend split). Wire play and in-process MIDI play never co-occur;
-    // when any touch is held the readout prefers it. Guarded by `lock`.
+    // Touch-keyed twins for the TLP path (full-resolution pitch). When any
+    // touch is held the readout prefers it. Guarded by `lock`.
     /// Fractional-MIDI pitch per live touch id.
     private var touchPitchSemis: [UInt16: Double] = [:]
     /// Still-held touches in play order, most-recent last.
     private var heldTouchOrder: [UInt16] = []
-    /// Per-touch expression scale (2026-08-28, the strum chord — absent =
-    /// 1). Delivered by `touchExpr` ahead of the onset, consumed at
-    /// `touchOn` (String: the mapper's per-slot scale; Tanpura/Sitar: the
-    /// pluck level) and live-routed to the mapper while a String-voice
-    /// touch is held.
+    /// Per-touch expression scale (the strum chord; absent = 1). Delivered
+    /// by `touchExpr` ahead of the onset; String: the mapper's per-slot
+    /// scale, live while held; plucked mains: the pluck level at onset.
     private var touchExprScale: [UInt16: Double] = [:]
 
-    /// Lightweight lock guarding the performance-readout scalars below.
-    /// Separate from `lock` so the Live tab's poll never contends with the
-    /// audio render thread. Never held while `lock` is held.
+    /// Guards the readout scalars below; separate from `lock` so the Live
+    /// tab's poll never contends with it. Never held while `lock` is held.
     private let meterLock = NSLock()
     private var meterPitchHz: Double = 0
     private var meterExpr: Double = 0
@@ -300,12 +216,9 @@ public class AudioEngine: ObservableObject {
 
     // MARK: - Setup
 
-    /// THE GLIDE QUEUE (2026-08-31): the control layer the public touch
-    /// API funnels through — an onset within `ctl_glide_thresh` of the
-    /// previous one is queued as a glissando waypoint instead of
-    /// mounting a fresh note; the sequencer's timer then drives the
-    /// sounding voice through every queued pitch via the direct path
-    /// below. Pure pass-through at the default threshold 0.
+    /// The glide queue the public touch API funnels through: with
+    /// `ctl_glide_on` armed, an overlapping onset is queued as a glissando
+    /// waypoint instead of mounting a note. Pass-through at the default 0.
     public let glideQueue = GlideSequencer()
 
     public init() {
@@ -323,20 +236,15 @@ public class AudioEngine: ObservableObject {
 
     private func setupAudio() {
         #if os(macOS)
-        // Match the output device to the engine/model rate (44.1 kHz) BEFORE the
-        // graph is built + started, so the engine adopts a 44.1 kHz output and
-        // there is no resampler between mainMixerNode and the device. Restored on
-        // quit (AppController wires `restoreOutputDeviceRate` to willTerminate).
+        // Match the output device to the engine rate BEFORE the graph starts
+        // (no resampler to the device). Restored on quit.
         matchOutputDeviceToEngineRate(systemDefaultOutputDevice())
         #endif
         let sampleRate = Config.sampleRate
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate,
                                    channels: 2)!
 
-        // Graph — the String voice is the COMPLETE played voice. Its source node
-        // is attached + connected to `symGain` when the voice is enabled
-        // (`setSarangiModelVoiceEnabled`); `symGain` feeds the main mixer:
-        //   stringVoiceSource.node → symGain → mainMixerNode → output
+        // source nodes attach + connect to symGain on enable
         engine.attach(symGain)
         engine.connect(symGain, to: engine.mainMixerNode, format: format)
         symGain.outputVolume = 1
@@ -352,11 +260,7 @@ public class AudioEngine: ObservableObject {
             print("AudioEngine failed to start: \(error)")
         }
         #if os(macOS)
-        // Request the IO buffer for play latency — transport-aware: the low
-        // buffer on solid transports, the safe buffer on jitter-prone ones
-        // (DisplayPort/HDMI/Bluetooth/AirPlay). macOS has no per-app IO
-        // buffer (no AVAudioSession) — this is the output device's HAL buffer,
-        // clamped to its allowed range. Tunable live via `setOutputBufferFrames`.
+        // transport-aware IO buffer (the device's HAL buffer)
         let beforeBuf = outputBufferFrames
         let wantBuf = preferredBufferFrames(for: currentOutputDevice)
         let gotBuf = setOutputBufferFrames(wantBuf)
@@ -407,8 +311,7 @@ public class AudioEngine: ObservableObject {
                 UInt32(MemoryLayout<AudioDeviceID>.size)
             )
         }
-        // Match the NEW device to the engine rate (and restore the old one)
-        // before restarting, so the engine adopts a 44.1 kHz output.
+        // Match the NEW device to the engine rate (restoring the old one).
         matchOutputDeviceToEngineRate(deviceID)
         if wasRunning {
             do {
@@ -419,8 +322,7 @@ public class AudioEngine: ObservableObject {
                 isRunning = false
             }
         }
-        // The IO buffer is a per-device property — re-apply to the new device
-        // (transport-aware: jitter-prone transports take the safe buffer).
+        // The IO buffer is per-device — re-apply to the new device.
         setOutputBufferFrames(preferredBufferFrames(for: deviceID))
     }
 
@@ -442,13 +344,10 @@ public class AudioEngine: ObservableObject {
 
     // MARK: - Output device sample-rate matching
 
-    /// The device whose nominal sample rate we changed to match the engine, plus
-    /// its original rate — so we can restore it on quit / device switch. nil when
-    /// no device has been changed.
+    /// The device whose nominal rate we changed, plus its original rate (nil = none).
     private var changedDeviceRate: (device: AudioDeviceID, originalRate: Double)?
 
-    /// CoreAudio system default output device (the one AVAudioEngine uses until
-    /// `setOutputDevice` overrides it).
+    /// CoreAudio system default output device.
     private func systemDefaultOutputDevice() -> AudioDeviceID {
         var id = AudioDeviceID(0)
         var sz = UInt32(MemoryLayout<AudioDeviceID>.size)
@@ -472,15 +371,9 @@ public class AudioEngine: ObservableObject {
         return v
     }
 
-    /// The IO buffer this output device should run. Solid transports
-    /// (built-in, USB, Thunderbolt, …) take the low play-latency buffer;
-    /// jitter-prone ones — monitor audio over the video link
-    /// (DisplayPort/HDMI: packetized, clock recovered monitor-side),
-    /// Bluetooth, AirPlay — cannot sustain its ~3 ms callback cadence and
-    /// crackle on EVERY voice (the misses are in the shared device
-    /// callback, not any one DSP path), so they take the safe buffer.
-    /// Measured 2026-08-17: AORUS FO32U2P over DisplayPort crackled at
-    /// 128 frames; the headphone DAC was clean with the identical render.
+    /// Solid transports take the low play-latency buffer; jitter-prone ones
+    /// (DisplayPort/HDMI monitor audio, Bluetooth, AirPlay) cannot sustain its
+    /// callback cadence and crackle on EVERY voice, so they take the safe buffer.
     private func preferredBufferFrames(for dev: AudioDeviceID) -> UInt32 {
         let t = deviceTransportType(dev)
         let jittery: Set<UInt32> = [kAudioDeviceTransportTypeDisplayPort,
@@ -522,8 +415,7 @@ public class AudioEngine: ObservableObject {
         return ranges.contains { sr >= $0.mMinimum - 1 && sr <= $0.mMaximum + 1 }
     }
 
-    /// Set a device's nominal sample rate and poll until it settles (the change
-    /// is asynchronous in CoreAudio). Returns true once it reaches `sr`.
+    /// Set a device's nominal rate and poll until it settles (asynchronous in CoreAudio).
     @discardableResult
     private func setDeviceNominalSampleRate(_ dev: AudioDeviceID, _ sr: Double) -> Bool {
         var v = sr
@@ -542,11 +434,8 @@ public class AudioEngine: ObservableObject {
         return abs(deviceNominalSampleRate(dev) - sr) < 1
     }
 
-    /// Match `dev`'s sample rate to the engine/model rate (`Config.sampleRate`,
-    /// 44.1 kHz) so the engine → device path has no resampler. Best-effort:
-    /// skipped if the device does not support the rate (then AVAudioEngine's
-    /// converter bridges as before). Remembers the device's prior rate; restore
-    /// with `restoreOutputDeviceRate`.
+    /// Match `dev`'s nominal rate to `Config.sampleRate` (no resampler).
+    /// Best-effort; remembers the prior rate for `restoreOutputDeviceRate`.
     private func matchOutputDeviceToEngineRate(_ dev: AudioDeviceID) {
         guard dev != 0 else { return }
         let target = Config.sampleRate
@@ -566,9 +455,7 @@ public class AudioEngine: ObservableObject {
         NSLog("Tarabdaar: output device rate \(Int(current)) → \(Int(target)) Hz: \(ok ? "OK (no resampler)" : "FAILED")")
     }
 
-    /// Restore any output device whose rate we changed back to its original.
-    /// Wire to a clean-quit hook (`NSApplication.willTerminateNotification`) so
-    /// the user's device is not left at 44.1 kHz after Tarabdaar exits.
+    /// Restore any output device whose rate we changed (wired to the clean-quit hook).
     public func restoreOutputDeviceRate() {
         guard let prev = changedDeviceRate else { return }
         setDeviceNominalSampleRate(prev.device, prev.originalRate)
@@ -576,9 +463,7 @@ public class AudioEngine: ObservableObject {
         changedDeviceRate = nil
     }
 
-    /// The output device's current IO buffer size in frames (0 if unknown). On
-    /// macOS this is the CoreAudio HAL buffer — the floor under round-trip
-    /// latency. Settable via `setOutputBufferFrames`.
+    /// The output device's IO buffer in frames (0 if unknown) — the HAL buffer.
     public var outputBufferFrames: UInt32 {
         guard let au = engine.outputNode.audioUnit else { return 0 }
         var n: UInt32 = 0
@@ -588,10 +473,8 @@ public class AudioEngine: ObservableObject {
         return n
     }
 
-    /// Request a smaller IO buffer on the output device (lower latency). macOS
-    /// has no per-app IO buffer (no AVAudioSession); the buffer is a device HAL
-    /// property, so this is clamped to the device's allowed range and affects
-    /// that device system-wide. Returns the value actually in effect afterward.
+    /// Request an IO buffer size on the output device (a system-wide HAL
+    /// property, clamped to its range). Returns the value in effect.
     @discardableResult
     public func setOutputBufferFrames(_ frames: UInt32) -> UInt32 {
         guard let au = engine.outputNode.audioUnit else { return 0 }
@@ -602,9 +485,7 @@ public class AudioEngine: ObservableObject {
         return outputBufferFrames
     }
 
-    /// One-shot diagnostic: log the played-voice latency budget — engine vs
-    /// device sample rate (a mismatch means an output resampler), the IO buffer
-    /// size, and the output presentation latency.
+    /// Log the latency budget: engine vs device rate, IO buffer, presentation latency.
     public func logAudioLatencyReport(_ context: String) {
         let engineSR = Config.sampleRate
         let deviceSR = engine.outputNode.outputFormat(forBus: 0).sampleRate
@@ -624,13 +505,9 @@ public class AudioEngine: ObservableObject {
     // MARK: - Recording (post-FX tap on the main mixer)
 
     private let recordingLock = NSLock()
-    // Recording is accumulated into a pre-allocated interleaved Int16 buffer
-    // by the tap (no audio-thread allocation), then written as one complete
-    // WAV at stop. We do NOT use AVAudioFile: its incremental write buffers
-    // internally and DROPS the unflushed tail on dispose for long recordings
-    // (the frames are "written" but lost before flush — verified: framesWritten
-    // full, file ~260 KB), which produced intermittent 0-frame WAVs. Owning the
-    // buffer + header makes the file deterministic and complete.
+    // The tap fills a pre-allocated interleaved Int16 buffer (no audio-thread
+    // allocation); one complete WAV with our own header is written at stop.
+    // Never AVAudioFile here: its incremental write drops the unflushed tail.
     private var recBuf: [Int16] = []      // interleaved L,R; reused across runs
     private var recCount: Int = 0         // valid interleaved Int16 count
     private var recURL: URL?
@@ -638,8 +515,7 @@ public class AudioEngine: ObservableObject {
     private var recActive = false
     private var recOverflow = false       // ran out of pre-allocated capacity
 
-    /// Frames written + first error of the last recording — surfaced in the
-    /// audition `.done` marker so any silent failure is visible.
+    /// Frames written + first error of the last recording (the audition `.done` marker).
     public var lastRecordingStats: (frames: Int64, error: String?) {
         recordingLock.lock(); defer { recordingLock.unlock() }
         return (Int64(recCountFinal / 2), recOverflow ? "buffer overflow (recording exceeded capacity)" : nil)
@@ -651,9 +527,8 @@ public class AudioEngine: ObservableObject {
     /// File URL of the most recently completed (or in-progress) recording.
     @Published public var lastRecordingURL: URL?
 
-    /// Begin capturing post-FX audio (after reverb, at the main mixer) into a
-    /// 16-bit stereo WAV at `url`, written in full at `stopRecording`.
-    /// Idempotent — always stops any prior recording first.
+    /// Capture post-FX audio at the main mixer into a 16-bit stereo WAV at
+    /// `url`, written in full at `stopRecording`. Stops any prior recording.
     public func startRecording(to url: URL) throws {
         stopRecording()
         let outputFormat = engine.mainMixerNode.outputFormat(forBus: 0)
@@ -737,20 +612,15 @@ public class AudioEngine: ObservableObject {
 
     // MARK: - Live performance readout (Live tab)
 
-    /// Live performance readout for the Mac "Live" tab: the currently
-    /// played pitch (Hz, from the tracked Note + pitch-bend) and the
-    /// commanded loudness (`expression`, 0…1, from CC11). `active` is false
-    /// when nothing is held. Derived at the single MIDI choke point below,
-    /// so it reflects every input path: the USB iPad, the Mac pads, and the
-    /// simulator.
+    /// Live-tab readout: played pitch (Hz), commanded loudness (`expression`
+    /// 0…1 from CC11; 0 on the touch path), and whether anything is held.
     public struct PerformanceReadout {
         public let pitchHz: Double
         public let expression: Double
         public let active: Bool
     }
 
-    /// Thread-safe snapshot of the current played pitch + loudness. Cheap —
-    /// poll it at UI rate.
+    /// Thread-safe snapshot; poll at UI rate.
     public func performanceReadout() -> PerformanceReadout {
         meterLock.lock()
         defer { meterLock.unlock() }
@@ -759,18 +629,10 @@ public class AudioEngine: ObservableObject {
                                   active: meterActive)
     }
 
-    /// VOICE/TARAF VOLUME READOUT (2026-08-24): the radiated level of the
-    /// MAIN VOICE and of the TARAF (the String kernel's sympathetic jt
-    /// bus), for the iPad toolbar's volume scope. Voice = the String
-    /// physics' voice bus plus — when the Live-tab instrument is the
-    /// tanpura/sitar — that node's output (energy sum; the tanpura node
-    /// counts only while it IS the main instrument, so the drone doesn't
-    /// swamp the played voice's meter). Taraf = the jt bus, whichever
-    /// voice charges it (bow, sitar halo, `tp_taraf`). EXACT interval
-    /// RMS (integrate-and-dump per source — RMS of the audio since the
-    /// caller's previous poll, no envelope, no smoothing: decay rates
-    /// read true), linear, 1.0 ≈ 0 dBFS. ONE poller owns the dump
-    /// semantics (the AppController relay). Thread-safe.
+    /// Radiated level of the main voice and of the taraf (the jt bus) for
+    /// the iPad's volume scope. Voice = the String voice bus plus the main
+    /// instrument's node when plucked (energy sum; the drone never counts).
+    /// Interval RMS since the previous poll, linear, 1.0 ≈ 0 dBFS. ONE poller.
     public func volumeLevels() -> (voice: Double, taraf: Double) {
         let bus = stringVoiceSource?.busLevels() ?? (voice: 0, taraf: 0)
         lock.lock()
@@ -791,12 +653,9 @@ public class AudioEngine: ObservableObject {
         return (voiceSq.squareRoot(), bus.taraf)
     }
 
-    /// Recompute `(pitchHz, expression, active)` for the primary held voice
-    /// from the tracked MPE maps. `lock` must be held; pure read → locals.
+    /// `(pitchHz, expression, active)` for the primary held voice. `lock` held.
     private func meterSnapshotLocked() -> (Double, Double, Bool) {
-        // TarabLink touches first: exact pitch, no bend math. (Expression
-        // reads 0 here, matching the old iPad wire — the iPad never sent
-        // CC11; the axis idles at the fitted median inside the mapper.)
+        // touches first: exact pitch; expression reads 0 (the axis idles in the mapper)
         if let id = heldTouchOrder.last, let semis = touchPitchSemis[id] {
             let hz = 440.0 * pow(2.0, (semis - 69.0) / 12.0)
             return (hz, 0, true)
@@ -812,8 +671,7 @@ public class AudioEngine: ObservableObject {
         return (hz, expr, true)
     }
 
-    /// Publish a snapshot into the readout scalars. Call with **no other
-    /// lock held** (it takes `meterLock`, which must never nest with `lock`).
+    /// Publish a snapshot. Takes `meterLock`, which must never nest with `lock`.
     private func storeMeter(_ snap: (Double, Double, Bool)) {
         meterLock.lock()
         meterPitchHz = snap.0
@@ -824,18 +682,14 @@ public class AudioEngine: ObservableObject {
 
     // MARK: - MIDI in
 
-    /// Push a 3-byte MIDI message into the String voice. Drone buttons
-    /// (Fret Pad, CC 102–104) are consumed here; everything else is routed
-    /// to the String voice's `BowControlMapper`.
+    /// Push a 3-byte in-process MIDI message. Drone buttons (CC 102–104) are
+    /// consumed here; everything else routes through `routeSarangiModelMIDI`.
     public func sendHostedMIDI(status: UInt8, data1: UInt8, data2: UInt8) {
         let channel = UInt8(status & 0x0F)
         let statusHi = status & 0xF0
 
-        // Drone buttons (Fret Pad): CC 102+i press/release (value ≥ 64 =
-        // pressed). Consumed here — never forwarded to the mapper. CC 105
-        // (the retired 4th slot) is still swallowed so an old iPad build
-        // can't leak it into the mapper; `setDronePressed` bounds-checks it
-        // into a no-op.
+        // drone buttons: CC 102+i, value ≥ 64 = pressed; never forwarded.
+        // CC 105 is swallowed too (`setDronePressed` bounds-checks it away).
         if statusHi == 0xB0, (102...105).contains(data1) {
             setDronePressed(Int(data1) - 102, data2 >= 64)
             return
@@ -845,55 +699,38 @@ public class AudioEngine: ObservableObject {
                               data1: data1, data2: data2)
     }
 
-    /// Two-byte variant for Channel Pressure (0xDx) and Program Change (0xCx).
-    /// The String voice ignores both (aftertouch vibrato arrives as polyphonic
-    /// aftertouch 0xAx, a 3-byte message on the path above).
+    /// Two-byte variant (Channel Pressure / Program Change) — ignored.
     public func sendHostedMIDI2(status: UInt8, data1: UInt8) {}
 
     // MARK: - TarabLink touch ingestion (the wire path)
     //
-    // The protocol twins of `sendHostedMIDI` — full-resolution fractional-
-    // MIDI pitch keyed by iPad touch id, no MIDI vocabulary. `sendHostedMIDI`
-    // stays for the in-process paths (Mac keyboard, auditions, external
-    // hardware). All entry points are thread-safe (called on the link
-    // receive queue, which plays the CoreMIDI thread's old role).
+    // Fractional-MIDI pitch keyed by touch id. Thread-safe (link receive queue).
 
-    /// Touch onset — through the GLIDE QUEUE (2026-08-31): the sequencer
-    /// either passes the onset straight to `touchOnDirect` (a fresh
-    /// note) or queues it as a glissando waypoint for the sounding voice
-    /// (no new note mounts; the sequencer's glide timer drives
-    /// `touchGlideDirect` instead). Exact pass-through at the default
-    /// `ctl_glide_thresh` 0.
+    /// Touch onset, through the glide queue: a fresh note via
+    /// `touchOnDirect`, or a queued glissando waypoint.
     public func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) {
         glideQueue.touchOn(id, pitchSemis: pitchSemis, velocity: velocity)
     }
 
-    /// The glide queue's exemption mark (the strum chord) — delivered by
-    /// the ingest just before the flagged touch's `touchOn`.
+    /// The glide queue's exemption mark (the strum chord), delivered before `touchOn`.
     public func touchGlideExempt(_ id: UInt16) {
         glideQueue.markExempt(id)
     }
 
-    /// Pitch update for a live touch — through the glide queue: a drag
-    /// on a queued-but-not-yet-reached note retargets its waypoint; a
-    /// drag on the voice's owning touch meends the voice directly
-    /// (mapped onto the voice's wire id).
+    /// Pitch update, through the glide queue: a drag on a queued waypoint
+    /// retargets it; the owning touch's drag meends the voice directly.
     public func touchGlide(_ id: UInt16, pitchSemis: Double) {
         glideQueue.touchGlide(id, pitchSemis: pitchSemis)
     }
 
-    /// Touch release — through the glide queue: a release inside the
-    /// onset window is deferred (release grace) or just accelerates the
-    /// in-flight glide; everything else forwards to `touchOffDirect`.
+    /// Touch release, through the glide queue (never deferred): a chain
+    /// member's release is resolved by the sequencer, others forward directly.
     public func touchOff(_ id: UInt16) {
         glideQueue.touchOff(id)
     }
 
-    /// Touch onset, the DIRECT path (below the glide queue). In tanpura
-    /// main-instrument mode the pluck fires HERE, immediately, at the
-    /// exact bent pitch — onset and pitch arrive in one frame, so the
-    /// MIDI path's pending-pluck-on-next-bend contraption has no
-    /// wire-path equivalent.
+    /// Touch onset, the DIRECT path. A plucked main instrument plucks HERE
+    /// at the exact pitch (onset and pitch arrive together).
     private func touchOnDirect(_ id: UInt16, pitchSemis: Double,
                                velocity: Double) {
         lock.lock()
@@ -916,11 +753,8 @@ public class AudioEngine: ObservableObject {
                             exprScale: exprScale)
     }
 
-    /// Per-touch expression scale (the strum chord's live loudness —
-    /// see `LinkPerformanceSink.touchExpr`). Arrives before the touch's
-    /// onset and on any change while held; String-voice touches update
-    /// the mapper's per-slot scale live (the chord swells), plucked
-    /// mains consume it at the onset only (a sounded pluck can't swell).
+    /// Per-touch expression scale (the strum chord). String touches update
+    /// the mapper's per-slot scale live; plucked mains consume it at onset.
     public func touchExpr(_ id: UInt16, exprScale: Double) {
         lock.lock()
         touchExprScale[id] = exprScale
@@ -932,11 +766,8 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// Pitch update, the DIRECT path (post-onset glide / the sequencer's
-    /// trajectory). String voice: the mapper tracks the pitch directly
-    /// (2026-08-24 — the 9 Hz meend smoother is gone; meend is the
-    /// finger's own movement). Tanpura: live-retune the ringing string
-    /// kernel-side, exactly as the MIDI bend path did.
+    /// Pitch update, the DIRECT path. String: the mapper tracks the finger
+    /// directly. Plucked mains: live-retune the ringing slot kernel-side.
     private func touchGlideDirect(_ id: UInt16, pitchSemis: Double) {
         lock.lock()
         guard touchPitchSemis[id] != nil else { lock.unlock(); return }
@@ -959,10 +790,8 @@ public class AudioEngine: ObservableObject {
         src?.mapper.touchGlide(id, pitchSemis: pitchSemis)
     }
 
-    /// Touch release, the DIRECT path. String voice: bow lift (the
-    /// string rings). Tanpura: fast-release the slot (`tp_rel_t60`). A
-    /// stale tanpura slot is released even after a mode switch back to
-    /// the String voice.
+    /// Touch release, the DIRECT path. String: bow lift. Plucked mains:
+    /// fast-release the slot (`tp_rel_t60`), even after a switch back to String.
     private func touchOffDirect(_ id: UInt16) {
         lock.lock()
         touchPitchSemis.removeValue(forKey: id)
@@ -984,10 +813,8 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// The link-drop kill path: every bow off, every tanpura touch slot
-    /// released, every drone button up. Called on disconnect or staleness —
-    /// the wire's stuck-note safety net. Clears the glide queue too (its
-    /// voices are being silenced here).
+    /// The link-drop kill path: every bow off, slot released, drone up,
+    /// glide queue cleared — the wire's stuck-note safety net.
     public func touchesAllOff() {
         glideQueue.reset()
         lock.lock()
@@ -1010,16 +837,13 @@ public class AudioEngine: ObservableObject {
         for i in 0..<FretArrangement.droneCount { setDronePressed(i, false) }
     }
 
-    /// The performance-expression axis (the old flat CC11): the Mac pads
-    /// hold the fitted median here since they have no tilt source. Sets
-    /// the long-lived mapper axis directly (survives engine rebuilds).
+    /// The expression axis (CC11); the Mac pads hold the fitted median here.
     public func setPerformanceExpression(_ v01: Double) {
         stringVoiceSource?.mapper.setAxis(expr: v01)
     }
 
-    /// Touch-keyed twin of `pluckMain` — the plucked main instruments'
-    /// (tanpura / sitar) wire-path onset. `exprScale` (default 1) scales
-    /// the pluck level — the strum chord's expression, onset-only here.
+    /// Touch-keyed twin of `pluckMain`; `exprScale` scales the pluck level
+    /// (the strum chord, onset-only).
     private func pluckMainTouch(_ inst: MainInstrument, hz: Double,
                                 velocity: Double, touch id: UInt16,
                                 exprScale: Double = 1.0) {
@@ -1040,13 +864,11 @@ public class AudioEngine: ObservableObject {
         lock.unlock()
     }
 
-    // MARK: - Sarangi-model voice bridge (the String physics instrument)
+    // MARK: - In-process MIDI routing
 
-    /// Route one MPE message to the String source. The `BowControlMapper`
-    /// allocates gut-string slots physically (every note-on a fresh
-    /// string) with per-channel MPE pitch bend; CCs 11/1/74/2/75 drive the
-    /// expr/press/pos/tilt axes; aftertouch is player vibrato. Also updates the
-    /// `hostedChannel*` bookkeeping so the Live readout tracks pitch/expression.
+    /// Route one in-process MIDI message: the `BowControlMapper` mounts a
+    /// fresh gut string per note-on with per-channel bend; CCs 11/1/74/2/75
+    /// drive the axes. Also keeps the `hostedChannel*` readout bookkeeping.
     private func routeSarangiModelMIDI(channel: UInt8, statusHi: UInt8,
                                        data1: UInt8, data2: UInt8) {
         lock.lock()
@@ -1074,18 +896,9 @@ public class AudioEngine: ObservableObject {
                 heldChannelOrder.removeAll(keepingCapacity: true)
             }
         }
-        // MAIN-INSTRUMENT gate (2026-08-04): when the tanpura is the played
-        // voice, a note-on becomes a pluck at the note's EXACT sounding
-        // pitch — which arrives one message later, on the pitch bend the
-        // pad always sends right after the note-on (the note number alone
-        // is only the nearest semitone). The pending pluck fires on that
-        // bend, or on CC11 as the fallback for senders that skip the bend.
-        // 2026-08-05: the note then PLAYS like the String voice — glides
-        // after the pluck live-retune the ringing string (per-channel MPE
-        // bend -> `TanpuraEngine.bend`), and note-off fast-releases it
-        // (`tp_rel_t60` — held strings decay at their natural rate, a
-        // released string much faster). The String mapper sees no note
-        // messages in this mode.
+        // Plucked main instrument: the note-on plucks at the EXACT pitch,
+        // which arrives on the following pitch bend (CC11 = fallback); later
+        // bends retune the slot, note-off releases it. The mapper sees no notes.
         let inst = mainInstrumentStorage
         let tpSrc = pluckSourceLocked(inst)
         var pendingHz: Double?
@@ -1139,17 +952,9 @@ public class AudioEngine: ObservableObject {
             let rate = log(1000.0) / max(0.05, relT60)
             for s in releaseSlots { engine.release(slot: s, rate: rate) }
         }
-        // RAW TILT REPORT (2026-07-24): the controller streams its three
-        // raw tilt values on the fixed axis messages (`TiltAxisWire`) —
-        // it knows nothing about parameters or mappings. Forwarded to
-        // the host (AppController), which evaluates its own tilt
-        // bindings. Called on the MIDI thread; handler thread-safe.
-        // 14-BIT (2026-08-14): MSB/LSB CC pairs, sent MSB-then-LSB.
-        // Emit on the LSB (combining with the stored MSB) so the pair
-        // lands atomically — emitting on the MSB too would interleave
-        // coarse values between fine ones and reintroduce the very
-        // quantization steps the pair removes. A stream that has never
-        // carried an LSB is a legacy 7-bit iPad build: emit on MSB.
+        // Raw tilt axes (`TiltAxisWire`, in-process): 14-bit MSB/LSB pairs,
+        // MSB first. Emit on the LSB so the pair lands atomically; a stream
+        // that has never carried an LSB is 7-bit — emit on the MSB.
         if statusHi == 0xB0, let axis = TiltAxisWire.ccs.firstIndex(of: data1) {
             tiltMSB[axis] = data2
             if !tiltLSBSeen {
@@ -1161,41 +966,28 @@ public class AudioEngine: ObservableObject {
             let v14 = Int(tiltMSB[axis]) << 7 | Int(data2)
             onTiltAxis?(axis, Double(v14) / 16383.0 * 2.0 - 1.0)
         }
-        // COMPOSITE PARAMETER slots (2026-07-24): direct slot-CC drives
-        // (audition scores / external hardware; the iPad no longer sends
-        // these). The mapper ignores these CCs.
+        // composite-parameter slot CCs (audition scores / hardware); the mapper ignores them
         if statusHi == 0xB0, CompositeParam.slotCCs.contains(data1) {
             onCompositeCC?(data1, Double(data2) / 127.0)
         }
-        // Note messages reach the String mapper only when the String voice
-        // is the played instrument; axes/CCs flow either way (they drive
-        // nothing without notes, and keep the mapper's state current for a
-        // switch back).
+        // Notes reach the String mapper only while it is the played
+        // instrument; axes/CCs flow either way (kept current for a switch back).
         if inst != .string, statusHi == 0x90 || statusHi == 0x80 { return }
         mapper?.midi(statusHi | channel, data1, data2)
     }
 
-    /// Raw-tilt delivery (2026-07-24): fired with (axis 0…2, value
-    /// −1…+1, rest 0 — the CC transport's 0…16383 is unsigned, the
-    /// software value is not) for each incoming tilt-axis message — on
-    /// the MIDI thread; the handler must be thread-safe.
+    /// Raw-tilt delivery: (axis 0…2, value −1…+1), MIDI thread; handler must be thread-safe.
     public var onTiltAxis: ((Int, Double) -> Void)?
-    /// 14-bit tilt-pair assembly (2026-08-14): latest MSB per axis, and
-    /// whether the stream has EVER carried an LSB (false = legacy 7-bit
-    /// iPad build, decode MSB-only). MIDI-thread only.
+    /// 14-bit tilt-pair assembly: latest MSB per axis; LSB ever seen (false = 7-bit). MIDI thread.
     private var tiltMSB = [UInt8](repeating: 0, count: 3)
     private var tiltLSBSeen = false
 
-    /// Composite-parameter delivery (2026-07-24): fired with
-    /// (slot CC, value 0…1) for every incoming slot-CC message — on the
-    /// MIDI thread; the handler must be thread-safe. Set by the host
-    /// (AppController wires it to its composite apply path).
+    /// Composite-parameter delivery: (slot CC, value 0…1), MIDI thread;
+    /// the handler must be thread-safe.
     public var onCompositeCC: ((UInt8, Double) -> Void)?
 
-    /// Enable/disable the String physics instrument. On first enable the
-    /// source node is created and connected DIRECTLY to `symGain`, and the
-    /// `BowEngine` is built off-main from the current tonic + tarab strings.
-    /// Returns false when `bowed_string.json` is missing.
+    /// Enable/disable the String voice: creates + connects the node on first
+    /// enable and builds the engine off-main. False if `bowed_string.json` is missing.
     @discardableResult
     public func setSarangiModelVoiceEnabled(_ on: Bool) -> Bool {
         if on && stringVoiceSource == nil {
@@ -1205,9 +997,7 @@ public class AudioEngine: ObservableObject {
             }
             let src = StringVoiceSource()
             src.mapper.bendRange = Config.midiPitchBendRange
-            // Voice/taraf VOLUME READOUT (2026-08-24): always armed — the
-            // metered split-bus render is bit-exact against the fused
-            // path (`BusMeterTests`), so auditions/parity are untouched.
+            // always armed — the metered render is bit-exact (`BusMeterTests`)
             src.setBusMeter(true)
             stringVoiceSource = src
         }
@@ -1257,11 +1047,8 @@ public class AudioEngine: ObservableObject {
 
     // MARK: - Tanpura voice bridge
 
-    /// Enable the tanpura source. On first enable the node is created and
-    /// connected to `symGain` (beside the String node — the mixer sums), and
-    /// the engine is built off-main from the current tonic + scale. Returns
-    /// false when `tanpura_live.json` is missing. Armed once at startup and
-    /// stays on — it is the default drone voice.
+    /// Enable the tanpura source (node + off-main engine build on first
+    /// enable). Armed once at startup — the default drone voice.
     @discardableResult
     public func setTanpuraVoiceEnabled(_ on: Bool) -> Bool {
         if on && tanpuraSource == nil {
@@ -1271,9 +1058,7 @@ public class AudioEngine: ObservableObject {
             }
             let src = TanpuraVoiceSource()
             if let g = tanpuraGainOverride { src.setOutGain(g) }
-            // tanpura→taraf tap (2026-08-21): the drone plucks charge
-            // the sarangi jt web sympathetically, `tp_taraf`-scaled —
-            // the String voice exists by now (enabled first at startup)
+            // tanpura→taraf tap; the String voice exists by now (enabled first)
             if let strSrc = stringVoiceSource {
                 src.setInjectSink { strSrc.jtInjectWrite($0, $1) }
             }
@@ -1316,18 +1101,14 @@ public class AudioEngine: ObservableObject {
     /// True once a tanpura engine is mounted and renderable.
     public var isTanpuraArmed: Bool { tanpuraSource?.isArmed ?? false }
 
-    /// Tanpura async-pool telemetry (underruns / divergence resets / ringing
-    /// strings). nil while unarmed.
+    /// Tanpura async-pool telemetry (underruns / resets / ringing strings); nil unarmed.
     public func tanpuraStats() -> (underruns: Int, resets: Int, active: Int)? {
         guard let e = tanpuraSource?.currentEngine() else { return nil }
         return (e.underruns, e.resetCount, e.activeStrings)
     }
 
-    /// (Re)build the tanpura's JI slot grid for a tonic + scale, off-main
-    /// (the mount+settle pass is ~seconds of CPU — far heavier than a
-    /// String rebuild, hence the utility-QoS queue and the caller-side
-    /// debounce). A newer build supersedes any in-flight older one; held
-    /// drone buttons re-pluck onto the fresh engine across the crossfade.
+    /// (Re)build the tanpura's JI slot grid off-main (seconds of CPU). A
+    /// newer build supersedes; held drone buttons re-pluck onto the fresh engine.
     public func rebuildTanpura(tonic: Double, scaleRatios: [Double]) {
         lock.lock()
         lastTanpuraTonic = tonic
@@ -1360,8 +1141,7 @@ public class AudioEngine: ObservableObject {
                     NSLog("Tarabdaar: tanpura engine build failed (tanpura_live.json missing?)")
                 }
                 self.tanpuraSource?.setEngine(engine)
-                // held main-instrument notes lose their slot binding — the
-                // fresh engine's slots differ; the next note-on rebinds
+                // the fresh engine's slots differ — held notes lose their binding
                 self.lock.lock()
                 self.tanpuraChannelSlot.removeAll(keepingCapacity: true)
                 self.tanpuraTouchSlot.removeAll(keepingCapacity: true)
@@ -1371,15 +1151,9 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// Enable the SITAR voice (2026-08-19). Mirrors the tanpura path: a
-    /// third source node connected to `symGain`, engine built off-main on
-    /// the same utility queue from the current tonic + scale, but from the
-    /// SITAR artifact — and its render tap is wired into the String
-    /// kernel's jt inject ring, so whatever the sitar radiates charges
-    /// the sarangi taraf sympathetically (`st_taraf` scales it; the
-    /// String voice stays armed and silent under sitar play, exactly as
-    /// under tanpura play, so the web is always there to ring).
-    /// Returns false when `sitar_live.json` is missing.
+    /// Enable the sitar voice (mirrors the tanpura path). Its render tap
+    /// feeds the jt inject ring (`st_taraf`); the String voice stays armed
+    /// and silent so the web can ring. False if `sitar_live.json` is missing.
     @discardableResult
     public func setSitarVoiceEnabled(_ on: Bool) -> Bool {
         if on && sitarSource == nil {
@@ -1431,10 +1205,7 @@ public class AudioEngine: ObservableObject {
     /// True once a sitar engine is mounted and renderable.
     public var isSitarArmed: Bool { sitarSource?.isArmed ?? false }
 
-    /// (Re)build the sitar's JI slot grid — same discipline as
-    /// `rebuildTanpura` (off-main on the shared utility queue, newer build
-    /// supersedes, held notes lose their slot binding). No shaping /
-    /// register-comp layers: the sitar artifact is its own fit.
+    /// (Re)build the sitar's JI slot grid — same discipline as `rebuildTanpura`, no shaping layers.
     public func rebuildSitar(tonic: Double, scaleRatios: [Double]) {
         lock.lock()
         let src = sitarSource
@@ -1464,8 +1235,7 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// Apply one `st_*` live registry parameter. Same contract as
-    /// `setTanpuraParam`.
+    /// Apply one `st_*` live registry parameter (same contract as `setTanpuraParam`).
     @discardableResult
     public func setSitarParam(_ key: String, _ value: Double) -> Bool {
         switch key {
@@ -1487,10 +1257,7 @@ public class AudioEngine: ObservableObject {
             lock.unlock()
             src?.currentEngine()?.setPolyphony(Int(value.rounded()))
         case "st_taraf":
-            // sympathetic-coupling drive, scaled per-source at the
-            // sitar's inject tap (2026-08-21 — the tanpura's `tp_taraf`
-            // shares the kernel ring); the String-side kernel gain is
-            // the shared arm, republished across bow rebuilds
+            // per-source tap gain; the kernel-side gain is the shared arm
             lock.lock()
             sitarTarafDrive = value
             let src = sitarSource
@@ -1503,12 +1270,9 @@ public class AudioEngine: ObservableObject {
         return true
     }
 
-    /// (Re)publish the String kernel's inject-ring arm: 1.0 while ANY
-    /// foreign voice drives the taraf (`st_taraf` / `tp_taraf` above 0),
-    /// else 0. The per-source drives scale at the taps, so the kernel
-    /// gain carries no level of its own; `StringVoiceSource` caches the
-    /// arm across bow rebuilds. Both-zero keeps the ring unwritten —
-    /// the byte-null String parity path.
+    /// (Re)publish the String kernel's inject-ring arm: 1 while any foreign
+    /// voice drives the taraf (`st_taraf` / `tp_taraf` > 0), else 0. Levels
+    /// live at the taps; both zero keeps the ring unwritten (byte-null).
     private func updateJtInjectArm() {
         lock.lock()
         let armed = sitarTarafDrive > 0 || tanpuraTarafDrive > 0
@@ -1516,9 +1280,8 @@ public class AudioEngine: ObservableObject {
         stringVoiceSource?.setJtInjectGain(armed ? 1.0 : 0.0)
     }
 
-    /// Which voice the drone buttons drive. Switching releases everything:
-    /// held jt rows get their release envelope, ringing tanpura strings are
-    /// damped, hold-cycles cancel — the buttons start clean in the new mode.
+    /// Which voice the drone buttons drive. Switching releases everything
+    /// held so the buttons start clean in the new mode.
     public func setDroneVoiceMode(_ mode: DroneVoiceMode) {
         lock.lock()
         guard mode != droneVoiceModeStorage else { lock.unlock(); return }
@@ -1547,12 +1310,10 @@ public class AudioEngine: ObservableObject {
         return droneVoiceModeStorage
     }
 
-    /// Which voice the played notes drive. Switching away from the String
-    /// voice releases its held notes; switching away from the tanpura just
-    /// drops pending plucks (its strings ring out — their nature).
+    /// Which voice the played notes drive. Leaving the String voice
+    /// releases its notes; leaving a plucked voice drops pending plucks.
     public func setMainInstrument(_ inst: MainInstrument) {
-        // Any in-flight glissando references the outgoing voice's notes
-        // (released just below) — forget it before switching.
+        // an in-flight glissando references the outgoing voice's notes
         glideQueue.reset()
         lock.lock()
         guard inst != mainInstrumentStorage else { lock.unlock(); return }
@@ -1564,8 +1325,7 @@ public class AudioEngine: ObservableObject {
         let strSrc = stringVoiceSource
         lock.unlock()
         if old == .string { strSrc?.reset() }
-        // the sitar arms lazily on first use and stays armed (idle
-        // strings are ~free; switching back is instant)
+        // the sitar arms lazily and stays armed (idle strings are ~free)
         if inst == .sitar { setSitarVoiceEnabled(true) }
     }
 
@@ -1574,8 +1334,7 @@ public class AudioEngine: ObservableObject {
         return mainInstrumentStorage
     }
 
-    /// Apply one `tp_*` live registry parameter. Same contract as
-    /// `setStringControlParam` — thread-safe, persists across rebuilds.
+    /// Apply one `tp_*` live registry parameter (thread-safe, persists across rebuilds).
     @discardableResult
     public func setTanpuraParam(_ key: String, _ value: Double) -> Bool {
         switch key {
@@ -1612,8 +1371,7 @@ public class AudioEngine: ObservableObject {
             let old = tanpuraJivaComp
             tanpuraJivaComp = value
             lock.unlock()
-            // same discipline as the shapes: only a real change burns a
-            // seconds-long rebuild (the startup default push is a no-op)
+            // only a real change burns a seconds-long rebuild
             if value != old { scheduleTanpuraShapeRebuild() }
         case "tp_cascade":
             lock.lock()
@@ -1640,9 +1398,8 @@ public class AudioEngine: ObservableObject {
             let isActive = tanpuraShapeAlign > 0 || tanpuraShapeFocus > 0
                 || tanpuraShapeQuiet > 0
             lock.unlock()
-            // the engine only changes when a value moved AND shaping is
-            // (or was) actually in effect — spread alone is inert, and
-            // the startup default push must not burn a seconds-long build
+            // rebuild only when a value moved AND shaping is (or was) in
+            // effect — spread alone is inert; the startup push must not build
             if value != old, wasActive || isActive {
                 scheduleTanpuraShapeRebuild()
             }
@@ -1652,11 +1409,8 @@ public class AudioEngine: ObservableObject {
         return true
     }
 
-    /// Debounced rebuild for a `tp_shape_*` edit: the tanpura build is
-    /// seconds of CPU, so a Parameters-tab slider drag must settle
-    /// (750 ms, the scale pipeline's constant) before one build runs.
-    /// The build-generation guard then supersedes any in-flight older
-    /// build as usual.
+    /// Debounced table-build rebuild: a slider drag settles (750 ms) before
+    /// one seconds-long build runs; the generation guard supersedes in-flight ones.
     private func scheduleTanpuraShapeRebuild() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1676,9 +1430,8 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// One drone-button tanpura pluck: the mapped pitch's nearest mounted
-    /// slot (the grid carries every scale pitch, so this is exact up to the
-    /// mHz quantization; 50 ¢ tolerance guards a mid-rebuild mismatch).
+    /// One drone-button pluck at the mapped pitch's slot (50 ¢ tolerance
+    /// guards a mid-rebuild mismatch).
     private func tanpuraPluckDrone(_ index: Int) {
         lock.lock()
         let hz = droneFreqs.indices.contains(index) ? droneFreqs[index] : nil
@@ -1694,10 +1447,8 @@ public class AudioEngine: ObservableObject {
                      touch: touch, drive: drive)
     }
 
-    /// Hold re-pluck cycle (the strumming hand): while button `index` stays
-    /// held in tanpura mode, re-pluck every `tp_drone_cycle` seconds. The
-    /// period is re-read each hop so a live edit applies mid-hold; a bumped
-    /// generation (release / remap / mode switch) orphans the chain.
+    /// Hold re-pluck cycle: re-pluck every `tp_drone_cycle` s while held
+    /// (period re-read each hop); a bumped generation orphans the chain.
     private func scheduleDroneCycle(_ index: Int, gen: Int) {
         lock.lock()
         let period = tanpuraDroneCycleSec
@@ -1718,8 +1469,7 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// Re-strike held drone buttons on a freshly-built tanpura (a rebuild
-    /// crossfades the old ring out; the fresh engine starts silent).
+    /// Re-strike held drone buttons on a freshly built tanpura (it starts silent).
     private func reapplyHeldTanpuraDrones() {
         lock.lock()
         let held = droneHeld.indices.filter {
@@ -1729,11 +1479,8 @@ public class AudioEngine: ObservableObject {
         for i in held { tanpuraPluckDrone(i) }
     }
 
-    /// A main-instrument tanpura pluck at an exact sounding pitch: the
-    /// nearest mounted slot (60 ¢ tolerance — a fret pitch always has a
-    /// slot) BENT to the exact Hz (2026-08-05 — the pluck itself is now
-    /// pitch-exact, not slot-quantized). The slot is recorded per channel
-    /// so later MPE bends retune it and note-off fast-releases it.
+    /// A main-instrument pluck (MIDI path): the nearest slot (60 ¢) bent to
+    /// the exact Hz, recorded per channel for later bends / release.
     private func pluckMain(_ inst: MainInstrument, hz: Double,
                            velocity: UInt8, channel: UInt8) {
         lock.lock()
@@ -1751,10 +1498,8 @@ public class AudioEngine: ObservableObject {
         lock.unlock()
     }
 
-    /// Runtime BASE PARAMETERS of the String voice (2026-07-24 composite
-    /// rework) — the live-appliable base params composite parameters
-    /// sweep (no engine rebuild; chunk-rate smoothed in `BowEngine`).
-    /// Values persist across engine rebuilds. Thread-safe.
+    /// The String voice's `.live` runtime parameters (no rebuild; persist
+    /// across rebuilds). Thread-safe.
     public func setStringJtToneLp(hz: Double) {
         stringVoiceSource?.setJtToneLp(hz: hz)
     }
@@ -1789,37 +1534,31 @@ public class AudioEngine: ObservableObject {
         stringVoiceSource?.setTwang(amt01)
     }
 
-    /// String-voice jawari-web overload telemetry (see
-    /// `StringVoiceSource.jtStats`). nil when the voice isn't created.
+    /// Jawari-web overload telemetry (see `StringVoiceSource.jtStats`); nil without a voice.
     public func stringVoiceJtStats() -> (drops: Double, flat: Double,
                                          fill: Double, on: Double)? {
         stringVoiceSource?.jtStats()
     }
 
-    /// String-voice quiescence-gate probe (see
-    /// `StringVoiceSource.jtGateProbe`). nil when the voice isn't created.
+    /// Quiescence-gate probe (see `StringVoiceSource.jtGateProbe`); nil without a voice.
     public func stringVoiceJtGateProbe() -> (asleep: Int, total: Int,
                                              ringR: Double, driveR: Double,
                                              droneHot: Bool)? {
         stringVoiceSource?.jtGateProbe()
     }
 
-    // MARK: - Scope telemetry (2026-09-01)
+    // MARK: - Scope telemetry
 
-    /// The Mac Scope tab's one poll: what the MAIN VOICE is sounding
-    /// (pitch + level per string, on whichever instrument is armed) and
-    /// every modal-jawari taraf row's pitch, level and harmonic
-    /// character. Display only — nothing here feeds the physics.
+    /// The Scope tab's one poll: the main voice's strings (pitch + level) and
+    /// every taraf row's pitch, level and character. Display only.
     public struct ScopeSnapshot {
         public struct Voice {
-            /// Stable identity across polls (slot + string generation),
-            /// so the display can draw one trajectory per string.
+            /// Stable identity across polls (slot + string generation).
             public let id: Int
             public let pitchHz: Double
             /// Held (bow down / touch down); a released string rings on.
             public let held: Bool
-            /// 0…1 display level (log-mapped from the source's meter —
-            /// relative, for colour).
+            /// 0…1 display level (log-mapped, relative).
             public let level: Double
         }
         public var voices: [Voice] = []
@@ -1827,21 +1566,18 @@ public class AudioEngine: ObservableObject {
         public var instrument: MainInstrument = .string
     }
 
-    /// Arm/disarm the String kernel's display meters (the Scope tab does
-    /// this on appear/disappear; unarmed = the exact legacy render).
+    /// Arm/disarm the kernel's display meters (unarmed = byte-null).
     public func setScopeArmed(_ on: Bool) {
         stringVoiceSource?.setScopeArmed(on)
     }
 
-    /// Bowed-string ring envelope (bridge-wave chunk peak) → 0…1 display
-    /// level: ~60 dB below a firmly bowed string reads 0.
+    /// Bowed-string ring envelope → 0…1 display level (60 dB range).
     static func bowScopeLevel01(_ senv: Double) -> Double {
         guard senv > 0 else { return 0 }
         return min(1, max(0, 1 + 20 * log10(senv / 0.5) / 60))
     }
 
-    /// Plucked-string output envelope (output units, 1.0 at the pluck)
-    /// → 0…1 display level over the same 60 dB.
+    /// Plucked-string output envelope (1.0 at the pluck) → 0…1 over the same 60 dB.
     static func pluckScopeLevel01(_ env: Double) -> Double {
         guard env > 0 else { return 0 }
         return min(1, max(0, 1 + 20 * log10(env) / 60))
@@ -1878,16 +1614,13 @@ public class AudioEngine: ObservableObject {
         return snap
     }
 
-    /// String-voice render-deadline telemetry (see
-    /// `StringVoiceSource.renderStats`). nil when the voice isn't created.
+    /// Render-deadline telemetry (see `StringVoiceSource.renderStats`); nil without a voice.
     public func stringVoiceRenderStats() -> (maxMs: Double, overruns: UInt64,
                                              callbacks: UInt64)? {
         stringVoiceSource?.renderStats()
     }
 
-    /// Drive one of the String voice's control axes from the UI (0..1),
-    /// through the same axes the CCs drive (CC11 expr · CC1 press · CC74
-    /// pos · CC2/75 tilt). No-op when the source isn't created yet.
+    /// Drive one control axis from the UI (0..1): CC11 expr · CC1 press · CC74 pos · CC2/75 tilt.
     public func setSarangiModelVoiceAxis(cc: UInt8, value01: Double) {
         guard let m = stringVoiceSource?.mapper else { return }
         switch cc {
@@ -1899,18 +1632,15 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// Player vibrato depth 0..1 (the aftertouch axis) — delivered as a
-    /// channel-pressure message so the mapper's vibrato path picks it up.
+    /// Player vibrato depth 0..1 (the aftertouch axis), as a channel-pressure message.
     public func setStringVibrato(_ v01: Double) {
         let byte = UInt8(max(0, min(127, Int((v01 * 127.0).rounded()))))
         stringVoiceSource?.mapper.midi(0xD0, byte, 0)
     }
 
-    /// Apply one `.live` registry parameter to the String voice — the
-    /// unified instant-apply path for the Parameters tab, composite
-    /// members and direct tilt bindings. Returns false when the key has no
-    /// live setter (the caller routes it through the rebuild path). All
-    /// setters are thread-safe and persist across engine rebuilds.
+    /// Apply one `.live` registry parameter to the String voice — the ONE
+    /// instant-apply path. Returns false when the key has no live setter (the
+    /// caller rebuilds). Setters are thread-safe and persist across rebuilds.
     @discardableResult
     public func setStringControlParam(_ key: String, _ value: Double) -> Bool {
         switch key {
@@ -1918,11 +1648,8 @@ public class AudioEngine: ObservableObject {
         case "bow_press":     setSarangiModelVoiceAxis(cc: 1, value01: value)
         case "bow_pos":       setSarangiModelVoiceAxis(cc: 74, value01: value)
         case "bow_tilt":      setSarangiModelVoiceAxis(cc: 75, value01: value)
-        // The registry's top of range means "bypass" — hand the engine 0
-        // so it restores the EXACT build-time coefficient (bit-exact
-        // legacy) instead of engaging the runtime filter at its ceiling.
-        // Matters at rest: the unified apply pushes every live parameter
-        // at startup, and this one rests at 20 kHz.
+        // top of range = bypass: hand the engine 0 so it restores the exact
+        // build-time coefficient (byte-null) — this one rests at 20 kHz
         case "bow_jt_lp":     setStringJtToneLp(hz: value >= 20000 ? 0 : value)
         case "bow_jt_hp":     setStringJtToneHp(hz: value)
         case "bow_jt_body":   setStringJtBody(value)
@@ -1951,16 +1678,15 @@ public class AudioEngine: ObservableObject {
         case "bow_twang":     setStringTwang(value)
         case "bow_tone_tilt": setStringToneTilt(value)
         default:
-            // FX rack (2026-08-01): every `fx_<point>_<field>` key routes
-            // to the source's cached settings (re-applied across rebuilds).
+            // FX rack: `fx_<point>_<field>` keys route to the source's cached settings
             if key.hasPrefix("fx_") {
                 return stringVoiceSource?.setFXParam(key, value) ?? false
             }
-            // Tanpura voice (2026-08-04): the `tp_*` group.
+            // the tanpura's `tp_*` group
             if key.hasPrefix("tp_") {
                 return setTanpuraParam(key, value)
             }
-            // Sitar voice (2026-08-19): the `st_*` group.
+            // the sitar's `st_*` group
             if key.hasPrefix("st_") {
                 return setSitarParam(key, value)
             }
@@ -1969,11 +1695,8 @@ public class AudioEngine: ObservableObject {
         return true
     }
 
-    /// Drive the kernel's live 0…1 scaler behind a `.hybrid` parameter.
-    /// The scaler is an implementation detail — it exists so a build-time
-    /// depth (vibrato cents) can be turned DOWN from its built value
-    /// without an engine rebuild. `ParamRegistry` owns the native-units ↔
-    /// scaler conversion; no UI shows these directly.
+    /// Drive the kernel's live 0…1 scaler behind a `.hybrid` parameter (a
+    /// build-time depth turned DOWN without a rebuild; `ParamRegistry` converts).
     public func setStringHybridScaler(_ scaler: ParamRegistry.HybridScaler,
                                       _ amount01: Double) {
         let a = max(0.0, min(1.0, amount01))
@@ -1984,10 +1707,8 @@ public class AudioEngine: ObservableObject {
 
     // MARK: - Drone buttons (Fret Pad)
 
-    /// Update which sympathetic strings the drone buttons pluck. A
-    /// mapping-only change — the jawari web is untouched, so no rebuild.
-    /// Any held button is released first (its OLD row must not drone on
-    /// with no release path to it).
+    /// Update which strings the drone buttons pluck (mapping only — no
+    /// rebuild). Any held button is released first.
     public func setDroneMappedFreqs(_ freqs: [Double?]) {
         lock.lock()
         let heldOld = droneHeld.indices
@@ -2009,12 +1730,9 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// Press/release drone button `index` (0–2). In the default tanpura
-    /// mode a press PLUCKS the mapped pitch (and starts the hold re-pluck
-    /// cycle); release stops the cycle and lets the string ring out. In
-    /// `.sympathetic` mode: pluck-and-hold / release the mapped string's jt
-    /// row (identity lookup on its nominal Hz; string not in the web =
-    /// inert). Unmapped slot = inert either way. Safe from the MIDI thread.
+    /// Press/release drone button `index` (0–2). Tanpura mode: press plucks
+    /// + starts the re-pluck cycle, release rings out. Sympathetic mode:
+    /// hold/release the mapped jt row. Unmapped = inert. MIDI-thread safe.
     public func setDronePressed(_ index: Int, _ pressed: Bool) {
         lock.lock()
         guard droneHeld.indices.contains(index),
@@ -2026,8 +1744,7 @@ public class AudioEngine: ObservableObject {
             droneCycleGen[index] += 1
         }
         let cycleGen = droneCycleGen[index]
-        // Frequencies of the OTHER still-held buttons — a release must not
-        // silence a row another button also maps to.
+        // a release must not silence a row another held button maps to
         let othersHeld = droneHeld.indices
             .filter { $0 != index && droneHeld[$0] }
             .compactMap { droneFreqs[$0] }
@@ -2052,8 +1769,7 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// Re-arm held drones on a freshly-built engine (a structural rebuild
-    /// starts from silent drone state).
+    /// Re-arm held drones on a freshly built engine (it starts silent).
     private func reapplyHeldDrones(to engine: BowEngine) {
         lock.lock()
         let held = droneHeld.indices
@@ -2067,11 +1783,8 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// Build a fresh String `BowEngine` for the tuning (tonic + tarab rows)
-    /// off the main thread and publish it lock-free. The long-lived mapper
-    /// keeps held notes/axes across the swap; a newer build supersedes any
-    /// in-flight older one. Called on voice enable and on every structural
-    /// tarab/tonic change.
+    /// Build a fresh String `BowEngine` off-main and publish it; the mapper
+    /// keeps held notes/axes across the swap, a newer build supersedes.
     private func rebuildStringVoice(tonic: Double, strings: [ResolvedString],
                                     follower: (gain: Double, t60: Double)? = nil) {
         guard let src = stringVoiceSource else { return }
@@ -2096,10 +1809,8 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// Push overrides onto the RUNNING String engine when every changed
-    /// key can be applied in place (`ParamRegistry.inPlaceKeys`), so a
-    /// physics edit costs nothing and interrupts nothing. Returns false if
-    /// anything needs a real rebuild — the caller then goes the slow way.
+    /// Push overrides onto the RUNNING engine when every changed key is in
+    /// `ParamRegistry.inPlaceKeys`. False = the caller must rebuild.
     @discardableResult
     public func applyStringVoiceOverridesInPlace(
         _ overrides: [String: Double], changed: Set<String>) -> Bool {
@@ -2114,8 +1825,7 @@ public class AudioEngine: ObservableObject {
         lock.unlock()
         guard on, let src = stringVoiceSource else { return false }
         stringVoiceOverrides = overrides
-        // Rebuilding the jawari tables is the costly half (~3.4 ms); only
-        // do it when a jawari key actually moved.
+        // the jawari tables are the costly half — only when a jt key moved
         let jtTouched = changed.contains { $0.hasPrefix("bow_jt") }
         return src.applyLiveParams(tonicHz: tonic, strings: strings,
                                    overrides: overrides,
@@ -2123,8 +1833,7 @@ public class AudioEngine: ObservableObject {
                                    needsJawariTables: jtTouched)
     }
 
-    /// Re-apply the String-editor / audition overrides with a rebuild (the
-    /// artifact scalars are baked into the tables/kernel at build time).
+    /// Re-apply the overrides with a rebuild (artifact scalars bake into the tables).
     public func setStringVoiceOverrides(_ overrides: [String: Double]) {
         stringVoiceOverrides = overrides
         lock.lock()
@@ -2144,23 +1853,10 @@ public class AudioEngine: ObservableObject {
 
     // MARK: - Tarab tuning (Strings tab) → String voice
 
-    /// Push the current tarab tuning (tonic + resolved sympathetic strings)
-    /// to the String voice's in-kernel taraf. Called by `SarangiStore` on
-    /// every structural change (raga/tonic/string edits, Strings-tab sync). The
-    /// String kernel's taraf tracks the same tuning as the tarab table; the
-    /// build runs off-main (the mapper keeps held notes across the swap).
-    ///
-    /// The String voice reads only the tuning — its physics come from
-    /// `bowed_string.json` + `stringVoiceOverrides`. This used to also take
-    /// `params`/`fx`/`eqBands`/`groups`/`coupled` and ignore all five; they
-    /// were dropped with the rest of the coupled-network remnants
-    /// (2026-07-24), along with the `applySarangiScalars` /
-    /// `applySarangiFXScalars` / `applySarangiFXFilters` no-op hooks.
-    /// `droneFreqs` (2026-07-25) = per drone button, the mapped sympathetic
-    /// string's nominal Hz (`InstrumentState.droneStringFreqs`; nil =
-    /// unmapped/disabled → button inert).
-    /// `follower` (2026-07-25) = the melody-follower string's (gain, t60)
-    /// when enabled (`InstrumentState.resolvedFollower`; nil = off).
+    /// Push the tarab tuning (tonic + resolved strings) to the String
+    /// voice's in-kernel taraf; the build runs off-main. `droneFreqs` = per
+    /// drone button, the mapped string's nominal Hz (nil = inert);
+    /// `follower` = the melody-follower's (gain, t60) when enabled.
     public func rebuildSarangi(strings: [ResolvedString], tonic: Double,
                                droneFreqs: [Double?] = [],
                                follower: (gain: Double, t60: Double)? = nil) {
@@ -2171,9 +1867,7 @@ public class AudioEngine: ObservableObject {
         for i in self.droneFreqs.indices {
             self.droneFreqs[i] = droneFreqs.indices.contains(i) ? droneFreqs[i] : nil
         }
-        // A slot unmapped while held must not stay latched: the fresh
-        // engine starts silent and `reapplyHeldDrones` skips nil slots,
-        // so drop the flag too (a later press starts clean).
+        // a slot unmapped while held must not stay latched
         for i in droneHeld.indices where self.droneFreqs[i] == nil {
             droneHeld[i] = false
         }

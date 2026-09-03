@@ -146,7 +146,7 @@ final class GlideSequencerTests: XCTestCase {
 
     // MARK: Parked fingers & glide-back
 
-    /// THE TWO-FINGER OSCILLATION BUG (2026-08-31): after ownership
+    /// THE TWO-FINGER OSCILLATION BUG : after ownership
     /// transfers to the second finger, the still-held FIRST finger's
     /// wiggles must be ignored — its wire id is the voice's downstream
     /// id, so letting it fall through to pass-through yanked the pitch

@@ -1,125 +1,60 @@
 import Foundation
 
-/// MIDI/UI events → kernel-rate bow controls (f0, vbow, fbow, beta, gate) —
-/// the LIVE form of `bowstring.pair_controls`' control-mapping laws.
+/// MIDI/UI/touch events → kernel-rate bow controls (f0, vbow, fbow, beta,
+/// gate). The control thread writes target state under a lock; once per
+/// render buffer the audio thread snapshots it and fills per-sample arrays,
+/// interpolating the axes linearly from the previous snapshot:
 ///
-/// Block-rate in, kernel-rate out: the control thread (MIDI/UI) writes the
-/// target state under a lock; once per render buffer the audio thread
-/// snapshots it and fills per-sample arrays, linearly interpolating the axis
-/// values from the previous snapshot and running the per-sample smoothers:
+///   * f0    — slot pitch → log-f0 ramped across the block to the latest
+///             target (meend is the finger's own movement), then the
+///             calibrated `pitch_cents` correction.
+///   * gate  — note state through a ~25 ms one-pole.
+///   * vbow  — expression (CC11) → dB (rel ∈ [−14, +5]) → v =
+///             v_ref·10^(rel/(20·dyn_p)) clipped to [v_lo, 1.3·v_hi]
+///             (dyn_p ≤ 0.1: affine). Rides [bow_expr_lift, 1]; below the
+///             lift the bow fades to SILENCE.
+///   * fbow  — press (CC1) → LOG-force position across the analytic
+///             Schelleng wedge, edges reachable (see `fill`).
+///   * beta  — pos (CC74) affine in [bow_live_beta_lo, bow_live_beta_hi];
+///             tilt (CC2, dB) moves toward the bridge (bow_tilt_beta, soft
+///             knee) and brightens force (bow_tilt_force).
 ///
-///   * f0    — held note + pitch bend → target log-f0, tracked DIRECTLY
-///             (2026-08-24: the 9 Hz meend smoother was removed — meend is
-///             fully the player's finger; the target ramps linearly in log2
-///             across each render block, like the other axes, so the delay
-///             line stays continuous while the pitch reaches the finger
-///             within one block), then the calibrated per-octave
-///             `pitch_cents` correction.
-///   * gate  — note state softened by the ~25 ms one-pole (a step gate slams
-///             the friction excitation = broadband swing overshoot).
-///   * vbow  — expression (CC11) → loudness dB (rel ∈ [−14, +5], the range
-///             the offline dynamics inversion spans) → the kernel's
-///             calibrated loudness law v = v_ref·10^(rel/(20·dyn_p)),
-///             clipped to [v_lo, 1.3·v_hi]; dyn_p ≤ 0.1 falls back to the
-///             affine map. The loudness law rides [bow_expr_lift, 1]; the
-///             zone below the lift is the fade-to-SILENCE release gesture
-///             (the two must not overlap — offline pianissimo bows at the
-///             velocity floor, never lifts).
-///   * fbow  — press (CC1) → position INSIDE the playable Schelleng wedge
-///             on a LOG-force axis (2026-07-16 remap, ear-approved ladders
-///             reports/press_pos_authority.html): fb = f_min·(f_max/f_min)^press
-///             with f_min = bow_live_press_under·wedge_lo (press 0 dips
-///             BELOW the lock floor — under-pressed flautando/octave
-///             whistle, deliberate) and f_max = bow_live_press_over·wedge_hi
-///             (press 1 pushes past max lock — pressed grit). The OLD law
-///             (absolute [f_lo, f_hi] then wedge clamp ×fmin_scale) had ZERO
-///             press authority at 247/415 Hz (the floor exceeded the whole
-///             mapped range) and ~0.3 dB of tilt where it survived: force
-///             timbre lives at the wedge EDGES, which a clamp forbids.
-///             Wedge-relative mapping is register-uniform by construction;
-///             velocity co-drive comes through the bounds themselves
-///             (fmin ∝ v). OFFLINE pair_controls keeps the absolute law —
-///             the fitted contours were converged under it; the bowreplay
-///             exporter INVERTS this live law so replay reproduces the
-///             offline post-projection controls exactly.
-///   * beta  — pos (CC74) affine in [bow_live_beta_lo, bow_live_beta_hi]
-///             (0.04–0.22: sul ponticello ↔ sul tasto; the offline
-///             bow_beta_lo/hi 0.063–0.165 were the RECORDING's contour
-///             range, not the instrument's). tilt (CC2, dB) moves toward
-///             the bridge via bow_tilt_beta through the soft deadband knee,
-///             and brightens force via bow_tilt_force; optional
-///             absolute-distance correction (bow_beta_f0).
-///   * force — the ANALYTIC Schelleng region is the press axis' ENVELOPE,
-///             not a clamp: fmin = M·C·v/β² (the minimum force to sustain
-///             Helmholtz), fmax = 2Zv/(β·Δμ) (the maximum before raucous),
-///             both straight from the friction params. A final bow_f_cap
-///             guards tilt/register pushes. The offline sul-tasto β projection, note-onset
-///             articulation, technique overlays and glide bow-lightening
-///             are OMITTED live: they are lookahead/zero-phase passes over
-///             a known contour — a live player supplies those gestures on
-///             the axes directly.
-///
-/// No pre-roll/pre-charge live: the instrument starts from silence
-/// (the offline warm start models a mid-performance excerpt).
+/// Starts from silence (no pre-roll). Articulation, vibrato and glide
+/// gestures are the player's, supplied on the axes.
 public final class BowControlMapper: @unchecked Sendable {
 
     /// Fixed slot-table size (the engine's `maxPoly` is clamped to this).
     public static let maxSlots = 16
 
-    /// Note identity on a slot. `.midi` = the in-process MIDI path (note +
-    /// MPE channel, pitch = note + per-channel bend — the audition/keyboard
-    /// substrate, byte-frozen for parity). `.touch` = the TarabLink path:
-    /// identity is the iPad touch id and pitch is a full-resolution
-    /// fractional-MIDI Double in `touchPitch` — no ±48-semi bend
-    /// quantization, no 15-channel cap.
+    /// Note identity on a slot. `.midi` = the in-process MIDI path (pitch =
+    /// note + per-channel bend; the parity substrate). `.touch` = the
+    /// TarabLink path (pitch = the fractional-MIDI Double `touchSemis`).
     enum SlotKey: Equatable {
         case midi(note: UInt8, ch: UInt8)
         case touch(id: UInt16)
     }
 
-    /// One POLYPHONIC voice slot = one gut string on the shared bridge
-    /// (2026-07-16; allocation simplified 2026-08-24 — the legato/
-    /// portamento laws are GONE). EVERY note-on mounts a FRESH string:
-    /// unused slot, else the longest-released, else steal the oldest
-    /// sounding note. A note-on for a key already gated first releases
-    /// that slot (the collapsed note-off of a TLP retrigger — the old
-    /// string keeps ringing). A fresh string always bumps `serial` — the
-    /// engine zeroes that kernel string and snaps its pitch smoother, so
-    /// pitch NEVER glides between notes; within-note movement
-    /// (`touchGlide` / pitch bend on the note's own string) is tracked
-    /// directly. Note-off only lifts the bow: the string keeps ringing
-    /// on its slot. (The removed laws: the mono meend re-bow of the most
-    /// recent string, the effective-mono legato steal, and the note-off
-    /// glide-back to a held predecessor.)
+    /// One voice slot = one gut string on the shared bridge. EVERY note-on
+    /// mounts a FRESH string (unused slot, else longest-released, else the
+    /// oldest sounding note is stolen) and bumps `serial` — the engine
+    /// zeroes that kernel string and snaps its pitch, so pitch never glides
+    /// BETWEEN notes. Note-off only lifts the bow; the string rings on.
     private struct Slot {
-        /// TARABDAAR: note identity (was note+MPE channel; now either that
-        /// or a TarabLink touch id — upstream behavior unchanged for .midi).
         var key: SlotKey = .midi(note: 69, ch: 0)
         var gateOn = false
         var used = false
         var serial: UInt32 = 0
         var lastOn: UInt64 = 0
         var lastOff: UInt64 = 0
-        /// ONSET VELOCITY (2026-08-19): the strike velocity 0…1 of the
-        /// slot's most recent articulation — MIDI d2/127 or the touch
-        /// frame's velocity byte. Consumed by `BowControlFilter` only when
-        /// `bow_attack_vel` > 0 (velocity → attack sharpness); the default
-        /// 0 keeps the historic no-velocity-axis behavior bit-exact.
+        /// Onset strike velocity 0…1 (MIDI d2/127 or the touch frame's
+        /// velocity byte); read only when `bow_attack_vel` > 0.
         var onVel: Double = 0.0
-        /// Pitch of a `.touch` key, fractional MIDI (69.0 = A440) at full
-        /// Double resolution — set at mount, updated by `touchGlide` while
-        /// the slot is gated, FROZEN on release (a ringing string keeps
-        /// the pitch it was released at; a retriggered id's fresh string
-        /// glides independently of its ringing predecessor). Unused for
-        /// `.midi` keys (their pitch is note + per-channel bend).
+        /// Pitch of a `.touch` key, fractional MIDI (69.0 = A440): updated
+        /// by `touchGlide` while gated, FROZEN on release.
         var touchSemis: Double = 69.0
-        /// PER-SLOT EXPRESSION SCALE (2026-08-28, the controller strum's
-        /// chord expression): multiplies the GLOBAL expr axis for this
-        /// slot alone at snapshot time. Set at `touchOn`, live-updated by
-        /// `setExprScale(_:forTouch:)` while gated, frozen on release
-        /// (like the pitch). 1.0 — every path but the Mac strum — is
-        /// bit-exact: ×1.0 is an IEEE identity, and the parity hash
-        /// stands on it.
+        /// Per-slot expression scale on the GLOBAL expr axis (the strum
+        /// chord's per-note expression); frozen on release. ×1.0 is an IEEE
+        /// identity, so every path but the strum is bit-exact.
         var exprScale: Double = 1.0
     }
 
@@ -128,28 +63,24 @@ public final class BowControlMapper: @unchecked Sendable {
     private var slots = [Slot](repeating: Slot(), count: BowControlMapper.maxSlots)
     private var slotLimit = 1
     private var evt: UInt64 = 0
-    /// TARABDAAR MPE: pitch bend is PER CHANNEL (semitones) — each Pitch Pad
-    /// finger bends only its own note. A single-channel controller uses
-    /// index 0 and behaves exactly like the upstream global bend.
+    /// Pitch bend PER CHANNEL (semitones).
     private var chBend = [Double](repeating: 0.0, count: 16)
     private var expr: Double
     private var press: Double
     private var pos: Double
     private var tilt01: Double
-    /// Player vibrato = AFTERTOUCH (channel 0xD0 / poly 0xA0): depth 0..1
-    /// into bow_vib_cents at bow_vib_hz — deliberate finger motion, the
-    /// ear-law-compliant liveness (never free-running).
+    /// Player vibrato = aftertouch depth 0..1 into bow_vib_cents at
+    /// bow_vib_hz — never free-running.
     private var vibAT = 0.0
     public var bendRange = 2.0             // semitones at full wheel
 
-    /// Tilt axis dB mapping (shared with the voice: CC2 0…127 spans
-    /// [tiltMinDb, tiltMaxDb]; neutral 0 dB ≈ CC 42).
+    /// Tilt axis dB mapping: CC2 0…127 spans [tiltMinDb, tiltMaxDb];
+    /// neutral 0 dB ≈ CC 42.
     public static let tiltMinDb = -12.0
     public static let tiltMaxDb = 24.3
 
-    /// Idle operating point = pair-3 gated medians (the same defaults the
-    /// voice axes use): expr 0.251 · press ~0.56 axis · pos 0.45 (the
-    /// control_track default) · tilt neutral.
+    /// Idle operating point: the calibrated medians the voice is fitted
+    /// around, tilt neutral.
     public init() {
         expr = 0.251
         press = 0.562
@@ -158,9 +89,9 @@ public final class BowControlMapper: @unchecked Sendable {
             / (BowControlMapper.tiltMaxDb - BowControlMapper.tiltMinDb)
     }
 
-    /// Usable slot count = the engine's polyphony (set at engine build; the
-    /// long-lived mapper keeps held notes across rebuilds when unchanged).
-    /// Shrinking releases the gates of the slots that fall outside.
+    /// Usable slot count = the engine's polyphony (the long-lived mapper
+    /// keeps held notes across rebuilds). Shrinking releases the gates of
+    /// the slots that fall outside.
     public func setSlotLimit(_ n: Int) {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
@@ -181,9 +112,8 @@ public final class BowControlMapper: @unchecked Sendable {
     private func noteOn(key: SlotKey, vel: Double) -> Int {
         evt += 1
         let lim = slotLimit
-        // a note-on for a key already gated carries a collapsed note-off
-        // (a TLP retrigger / same-note re-strike): release that slot —
-        // the old string keeps ringing at its frozen pitch
+        // a note-on for a key already gated = a retrigger: release that
+        // slot, the old string rings on at its frozen pitch
         for i in 0..<lim where slots[i].gateOn && slots[i].key == key {
             slots[i].gateOn = false
             slots[i].lastOff = evt
@@ -221,12 +151,10 @@ public final class BowControlMapper: @unchecked Sendable {
         }
     }
 
-    /// Same event map as the voice (ViolinVoiceControl): note on/off (poly
-    /// slot allocation above), CC11 expr · CC1 press · CC74 pos · CC2 tilt,
-    /// pitch bend, CC120/123 all-off.
-    /// TARABDAAR MPE: the status byte's channel nibble keys note identity and
-    /// pitch bend (per-note channels, per-channel bend — the Pitch Pad's MPE);
-    /// CC75 doubles as tilt (the iPad's mappable set); CCs stay global.
+    /// In-process MIDI: note on/off, CC11 expr · CC1 press · CC74 pos ·
+    /// CC2/CC75 tilt, per-channel bend, aftertouch vibrato, CC120/123
+    /// all-off. The channel nibble keys note identity and bend; CCs are
+    /// global.
     public func midi(_ status: UInt8, _ d1: UInt8, _ d2: UInt8) {
         let kind = status & 0xF0
         let ch = status & 0x0F
@@ -265,16 +193,9 @@ public final class BowControlMapper: @unchecked Sendable {
 
     // MARK: TarabLink touch path (full-resolution pitch, touch-id keyed)
 
-    /// Note-on from a TarabLink state frame. `pitchSemis` is fractional
-    /// MIDI (69.0 = A440) at full Double resolution — no note+bend split.
-    /// Slot allocation / stealing are IDENTICAL to the MIDI path (same
-    /// `noteOn(key:vel:)` — every touch mounts a fresh string). `velocity`
-    /// (0…1) is the ONSET STRIKE VELOCITY (2026-08-19): stored per slot
-    /// and consumed by the filter's `bow_attack_vel` law (velocity →
-    /// attack sharpness); with that key at its 0 default the value is
-    /// inert — the historic no-velocity-axis behavior, bit-exact.
-    /// `exprScale` (0…1, default 1) is the slot's expression scale (the
-    /// strum chord's per-note expression, 2026-08-28) — see `Slot.exprScale`.
+    /// Note-on from a TarabLink frame: fractional-MIDI pitch, onset strike
+    /// `velocity` 0…1 (inert while `bow_attack_vel` is 0), `exprScale`
+    /// (see `Slot.exprScale`). Same allocation as the MIDI path.
     public func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double,
                         exprScale: Double = 1.0) {
         os_unfair_lock_lock(&lock)
@@ -284,9 +205,7 @@ public final class BowControlMapper: @unchecked Sendable {
         slots[i].exprScale = min(max(exprScale, 0.0), 1.0)
     }
 
-    /// Live expression-scale update for a held touch (the strum chord's
-    /// swell): only the GATED slot carrying this id updates — a released
-    /// ringing string keeps the scale it was released at, like its pitch.
+    /// Expression-scale update for a held touch (gated slot only).
     public func setExprScale(_ scale: Double, forTouch id: UInt16) {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
@@ -296,13 +215,8 @@ public final class BowControlMapper: @unchecked Sendable {
         }
     }
 
-    /// Pitch update for a live touch. Just writes the target — the render
-    /// side ramps to it within one block (2026-08-24: the 9 Hz meend
-    /// smoother is gone; meend IS the finger's own movement, delivered at
-    /// wire rate — this replaced the old 60 Hz bend re-send loop). Only the
-    /// GATED slot carrying this id glides; a ringing released string (a
-    /// stale frame after release, or a retrigger's predecessor) keeps its
-    /// frozen pitch.
+    /// Pitch update for a held touch (gated slot only; the render side
+    /// ramps to it within one block). A released string keeps its pitch.
     public func touchGlide(_ id: UInt16, pitchSemis: Double) {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
@@ -312,8 +226,7 @@ public final class BowControlMapper: @unchecked Sendable {
         }
     }
 
-    /// Note-off (bow lift) for a touch; the string keeps ringing on its
-    /// slot at its frozen pitch.
+    /// Note-off (bow lift) for a touch; the string rings on.
     public func touchOff(_ id: UInt16) {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
@@ -347,16 +260,12 @@ public final class BowControlMapper: @unchecked Sendable {
         var gate: Double
         var expr: Double, press: Double, pos: Double, tiltDb: Double
         var vib: Double = 0.0              // aftertouch vibrato depth 0..1
-        /// Onset strike velocity 0…1 of the slot's current articulation —
-        /// read by the filter ONLY at a fresh-attack edge, and only when
-        /// `bow_attack_vel` > 0 (default 0 = the legacy press-only law).
+        /// Onset strike velocity 0…1 (read at a fresh attack edge).
         var onVel: Double = 0.0
     }
 
-    /// One voice slot as the render thread sees it. `serial` identifies the
-    /// physical string generation: a change means "a fresh gut string was
-    /// mounted on this slot" — the engine zeroes the kernel string state and
-    /// snaps the slot's pitch smoother onto the new note.
+    /// One voice slot as the render thread sees it; a `serial` change means
+    /// a fresh string was mounted (the engine zeroes it and snaps pitch).
     public struct SlotSnapshot: Sendable {
         public var f0Target: Double = 440.0
         public var gate: Double = 0.0
@@ -367,9 +276,8 @@ public final class BowControlMapper: @unchecked Sendable {
         public var exprScale: Double = 1.0
     }
 
-    /// Poly snapshot into a preallocated buffer (render thread; no
-    /// allocation). `lead` = the melody slot (newest gated, else newest
-    /// used) — the fingerprint mask rides its sounding pitch.
+    /// Poly snapshot into a preallocated buffer (render thread, no
+    /// allocation). `lead` = newest gated slot, else newest used.
     public struct PolySnapshot: Sendable {
         public var expr = 0.0, press = 0.0, pos = 0.0, tiltDb = 0.0
         public var vib = 0.0               // aftertouch vibrato depth 0..1
@@ -381,13 +289,8 @@ public final class BowControlMapper: @unchecked Sendable {
         }
     }
 
-    /// Pitch of a slot. The .midi expression is byte-frozen — it must
-    /// stay TEXTUALLY identical to the historic
-    /// `440.0 * pow(2.0, (Double(note) - 69.0 + chBend[ch]) / 12.0)`:
-    /// TarafRemovalParityTests pins a SHA-256 of the render, and FP
-    /// associativity means any "simplification" here risks a last-bit
-    /// change. A .touch slot carries its own pitch (live-glided while
-    /// gated, frozen on release). Callers hold the lock.
+    /// Pitch of a slot. Keep the .midi expression TEXTUALLY as it is — the
+    /// render hash depends on its FP evaluation order. Callers hold the lock.
     private func f0TargetLocked(_ slot: Slot) -> Double {
         switch slot.key {
         case .midi(let note, let ch):
@@ -438,8 +341,7 @@ public final class BowControlMapper: @unchecked Sendable {
         snap.lead = min(leadIndex(lim), snap.slots.count - 1)
     }
 
-    /// Mono facade (the fixture/e2e path and slotLimit-1 engines): the lead
-    /// slot's note and gate (newest gated, else newest used).
+    /// Mono facade (fixtures, slotLimit-1 engines): the lead slot.
     func snapshot() -> Snapshot {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
@@ -454,13 +356,12 @@ public final class BowControlMapper: @unchecked Sendable {
     }
 }
 
-/// The render-thread half: holds the per-sample smoother state and the
-/// mapping constants baked from BowParams, fills kernel-rate control arrays.
-/// Owned by BowEngine (one instance per engine build; the mapper it reads is
-/// long-lived so held notes/axes survive structural rebuilds).
+/// The render-thread half: per-sample state + the mapping constants baked
+/// from BowParams; fills kernel-rate control arrays. One instance per
+/// engine build (the mapper it reads is long-lived).
 public struct BowControlFilter: Sendable {
     let srk: Double
-    // baked mapping constants (bowstring.pair_controls)
+    // baked mapping constants
     let aGate: Double            // 25 ms gate one-pole
     var vLo: Double, vHi: Double
     var betaLo: Double, betaHi: Double
@@ -472,65 +373,29 @@ public struct BowControlFilter: Sendable {
     var tiltBeta: Double, tiltForce: Double, tiltKnee: Double
     var betaF0Gamma: Double
     var fReg: Double, tonicHz: Double   // register force (f0/tonic)^k
-    // PLACE-then-DRAW articulation (2026-07-16b): at a fresh attack the
-    // force rides the gate ramp while VELOCITY holds ~0 for placeS (bow
-    // set on the string — static stick, silence) then rises over drawS
-    // (smoothstep) — the friction loop produces the authentic
-    // pre-Helmholtz crunch with no injected noise. placeS 0 = off
-    // (bit-null: the sarangi bow artifact carries no key).
+    // PLACE-then-DRAW: at a fresh attack velocity holds ~0 for placeS (bow
+    // set, static stick) then rises over drawS (smoothstep). 0 = bit-null.
     var placeS: Double, drawS: Double
-    // ATTACK SHARPNESS (2026-07-17d): a sharp, accented onset is a FAST,
-    // FORCEFUL bite. Sharpness = onset PRESS above attackThresh (the player
-    // law: "a sharper sound from higher pressure"). A sharp attack DRAWS
-    // fast (drawS → drawMinS) and briefly OVER-forces (fb *= 1 +
-    // attackBite·sharp·exp(-t/biteTau)): the high force under a fast
-    // velocity onset drives the friction loop through a transient
-    // MULTI-SLIP regime = a burst of upper-harmonic energy (the kernel's
-    // own physics, no injected noise). attackBite 0 = off (legato draw).
+    // ATTACK SHARPNESS = onset press above attackThresh: a sharp attack
+    // draws fast (drawS → drawMinS) and briefly over-forces
+    // (fb *= 1 + attackBite·sharp·exp(-t/biteTau)). attackBite 0 = off.
     var drawMinS: Double, attackBite: Double
     var attackBiteTau: Double, attackThresh: Double
-    // ONSET VELOCITY → SHARPNESS (2026-08-19): the strike velocity 0…1
-    // (touch frame byte / MIDI d2) ALSO sharpens the attack — sharpness =
-    // max(press law, attackVel·velocity). Press stays the deliberate
-    // articulation axis; velocity makes it per-note (tap hard = martelé,
-    // place gently = the legato draw). attackVel 0 = bit-null (the
-    // historic press-only law — velocity was never consumed before).
+    // sharpness = max(press law, attackVel·strike velocity). 0 = bit-null.
     var attackVel: Double
-    // SETTLE EXEMPTION (2026-08-19): a SHARP attack keeps its level —
-    // the post-onset settle depth is scaled by (1 − settleSharp·sharp),
-    // so accented staccato holds its bite while calm sustains keep the
-    // fitted settle balance. settleSharp 0 = bit-null.
+    // settle depth × (1 − settleSharp·sharp): accents keep their level.
     var settleSharp: Double
-    // player vibrato (aftertouch): depth vibCents at vibHz, applied to the
-    // SOUNDING pitch post-smoother (finger motion). vibCents 0 = off.
+    // player vibrato (aftertouch): vibCents at vibHz on the sounding pitch
     var vibCents: Double, vibHz: Double
-    // SUSTAIN LIVENESS + LEGATO LIGHTENING (2026-08-01, fitted to clean
-    // SWAM Violin 3 captures — room off, vibrato 0, constant expression):
-    //   * settle — a real sustained stroke sits slightly above its
-    //     sustainable level right after capture and eases down (SWAM:
-    //     +1.8 dB peak ~200 ms, level by ~500 ms; our friction loop alone
-    //     overshoots +6.7 dB). settleDb·smoothstep(t/t0)·exp(-(t-t0)/tau)
-    //     is subtracted from the bow velocity (dB): zero through the
-    //     place+draw window t0 — the staccato bite is untouched — peaking
-    //     right after it, gone by ~4·tau. Restarts per fresh attack (since
-    //     2026-08-24 every note-on is a fresh mount, so every note
-    //     re-settles; the legato-steal keep-stroke case is gone with the
-    //     legato allocation laws).
-    //   * drift — the not-quite-vibrato life of a held note: three
-    //     independent unit-variance Ornstein–Uhlenbeck walks (deterministic
-    //     per-slot xorshift64, ~driftHz bandwidth) scale into pitch cents
-    //     (SWAM: ±2 c std / 7 c p2p at 0.5–4 Hz), bow-velocity dB (±0.5 dB)
-    //     and bow-force dB (timbre motion). The body + friction chain turns
-    //     the pitch wander into the decorrelated per-harmonic ±1–5 dB
-    //     shimmer measured in SWAM — do NOT try to inject that per band.
-    //   * glide dip — bow lightening while the pitch is MOVING (the causal
-    //     form of the offline glide-lightening pass): dip toward
-    //     glideDipDb·r/(r+glideDipRate) where r = |sounding-pitch slew| in
-    //     cents/s (fast ~15 ms attack, ~120 ms release); full dip on vbow,
-    //     half on force. SWAM legato transitions dip 3.5–9 dB over ~40 ms;
-    //     drift-rate motion (~20 c/s) is far below any audible dip.
-    // All default 0 = bit-null (goldens untouched); shipped values live in
-    // the bowed_string.json artifact.
+    // SUSTAIN LIVENESS, as dB on the bow controls (0 = bit-null):
+    //   settle — settleDb·smoothstep(t/t0)·exp(-(t-t0)/tau) off the bow
+    //     velocity after the place+draw window t0; restarts per attack.
+    //   drift — three unit-variance OU walks (deterministic per-slot
+    //     xorshift64, ~driftHz) into pitch cents, velocity dB, force dB;
+    //     the body + friction chain makes the per-harmonic shimmer itself.
+    //   glide dip — lightening while the pitch MOVES: glideDipDb·r/(r+rate),
+    //     r = |pitch slew| cents/s (~15 ms attack, ~120 ms release); full on
+    //     vbow, 0.3× on force.
     var settleDb: Double, settleTauS: Double
     var driftCents: Double, driftDb: Double, driftForceDb: Double
     var driftHz: Double
@@ -541,13 +406,11 @@ public struct BowControlFilter: Sendable {
     let pitchRefLog2: Double
     let pitchKnotsA: [Double]?, pitchCentsA: [Double]?
     let pitchCentsPress: [Double]?
-    // pitch state: sounding log2 f0 at the last rendered sample (ramps
-    // linearly to the snapshot target across each block — no smoother)
-    var lf0 = 0.0
+    var lf0 = 0.0                // sounding log2 f0 at the last sample
     var gateState = 0.0
     var attackFms: Double
     var placeClock = 1.0e9       // seconds since the current attack began
-    var attackSharp = 0.0        // onset-press sharpness of the current attack
+    var attackSharp = 0.0        // onset sharpness of the current attack
     var vibPhase = 0.0
     // liveness state (drift walks, dip smoother, per-slot deterministic RNG)
     var driftSeed: UInt64 = 0x9E3779B97F4A7C15
@@ -557,10 +420,8 @@ public struct BowControlFilter: Sendable {
     var lastLf = 0.0, lastLfValid = false
     var prev: BowControlMapper.Snapshot?
     var primed = false
-    /// A fresh string was mounted on this slot: the next fill must capture
-    /// its OWN onset sharpness. A steal happens with the gate already high,
-    /// so the rising-edge test alone never fires and the new string would
-    /// articulate with the stolen note's sharpness.
+    /// Fresh string mounted: the next fill captures its OWN onset sharpness
+    /// (a steal happens with the gate already high — no rising edge).
     var freshMount = false
 
     public init(bp: BowParams, srk: Double, tonic: Double = 261.63) {
@@ -569,8 +430,6 @@ public struct BowControlFilter: Sendable {
         aGate = exp(-1.0 / (0.025 * srk))
         vLo = bp.v("bow_v_lo", 0.05)
         vHi = bp.v("bow_v_hi", 0.35)
-        // LIVE performance ranges (bow_live_*): wider than the offline
-        // bow_beta_lo/hi, which are the fitted RECORDING contour range
         betaLo = bp.v("bow_live_beta_lo", 0.04)
         betaHi = bp.v("bow_live_beta_hi", 0.22)
         pressUnder = bp.v("bow_live_press_under", 0.55)
@@ -611,9 +470,9 @@ public struct BowControlFilter: Sendable {
         driftGain = sqrt(max(1.0 - aDrift * aDrift, 0.0) * 3.0)
         aDipAtt = exp(-1.0 / (0.015 * srk))
         aDipRel = exp(-1.0 / (0.12 * srk))
-        // TWO-COMPONENT correction when the String artifact carries it
-        // (corr = A(f0) bare-loop absolute + B(f0/tonic) body residual);
-        // the sarangi bow has neither and keeps the legacy 220 table
+        // two-component pitch correction when the artifact carries it
+        // (A(f0) absolute + B(f0/tonic) body residual), else the single
+        // 220 Hz-referenced table
         if let knR = bp.pitchKnotsRel, let ceR = bp.pitchCentsRel,
            let knA = bp.pitchKnotsAbs, let ceA = bp.pitchCentsAbs {
             pitchKnots = knR
@@ -632,13 +491,9 @@ public struct BowControlFilter: Sendable {
         }
     }
 
-    /// TARABDAAR LIVE PARAMETERS (2026-07-24): re-read the bp-derived
-    /// mapping constants on a filter that is already running. Only the
-    /// config above is touched — the render state (`lf0`,
-    /// `gateState`, `placeClock`, `attackSharp`, `vibPhase`, `prev`,
-    /// `primed`) is left exactly as it stands, so a parameter edit does
-    /// not re-articulate a sounding note. Keep in lockstep with `init`.
-    /// (Pitch tables/wedge are structural and stay put.)
+    /// Re-read the mapping constants on a running filter; render state is
+    /// untouched so a parameter edit does not re-articulate a sounding
+    /// note. Mirror `init` (pitch tables are structural and stay put).
     public mutating func updateLiveParams(bp: BowParams) {
         vLo = bp.v("bow_v_lo", 0.05)
         vHi = bp.v("bow_v_hi", 0.35)
@@ -682,9 +537,8 @@ public struct BowControlFilter: Sendable {
         driftGain = sqrt(max(1.0 - aDrift * aDrift, 0.0) * 3.0)
     }
 
-    /// Decorrelate the liveness walks across poly slots (deterministic:
-    /// the same slot always draws the same sequence — offline renders and
-    /// the parity fixtures stay bit-reproducible).
+    /// Decorrelate the liveness walks across slots, deterministically
+    /// (renders stay bit-reproducible).
     public mutating func seedDrift(_ slot: UInt64) {
         driftSeed = 0x9E3779B97F4A7C15 &+ (slot &+ 1) &* 0xBF58476D1CE4E5B9
         rng = driftSeed
@@ -702,10 +556,8 @@ public struct BowControlFilter: Sendable {
                 0.0), 1.0)
     }
 
-    /// Onset sharpness of a fresh attack: the press law, sharpened by the
-    /// strike velocity when `bow_attack_vel` is armed (whichever is
-    /// sharper wins — a hard press OR a hard tap bites). attackVel 0
-    /// reproduces `attackSharpOf(press)` exactly (bit-null).
+    /// Onset sharpness: the press law, or the strike velocity when armed —
+    /// whichever is sharper. attackVel 0 = `attackSharpOf(press)` exactly.
     @inline(__always) func attackSharpAt(press: Double, onVel: Double)
         -> Double {
         var s = attackSharpOf(press)
@@ -727,9 +579,7 @@ public struct BowControlFilter: Sendable {
     }
 
     @inline(__always) func pitchCorrection(_ lf0: Double) -> Double {
-        // np.interp over (log2(f0/ref) knots → cents), clamped ends;
-        // ref = the tonic for rel knots, 220 Hz for the legacy table.
-        // Two-component artifacts add the bare-loop absolute table A.
+        // piecewise-linear log2(f0/ref) knots → cents, clamped ends
         if let knA = pitchKnotsA, let ceA = pitchCentsA {
             return interpKnots(lf0 - log2(220.0), knA, ceA)
                 + interpKnots(lf0 - pitchRefLog2, pitchKnots, pitchCentsTab)
@@ -744,14 +594,9 @@ public struct BowControlFilter: Sendable {
         return pitchCentsTab[i] + t * (pitchCentsTab[i + 1] - pitchCentsTab[i])
     }
 
-    /// Fill `n` kernel-rate samples from the mapper state. Outputs ride the
-    /// wedge-relative performance envelope: fb inside
-    /// [pressUnder·wedge_lo, pressOver·wedge_hi] (× tilt/register pushes,
-    /// hard-capped at bow_f_cap), v/beta inside their live ranges.
-    /// `f0Snd` (optional) receives the PRE-correction smoothed f0 — the
-    /// pitch the string will actually SOUND at (the knot correction exists
-    /// to cancel the friction pull); the fingerprint mask must track this,
-    /// not the corrected control (offline masks ride the recording's line).
+    /// Fill `n` kernel-rate samples from the mapper state. `f0Snd`
+    /// (optional) receives the PRE-correction f0 — the pitch the string
+    /// actually SOUNDS at (the knot correction cancels the friction pull).
     public mutating func fill(from mapper: BowControlMapper, n: Int,
                               f0 f0Out: UnsafeMutablePointer<Double>,
                               vb vbOut: UnsafeMutablePointer<Double>,
@@ -763,9 +608,7 @@ public struct BowControlFilter: Sendable {
              fb: fbOut, beta: betaOut, gate: gateOut, f0Snd: f0Snd)
     }
 
-    /// A fresh string was mounted on this slot: start the pitch ON the new
-    /// note (no cross-string portamento) with the gate closed (a fresh
-    /// attack softens in from silence).
+    /// Fresh string mounted: start ON the new pitch with the gate closed.
     public mutating func notePrime(f0Target: Double) {
         lf0 = log2(max(f0Target, 40.0))
         gateState = 0.0
@@ -776,8 +619,7 @@ public struct BowControlFilter: Sendable {
         lastLfValid = false
     }
 
-    /// Per-slot fill (the poly engine snapshots the mapper ONCE and hands
-    /// each slot its own Snapshot: the slot's f0/gate + the global axes).
+    /// Per-slot fill (the slot's f0/gate + the global axes).
     mutating func fill(snapshot snap: BowControlMapper.Snapshot, n: Int,
                        f0 f0Out: UnsafeMutablePointer<Double>,
                        vb vbOut: UnsafeMutablePointer<Double>,
@@ -787,8 +629,7 @@ public struct BowControlFilter: Sendable {
                        f0Snd: UnsafeMutablePointer<Double>? = nil) {
         let lfTarget = log2(max(snap.f0Target, 40.0))
         if !primed {
-            // first buffer: start ON the target (no glide from a fictitious
-            // A4) with the gate closed — silence until the first note-on.
+            // first buffer: start ON the target with the gate closed
             lf0 = lfTarget
             gateState = 0.0
             if snap.gate > 0.5 {                       // born mid-attack
@@ -799,13 +640,8 @@ public struct BowControlFilter: Sendable {
             prev = snap
             primed = true
         }
-        // fresh attack (gate rising edge, or a freshly mounted string whose
-        // gate never fell): restart the bow placement and capture the onset
-        // sharpness = press above threshold (the player sets press
-        // before/as they attack — a hard press = a sharp bite).
-        // (No placeS gate: the settle envelope needs the attack clock even
-        // when place-then-draw is off; with placeS 0 and settleDb 0 the
-        // clock is never read, so the legacy path stays bit-identical.)
+        // fresh attack (gate rising edge, or a fresh mount whose gate never
+        // fell): restart the placement clock, capture the onset sharpness
         if snap.gate > 0.5,
            freshMount || (prev?.gate ?? 0.0) <= 0.5 {
             placeClock = 0.0
@@ -817,11 +653,7 @@ public struct BowControlFilter: Sendable {
         let vRef = 0.75 * vHi
         let dtk = 1.0 / srk
         let vibW = 2.0 * Double.pi * vibHz / srk
-        // Pitch tracks the finger DIRECTLY (2026-08-24, the 9 Hz meend
-        // smoother removed): ramp log2 f0 linearly from where the last
-        // block ended to the snapshot target — continuous everywhere,
-        // on target by the end of the block. All meend is the player's
-        // finger (touchGlide / bend updates at wire rate).
+        // ramp log2 f0 linearly from the last block's end to the target
         let lfStart = lf0
         for i in 0..<n {
             let u = Double(i + 1) / Double(n)      // block → kernel-rate lerp
@@ -831,8 +663,7 @@ public struct BowControlFilter: Sendable {
             let tk = p.tiltDb + u * (snap.tiltDb - p.tiltDb)
             let lf = lfStart + u * (lfTarget - lfStart)
             lf0 = lf
-            // player vibrato (aftertouch-depth finger motion on the
-            // sounding pitch — post-smoother, pre-knot-correction)
+            // player vibrato (aftertouch depth) on the sounding pitch
             var vibOct = 0.0
             if vibCents > 1e-9 {
                 vibPhase += vibW
@@ -842,8 +673,7 @@ public struct BowControlFilter: Sendable {
                     vibOct = vibCents * amt * sin(vibPhase) / 1200.0
                 }
             }
-            // liveness drift: three independent OU walks (soft-bounded ±3σ),
-            // pitch component rides the sounding pitch like vibrato does
+            // liveness drift: three OU walks, soft-bounded ±3σ
             if driftCents > 1e-9 || driftDb > 1e-9 || driftForceDb > 1e-9 {
                 ouPitch = min(max(aDrift * ouPitch + driftGain * nextUniform(), -3.0), 3.0)
                 ouLevel = min(max(aDrift * ouLevel + driftGain * nextUniform(), -3.0), 3.0)
@@ -870,13 +700,8 @@ public struct BowControlFilter: Sendable {
             if let snd = f0Snd { snd[i] = exp2(lf + vibOct) }
             // 25 ms softened gate
             gateState = (1.0 - aGate) * snap.gate + aGate * gateState
-            // dynamics: expr → dB → (v, f) through the calibrated law.
-            // The loudness law rides [exprLift, 1] — the fade-to-silence
-            // zone below the lift must NOT overlap it: offline pianissimo
-            // bows at the velocity floor (the speak_min lesson), and
-            // mapping rel −14 dB into the lift zone silenced the quiet
-            // connective strokes that charge the joda lattice (measured
-            // −3–4 dB @125–250 on fast material).
+            // dynamics: expr → dB → v. The law rides [exprLift, 1]; the
+            // fade-to-silence zone below the lift must NOT overlap it.
             var vb: Double
             let e01 = min(max(expr, 0.0), 1.0)
             let eDyn = exprLift > 1e-6 && exprLift < 1.0
@@ -901,30 +726,19 @@ public struct BowControlFilter: Sendable {
                 beta = min(max(beta * pow(466.16 / max(f0, 80.0), betaF0Gamma),
                                0.04), 0.22)
             }
-            // press = log-force position across the playable wedge at this
-            // (f0, β, v), edges DELIBERATELY reachable: pressUnder·fmin =
-            // under-pressed flautando/octave whistle, pressOver·fmax =
-            // pressed grit. The former absolute-range + clamp law had no
-            // authority where the floor exceeded the whole range (247/415 Hz)
-            // — force timbre lives at the wedge edges. Velocity co-drive
-            // rides the bounds (fmin ∝ v), replacing the old (v/vRef)^0.7.
-            // ANALYTIC Schelleng wedge, from the friction params:
-            // fmin = M·C·v/β² (minimum force to sustain Helmholtz),
-            // fmax = 2Zv/(β·Δμ) (maximum before raucous). There used to be a
-            // MEASURED alternative here (`BowWedge`, a per-(f0, β, v)
-            // trilinear force table from the sarangi-era `calibrate_wedge`);
-            // the pure-physics artifact Tarabdaar ships has never carried one,
-            // so only this branch ever ran, and the table went with the rest
-            // of the upstream machinery (2026-07-24).
+            // press = log-force position across the analytic Schelleng
+            // wedge at this (f0, β, v): fmin = M·C·v/β² (Helmholtz floor),
+            // fmax = 2Zv/(β·Δμ) (raucous ceiling). The edges are reachable
+            // on purpose: pressUnder·fmin = flautando, pressOver·fmax =
+            // pressed grit — force timbre lives at the wedge edges.
             let lo = schellengMargin * schellengC * vb / max(beta * beta, 1e-6)
             let hi = max(2.0 * schellengZ * vb / (max(beta, 1e-3) * schellengDmu),
                          lo * 1.05)
             let fMin = pressUnder * lo
             let fMax = max(pressOver * hi, fMin * 1.0001)
             var fb = fMin * pow(fMax / fMin, press)
-            // tilt brightens force; register force: a player presses harder
-            // at high positions (a lossy stopped gut string needs more
-            // force to lock up high)
+            // tilt brightens force; register force (more force to lock a
+            // lossy stopped gut string up high)
             if tiltForce > 1e-9 {
                 fb *= exp2(tiltForce * tk / 12.0)
             }
@@ -932,39 +746,22 @@ public struct BowControlFilter: Sendable {
                 fb *= pow(max(f0 / tonicHz, 1.0), fReg)
             }
             fb = min(fb, fCap)
-            // BOW LIFTS TO SILENCE at low expression.  The wedge/Schelleng
-            // floor keeps the string SPEAKING for any positive force, so
-            // expression alone never reached zero — expr=0 still bowed a
-            // full-level note (which then drove the sympathetics: the "note
-            // with expression at 0" the user heard).  Below exprLift the
-            // force AND velocity fade to 0: the friction stops (Fb<1e-6),
-            // the played string goes silent, and its sympathetic ring —
-            // driven ONLY by the bridge — falls with it.  This is the live
-            // form of the offline control_track's "expr axis reaches true
-            // silence at 0".  exprLift = 0 keeps the legacy always-on bow.
+            // BOW LIFTS TO SILENCE below exprLift: force AND velocity fade
+            // to 0 (the wedge floor alone would keep the string speaking).
             if exprLift > 1e-6 {
                 let lift = min(1.0, max(0.0, expr) / exprLift)
                 fb *= lift
                 vb *= lift
             }
-            // PLACE-then-DRAW (+ ATTACK BITE): hold velocity ~0 while the
-            // bow is being set (force riding the gate ramp — static stick),
-            // then draw with a smoothstep. A SHARP attack (onset press high)
-            // draws FAST (drawS → drawMinS) and briefly OVER-forces
-            // (attackBite): the high force under the fast velocity onset
-            // drives the friction loop's own transient multi-slip = the
-            // upper-harmonic bite. attackBite 0 leaves the plain place-draw.
+            // PLACE-then-DRAW (+ attack bite): velocity ~0 while the bow is
+            // set, then a smoothstep draw; a sharp attack draws fast
             placeClock += dtk
             if placeS > 0.0 {
                 let drawEff = drawS + (drawMinS - drawS) * attackSharp
                 let ud = min(max((placeClock - placeS) / drawEff, 0.0), 1.0)
                 let stepSoft = ud * ud * (3.0 - 2.0 * ud)
-                // VELOCITY-LEADS-FORCE sharp attacks (2026-07-18l,
-                // martelé/collé mechanics — a moving bow that GRIPS: the
-                // first slip releases a full drag displacement = instant
-                // full-amplitude fundamental; lockstep with controls_of):
-                // sharpness blends velocity-waits (soft) with velocity-
-                // immediate + force ramp over bow_attack_fms.
+                // sharp attacks lead with velocity (martelé/collé — a moving
+                // bow that grips) and ramp force over attackFms
                 let uf = min(max(placeClock / attackFms, 0.0), 1.0)
                 vb *= (1.0 - attackSharp) * stepSoft + attackSharp
                 fb *= (1.0 - attackSharp)
@@ -974,15 +771,11 @@ public struct BowControlFilter: Sendable {
                         * exp(-max(placeClock, 0.0) / attackBiteTau)
                 }
             }
-            // liveness: level/force wander + post-onset settle + glide
-            // lightening, all as dB on the bow controls
+            // liveness: wander + settle + glide lightening, as dB
             var vbDb = driftDb * ouLevel
             var fbDb = driftForceDb * ouForce
             if settleDb > 1e-9 {
-                // SETTLE EXEMPTION (2026-08-19): a sharp attack keeps its
-                // level — depth scaled by (1 − settleSharp·sharp). The
-                // guard keeps settleSharp 0 bit-exact (no new arithmetic
-                // on the legacy path).
+                // the guard keeps settleSharp 0 bit-exact
                 let sDb = settleSharp > 1e-9
                     ? settleDb * max(1.0 - settleSharp * attackSharp, 0.0)
                     : settleDb
@@ -996,9 +789,7 @@ public struct BowControlFilter: Sendable {
             }
             if dipDb > 1e-12 {
                 vbDb -= dipDb
-                // light force coupling only: a heavy force cut slows the
-                // string's re-capture and smears the transition (measured
-                // ~150 ms to re-lock at 0.5× vs ~90 ms at 0.3×)
+                // light force coupling: a heavy cut slows re-capture
                 fbDb -= 0.3 * dipDb
             }
             if vbDb != 0.0 { vb *= exp(vbDb * 0.11512925464970229) }

@@ -4,39 +4,22 @@ import QuartzCore
 import TarabdaarCore
 import SwiftUI
 
-/// The **Fret Pad** tab — the playing surface: the scale's pitches as vertical
-/// **frets** positioned **freely** (each fret's x is its own layout state,
-/// unrelated to its pitch). The playable pitch is a continuous **field**
-/// interpolated from the frets (`fretFieldLog` — exact on a fret,
-/// inverse-distance log-pitch blend between them). A touch that **starts**
-/// within the Snap distance of a fret *and* inside its vertical extent snaps
-/// to that fret's exact pitch; starting elsewhere plays the field pitch — the
-/// approach path. After onset the drag is always continuous (field pitch plus
-/// the constant offset captured at the snap), so a snapped note stays true
-/// while meend/vibrato move relative to it.
-///
-/// Frets are editable: drag an endpoint to set a fret's vertical extent (its
-/// snap zone), drag the line to move it (horizontally and vertically),
-/// shift-click to add a fret on the nearest degree, right-click to delete.
-/// The base layout sits in the central band; the surface extends
-/// `ghostExtentOctaves` band-widths past it each side (default 0.5) with
-/// read-only octave-repeat ghost copies of the whole layout. Reuses
-/// `controller.fretPad` (a fourth `PitchPadEngine`) as the MPE emitter and
-/// reads the scale + tonic from `controller.pitchPad`. **Runs on the iPad
-/// too**: selecting this tab sets `ipadLayout = .fretPad`, and the arrangement
-/// rides its own SysEx message (`FretArrangementSysEx`, subtype `0x03`) to the
-/// iPad's `FretPadViewIOS` (always perform mode). See
-/// [docs/fret-pad.md](../../docs/fret-pad.md).
+/// The **Fret Pad** tab — the playing surface: freely positioned vertical
+/// **frets** over a continuous pitch **field** (`fretFieldLog`). A touch
+/// starting within the Snap distance of a fret and inside its extent snaps to
+/// it; elsewhere it plays the field pitch; drags are continuous (field plus
+/// the onset offset). Editing: drag an endpoint to set the extent, drag the
+/// line to move, shift-click to add on the nearest degree, right-click to
+/// delete. Plays through `controller.fretPad`, reads the scale + tonic from
+/// `controller.pitchPad`; the arrangement syncs to the iPad's `FretPadViewIOS`
+/// as the `FRET_ARRANGEMENT` TLP event. See [docs/fret-pad.md](../../docs/fret-pad.md).
 struct FretPadView: View {
     @ObservedObject var controller: AppController
-    /// The MPE emitter (the `fretPad` engine). Owns velocity / snap distance
-    /// (`marginPixels`) / `sounding`; its own `scale` is unused here.
+    /// The note emitter (`fretPad`): velocity, `marginPixels`, `sounding`.
     @ObservedObject var engine: PitchPadEngine
-    /// The scale + tonic source, edited right here (the Fret Pad is the only
-    /// playing surface, so the scale selector + editor live on this tab).
+    /// The scale + tonic source, edited on this tab.
     @ObservedObject var pitchPad: PitchPadEngine
-    /// Records play strokes (raw events + context) for offline fitting of the
-    /// drag-assist parameters (`tools/fretpad_fit.py`).
+    /// Records play strokes for offline assist fitting (`tools/fretpad_fit.py`).
     @StateObject private var recorder = FretGestureRecorder()
     /// Drives the "Save As…" name prompt for the scale menu.
     @State private var showingSaveDialog = false
@@ -70,10 +53,8 @@ struct FretPadView: View {
                                onChordTap: { controller.tapChord($0) })
                     .aspectRatio(Config.iPadSurfaceAspect, contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // The scale selector's list editor (moved here from the old
-                // Pitch Pad tab) — edits `pitchPad.scale`, which the frets and
-                // the whole app read from. (The drone buttons live INSIDE the
-                // surface — same placement as the iPad.)
+                // The scale list editor — edits `pitchPad.scale`, which the
+                // frets and the whole app read from.
                 if !engine.performanceMode {
                     ScaleListEditor(engine: pitchPad)
                         .frame(width: 280)
@@ -128,8 +109,7 @@ struct FretPadView: View {
         }
     }
 
-    /// Save / load / delete saved scales + built-in scale presets. Edits the
-    /// shared `pitchPad` scale, which the frets (and the tarab / iPad sync) read.
+    /// Save / load / delete scales + built-in presets, editing `pitchPad.scale`.
     private var scaleMenu: some View {
         Menu {
             Button("Save As…") {
@@ -140,8 +120,7 @@ struct FretPadView: View {
                 Button("Save “\(name)”") { pitchPad.saveScale(name: name) }
             }
             Divider()
-            // The full factory reset: the bundled default scale AND the
-            // C Keyboard layout rebuilt from it.
+            // Full factory reset: the default scale AND the C Keyboard layout.
             Button("Reset to Default") {
                 pitchPad.resetToDefault()
                 controller.loadFretLayout(preset: .keyboard)
@@ -183,10 +162,8 @@ struct FretPadView: View {
         .fixedSize()
     }
 
-    /// Save / load / delete fret LAYOUTS — the fret positions and snap zones
-    /// (`controller.fretArrangement`), which are their own state, separate
-    /// from the scale that names and tunes them. The two built-ins
-    /// (`FretLayoutPreset`) are rebuilt from whatever scale is loaded.
+    /// Save / load / delete fret layouts (`controller.fretArrangement`) —
+    /// state separate from the scale; built-ins rebuild from the loaded scale.
     private var layoutMenu: some View {
         Menu {
             Button("Save As…") {
@@ -255,8 +232,7 @@ struct FretPadView: View {
         .help("Prime-limit cap for the scale editor's scroll-to-next-gridline snap targets.")
     }
 
-    /// How far the ribbon extends past the base octave on each side, in
-    /// octaves (fractional). 0.5 = a 2-octave ribbon.
+    /// Flank past the base band each side, in band-widths.
     private var octaveControl: some View {
         HStack(spacing: 4) {
             Text("Octave ±").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
@@ -272,8 +248,7 @@ struct FretPadView: View {
         .help("How far the surface extends past the base fret layout on each side, in band-widths (read-only octave-repeat copies of the whole layout). 0.5 = half a band of flank each side.")
     }
 
-    /// Record play strokes to a JSONL session file for offline fitting of the
-    /// drag-assist parameters.
+    /// Record play strokes to JSONL for offline assist fitting.
     private var recordControl: some View {
         Toggle(isOn: Binding(get: { recorder.isRecording },
                              set: { recorder.setRecording($0) })) {
@@ -289,8 +264,7 @@ struct FretPadView: View {
         .help("Record play strokes (raw movements + fret context) to Application Support/Tarabdaar/FretRecordings/ as JSONL, for fitting the drag-assist parameters to your real playing (tools/fretpad_fit.py). Play naturally: glides into stops, direction changes near notes, vibrato, fast runs.")
     }
 
-    /// Horizontal snap distance in pixels, backed by `engine.marginPixels`
-    /// (0–64). 0 = fretless (no onset snapping at all).
+    /// Horizontal onset-snap distance in px (`engine.marginPixels`); 0 = fretless.
     private var snapControl: some View {
         HStack(spacing: 6) {
             Text("Snap").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
@@ -303,12 +277,8 @@ struct FretPadView: View {
         .help("How close (horizontally) a touch must start to a fret to snap to its pitch. Only applies within the fret's vertical extent, and only at touch onset — drags glide continuously. 0 = fretless.")
     }
 
-    /// How strongly the frets warp the pitch space around them — the
-    /// `ctl_fret_warp` registry param (a LIVE control param, so it is
-    /// also on the Parameters tab, bindable to any tilt/stick axis, and
-    /// relayed to the iPad over JOYCON_STATE). This slider edits the
-    /// RESTING value; a binding's live output rides on top and is what
-    /// the surface + contours display.
+    /// `ctl_fret_warp` (bindable, relayed to the iPad): the slider edits the
+    /// RESTING value; a binding's output rides on top.
     private var warpControl: some View {
         HStack(spacing: 6) {
             Text("Warp").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
@@ -341,17 +311,10 @@ struct FretPadView: View {
         }
     }
 
-    /// The scale's tonic, edited HERE and only here — two controls onto the
-    /// same value. **Hz**: the app's one absolute-frequency input, typed.
-    /// **Note**: a menu of the notes within half an octave of where the tonic
-    /// sits (it re-centers on each pick), keeping the cents offset. Every
-    /// other pitch (frets, tarab strings, drones) is a scale degree relative
-    /// to this.
-    ///
-    /// The Hz field is a PLAIN `TextField`, deliberately: it was briefly a
-    /// scroll-wheel `ScrollableField` (cents per detent) and that crashed the
-    /// app — don't re-add scroll-stepping here. Type the frequency for
-    /// sub-cent tuning (0.01 Hz ≈ 0.06 ¢ at D4).
+    /// The tonic, edited here only: **Hz** (the app's one absolute pitch) and
+    /// **Note** (a menu within half an octave, keeping the cents offset). The
+    /// Hz field is a plain `TextField` — a scroll-wheel `ScrollableField`
+    /// crashes the app here; do not add scroll-stepping.
     private var tonicControl: some View {
         HStack(spacing: 6) {
             Text("Tonic").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
@@ -384,10 +347,8 @@ struct FretPadView: View {
         }
     }
 
-    /// The note menu's contents: a tritone either side of the current tonic
-    /// (13 semitones), clipped to `tonicNoteRange`. A deliberately SHORT list
-    /// — retuning is a nudge to a neighbouring pitch, not a jump across the
-    /// keyboard; the Hz field covers anything further.
+    /// A tritone either side of the current tonic, clipped to `tonicNoteRange`
+    /// — deliberately short; the Hz field covers anything further.
     private var tonicNoteChoices: [Int] {
         let lo = max(PitchPadEngine.tonicNoteRange.lowerBound, pitchPad.tonicMidi - 6)
         let hi = min(PitchPadEngine.tonicNoteRange.upperBound, pitchPad.tonicMidi + 6)
@@ -399,10 +360,6 @@ struct FretPadView: View {
         let c = pitchPad.tonicCents
         return abs(c) < 0.05 ? "" : String(format: "%+.1f¢", c)
     }
-
-    // (The Drones menu is gone, 2026-07-25: the drone buttons pluck
-    // sympathetic strings mapped in the Strings tab; the button labels here
-    // just display the mapped pitches, synced via the arrangement.)
 
     private var footer: some View {
         HStack {
@@ -418,16 +375,11 @@ struct FretPadView: View {
 
 // MARK: - Drone buttons
 
-/// Visual layer for the drone buttons (display only — presses are
-/// hit-tested in the surface's mouse handlers via the shared
-/// `droneButtonRects`, so the surface keeps its full playing area and the
-/// placement matches the iPad exactly). Right edge, top → vertical center:
-/// press = the String voice's nearest jawari-taraf string swells and sings;
-/// release = it rings out.
+/// Drone buttons, display only — presses are hit-tested in the surface's
+/// mouse handlers via the shared `droneButtonRects`.
 private struct DroneButtonsVisual: View {
     let ratios: [Double]
-    /// The scale's degrees — the buttons are named from the scale like every
-    /// other pitch in the app (`scaleLabel(forRatio:)`).
+    /// The scale's degrees — buttons are named by the scale (`scaleLabel`).
     let degrees: [(ratio: Double, label: String)]
     let held: Set<Int>
     let size: CGSize
@@ -462,12 +414,9 @@ private struct DroneButtonsVisual: View {
 
 // MARK: - Chord bar
 
-/// The CHORD BAR (2026-08-28) — the strip below the playable band: one
-/// derived 3-tone chord per fret column (`scaleChords` / `chordBarCells`,
-/// shared with the iPad so layout and hit-tests agree). The highlighted
-/// cell is the ACTIVE strum chord (`AppController.strumChord` — whichever
-/// surface selected it); clicks are hit-tested in `handleDown`, display
-/// only here.
+/// The chord bar below the band: one derived triad per fret column
+/// (`chordBarCells`, shared with the iPad). Highlight = the active strum
+/// chord (`AppController.strumChord`); clicks are hit-tested in `handleDown`.
 private struct ChordBarVisual: View {
     let cells: [ChordBarCell]
     let active: ChordSelection?
@@ -476,8 +425,7 @@ private struct ChordBarVisual: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             ForEach(cells) { c in
-                // Octave-agnostic (2026-08-30): every octave's cell of
-                // the selected degree lights — it's one pitch-class chord.
+                // Octave-agnostic: every octave's cell of the degree lights.
                 let sel = active?.degree == c.degreeIndex
                 let hue = pitchColor(forRatio: c.rootRatio, lightness: 0.78,
                                      chroma: 0.16)
@@ -505,9 +453,8 @@ private struct ChordBarVisual: View {
 
 // MARK: - Sounding readout
 
-/// Live frequency / nearest-note / cents readout for the active touch, tinted
-/// in the pitch's hue. Observes only `SoundingState`, so per-tick glide
-/// updates re-render this capsule alone.
+/// Live Hz / note / cents readout for the active touch. Observes only
+/// `SoundingState`, so glide ticks re-render this capsule alone.
 private struct FretSoundingReadout: View {
     @ObservedObject var sounding: SoundingState
     let tonicFractionalMidi: Double
@@ -515,8 +462,7 @@ private struct FretSoundingReadout: View {
     var body: some View {
         let ratio = sounding.ratio
         let text: String = ratio.map { r in
-            // sounding.octaveSemis is the touch's ONSET-captured octave
-            // shift, so a note held across an octave step reads true.
+            // octaveSemis is onset-captured, so a held note reads true.
             let fractionalMidi = tonicFractionalMidi + sounding.octaveSemis
                 + 12.0 * log2(r)
             let freq = 440.0 * pow(2.0, (fractionalMidi - 69.0) / 12.0)
@@ -546,22 +492,19 @@ private struct FretPadSurface: View {
     @ObservedObject var engine: PitchPadEngine
     @Binding var arrangement: FretArrangement
     let degrees: [(ratio: Double, label: String)]
-    /// The LIVE fret pitch-warp (`controller.fretFieldWarp` — resting
-    /// param value plus any binding's output). Field + contours read it.
+    /// The LIVE fret warp (`controller.fretFieldWarp`, binding included).
     let warp: Double
     /// Stroke recorder for offline assist fitting (no-op unless armed).
     let recorder: FretGestureRecorder
-    /// Held plain (NOT `@ObservedObject` — its stick axes publish at input
-    /// rate and must not re-run the surface); only `$connectedName` is
-    /// tapped, via `onReceive` below.
+    /// NOT `@ObservedObject` (stick axes publish at input rate); only
+    /// `$connectedName` is tapped via `onReceive`.
     let joyCon: JoyConInput
-    /// The ACTIVE strum chord (`AppController.strumChord`) and the chord
-    /// bar's tap route (`AppController.tapChord`).
+    /// The active strum chord and the chord bar's tap route.
     let chordActive: ChordSelection?
     let onChordTap: (ChordSelection) -> Void
 
-    /// While a Joy-Con is attached its printed arrows / L pluck the drones,
-    /// so the on-screen buttons hide (visual + hit-test both).
+    /// While a Joy-Con is attached its arrows pluck the drones, so the
+    /// on-screen buttons hide (visual + hit-test).
     @State private var joyConConnected = false
 
     @State private var activeTouchId: Int? = nil
@@ -571,18 +514,12 @@ private struct FretPadSurface: View {
     /// Pixel delta (segment x/mid-y − click) captured at mouse-down for a move.
     @State private var moveOffsetX: CGFloat = 0
     @State private var moveOffsetY: CGFloat = 0
-    /// Constant log2 offset captured at a snapped onset: the drag plays
-    /// `2^(fieldLog + snapOffsetLog)`, so the snapped pitch is exact at the
-    /// onset point and finger movement glides relative to it.
+    /// Log2 offset captured at a snapped onset (0 if unsnapped).
     @State private var snapOffsetLog: Double = 0
-    /// Drag assist ("magnetic" intonation at stops/turns — see
-    /// `FretDragAssist`). The timer drives the settle while the mouse is
-    /// held still (no drag events arrive then).
+    /// Drag assist; the timer drives the settle while the mouse is still.
     @State private var assist = FretDragAssist()
     @State private var assistTimer: Timer? = nil
-    /// Drone button currently held by the mouse (hit-tested in
-    /// `handleDown` via the shared `droneButtonRects` — the buttons live
-    /// inside the surface, matching the iPad).
+    /// Drone button currently held (hit-tested in `handleDown`).
     @State private var droneDown: Int? = nil
 
     private let edgePad: CGFloat = 16
@@ -596,23 +533,17 @@ private struct FretPadSurface: View {
         GeometryReader { geo in
             let size = CGSize(width: max(1, geo.size.width - 2 * edgePad),
                               height: max(1, geo.size.height - 2 * edgePad))
-            // The playable band — the frets' coordinate space, mirroring the
-            // iPad exactly: the bordered half-height strip, dead space
-            // above/below, drone buttons in full-surface coords.
+            // The playable band — the frets' coordinate space (the iPad's too).
             let band = fretPadBandRect(in: size)
-            // All placements (base + octave-repeat ghosts). `body` does NOT
-            // re-run during a glide (fills live on the separate `SoundingState`).
+            // `body` does NOT re-run during a glide (fills live on `SoundingState`).
             let placements = fretPlacements(arrangement: arrangement,
                                             degrees: degrees, size: band.size)
             let basePlacements = placements.filter { !$0.isGhost }
-            // The chord bar's cells (the strip below the band) — shared
-            // geometry with the iPad.
             let chordCells = chordBarCells(arrangement: arrangement,
                                            degrees: degrees,
                                            chords: scaleChords(degrees: degrees),
                                            size: size)
-            // Perform mode: a clean playing surface — no gridlines, labels, or
-            // handles, and the ghosts styled identically to the editable frets.
+            // Perform mode: no gridlines, labels or handles.
             let perform = engine.performanceMode
             let extent = max(0, arrangement.ghostExtentOctaves)
 
@@ -626,8 +557,7 @@ private struct FretPadSurface: View {
                                with: .color(.white.opacity(0.12)), lineWidth: 1)
                     ctx.translateBy(x: band.minX, y: band.minY)
 
-                    // Octave-band boundaries — the edges between the base
-                    // layout and its octave-repeat copies (hidden in perform).
+                    // Octave-band boundaries (hidden in perform).
                     if !perform {
                         let lo = Int((-extent).rounded(.up))
                         let hi = Int((1 + extent).rounded(.down))
@@ -641,11 +571,8 @@ private struct FretPadSurface: View {
                             ctx.stroke(line, with: .color(.white.opacity(0.10)),
                                        lineWidth: 1)
                         }
-                        // Pitch-field contours: the territory boundaries
-                        // (log-midpoints between adjacent sounding pitches)
-                        // plus fainter quarter-pitch lines. They curve
-                        // through stacked-column blend zones and bunch
-                        // toward the boundaries as the Warp goes up.
+                        // Pitch-field contours: territory boundaries plus
+                        // fainter quarter-pitch lines.
                         for c in fretFieldContours(placements: placements,
                                                    size: band.size,
                                                    warp: warp) {
@@ -693,14 +620,12 @@ private struct FretPadSurface: View {
                               edgePad: edgePad)
                     .offset(x: band.minX, y: band.minY)
 
-                // The chord bar (display only — clicks are hit-tested in
-                // handleDown): the strip below the band.
+                // The chord bar (display only; clicks hit-tested in handleDown).
                 ChordBarVisual(cells: chordCells, active: chordActive,
                                edgePad: edgePad)
 
-                // Drone buttons (display only — presses are hit-tested in
-                // handleDown): right edge, top → vertical center. Hidden
-                // while a Joy-Con is attached (its arrows pluck the drones).
+                // Drone buttons (display only). Hidden while a Joy-Con is
+                // attached (its arrows pluck the drones).
                 if !joyConConnected {
                     DroneButtonsVisual(ratios: arrangement.droneRatios,
                                        degrees: degrees,
@@ -739,18 +664,15 @@ private struct FretPadSurface: View {
     private func handleDown(at spt: CGPoint, placements: [FretPlacement],
                             base: [FretPlacement], size: CGSize, band: CGRect,
                             chordCells: [ChordBarCell]) {
-        // Drone buttons first (both modes, full-surface coords): a click
-        // starting inside a button rect is a drone press, not a note or an
-        // edit. Skipped while hidden (Joy-Con attached) so the area falls
-        // through to the band / dead space like any other point.
+        // Drone buttons first (full-surface coords): a click starting in a
+        // button is a drone press. Skipped while hidden (Joy-Con attached).
         if !joyConConnected,
            let d = droneButtonRects(size: size).firstIndex(where: { $0.contains(spt) }) {
             droneDown = d
             engine.setDrone(d, pressed: true)
             return
         }
-        // Chord bar (full-surface coords): a click in a cell toggles the
-        // strum chord — selection only, nothing sounds until the strum.
+        // Chord bar: a click in a cell toggles the strum chord (selection only).
         if let cell = chordCells.first(where: { $0.rect.contains(spt) }) {
             onChordTap(ChordSelection(degree: cell.degreeIndex,
                                       octave: cell.octaveShift))
@@ -795,10 +717,8 @@ private struct FretPadSurface: View {
         playAt(pt, placements: placements, size: band.size)
     }
 
-    /// Sound the pitch at `pt`: snapped to a fret when the onset lands within
-    /// `snapDistance` of one **and** inside its vertical extent, otherwise the
-    /// fret-field pitch (the approach path). Registers the touch with the
-    /// drag assist and starts the settle timer.
+    /// Sound the pitch at `pt` (snapped or field), register with the drag
+    /// assist and start the settle timer.
     private func playAt(_ pt: CGPoint, placements: [FretPlacement], size: CGSize) {
         guard let fieldLog = fretFieldLog(at: pt, placements: placements,
                                           warp: warp)
@@ -861,8 +781,7 @@ private struct FretPadSurface: View {
     }
 
     /// 60 Hz settle loop while a play touch is down. Captures only the class
-    /// objects (never the view struct); the assist reuses the context set on
-    /// the last mouse event.
+    /// objects (never the view struct).
     private func startAssistTimer() {
         assistTimer?.invalidate()
         let assist = self.assist
@@ -885,8 +804,7 @@ private struct FretPadSurface: View {
                             band: CGRect) {
         // A press holding a drone button never glides or edits.
         guard droneDown == nil else { return }
-        // Band-local coordinates — a drag may wander out of the band (the
-        // field clamps, edit positions clamp to 0..1).
+        // Band-local; a drag may wander out (the field clamps, edits clamp 0..1).
         let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
         let size = band.size
         switch editGrab {
@@ -897,8 +815,7 @@ private struct FretPadSurface: View {
             mid = min(max(h / 2, mid), 1 - h / 2)
             arrangement.segments[idx].topY = mid - h / 2
             arrangement.segments[idx].bottomY = mid + h / 2
-            // Frets are freely positioned — a move drags x too (clamped to
-            // the base band).
+            // A move drags x too (clamped to the base band).
             arrangement.segments[idx].x = clamp01(fretBandX(
                 atPixelX: pt.x + moveOffsetX,
                 ghostExtentOctaves: arrangement.ghostExtentOctaves,
@@ -919,11 +836,8 @@ private struct FretPadSurface: View {
         case .none:
             break
         }
-        // Playing: continuous glide — the fret-field pitch plus the constant
-        // offset captured at a snapped onset, then the drag assist's slewed
-        // correction on top (magnetic at stops/turns, transparent while
-        // gliding). Never re-snaps mid-drag; the field and assist are
-        // continuous.
+        // Playing: the field pitch plus the onset offset, then the drag
+        // assist's slewed correction on top. Never re-snaps mid-drag.
         guard let touch = activeTouchId else { return }
         guard let fieldLog = fretFieldLog(at: pt, placements: placements,
                                           warp: warp)
@@ -974,9 +888,8 @@ private struct FretPadSurface: View {
         arrangement.segments.remove(at: idx)
     }
 
-    /// Shift-click: add a fret at the click position, on the degree whose
-    /// pitch is nearest the field pitch there (circular within the octave),
-    /// with a default-height extent centered on the click y.
+    /// Shift-click: add a fret at the click, on the degree nearest the field
+    /// pitch there (circular within the octave), default extent.
     private func addSegment(at pt: CGPoint, placements: [FretPlacement],
                             size: CGSize) {
         guard !degrees.isEmpty else { return }
@@ -1032,12 +945,10 @@ private struct FretPadSurface: View {
     }
 }
 
-// MARK: - Mouse capture (mirrors PadMouseCapture in PitchPadView)
+// MARK: - Mouse capture
 
-/// AppKit-backed mouse capture so drag events arrive at full resolution
-/// (SwiftUI's `DragGesture` coalesces moves on macOS, making a glide stutter).
-/// Reports left press/drag/up plus right-click; modifier state is read from
-/// `NSEvent.modifierFlags` in the handlers.
+/// AppKit mouse capture so drags arrive at full resolution (SwiftUI's
+/// `DragGesture` coalesces moves and a glide stutters).
 private struct FretPadMouseCapture: NSViewRepresentable {
     let onMouseDown: (CGPoint) -> Void
     let onMouseDragged: (CGPoint) -> Void
@@ -1090,12 +1001,10 @@ private struct FretPadMouseCapture: NSViewRepresentable {
 
 private func clamp01(_ x: Double) -> Double { min(max(0, x), 1) }
 
-// MARK: - Scale list editor (moved from the old Pitch Pad tab)
+// MARK: - Scale list editor
 
-/// The scale's notes as an editable list: per-row enable chip, custom name,
-/// `num/den` ratio, and y-position, plus add / sort. Edits `engine.scale`
-/// (the shared `pitchPad`), so a change re-renders the frets immediately and
-/// flows to the tarab + iPad sync.
+/// The scale's notes as an editable list (enable chip, name, `num/den`,
+/// y-position, add / sort). Edits `engine.scale` (the shared `pitchPad`).
 private struct ScaleListEditor: View {
     @ObservedObject var engine: PitchPadEngine
 
@@ -1274,8 +1183,7 @@ private struct ScaleEditorRow: View {
     // MARK: - Formatting helpers
 
     private func formatRatio(num: Int, den: Int) -> String { "\(num)/\(den)" }
-    /// Internal y is [0, 1] with 0 at the top. User-facing y is [-3, 3] with 0
-    /// at the center; integers correspond to the command-snap gridlines.
+    /// Internal y is [0, 1], 0 at the top; user-facing y is [-3, 3], 0 centre.
     private func formatY(_ y: Double) -> String {
         let userY = 3 - 6 * y
         return String(format: "%.1f", userY)
@@ -1352,10 +1260,8 @@ private struct ScaleEditorRow: View {
 
 // MARK: - Scrollable editable text field
 
-/// A small `NSTextField` wrapper that emits ±1 "step" events when the user
-/// scrolls the wheel over it, while still letting them click to edit as plain
-/// text. Scroll deltas accumulate so a trackpad's many small events emit one
-/// step per detent.
+/// An `NSTextField` that emits ±1 step events on scroll-wheel (deltas
+/// accumulate to one step per detent) and still edits as plain text.
 private struct ScrollableField: NSViewRepresentable {
     @Binding var text: String
     let onScrollStep: (Int) -> Void

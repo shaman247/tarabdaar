@@ -1,19 +1,13 @@
 import Foundation
 import SarangiKit
 
-/// THE TARABDAAR PRESET (2026-07-24; unified 2026-07-30) — the saved-rig
-/// document.
+/// THE TARABDAAR PRESET — the saved-rig document: the tarab table, tonic
+/// and model params, the parameter values, the composites built from
+/// them, and the tilt bindings that drive them.
 ///
-/// It folds in what used to be the `.sarangi` document (the tarab table +
-/// tonic + model params) and adds what was previously unsaveable: the
-/// parameter values, the composites built from them, and the tilt
-/// bindings that drive them.
-///
-/// **One file, the whole rig** (2026-07-30): a `.tarabdaar` save carries
-/// every section — the instrument AND the controls. The 2026-07-24
-/// instrument/controls split (`.tarabdaar` + `.tarabdaarmap`, scope-filtered
-/// loading) was folded back together: one preset is one rig. Loading
-/// applies whatever sections a file has, so the old split-era files still
+/// **One file, the whole rig**: a `.tarabdaar` save carries every
+/// section — the instrument AND the controls. Loading
+/// applies whatever sections a file has, so older partial files still
 /// work — a `.tarabdaarmap` simply carries only composites + tilt bindings
 /// and leaves the instrument alone. (Split-era files also wrote a `kind`
 /// tag; it decodes away ignored.)
@@ -30,7 +24,7 @@ public struct TarabdaarPreset: Codable {
     public var savedAt: String?
 
     /// The sarangi instrument document: tarab strings, tonic, model
-    /// params. This is exactly what a `.sarangi` file used to hold.
+    /// params.
     public var instrument: InstrumentState?
 
     /// `bowed_string.json` physics overrides — the `.rebuild` and
@@ -47,7 +41,7 @@ public struct TarabdaarPreset: Codable {
     /// Tilt bindings — composites AND direct single-parameter targets.
     public var tiltMapping: DimensionMapping?
 
-    /// Voice routing (2026-08-04, with the tanpura port): which voice the
+    /// Voice routing (with the tanpura port): which voice the
     /// played notes drive (`AudioEngine.MainInstrument` raw value) and
     /// which the drone buttons drive (`AudioEngine.DroneVoiceMode` raw
     /// value). Strings, not enums, so an unknown future value decodes and

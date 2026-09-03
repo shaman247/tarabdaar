@@ -1,17 +1,14 @@
 import Foundation
 
 /// The default instrument preset. There is ONE: the sarangi Pilu bank —
-/// since the scale centralization (2026-07-25) purely a SEED document (the
+/// since the scale centralization purely a SEED document (the
 /// Pilu scale's JI degree ratios + the generated string layout); on launch
 /// the Pitch Pad scale is pushed over it, so what ships is the layout and
 /// the gains/t60s, not a pitch table. The timbre lives in
 /// `bowed_string.json`.
 ///
-/// (The EXACT fitted string table — `sarangi_pilu_strings.json`, PCG64-
-/// seeded per-string detunes, and with it the STRING-TABLE LAW — was
-/// retired 2026-07-25 with the scale-defined pitch model: a degree can't
-/// be a few cents off itself. Strings now sit exactly on the scale's JI
-/// grid. Git history has the fitted artifact and the law's measurements.)
+/// (Strings sit exactly on the scale's JI grid — there is no per-string
+/// detune table; see docs/history/ for the retired fitted table.)
 public enum Preset: String, CaseIterable, Sendable {
     case sarangiPilu = "sarangi_pilu"
 
@@ -22,7 +19,7 @@ public enum Preset: String, CaseIterable, Sendable {
 public enum Presets {
     /// A full instrument state for the preset: the raga's JI degree ratios
     /// as the scale, its session tonic as the starting tonic, and the
-    /// generated string layout — BOTH sets since 2026-09-02: the raga
+    /// generated string layout — BOTH sets  the raga
     /// bridge's degree-indexed rows plus the chromatic bridge's fixed
     /// 15-semitone row (`chromatic: false` = the raga set alone, for
     /// scaffolds that measure one bridge).
@@ -53,8 +50,8 @@ public enum Presets {
     // MARK: - The Tanpura voice (r7 modal-contact plucked drone)
 
     /// The bundled fitted tanpura artifact (`tanpura_live.json`, written by
-    /// the Sarangi Live exporter `scripts/export_tanpura_live.py`; ported
-    /// 2026-08-04). String-construction laws per register role, the bridge
+    /// the fitting project's exporter `scripts/export_tanpura_live.py`).
+    /// String-construction laws per register role, the bridge
     /// geometry, the polarization config, the per-note pitch-calibration
     /// cents and the body/capture EQ FIR. RECAL LAW: the cents and role
     /// t60s are secanted at this exact physics config — regenerate the
@@ -68,8 +65,8 @@ public enum Presets {
     }
 
     /// The bundled fitted SITAR artifact (`sitar_live.json`, written by
-    /// `scripts/export_sitar_live.py` in the same upstream workspace —
-    /// the r7 modal-contact model retuned to sitar1.wav, 2026-08-19:
+    /// `scripts/export_sitar_live.py` in the same fitting project — the
+    /// modal-contact model retuned to a sitar reference:
     /// bare-bone jawari with no jiva thread, steel string, near-bridge
     /// pluck, its own body FIR baked from the reference residual). Same
     /// schema as the tanpura artifact — the sitar voice is a second

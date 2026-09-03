@@ -37,7 +37,7 @@ extension FretSegment: Codable {
 /// format change can be migrated on load rather than failing to decode.
 /// v2 replaced the integer `ghostOctavesPerSide` with the fractional
 /// `ghostExtentOctaves` (a v1 file just gets the 0.5 default); v3 added
-/// `legato` (the tap-legato mode, deleted 2026-08-02 — the key is no longer
+/// `legato` (a retired key — no longer
 /// declared and simply decodes away, so no version bump); v4 added the free
 /// per-segment `x` — pre-v4 files carry pitch-derived positions that no
 /// longer exist, so they're **rejected** on load (the caller rebuilds the
@@ -177,7 +177,7 @@ public enum FretArrangementStore {
         // treat them as absent so the caller rebuilds the new default.
         guard doc.version >= 4 else { throw CocoaError(.coderReadCorrupt) }
         var drones = doc.droneRatios ?? FretArrangement.defaultDroneRatios
-        // 4-slot-era migrations (2026-07-25): both historical defaults —
+        // 4-slot-era migrations : both historical defaults —
         // the first revision's Sa·Ma·Pa·Sa′ and the octave-lowered
         // ,Sa·,Ma·,Pa·Sa — become the current 3-slot default; a
         // hand-picked 4-slot set keeps its choices minus the second

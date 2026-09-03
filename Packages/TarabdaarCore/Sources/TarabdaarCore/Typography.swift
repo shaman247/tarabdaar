@@ -1,7 +1,7 @@
 import CoreGraphics
 import SwiftUI
 
-/// The app's small-text scale (2026-07-25 legibility pass).
+/// The app's small-text scale (legibility pass).
 ///
 /// SwiftUI's stock small styles are 10–11 pt on macOS and 11–12 pt on iOS,
 /// which is too fine for the dense tables this UI is mostly made of — the

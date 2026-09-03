@@ -3,7 +3,7 @@ import SwiftUI
 // NOTE: deliberately does NOT import SarangiKit — its dormant coupled-network
 // `ParamSpec` would collide with the registry's.
 
-/// The Parameters tab (2026-07-24 unification) — **the** parameter surface.
+/// The Parameters tab (unification) — **the** parameter surface.
 /// Every parameter of the String instrument lives here in one list: the
 /// bow-stroke axes, the `bowed_string.json` physics scalars (formerly a
 /// separate Sarangi tab), and the live taraf/tone axes. Each row shows the
@@ -215,7 +215,7 @@ private struct ParamRow: View {
     /// Scope + timing come from the SHARED vocabulary in `ParamRegistry`
     /// (`ParamScope`/`ParamTiming.summary`) — the same strings paramdoc
     /// renders into docs/parameters.md, so this description can never
-    /// tell a different story than the documentation. (2026-08-24 fix:
+    /// tell a different story than the documentation. (fix:
     /// the old text derived timing from the apply STRATEGY alone and
     /// claimed "crossfaded engine rebuild" for every in-place key.)
     private var helpText: String {

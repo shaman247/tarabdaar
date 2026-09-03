@@ -42,7 +42,7 @@ public struct Reverb: Sendable {
         return mix * wet
     }
 
-    /// Mono `x` → ADDITIVE stereo wet pair (Tarabdaar stereo, 2026-07-23):
+    /// Mono `x` → ADDITIVE stereo wet pair (Tarabdaar stereo):
     /// the `processMono` wet plus the decorrelated side tank scaled by
     /// `width` — a real room's reverberant field differs at the two ears.
     /// The side term cancels in L+R, so the mono fold-down is exactly
@@ -89,7 +89,7 @@ public struct Reverb: Sendable {
         rmsDry.reset(); rmsWet.reset(); rmsSide.reset(); rmsMid.reset()
     }
 
-    /// TARABDAAR FX (2026-08-01): retune the running room in place — comb
+    /// TARABDAAR FX : retune the running room in place — comb
     /// feedbacks re-derived for the new RT60 (buffers and state kept, so
     /// the tail glides instead of clicking) and the band-limit low-passes
     /// take new coefficients state-kept (`copyCoefficients`). The FX
@@ -181,8 +181,7 @@ struct Allpass: Sendable {
 }
 
 /// Causal running RMS (one-pole on x²) — the wet/dry level tracker above is
-/// its only consumer, so it lives here since `DSP/Envelope.swift` (a grab-bag
-/// of offline-harness helpers) was deleted with the vendored machinery.
+/// its only consumer, so it lives here.
 /// Verbatim: the reverb's balance depends on these exact coefficients.
 public struct RunningRMS: Sendable {
     public var a: Double

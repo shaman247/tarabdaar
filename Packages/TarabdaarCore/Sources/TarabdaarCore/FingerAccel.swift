@@ -1,6 +1,6 @@
 import Foundation
 
-/// FINGER ACCELERATION (2026-08-24) — the shared control-rate law behind
+/// FINGER ACCELERATION — the shared control-rate law behind
 /// the `.fingerAccel` dimension and the iPad's finger-accel readout: the
 /// SIGNED second derivative of the playing finger's pitch trajectory,
 /// soft-saturated to −1…+1. Positive = the pitch's motion is accelerating

@@ -51,7 +51,7 @@ final class LiveParamPushTests: XCTestCase {
     /// produced. Compares the steady state of (a) push-then-settle against
     /// (b) an engine built with the value baked in from the start.
     ///
-    /// SETTLE LENGTH MATTERS (2026-07-24, the taraf-web removal). This used
+    /// SETTLE LENGTH MATTERS (the taraf-web removal). This used
     /// to render 10 blocks and measure the last 8192 samples, which caught
     /// the bowed tone still on its way to steady state — the two engines
     /// were compared mid-transient. The linear sympathetic web hid that:

@@ -1,33 +1,19 @@
 import Foundation
 
 /// The persisted instrument document: the tonic, the scale it is resolved
-/// against, and the editable sympathetic strings. Saved/loaded inside a
+/// against, and the editable sympathetic strings. Saved inside a
 /// `.tarabdaar` preset.
 ///
-/// SCALE-CENTRALIZED (2026-07-25): `scaleRatios` mirrors the ONE Pitch Pad
-/// scale (degrees from the tonic in [1, 2), sorted ascending) and `tonicHz`
-/// mirrors its tonic — `AppController` pushes both on every scale/tonic
-/// change, unconditionally. Strings reference the scale by degree+octave,
-/// so a scale or tonic move ALWAYS retunes the whole bank — there is no
-/// opt-out (the "Follow the Pitch Pad scale" toggle was removed the same
-/// day). The ROW LAYOUT (which degrees get strings, emphasis, octave
-/// repeats) regenerates when the scale's degree COUNT changes — existing
-/// rows would go stale-and-clamped — or on the Strings tab's explicit
-/// "Regenerate" action; otherwise hand edits (gains, t60s, added/removed
-/// rows) stand. The raga fields (`ragaId`/`ragaName`/`intervals`) were
-/// dropped with the free-ratio model — the raga table survives in
-/// `RagaTuning` purely to seed the default preset.
+/// `scaleRatios`/`tonicHz` mirror the one Pitch Pad scale (pushed by
+/// `AppController` on every change); strings reference it by degree+octave,
+/// so a scale or tonic move always retunes the bank. The raga row LAYOUT
+/// regenerates when the degree count changes or on "Regenerate".
 ///
-/// TWO SETS, TWO BRIDGES (2026-09-02, schema 4): `strings` holds BOTH the
-/// RAGA set (scale-degree strings, the `bow_jt_*` bridge) and the
-/// CHROMATIC set (semitone strings on the fixed JI grid, the `bow_jtc_*`
-/// bridge) — tagged per row by `StringSpec.set`. The pool invariant is
-/// PER SET (one string per pitch on each bridge; Sa may sit on both, as
-/// on the instrument), the raga set alone follows scale edits and
-/// regenerations (the chromatic set is tuned once; the tonic moves both),
-/// and a schema-3 document (all raga strings) is migrated on decode by
-/// seeding the default chromatic set beside its hand-tuned raga rows —
-/// the persist key is NOT bumped.
+/// `strings` holds the RAGA set (`bow_jt_*` bridge) and the CHROMATIC set
+/// (fixed JI semitones, `bow_jtc_*`), tagged by `StringSpec.set`; one string
+/// per pitch per bridge; only the raga set follows scale edits. A schema-3
+/// document is migrated on decode by seeding the chromatic set — the persist
+/// key is not bumped.
 public struct InstrumentState: Codable, Sendable {
     public var tonicHz: Double
     /// The centralized scale's degree ratios (0 = Sa = 1.0), the target of
@@ -35,34 +21,23 @@ public struct InstrumentState: Codable, Sendable {
     public var scaleRatios: [Double]
     public var strings: [StringSpec]
     /// Which sympathetic string each of the 3 Fret Pad drone buttons plucks
-    /// (by `StringSpec.id`; nil = unmapped, button inert). The strings are
-    /// ordinary tarab rows — a mapped string sounds with its own pitch/gain/
-    /// t60, and if the jawari selection doesn't pick it up the button is
-    /// inert like the row itself. Regenerating the bank re-runs the
-    /// auto-mapping (fresh ids); manual mappings otherwise stick.
+    /// (by `StringSpec.id`; nil = unmapped, button inert). Regenerating the
+    /// bank re-runs the auto-mapping (fresh ids); manual mappings stick.
     public var droneStringIds: [UUID?]
-    /// The controller's STRUM set (2026-08-27): the sympathetic strings the
-    /// Joy-Con L button sweeps low→high (by `StringSpec.id`). Members are
-    /// ordinary tarab rows — string references are scale degrees under the
-    /// pool invariant, so a configured chord is raga-dependent by
-    /// construction (it re-voices when the scale/tonic moves). Defaults to
-    /// the two low anchors (low Sa · low Pa); regenerating the bank re-runs
-    /// the auto-mapping (fresh ids), manual sets otherwise stick.
+    /// The Joy-Con L strum set (by `StringSpec.id`) — scale degrees, so the
+    /// chord re-voices with the scale. Defaults to low Sa · low Pa.
     public var strumStringIds: [UUID]
-    /// The melody-follower string (2026-07-25): pitch = the highest note
-    /// being played (live, kernel-side); gain/t60/enabled are ordinary
-    /// Strings-tab knobs. Default disabled (byte-null when off).
+    /// The melody-follower string: pitch = the highest note being played
+    /// (kernel-side). Default disabled (byte-null when off).
     public var follower: FollowerSpec
     public var schemaVersion: Int
 
-    // RETIRED FIELDS: `fir`/`fx`/`params`/`eqBands` (the coupled network,
-    // 2026-07-24), `ragaId`/`ragaName`/`intervals` (the free-ratio era,
-    // 2026-07-25) and `manualEdits`/`autoSyncToScale` (the follow-the-scale
-    // toggle, 2026-07-25 — following is unconditional now). Documents that
-    // still carry the keys decode fine — they are ignored.
+    // Retired keys older documents may carry (`fir`, `fx`, `params`,
+    // `eqBands`, `ragaId`, `ragaName`, `intervals`, `manualEdits`,
+    // `autoSyncToScale`) decode away ignored.
 
-    /// The document schema this build writes. 4 (2026-09-02) = the
-    /// two-set taraf; a lower version on decode seeds the chromatic set.
+    /// The document schema this build writes; a lower version on decode
+    /// seeds the chromatic set.
     public static let currentSchemaVersion = 4
 
     /// The strings of one bridge, in pool order.
@@ -70,20 +45,13 @@ public struct InstrumentState: Codable, Sendable {
         strings.filter { $0.set == set }
     }
 
-    /// The number of drone buttons/slots. Mirrors TarabdaarCore's
-    /// `FretArrangement.droneCount` (SarangiKit sits below TarabdaarCore, so
-    /// it can't read it) — `DroneStringTests` pins the two equal.
+    /// Mirrors TarabdaarCore's `FretArrangement.droneCount` (not visible
+    /// from here); `DroneStringTests` pins the two equal.
     public static let droneSlotCount = 3
 
-    /// Auto-map the drone buttons to sympathetic strings: per slot, the
-    /// HIGHEST-GAIN enabled string within ±100 ¢ of its target ratio
-    /// (low Sa · low Pa · Sa), nearest-pitch as the tie-break; nil when no
-    /// string is close. Gain-first matters: the emphasized Sa/Pa rows are
-    /// the drone-worthy ones, and a quiet row can sit below the jawari
-    /// selection's `bow_jt_gmin` and never sound. Used for fresh documents
-    /// and whenever the bank regenerates (the old ids die with the rows).
-    /// RAGA strings only: the anchors live on the raga bridges (a chromatic
-    /// Sa sits at the same pitch but is the haze set, not the drone).
+    /// Auto-map the drone buttons: the highest-gain enabled RAGA string within
+    /// ±100 ¢ of each target (low Sa · low Pa · Sa), nearest as tie-break.
+    /// Gain-first: a quiet row can sit below `bow_jt_gmin` and never sound.
     public static func autoDroneMapping(strings: [StringSpec],
                                         scaleRatios: [Double]) -> [UUID?] {
         [0.5, 0.75, 1.0].map { target in
@@ -97,9 +65,8 @@ public struct InstrumentState: Codable, Sendable {
         }
     }
 
-    /// Default strum set: the low Sa and low Pa anchors (targets 1/2 and
-    /// 3/4 of the tonic, the autoDroneMapping selection law — gain-first,
-    /// nearest-pitch tie-break, ±100 ¢; a missing anchor just drops out).
+    /// Default strum set: the low Sa and low Pa anchors under the
+    /// `autoDroneMapping` selection law; a missing anchor drops out.
     public static func autoStrumMapping(strings: [StringSpec],
                                         scaleRatios: [Double]) -> [UUID] {
         [0.5, 0.75].compactMap { target in
@@ -113,18 +80,10 @@ public struct InstrumentState: Codable, Sendable {
         }
     }
 
-    /// THE POOL INVARIANT (2026-07-26): `strings` is always SORTED by pitch
-    /// (lowest resolved frequency first) and holds at most ONE string per
-    /// pitch — PER SET since 2026-09-02: the raga set comes first, then the
-    /// chromatic set, each pitch-sorted, and a pitch may appear once on
-    /// EACH bridge (Sa on both is the instrument's own layout). Duplicates
-    /// within a set fold into the strongest twin
-    /// (higher gain, then longer t60; `preferring` overrides — the edited
-    /// row wins), and drone mappings that pointed at a dropped twin are
-    /// re-pointed at its survivor via the returned map. Every entry path
-    /// runs it: both inits (persisted documents with the historic Sa/Pa
-    /// doubling rows migrate in place — the persist key is NOT bumped),
-    /// `updateScale`/`regenerateFromScale`, and the store's edit paths.
+    /// The pool invariant: raga set then chromatic set, each pitch-sorted with
+    /// one string per pitch. Duplicates fold into the strongest twin (higher
+    /// gain, then longer t60; `preferring` wins); drone/strum ids follow via
+    /// the returned map. Every entry path runs it.
     @discardableResult
     public mutating func normalizeStrings(preferring preferred: UUID? = nil)
         -> [UUID: UUID] {
@@ -192,9 +151,8 @@ public struct InstrumentState: Codable, Sendable {
         }
     }
 
-    // Tolerant decode: `droneStringIds` and `follower` default for older
-    // documents; retired keys decode away ignored. `scaleRatios` is
-    // required — pre-degree documents were migrated in place.
+    // Tolerant decode: `droneStringIds`, `strumStringIds`, `follower` and
+    // `schemaVersion` default when absent; `scaleRatios` is required.
     private enum CodingKeys: String, CodingKey {
         case tonicHz, scaleRatios, strings, droneStringIds, strumStringIds,
              follower, schemaVersion
@@ -215,20 +173,15 @@ public struct InstrumentState: Codable, Sendable {
         follower = (try? c.decode(FollowerSpec.self, forKey: .follower))
             ?? FollowerSpec()
         schemaVersion = (try? c.decode(Int.self, forKey: .schemaVersion)) ?? 3
-        // THE TWO-SET MIGRATION (2026-09-02): a pre-split document is all
-        // raga strings — seed the default chromatic set beside them (the
-        // hand-tuned raga rows stand untouched). Only ever runs once: the
-        // re-saved document carries schema 4, and a user who deletes the
-        // whole chromatic set afterwards keeps it deleted.
+        // Schema < 4: an all-raga document — seed the default chromatic set
+        // once (the re-saved document carries schema 4).
         if schemaVersion < Self.currentSchemaVersion {
             if !strings.contains(where: { $0.set == .chromatic }) {
                 strings += RagaTuning.buildChromaticSpecs()
             }
             schemaVersion = Self.currentSchemaVersion
         }
-        // Pool invariant: sort + fold duplicate pitches (documents from the
-        // doubling era migrate here; a drone mapped to a dropped twin is
-        // re-pointed at its survivor by the remap inside).
+        // Pool invariant: sort + fold duplicate pitches (mappings follow).
         normalizeStrings()
         // A mapped id must reference an existing string (a deleted row's
         // mapping dies with it rather than dangling).
@@ -249,10 +202,8 @@ public struct InstrumentState: Codable, Sendable {
         strings.map { $0.resolved(tonic: tonicHz, scaleRatios: scaleRatios) }
     }
 
-    /// Per drone slot, the mapped string's resolved Hz — nil when unmapped,
-    /// the string is gone, or it is disabled (the button is then inert).
-    /// The Hz is the row's nominal table frequency, so the engine can find
-    /// the jt row by identity (`BowEngine.droneRow(forExactHz:)`).
+    /// Per drone slot, the mapped string's nominal Hz (nil = unmapped, gone
+    /// or disabled → inert); the engine finds the jt row by exact Hz.
     public var droneStringFreqs: [Double?] {
         droneStringIds.map { id in
             id.flatMap { id in strings.first { $0.id == id } }
@@ -262,11 +213,8 @@ public struct InstrumentState: Codable, Sendable {
         }
     }
 
-    /// The strum set's resolved frequency RATIOS above the tonic,
-    /// pitch-sorted low→high (the sweep order) — ratio space because the
-    /// strum plays STACCATO NOTES IN THE MAIN VOICE through the pitch-pad
-    /// touch path (`PitchPadEngine.noteOn(ratio:)`), not the drone
-    /// machinery. A deleted or disabled member drops out (inert).
+    /// The strum set's ratios above the tonic, pitch-sorted — the strum plays
+    /// main-voice notes through the touch path. Disabled members drop out.
     public var strumStringRatios: [Double] {
         strumStringIds.compactMap { id in
             strings.first { $0.id == id }
@@ -276,30 +224,24 @@ public struct InstrumentState: Codable, Sendable {
         }.sorted()
     }
 
-    /// The ONE instrument: the default bank generated from the Pilu scale.
-    /// (Purely a seed — on launch the Pitch Pad scale is pushed over it.)
+    /// The default bank, generated from the Pilu scale — a seed only; on
+    /// launch the Pitch Pad scale is pushed over it.
     public static func makeDefault() -> InstrumentState { Presets.state(.sarangiPilu) }
 
-    /// Adopt a new scale WITHOUT touching the row layout: pitches follow
-    /// (degree-defined strings resolve against the new ratios/tonic), the
-    /// hand-tuned rows stand. The unconditional half of the scale push.
+    /// Adopt a new scale without touching the row layout: pitches follow,
+    /// hand-tuned rows stand.
     public mutating func updateScale(tonicHz: Double, ratios: [Double]) {
         guard tonicHz > 20, tonicHz < 4000, !ratios.isEmpty else { return }
         self.tonicHz = tonicHz
         self.scaleRatios = ratios
-        // Re-established under the new ratios: the pitch ORDER of degrees
-        // can move with a scale edit, and two degrees edited onto the same
-        // ratio would otherwise leave duplicate-pitch rows.
+        // Degree order can move with a scale edit, and two degrees edited
+        // onto one ratio would otherwise leave duplicate-pitch rows.
         normalizeStrings()
     }
 
-    /// Rebuild the RAGA set's LAYOUT from the scale as well: fresh
-    /// degree-indexed rows (scale degrees + doublings + octave repeats),
-    /// discarding any hand edits to that set. The old rows' ids die with
-    /// them, so the drone mapping re-runs too. Used when the scale's
-    /// degree count changes and by the Strings tab's explicit "Regenerate"
-    /// action. The CHROMATIC set is untouched — its layout does not
-    /// depend on the scale (`regenerateChromatic` resets it).
+    /// Rebuild the raga set's layout from the scale, discarding hand edits
+    /// to that set; the old ids die, so the drone and strum mappings re-run.
+    /// The chromatic set is untouched (`regenerateChromatic` resets it).
     public mutating func regenerateFromScale(tonicHz: Double, ratios: [Double]) {
         guard tonicHz > 20, tonicHz < 4000, !ratios.isEmpty else { return }
         self.tonicHz = tonicHz
@@ -311,11 +253,9 @@ public struct InstrumentState: Codable, Sendable {
         strumStringIds = Self.autoStrumMapping(strings: strings, scaleRatios: ratios)
     }
 
-    /// Reset the CHROMATIC set to its default layout (the 15-semitone
-    /// row), discarding hand edits to that set; the raga set, the drone
-    /// mapping and the strum set stand (they never reference chromatic
-    /// rows by default). A chromatic row that WAS mapped dies with its id
-    /// — the mapping is pruned like any deleted row's.
+    /// Reset the chromatic set to its default 15-semitone layout; the raga
+    /// set stands. A mapped chromatic row dies with its id and the mapping
+    /// is pruned.
     public mutating func regenerateChromatic() {
         strings = strings(in: .raga) + RagaTuning.buildChromaticSpecs()
         normalizeStrings()

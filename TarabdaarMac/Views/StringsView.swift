@@ -3,18 +3,13 @@ import SarangiKit
 import TarabdaarCore
 import SwiftUI
 
-/// The **Sympathetic Strings (Tarab)** tab: the sarangi's sympathetic-string
-/// bank — TWO SETS ON TWO BRIDGES since 2026-09-02, the instrument's own
-/// layout: the **raga set** (each string a **scale degree + octave** of the
-/// centralized Pitch Pad scale — 2026-07-25: pitches always follow the
-/// scale; there is no per-string ratio or Hz, and no follow toggle —
-/// following is unconditional) on the `bow_jt_*` bridge, and the
-/// **chromatic set** (semitone strings on the fixed JI chromatic grid off
-/// the tonic — the main-bridge set, tuned once whatever the raga) on the
-/// `bow_jtc_*` bridge, with its own jawari knobs in the Parameters tab.
-/// The raga LAYOUT regenerates when the scale's degree count changes or
-/// via "Regenerate from scale"; the chromatic set resets via its own
-/// button; hand edits otherwise stand. Backed by `controller.sarangi`.
+/// The **Strings** tab: the sympathetic-string bank, two sets on two bridges.
+/// The **raga set** (scale degree + octave of the centralized scale; pitches
+/// always follow it) rides the `bow_jt_*` bridge; the **chromatic set**
+/// (semitones of the fixed JI grid off the tonic) rides `bow_jtc_*`. The raga
+/// layout regenerates when the scale's degree count changes or via
+/// "Regenerate from scale"; the chromatic set resets via its own button;
+/// hand edits otherwise stand. Backed by `controller.sarangi`.
 struct StringsView: View {
     @ObservedObject var controller: AppController
     @ObservedObject var store: SarangiStore
@@ -24,11 +19,9 @@ struct StringsView: View {
         self.store = controller.sarangi
     }
 
-    /// The scale's OWN labels for its degrees, index-aligned with the
-    /// document's `scaleRatios` mirror — pitches are named by the scale
-    /// everywhere in the app, this tab included. The push that keeps the
-    /// mirror in sync is debounced, so a degree the labels haven't caught up
-    /// with falls back to its ratio rather than borrowing a neighbour's name.
+    /// The scale's own labels, index-aligned with the document's `scaleRatios`
+    /// mirror. The push is debounced, so a degree the labels haven't caught
+    /// up with shows its ratio rather than a neighbour's name.
     private var degreeLabels: [String] {
         let labels = scaleDegrees(from: controller.pitchPad.scale).map(\.label)
         return store.state.scaleRatios.indices.map { i in
@@ -37,11 +30,9 @@ struct StringsView: View {
         }
     }
 
-    /// The chromatic bridge's 12 semitone labels: the scale's OWN label
-    /// where the scale has a degree at that JI pitch (the naming rule —
-    /// exact match, any octave folded out), else the grid's fraction (a
-    /// pitch the scale can't name shows its ratio). Prefixed with the
-    /// semitone number so the dropdown reads as a chromatic run.
+    /// The chromatic bridge's 12 semitone labels: the scale's own label where
+    /// it has a degree at that JI pitch, else the grid fraction. Prefixed
+    /// with the semitone number.
     private var chromaticLabels: [String] {
         let degrees = scaleDegrees(from: controller.pitchPad.scale)
         return (0..<12).map { k in
@@ -156,11 +147,9 @@ private struct StringsSection: View {
     }
 }
 
-/// The MELODY-FOLLOWER string — one special row pinned above the pool:
-/// its pitch is not a scale degree, it live-retunes to the highest note
-/// being played (glides included). Same Gain / t60 / On knobs as any
-/// string; no octave, no Hz readout (the pitch is the melody's), and it
-/// can't be a drone-button target.
+/// The melody-follower row, pinned above the raga pool: its pitch
+/// live-retunes to the highest note being played. Same Gain / t60 / On
+/// knobs; no octave or Hz readout; not a drone-button target.
 private struct FollowerRow: View {
     @EnvironmentObject var store: SarangiStore
 
@@ -352,10 +341,6 @@ private struct StrumMappingSection: View {
         tarabStringLabel(s, state: store.state, degreeLabels: degreeLabels)
     }
 }
-
-// (The "Manual tuning" section — raga picker + tonic Set/Transpose/
-// Regenerate — was removed 2026-07-25: the bank tunes via scale auto-sync,
-// hand edits, or preset loads.)
 
 /// A string as the mapping dropdowns name it: the scale's label (raga) or
 /// the semitone + grid fraction (chromatic, marked), octave, Hz, on/off.
