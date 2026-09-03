@@ -63,13 +63,15 @@ int bow_poly_active(const void *vst, int b);
      pinScale[njt]   per-row TERMINATION (pin) force → the same units
                      (radiated beside the contact force, always)
      phiD            ΣM    bridge-force drive tap per mode (÷mu, ×drive)
+     phiDT           ΣM    the TERMINATION drive shape (∝ (−1)^k·k, mode 1
+                     matched to the tap), blended in by jt_set_drive_term
      phiU phiF       ΣM·J  mode shape at the zone points (raw / ×wj÷mu)
      b               ΣJ    bone height at the zone points (m)
      G G4            ΣJ·J  zone Green's matrix at dt / dt/4
      gd gd4          ΣJ    its diagonals
      phys[7]         kc, alpha, hcB, deep, gain, drive, div
      q0              ΣM    static-wrap modal displacement at rest */
-void bow_poly_jt_load(void *vst, int njt, int J, const int *M, const double *ca, const double *cb, const double *ca4, const double *cb4, const double *wd, const double *radScale, const double *pinScale, const double *phiD, const double *phiU, const double *phiF, const double *b, const double *G, const double *G4, const double *gd, const double *gd4, const double *phys, const double *q0);
+void bow_poly_jt_load(void *vst, int njt, int J, const int *M, const double *ca, const double *cb, const double *ca4, const double *cb4, const double *wd, const double *radScale, const double *pinScale, const double *phiD, const double *phiDT, const double *phiU, const double *phiF, const double *b, const double *G, const double *G4, const double *gd, const double *gd4, const double *phys, const double *q0);
 
 /* Persistent jt worker pool for the deferred post-pass (off the audio
    thread); nth < 2 = serial. */
@@ -145,6 +147,14 @@ void bow_poly_jt_set_hp(void *vst, double a);
    Drone-setter contract, slewed ~30 ms; never calling it is byte-null. */
 void bow_poly_jt_set_body(void *vst, double mix);
 
+/* TERMINATION DRIVE morph 0..1 (`bow_jt_drive_term`): where the played
+   string's bridge force enters each row — 0 = the fitted 0.90 L tap (phiD,
+   which carries a |sin(kπ·0.9)| comb: modes 10/20 never charge), 1 = the
+   pin's mode slope (phiDT, ∝ (−1)^k·k, no null, mode 1 level matched, and
+   the same sign convention as the pin-force radiation term). Per-row
+   slewed ~40 ms; 0 / never calling it is byte-null. Any thread. */
+void bow_poly_jt_set_drive_term(void *vst, double w);
+
 /* HARMONIC-EVOLUTION lift: SIGNED vertical bone offset (m; + = dropped,
    the twang cascade opens; − = raised). Slewed in-kernel (~40 ms) so the
    bone GLIDES — a stepped bone (set_coeffs) strums the wrapped strings.
@@ -189,7 +199,8 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
                            const double *ca4, const double *cb4,
                            const double *wd, const double *radScale,
                            const double *pinScale,
-                           const double *phiD, const double *phiU,
+                           const double *phiD, const double *phiDT,
+                           const double *phiU,
                            const double *phiF, const double *b,
                            const double *G, const double *G4,
                            const double *gd, const double *gd4,

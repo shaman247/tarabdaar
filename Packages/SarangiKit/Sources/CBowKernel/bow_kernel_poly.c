@@ -92,6 +92,16 @@ typedef struct {
     int *jtM, *jtMOff, *jtZOff;
     double *jtCa, *jtCb, *jtCa4, *jtCb4, *jtWd, *jtWdI,
         *jtPhiD;            /* jtWdI = 1/wd (no division in the rotation) */
+    /* TERMINATION DRIVE (bow_jt_drive_term): the second drive shape, the
+       bridge force entering through the mode SLOPE at the pin (∝ (−1)^k·k,
+       normalised to the tap's mode-1 level) — no |sin(kπ·0.9)| comb, and by
+       reciprocity the same sign convention as the pin-force radiation term.
+       jtDrvTerm is the 0…1 morph target; each row slews its own copy on the
+       radiation's ~40 ms law so a swept knob never steps the drive.
+       jtDrvTerm == 0 with a rested cur = the exact tap tick, byte-null. */
+    double *jtPhiDT;
+    double jtDrvTerm;
+    double *jtDrvTermCur;
     /* zone tables in FLOAT32 (the matmuls + J-vector solve dominate; the modal
        recursion stays double). Loops written for clang auto-vectorization. */
     float *jtPhiU, *jtPhiF;       /* zone matrices, concat M*J */
@@ -815,6 +825,7 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
                  const double *ca4, const double *cb4,
                  const double *wd, const double *radScale,
                  const double *pinScale, const double *phiD,
+                 const double *phiDT,
                  const double *phiU, const double *phiF,
                  const double *b, const double *G, const double *G4,
                  const double *gd, const double *gd4, const double *phys,
@@ -838,6 +849,9 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     st->jtWdI = (double *)malloc(sizeof(double) * mtot);
     for (int i = 0; i < mtot; i++) st->jtWdI[i] = 1.0 / wd[i];
     st->jtPhiD = pdup_d(phiD, mtot);
+    st->jtPhiDT = pdup_d(phiDT, mtot);
+    st->jtDrvTerm = 0.0;                 /* tap shape until set_drive_term */
+    st->jtDrvTermCur = (double *)calloc(njt, sizeof(double));
     st->jtPhiU = dup_f(phiU, ztot); st->jtPhiF = dup_f(phiF, ztot);
     st->jtB = dup_f(b, njt * J);
     st->jtG = dup_f(G, njt * J * J); st->jtG4 = dup_f(G4, njt * J * J);
@@ -1463,8 +1477,19 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             jt_core(Ms, J, u, ud, phiF, bc_, G_, gd_,
                     kcR, alphaR, hcBR, dtj, q, p, &fsum);
         }
-        for (int k = 0; k < Ms; k++)
-            p[k] += dtj * Fd * st->jtPhiD[mo + k];
+        {
+            const double *pd_ = st->jtPhiD + mo;
+            double w = st->jtDrvTermCur[s];
+            w += st->jtRadSlewA * (st->jtDrvTerm - w);
+            st->jtDrvTermCur[s] = w;
+            if (w == 0.0) {
+                for (int k = 0; k < Ms; k++) p[k] += dtj * Fd * pd_[k];
+            } else {
+                const double *pt_ = st->jtPhiDT + mo;
+                for (int k = 0; k < Ms; k++)
+                    p[k] += dtj * Fd * (pd_[k] + w * (pt_[k] - pd_[k]));
+            }
+        }
         /* TILT extra decay: momentum-proportional loss per tick; 0 / >= 1 =
            off */
         const double dampm = st->jtDampMul;
@@ -1761,6 +1786,24 @@ void bow_poly_jt_set_hp(void *vst, double a)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     st->jtHpA = a;
+}
+
+static void jt_gate_eps(bow_poly_state_t *st, double refDisp);
+
+/* TERMINATION DRIVE morph 0..1 (bow_jt_drive_term): 0 = the fitted 0.90 L
+   tap shape (byte-null — every row's slewed copy rests at 0 and the tick
+   takes the exact tap branch), 1 = the pin's mode-slope shape. Plain scalar
+   store, any thread; each row slews toward it on the radiation's ~40 ms law.
+   The gate's wake bound follows the effective shape. */
+void bow_poly_jt_set_drive_term(void *vst, double w)
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (!st || st->njt <= 0) return;
+    if (w < 0.0) w = 0.0;
+    if (w > 1.0) w = 1.0;
+    if (w == st->jtDrvTerm) return;
+    st->jtDrvTerm = w;
+    if (st->jtGateRef > 0.0) jt_gate_eps(st, st->jtGateRef);
 }
 
 /* jt BODY radiation mix 0..1 — plain scalar store, any thread, slewed
@@ -2066,6 +2109,30 @@ void bow_poly_jt_set_cap(void *vst, double hard, double ratio)
     }
 }
 
+/* The gate's per-row wake bound, evaluated on the EFFECTIVE drive shape (the
+   tap/termination morph): the drive that could ring the low modes back to the
+   floor within ~one mode-1 period (|p| ≈ π·Fd·phiD/wd1) — conservative.
+   Re-run whenever the morph moves so a comb-free drive is metered on its own
+   shape; at morph 0 it reads the tap table exactly. */
+static void jt_gate_eps(bow_poly_state_t *st, double refDisp)
+{
+    const double w = st->jtDrvTerm;
+    for (int s = 0; s < st->njt; s++) {
+        const int mo = st->jtMOff[s];
+        const double wd1 = st->jtWd[mo];
+        double pdm = 0.0;
+        for (int k = 0; k < st->jtM[s]; k++) {
+            const double pd = st->jtPhiD[mo + k];
+            const double t = fabs(w == 0.0 ? pd
+                                  : pd + w * (st->jtPhiDT[mo + k] - pd));
+            if (t > pdm) pdm = t;
+        }
+        st->jtGateFdEps[s] = pdm > 0.0
+            ? refDisp * wd1 * wd1 / (M_PI * pdm)
+            : 1e300;
+    }
+}
+
 /* QUIESCENCE GATE: refDisp = floor DISPLACEMENT in meters (× wd1 per row).
    <= 0 disarms AND wakes every row (a stale asleep flag under a later
    re-arm would truncate a ringing row). jtGateRef is written last. */
@@ -2081,21 +2148,8 @@ void bow_poly_jt_set_gate(void *vst, double refDisp)
     const double dtj = (double)st->jtDiv / st->sr;
     const int hold = (int)(0.030 / dtj + 0.5);
     st->jtGateHold = hold < 1 ? 1 : hold;
-    for (int s = 0; s < st->njt; s++) {
-        const int mo = st->jtMOff[s];
-        const double wd1 = st->jtWd[mo];
-        double pdm = 0.0;
-        for (int k = 0; k < st->jtM[s]; k++) {
-            const double t = fabs(st->jtPhiD[mo + k]);
-            if (t > pdm) pdm = t;
-        }
-        /* wake bound: the drive that could ring the low modes back to the floor
-           within ~one mode-1 period (|p| ≈ π·Fd·phiD/wd1) — conservative */
-        st->jtGateFdEps[s] = pdm > 0.0
-            ? refDisp * wd1 * wd1 / (M_PI * pdm)
-            : 1e300;
-        st->jtGateCnt[s] = st->jtGateHold;
-    }
+    jt_gate_eps(st, refDisp);
+    for (int s = 0; s < st->njt; s++) st->jtGateCnt[s] = st->jtGateHold;
     st->jtGateEvWake = st->jtEvTgt;   /* evolve wake reference = now */
     st->jtGateRef = refDisp;
 }
@@ -2253,7 +2307,7 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
               const double *ca, const double *cb,
               const double *ca4, const double *cb4, const double *wd,
               const double *radScale, const double *pinScale,
-              const double *phiD,
+              const double *phiD, const double *phiDT,
               const double *phiU, const double *phiF,
               const double *b, const double *G, const double *G4,
               const double *gd, const double *gd4, const double *phys)
@@ -2261,7 +2315,7 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     if (!st || njt != st->njt || J != st->jtJ || njt <= 0) return 0;
     if (!M || !ca || !cb || !ca4 || !cb4 || !wd || !radScale || !pinScale
-        || !phiD || !phiU || !phiF || !b || !G || !G4 || !gd || !gd4
+        || !phiD || !phiDT || !phiU || !phiF || !b || !G || !G4 || !gd || !gd4
         || !phys) return 0;
     int mtot = 0, ztot = 0;
     for (int s = 0; s < njt; s++) {
@@ -2275,6 +2329,7 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
         st->jtWd[i] = wd[i];
         st->jtWdI[i] = 1.0 / wd[i];
         st->jtPhiD[i] = phiD[i];
+        st->jtPhiDT[i] = phiDT[i];
     }
     for (int s = 0; s < njt; s++) {
         st->jtRadScale[s] = radScale[s];
@@ -2975,7 +3030,7 @@ void bow_poly_free(void *vst)
         free(st->jtM); free(st->jtMOff); free(st->jtZOff);
         free(st->jtCa); free(st->jtCb); free(st->jtCa4); free(st->jtCb4);
         free(st->jtWd); free(st->jtWdI);
-        free(st->jtPhiD);
+        free(st->jtPhiD); free(st->jtPhiDT); free(st->jtDrvTermCur);
         free(st->jtPhiU); free(st->jtPhiF); free(st->jtB);
         free(st->jtG); free(st->jtG4); free(st->jtGd); free(st->jtGd4);
         free(st->jtQ); free(st->jtP);

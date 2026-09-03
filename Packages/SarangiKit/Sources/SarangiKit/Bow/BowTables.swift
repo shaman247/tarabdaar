@@ -26,6 +26,12 @@ public struct JtTables: Sendable {
     public var ca: [Double] = [], cb: [Double] = []
     public var ca4: [Double] = [], cb4: [Double] = []
     public var wd: [Double] = [], phiD: [Double] = []
+    /// TERMINATION drive shape, the comb-free sibling of `phiD`: the
+    /// bridge force enters through the mode SLOPE at the pin,
+    /// ∝ (−1)^k·k, normalised so mode 1 keeps the 0.90 L tap's drive
+    /// (× sin(0.9π)). Load-ABI `phiDT`; blended against `phiD` by
+    /// `bow_jt_drive_term`.
+    public var phiDT: [Double] = []
     public var phiU: [Double] = [], phiF: [Double] = []
     public var b: [Double] = [], G: [Double] = [], G4: [Double] = []
     public var gd: [Double] = [], gd4: [Double] = []
@@ -243,9 +249,18 @@ public enum BowTables {
             var gdrv = row.gain
             // raga rows stay multiply-free — the render hash depends on it
             if chrom { gout *= gainMulC; gdrv *= driveMulC }
+            // TERMINATION drive: a moving bridge pushes mode k through the
+            // mode SLOPE at the pin, φ'_k(L) ∝ (−1)^k·k — no comb, and by
+            // reciprocity the SAME sign convention as the pin-force
+            // radiation term Σ(−1)^k·k·q_k in the tick. Normalised by
+            // cTerm so mode 1 keeps the tap's fitted recruitment level.
+            let cTerm = sin(Double.pi * 0.9)
             for k in 0..<M {
                 let pd = amp2 * sin(Double(k + 1) * Double.pi * xD / L)
                 T.phiD.append(gdrv * pd / mu)
+                let kk = Double(k + 1)
+                let sgn = (k & 1) == 0 ? -1.0 : 1.0   // (−1)^k, k 1-based
+                T.phiDT.append(gdrv * amp2 * sgn * kk * cTerm / mu)
             }
             T.phiU.append(contentsOf: phi)
             T.phiF.append(contentsOf: phi.map { $0 * wj / mu })

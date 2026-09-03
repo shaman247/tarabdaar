@@ -299,7 +299,7 @@ public final class BowEngine {
                 bow_poly_jt_load(pk, Int32(jt.M.count), jt.J, jt.M,
                                  jt.ca, jt.cb, jt.ca4, jt.cb4, jt.wd,
                                  jt.rowForceScale, jt.rowPinScale,
-                                 jt.phiD, jt.phiU, jt.phiF,
+                                 jt.phiD, jt.phiDT, jt.phiU, jt.phiF,
                                  jt.b, jt.G, jt.G4, jt.gd, jt.gd4,
                                  jt.phys, jt.q0)
                 // pool spawn happens at build, never on the audio thread
@@ -378,6 +378,11 @@ public final class BowEngine {
             let bodyMix = bp.v("bow_jt_body", 0.0)
             if bodyMix > 0, let pk = pkernel {
                 bow_poly_jt_set_body(pk, min(bodyMix, 1.0))
+            }
+            // termination drive morph: same arming rule. 0 = byte-null.
+            let drvTerm = bp.v("bow_jt_drive_term", 0.0)
+            if drvTerm > 0, let pk = pkernel {
+                bow_poly_jt_set_drive_term(pk, min(drvTerm, 1.0))
             }
             tiltPureLpHiHz = jt.lpA > 0
                 ? -log(1.0 - min(jt.lpA, 0.999999)) * jtTickRate
@@ -580,6 +585,17 @@ public final class BowEngine {
     public func setJtBody(_ mix01: Double) {
         guard let pk = pkernel else { return }
         bow_poly_jt_set_body(pk, min(max(mix01, 0.0), 1.0))
+    }
+
+    /// TERMINATION DRIVE morph 0…1 (`bow_jt_drive_term`): where the played
+    /// string's bridge force enters each sympathetic row. 0 = the fitted
+    /// 0.90 L tap, whose |sin(kπ·0.9)| comb never charges modes 10/20;
+    /// 1 = the pin's own mode slope (∝ (−1)^k·k, mode 1 held at the tap's
+    /// level, same sign convention as the pin-force radiation). 0 =
+    /// bit-exact. Kernel scalar write, slewed ~40 ms per row.
+    public func setJtDriveTerm(_ w01: Double) {
+        guard let pk = pkernel else { return }
+        bow_poly_jt_set_drive_term(pk, min(max(w01, 0.0), 1.0))
     }
 
     /// HARMONIC EVOLUTION 0…1 (`bow_jt_evolve`): a SIGNED bone offset,
@@ -1226,6 +1242,7 @@ public final class BowEngine {
         jt.rowForceScale.withUnsafeBufferPointer { radScale in
         jt.rowPinScale.withUnsafeBufferPointer { pinScale in
         jt.phiD.withUnsafeBufferPointer { phiD in
+        jt.phiDT.withUnsafeBufferPointer { phiDT in
         jt.phiU.withUnsafeBufferPointer { phiU in
         jt.phiF.withUnsafeBufferPointer { phiF in
         jt.b.withUnsafeBufferPointer { b in
@@ -1239,7 +1256,8 @@ public final class BowEngine {
                 ca.baseAddress, cb.baseAddress, ca4.baseAddress,
                 cb4.baseAddress, wd.baseAddress, radScale.baseAddress,
                 pinScale.baseAddress,
-                phiD.baseAddress, phiU.baseAddress, phiF.baseAddress,
+                phiD.baseAddress, phiDT.baseAddress,
+                phiU.baseAddress, phiF.baseAddress,
                 b.baseAddress, G.baseAddress, G4.baseAddress,
                 gd.baseAddress, gd4.baseAddress, phys.baseAddress)
             if ok == 1 {
@@ -1252,7 +1270,7 @@ public final class BowEngine {
                 pushJtRowContact(jt)
                 pushJtEvolveOffsets()
             }
-        }}}}}}}}}}}}}}}}}
+        }}}}}}}}}}}}}}}}}}
         // Melody follower: refresh the retune-law constants; re-arming the
         // SAME row keeps its current pitch
         if jt.trackRow >= 0, Int(jt.trackRow) < jt.rowFreqs.count {

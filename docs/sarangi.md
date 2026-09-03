@@ -199,6 +199,25 @@ when constant; an instant bone move radiates a real thump, which the 40 ms
 bone slew keeps out of tilt sweeps. The 0.90 L velocity pickup is not
 present — see `docs/history/`.
 
+### Where the drive enters (`bow_jt_drive_term`)
+
+The played string's bridge force enters each row at a fixed **0.90 L tap**
+(`phiD` = gdrv·amp2·sin(kπ·0.9)/mu), so the drive carries a |sin(kπ·0.9)|
+comb: modes 10 and 20 are never charged, and that null combines with the old
+pickup's. Physically the rows share the BRIDGE with the played string, and a
+moving termination excites mode k through the mode slope at the end,
+φ′_k(L) ∝ (−1)^k·k — no null anywhere. `bow_jt_drive_term` (0…1, `.live`,
+**0 = byte‑exact**) morphs per row per mode between the two tables (`phiD`
+and the builder's `phiDT`, both in the load ABI; the kernel keeps both and
+blends with a per‑row scalar slewed on the radiation's ~40 ms law, so a swept
+knob never steps the drive). `phiDT` is normalised by sin(0.9π) = 0.309 so
+**mode 1 keeps the tap's fitted level** either way, and its sign convention is
+the pin‑force radiation term's own (Σ(−1)^k·k·q_k) — by reciprocity the same
+weighting drives and radiates, so a positive bridge force makes a positive
+radiated pin force. The quiescence gate's wake bound follows the effective
+shape. At 1 the taraf rings ~17 dB hotter with a much higher modal centroid
+— see roadmap item 2 for the measurement and why it is not the default.
+
 ### Evolution and register
 
 - **`bow_jt_evolve`** (0…1, `.live`, 0.5 = bit‑exact): the tanpura/sitar
@@ -426,9 +445,17 @@ Improvements proposed for the modal‑jawari rows, in the order worth doing.
    radiated sample is the bone contact force plus the pin force
    `rowPinScale`·Σ(−1)^k·k·q_k, ahead of the DC blocker; no knob (the
    `bow_jt_rad_pin` mix it shipped as was judged at 1 and folded in).
-2. **Drive from the termination too.** The bridge force enters each row
-   through a fixed 0.90 L tap (φD), so modes 10/20 are never charged; the end
-   slope (∝ k·(−1)^k) has no null. Option first, then re‑fit recruitment.
+2. **Drive from the termination too — shipped as an OPTION, default off.**
+   `bow_jt_drive_term` (below) is the 0…1 morph; it is NOT baked, because the
+   slope weighting charges the high cluster far harder than the tap's comb
+   did. Measured on a bowed Sa (0.6 s bow + 0.8 s ring, shipped Pilu bank):
+   ring RMS **+17.5 dB** at morph 1, per‑row scope levels **+0.6 … +27.0 dB**
+   (the tap's comb nulls are exactly the rows that jump most), the Sa row's
+   modal centroid **3.6 → 6.4** (mode index). Stable — a 4 s ring at CC11 127
+   stays finite, peaks 1.61 and decays monotonically after the web charges.
+   So the shape is right and the LEVEL is not: taking it means re‑fitting
+   recruitment (`bow_jt_gain` / `bow_jt_norm` / `bow_jt_sel`) around it, not
+   flipping the default. A/B it with the knob first.
 3. **Two‑way coupling among the rows.** Feed the rows' summed bridge force
    back into the bridge so the web blooms physically. Keep the one‑sample
    lag the drive uses — stability is the risk.
