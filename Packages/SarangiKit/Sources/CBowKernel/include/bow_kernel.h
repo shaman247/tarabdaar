@@ -155,6 +155,15 @@ void bow_poly_jt_set_evolve(void *vst, double meters);
    gated row whose target moves. Never calling / all-zeros = byte-null. */
 void bow_poly_jt_set_evolve_ofs(void *vst, const double *ofs, int n);
 
+/* TERMINATION (PIN) FORCE radiation (`bow_jt_rad_pin`): mix 0…1 of the row's
+   LINEAR pin force T·du/dx|L into its radiated sample, beside the bone
+   CONTACT force, ahead of the DC blocker. scale = the builder's per-row unit
+   match gout·amp2·wd1 (NULL = left as is; re-push it after a coefficient
+   reload). The tick slews the mix ~40 ms. 0 = byte-null: the branch never
+   runs. Drone-setter contract. */
+void bow_poly_jt_set_rad_pin(void *vst, double mix, const double *scale,
+                             int n);
+
 /* Per-row CONTACT LAW (the chromatic bridge, `bow_jtc_*`): stiffness
    exponent alpha, hysteretic damping hcb, deep-substep threshold deep
    (2.5 × apex). NULL array = left as is. Writes min(n, njt) rows, clamped

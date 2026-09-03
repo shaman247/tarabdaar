@@ -157,6 +157,16 @@ typedef struct {
        scale: cur == target exactly, bit-null. */
     double jtRadSlewA;
     double *jtRadScaleCur;
+    /* TERMINATION (PIN) FORCE radiation (bow_jt_rad_pin): the row also
+       radiates the LINEAR bridge force at its pin, T·du/dx|L, which in the
+       same radiated units collapses to jtRadPinScale[s] · sum_k (-1)^k·k·q_k
+       (builder: gout·amp2·wd1). Summed with the contact force BEFORE the DC
+       blocker — the static wrap gives the pin sum a DC offset the blocker
+       must take. Global control-thread mix target, per-row slewed current
+       (~40 ms, worker-owned, frozen with a sleeping row). Target 0 with a
+       rested current: the branch never runs — byte-null. */
+    double jtRadPinMix, jtRadPinA;
+    double *jtRadPinScale, *jtRadPinCur;
     /* QUIESCENCE GATE (bow_jt_gate): the idle-CPU gate. Armed (jtGateRef > 0 =
        floor DISPLACEMENT in meters): a row whose peak LOW-MODE momentum stays
        below jtGateRef·wd1 for jtGateHold ticks with no bridge or drone drive
@@ -879,6 +889,11 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     st->jtRadLp = (double *)calloc(njt, sizeof(double));
     st->jtRadPrime = (unsigned char *)malloc((size_t)njt);
     memset(st->jtRadPrime, 1, (size_t)njt);
+    /* termination (pin) force: unarmed (scale 0, mix 0) until the setter */
+    st->jtRadPinMix = 0.0;
+    st->jtRadPinA = st->jtRadSlewA;
+    st->jtRadPinScale = (double *)calloc((size_t)njt, sizeof(double));
+    st->jtRadPinCur = (double *)calloc((size_t)njt, sizeof(double));
     /* quiescence gate: off (byte-null until bow_poly_jt_set_gate) */
     st->jtGateFdEps = (double *)calloc(njt, sizeof(double));
     st->jtGateCnt = (int *)calloc(njt, sizeof(int));
@@ -1490,7 +1505,21 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         double rs = st->jtRadScaleCur[s];
         rs += st->jtRadSlewA * (st->jtRadScale[s] - rs);
         st->jtRadScaleCur[s] = rs;
-        const double fr = rs * (double)fsum;
+        double fr = rs * (double)fsum;
+        /* TERMINATION (PIN) FORCE: the linear, comb-free bridge force at the
+           pin, weighted flat-per-k. Skipped whole at rest — byte-null. */
+        if (st->jtRadPinMix > 0.0 || st->jtRadPinCur[s] != 0.0) {
+            double mc = st->jtRadPinCur[s];
+            mc += st->jtRadPinA * (st->jtRadPinMix - mc);
+            if (st->jtRadPinMix == 0.0 && mc < 1e-9) mc = 0.0;
+            st->jtRadPinCur[s] = mc;
+            double sp = 0.0;
+            for (int k = 0; k < Ms; k++) {
+                const double t = (double)(k + 1) * q[k];
+                sp += (k & 1) ? t : -t;      /* (-1)^k, k the 1-based mode */
+            }
+            fr += mc * st->jtRadPinScale[s] * sp;
+        }
         double lp = st->jtRadLp[s];
         if (st->jtRadPrime[s]) { lp = fr; st->jtRadPrime[s] = 0; }
         lp += st->jtRadA * (fr - lp);
@@ -1975,6 +2004,24 @@ void bow_poly_jt_set_evolve_ofs(void *vst, const double *ofs, int n)
         st->jtEvOfsTgt[s] = v;
     }
     st->jtEvOfsOn = 1;
+}
+
+/* TERMINATION (PIN) FORCE radiation (bow_jt_rad_pin): the 0…1 mix of the
+   linear pin force into each row's radiated sample, plus the per-row unit
+   match gout·amp2·wd1 (the builder's rowPinScale, re-pushed after a
+   coefficient reload). Drone-setter contract: plain control-thread stores,
+   the jt tick slews the mix ~40 ms. mix 0 from rest = byte-null. */
+void bow_poly_jt_set_rad_pin(void *vst, double mix, const double *scale, int n)
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (!st || st->njt <= 0 || !st->jtRadPinScale) return;
+    if (scale && n > 0) {
+        const int m = n > st->njt ? st->njt : n;
+        for (int s = 0; s < m; s++) st->jtRadPinScale[s] = scale[s];
+    }
+    if (mix < 0.0) mix = 0.0;
+    if (mix > 1.0) mix = 1.0;
+    st->jtRadPinMix = mix;
 }
 
 /* TWO BRIDGES setter: alpha = exponent, hcb = hysteretic damping, deep =
@@ -2951,6 +2998,7 @@ void bow_poly_free(void *vst)
         free(st->jtCapV); free(st->jtCapBuf); free(st->jtCapRing);
         free(st->scopeEnv); free(st->scopeMode); free(st->scopeCnt);
         free(st->jtRadScale); free(st->jtRadScaleCur); free(st->jtRadLp);
+        free(st->jtRadPinScale); free(st->jtRadPinCur);
         free(st->jtRadPrime);
         free(st->jtGateFdEps); free(st->jtGateCnt); free(st->jtGateSlp);
         free(st->jtDwTgt); free(st->jtDwCur);

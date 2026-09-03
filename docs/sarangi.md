@@ -185,10 +185,11 @@ low‑frequency swing, so `bow_jt_gain` glides ~40 ms inside the kernel
 chromatic level rides `bow_jtc_gain / bow_jt_gain` — a stepped scale would
 splash impulses ~10× the signal, `ZipperTests`' fast flick), both bit‑null
 when constant; an instant bone move radiates a real thump, which the 40 ms
-bone slew keeps out of tilt sweeps. The observable is contact‑only — the
-linear pin force at the termination is not yet radiated (roadmap 1b), so the
-quiet grazing haze under‑radiates (force ∝ η^1.3) and an opened graze reads
-~8 dB quieter while its cascade doubles. The 0.90 L velocity pickup is not
+bone slew keeps out of tilt sweeps. The observable is contact‑only by default — the
+linear pin force at the termination is mixed in only when `bow_jt_rad_pin` > 0
+(roadmap 1b), so at the default 0 the quiet grazing haze under‑radiates
+(force ∝ η^1.3) and an opened graze reads ~8 dB quieter while its cascade
+doubles. The 0.90 L velocity pickup is not
 present — see `docs/history/`.
 
 ### Evolution and register
@@ -414,11 +415,23 @@ Improvements proposed for the modal‑jawari rows, in the order worth doing.
 1. **Radiate the bridge contact force — done.** Rows radiate the DC‑blocked
    contact force, unit‑matched per row (`rowForceScale`); every mode radiates
    flat and the Taraf tab's modal spectrum is the radiated one.
-1b. **Add the termination (pin) force.** The bridge receives both the pin
-   force T·∂u/∂x|L (linear, weight ∝ k, comb‑free) and the bone contact force
-   (the buzz); contact alone under‑radiates the quiet grazing haze. Adding
-   Σ(−1)^k·k·q_k per row per tick would restore the linear string tone under
-   the buzz. Judge by ear against the contact‑only sound.
+1b. **Add the termination (pin) force — implemented as `bow_jt_rad_pin`
+   (0…1, `.live`, default 0), to be judged by ear.** The bridge receives both
+   the pin force T·∂u/∂x|L (linear, weight ∝ k, comb‑free) and the bone contact
+   force (the buzz); contact alone under‑radiates the quiet grazing haze. With
+   the modal basis φ_k = amp2·sin(kπx/L) pinned at L and T = mu·(L·wd1/π)²,
+   F_pin = T·amp2·(π/L)·Σ(−1)^k·k·q_k; through the same force→radiated unit
+   match the contact sum uses (gout·π/(mu·L·wd1), without the zone spacing wj)
+   it collapses to `JtTables.rowPinScale` = gout·amp2·wd1 per row, so the tick
+   just adds mix·rowPinScale·Σ(−1)^k·k·q_k to the contact sum **before** the DC
+   blocker (the static wrap gives that sum a DC offset the blocker takes).
+   Signs: as written the two terms are positively correlated at the fundamental
+   (measured cos Δφ +0.24, broadband r +0.67 on a bowed Sa's ring); negating it
+   cancels instead (−1.6 dB). Pushed by `bow_poly_jt_set_rad_pin` (mix +
+   per‑row scale, re‑pushed after a coefficient reload — not the load ABI), the
+   mix slewed ~40 ms in‑kernel like `jtRadScaleCur`; 0 = the branch never runs,
+   byte‑null (`ByteNullContractTests`). Measured at mix 1: the ring is ~+0.9 dB
+   and every row lifts 0.3–0.8 dB, the kin rows most.
 2. **Drive from the termination too.** The bridge force enters each row
    through a fixed 0.90 L tap (φD), so modes 10/20 are never charged; the end
    slope (∝ k·(−1)^k) has no null. Option first, then re‑fit recruitment.
