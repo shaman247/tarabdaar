@@ -60,6 +60,8 @@ int bow_poly_active(const void *vst, int b);
      ca cb ca4 cb4   ΣM    per-mode damped rotation at dt and dt/4
      wd              ΣM    damped modal angular frequency (rad/s)
      radScale[njt]   per-row contact force → radiated velocity
+     pinScale[njt]   per-row TERMINATION (pin) force → the same units
+                     (radiated beside the contact force, always)
      phiD            ΣM    bridge-force drive tap per mode (÷mu, ×drive)
      phiU phiF       ΣM·J  mode shape at the zone points (raw / ×wj÷mu)
      b               ΣJ    bone height at the zone points (m)
@@ -67,7 +69,7 @@ int bow_poly_active(const void *vst, int b);
      gd gd4          ΣJ    its diagonals
      phys[7]         kc, alpha, hcB, deep, gain, drive, div
      q0              ΣM    static-wrap modal displacement at rest */
-void bow_poly_jt_load(void *vst, int njt, int J, const int *M, const double *ca, const double *cb, const double *ca4, const double *cb4, const double *wd, const double *radScale, const double *phiD, const double *phiU, const double *phiF, const double *b, const double *G, const double *G4, const double *gd, const double *gd4, const double *phys, const double *q0);
+void bow_poly_jt_load(void *vst, int njt, int J, const int *M, const double *ca, const double *cb, const double *ca4, const double *cb4, const double *wd, const double *radScale, const double *pinScale, const double *phiD, const double *phiU, const double *phiF, const double *b, const double *G, const double *G4, const double *gd, const double *gd4, const double *phys, const double *q0);
 
 /* Persistent jt worker pool for the deferred post-pass (off the audio
    thread); nth < 2 = serial. */
@@ -155,15 +157,6 @@ void bow_poly_jt_set_evolve(void *vst, double meters);
    gated row whose target moves. Never calling / all-zeros = byte-null. */
 void bow_poly_jt_set_evolve_ofs(void *vst, const double *ofs, int n);
 
-/* TERMINATION (PIN) FORCE radiation (`bow_jt_rad_pin`): mix 0…1 of the row's
-   LINEAR pin force T·du/dx|L into its radiated sample, beside the bone
-   CONTACT force, ahead of the DC blocker. scale = the builder's per-row unit
-   match gout·amp2·wd1 (NULL = left as is; re-push it after a coefficient
-   reload). The tick slews the mix ~40 ms. 0 = byte-null: the branch never
-   runs. Drone-setter contract. */
-void bow_poly_jt_set_rad_pin(void *vst, double mix, const double *scale,
-                             int n);
-
 /* Per-row CONTACT LAW (the chromatic bridge, `bow_jtc_*`): stiffness
    exponent alpha, hysteretic damping hcb, deep-substep threshold deep
    (2.5 × apex). NULL array = left as is. Writes min(n, njt) rows, clamped
@@ -195,6 +188,7 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
                            const double *ca, const double *cb,
                            const double *ca4, const double *cb4,
                            const double *wd, const double *radScale,
+                           const double *pinScale,
                            const double *phiD, const double *phiU,
                            const double *phiF, const double *b,
                            const double *G, const double *G4,

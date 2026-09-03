@@ -77,10 +77,10 @@ final class TarafRemovalParityTests: XCTestCase {
     }
     /// The blessed render's SHA-256. Re-bless DELIBERATELY when the shipped
     /// sound changes (write mode: `TARABDAAR_TARAF_REF=write`), and say why
-    /// in the commit. Last bless: bridge-force radiation + the
-    /// 5-block settle pre-roll.
+    /// in the commit. Last bless: pin-force radiation baked in — the
+    /// radiated sample is contact force + termination force.
     private static let referenceSHA256 =
-        "fde438455d331f510bff81eb54cbe55a538d3052b4697db007c3f6bdd661909f"
+        "b61d3c209868e1875cc3bff79c2d5092f652d4453bf7121796aee570aabf57f4"
 
     func testDefaultMatchesTheSilencedWebReference() throws {
         let y = try render()

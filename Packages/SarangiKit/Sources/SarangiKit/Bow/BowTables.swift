@@ -44,9 +44,9 @@ public struct JtTables: Sendable {
     /// force density → radiated velocity. Load-ABI `radScale`.
     public var rowForceScale: [Double] = []
     /// Per-row unit match for the TERMINATION (pin) force, gout·amp2·wd1:
-    /// the linear bridge force T·∂u/∂x|L in the same radiated units, so
-    /// `bow_jt_rad_pin` mixes Σ_k (−1)^k·k·q_k straight in. Pushed by
-    /// `bow_poly_jt_set_rad_pin` — not part of the load ABI.
+    /// the linear bridge force T·∂u/∂x|L in the same radiated units, so the
+    /// tick adds Σ_k (−1)^k·k·q_k straight into the radiated sample. Load-ABI
+    /// `pinScale`, beside `radScale`.
     public var rowPinScale: [Double] = []
     /// One-pole tone-LP coefficient on the radiated jt sum (`bow_jt_lp`;
     /// 0 = bypass). Applied via bow_jt_set_lp — not part of the load ABI.
@@ -253,7 +253,8 @@ public enum BowTables {
             // → radiated velocity is gout·π/(mu·L·wd1); × wj because the
             // kernel sums force DENSITIES over the zone
             T.rowForceScale.append(gout * Double.pi * wj / (mu * L * wd[0]))
-            // TERMINATION (pin) force: F_pin = T·amp2·(π/L)·Σ(−1)^k·k·q_k
+            // TERMINATION (pin) force, always radiated:
+            // F_pin = T·amp2·(π/L)·Σ(−1)^k·k·q_k
             // with T = mu·(L·wd1/π)²; through the force→radiated match
             // gout·π/(mu·L·wd1) (the same law without the density spacing
             // wj) it collapses to gout·amp2·wd1 per row.

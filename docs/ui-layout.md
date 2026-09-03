@@ -86,9 +86,9 @@ A legend explains the three encodings.
 ### Taraf tab (⌘9)
 
 `TarafScopeView.swift`, sharing `ScopeModel` with the Scope tab. Every modal-jawari row, pitch-sorted, one strip each: the scale label (`scaleLabel(forRatio:)`; `follow` for the melody follower, `·c` for a chromatic-bridge row, a moon glyph + dimming for a row asleep under the quiescence gate), Hz, the radiated level (bar coloured on the lane hue + dB on the 60 dB scale), the **modal energy** spectrum — p_k² over modes 1–16 on 40 dB under the row's own peak, bars coloured by mode index on the taraf hue law (the rows radiate their bridge contact force, which weighs every mode flat, so this is also the row's radiated spectrum up to a constant — the jawari's upward cascade as it happens) — and the spectral centroid (mode units, EMA-smoothed like the lane hue).
-`bow_jt_rad_pin` needs no change here: the pin term contributes k·q_k per mode,
-which is p_k up to the row's ω_1, so the displayed modal energy is already the
-termination force's weighting as well — the strip reads as the radiated spectrum
-at any pin mix.
+The termination (pin) force the rows also radiate needs no change here: it
+contributes k·q_k per mode, which is p_k up to the row's ω_1, so the displayed
+modal energy is already that weighting too — the strip reads as the radiated
+spectrum.
 
 **Plumbing.** `AudioEngine.scopeSnapshot()` (voices on whichever main instrument is armed + `BowEngine.ScopeRow`s) is polled at 30 Hz on the main queue by `ScopeModel`. The taraf meters live in the kernel (`bow_poly_scope_arm` / `_scope_jt`; per-row peak envelope every tick + per-mode envelopes every 4th tick, worker-owned, telemetry-grade racy reads) and are **armed only while a scope tab is showing** (`setScopeArmed` on appear/disappear, re-applied across rebuilds by `StringVoiceSource`); disarmed, the jt tick is the exact production code path, and `ScopeTelemetryTests` pins the armed render byte-identical to the unarmed one — nothing here feeds the physics.

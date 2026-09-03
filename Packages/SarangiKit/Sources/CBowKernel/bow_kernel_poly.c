@@ -145,10 +145,11 @@ typedef struct {
     double *scopeEnv;                 /* per-row radiated peak env */
     float *scopeMode;                 /* per-row × scopeK |p_k| envs */
     unsigned *scopeCnt;               /* per-row tick counter */
-    /* BRIDGE-FORCE RADIATION: each row radiates its CONTACT FORCE on the bone;
-       jtRadScale (builder: gout·π·wj/(mu·L·wd1)) makes every mode radiate FLAT
-       in pickup units. A ~8 Hz DC blocker, primed to the first sample, takes
-       only the static wrap preload. */
+    /* BRIDGE-FORCE RADIATION: each row radiates its CONTACT FORCE on the bone
+       (plus its TERMINATION force, below); jtRadScale (builder:
+       gout·π·wj/(mu·L·wd1)) makes every mode radiate FLAT in pickup units. A
+       ~8 Hz DC blocker, primed to the first sample, takes only the static
+       wrap preload. */
     double jtRadA;
     double *jtRadScale, *jtRadLp;
     unsigned char *jtRadPrime;
@@ -157,16 +158,17 @@ typedef struct {
        scale: cur == target exactly, bit-null. */
     double jtRadSlewA;
     double *jtRadScaleCur;
-    /* TERMINATION (PIN) FORCE radiation (bow_jt_rad_pin): the row also
-       radiates the LINEAR bridge force at its pin, T·du/dx|L, which in the
-       same radiated units collapses to jtRadPinScale[s] · sum_k (-1)^k·k·q_k
-       (builder: gout·amp2·wd1). Summed with the contact force BEFORE the DC
-       blocker — the static wrap gives the pin sum a DC offset the blocker
-       must take. Global control-thread mix target, per-row slewed current
-       (~40 ms, worker-owned, frozen with a sleeping row). Target 0 with a
-       rested current: the branch never runs — byte-null. */
-    double jtRadPinMix, jtRadPinA;
-    double *jtRadPinScale, *jtRadPinCur;
+    /* TERMINATION (PIN) FORCE radiation: every row ALSO radiates the LINEAR
+       bridge force at its pin, T·du/dx|L, which in the same radiated units
+       collapses to jtRadPinScale[s] · sum_k (-1)^k·k·q_k (builder:
+       gout·amp2·wd1). Summed with the contact force BEFORE the DC blocker —
+       the static wrap gives the pin sum a DC offset the blocker takes.
+       Permanent, no mix: a per-row LOAD-ABI scale beside radScale, and
+       slewed on the same ~40 ms law (a coefficient reload steps the target —
+       the chromatic rows' gout rides bow_jtc_gain/bow_jt_gain, so a stepped
+       scale zippers, `ZipperTests`' fast flick). Constant scale: cur ==
+       target exactly, bit-null. */
+    double *jtRadPinScale, *jtRadPinScaleCur;
     /* QUIESCENCE GATE (bow_jt_gate): the idle-CPU gate. Armed (jtGateRef > 0 =
        floor DISPLACEMENT in meters): a row whose peak LOW-MODE momentum stays
        below jtGateRef·wd1 for jtGateHold ticks with no bridge or drone drive
@@ -811,7 +813,8 @@ static double jt_maxpen(int M, int J, const float *phiU,
 void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
                  const double *ca, const double *cb,
                  const double *ca4, const double *cb4,
-                 const double *wd, const double *radScale, const double *phiD,
+                 const double *wd, const double *radScale,
+                 const double *pinScale, const double *phiD,
                  const double *phiU, const double *phiF,
                  const double *b, const double *G, const double *G4,
                  const double *gd, const double *gd4, const double *phys,
@@ -889,11 +892,9 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     st->jtRadLp = (double *)calloc(njt, sizeof(double));
     st->jtRadPrime = (unsigned char *)malloc((size_t)njt);
     memset(st->jtRadPrime, 1, (size_t)njt);
-    /* termination (pin) force: unarmed (scale 0, mix 0) until the setter */
-    st->jtRadPinMix = 0.0;
-    st->jtRadPinA = st->jtRadSlewA;
-    st->jtRadPinScale = (double *)calloc((size_t)njt, sizeof(double));
-    st->jtRadPinCur = (double *)calloc((size_t)njt, sizeof(double));
+    /* termination (pin) force: the builder's per-row unit match, permanent */
+    st->jtRadPinScale = pdup_d(pinScale, njt);
+    st->jtRadPinScaleCur = pdup_d(pinScale, njt);
     /* quiescence gate: off (byte-null until bow_poly_jt_set_gate) */
     st->jtGateFdEps = (double *)calloc(njt, sizeof(double));
     st->jtGateCnt = (int *)calloc(njt, sizeof(int));
@@ -1507,18 +1508,18 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         st->jtRadScaleCur[s] = rs;
         double fr = rs * (double)fsum;
         /* TERMINATION (PIN) FORCE: the linear, comb-free bridge force at the
-           pin, weighted flat-per-k. Skipped whole at rest — byte-null. */
-        if (st->jtRadPinMix > 0.0 || st->jtRadPinCur[s] != 0.0) {
-            double mc = st->jtRadPinCur[s];
-            mc += st->jtRadPinA * (st->jtRadPinMix - mc);
-            if (st->jtRadPinMix == 0.0 && mc < 1e-9) mc = 0.0;
-            st->jtRadPinCur[s] = mc;
+           pin, weighted flat-per-k — always radiated beside the contact
+           force, ahead of the DC blocker. */
+        {
+            double ps = st->jtRadPinScaleCur[s];
+            ps += st->jtRadSlewA * (st->jtRadPinScale[s] - ps);
+            st->jtRadPinScaleCur[s] = ps;
             double sp = 0.0;
             for (int k = 0; k < Ms; k++) {
                 const double t = (double)(k + 1) * q[k];
                 sp += (k & 1) ? t : -t;      /* (-1)^k, k the 1-based mode */
             }
-            fr += mc * st->jtRadPinScale[s] * sp;
+            fr += ps * sp;
         }
         double lp = st->jtRadLp[s];
         if (st->jtRadPrime[s]) { lp = fr; st->jtRadPrime[s] = 0; }
@@ -2006,24 +2007,6 @@ void bow_poly_jt_set_evolve_ofs(void *vst, const double *ofs, int n)
     st->jtEvOfsOn = 1;
 }
 
-/* TERMINATION (PIN) FORCE radiation (bow_jt_rad_pin): the 0…1 mix of the
-   linear pin force into each row's radiated sample, plus the per-row unit
-   match gout·amp2·wd1 (the builder's rowPinScale, re-pushed after a
-   coefficient reload). Drone-setter contract: plain control-thread stores,
-   the jt tick slews the mix ~40 ms. mix 0 from rest = byte-null. */
-void bow_poly_jt_set_rad_pin(void *vst, double mix, const double *scale, int n)
-{
-    bow_poly_state_t *st = (bow_poly_state_t *)vst;
-    if (!st || st->njt <= 0 || !st->jtRadPinScale) return;
-    if (scale && n > 0) {
-        const int m = n > st->njt ? st->njt : n;
-        for (int s = 0; s < m; s++) st->jtRadPinScale[s] = scale[s];
-    }
-    if (mix < 0.0) mix = 0.0;
-    if (mix > 1.0) mix = 1.0;
-    st->jtRadPinMix = mix;
-}
-
 /* TWO BRIDGES setter: alpha = exponent, hcb = hysteretic damping, deep =
    substep threshold (2.5 × apex). Exactly-global rows tick bit-identically
    to the unarmed path. Plain stores; survives bow_poly_jt_set_coeffs. */
@@ -2269,15 +2252,17 @@ int bow_poly_set_body(void *vst, int K, const double *ba1, const double *ba2,
 int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
               const double *ca, const double *cb,
               const double *ca4, const double *cb4, const double *wd,
-              const double *radScale, const double *phiD,
+              const double *radScale, const double *pinScale,
+              const double *phiD,
               const double *phiU, const double *phiF,
               const double *b, const double *G, const double *G4,
               const double *gd, const double *gd4, const double *phys)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     if (!st || njt != st->njt || J != st->jtJ || njt <= 0) return 0;
-    if (!M || !ca || !cb || !ca4 || !cb4 || !wd || !radScale || !phiD
-        || !phiU || !phiF || !b || !G || !G4 || !gd || !gd4 || !phys) return 0;
+    if (!M || !ca || !cb || !ca4 || !cb4 || !wd || !radScale || !pinScale
+        || !phiD || !phiU || !phiF || !b || !G || !G4 || !gd || !gd4
+        || !phys) return 0;
     int mtot = 0, ztot = 0;
     for (int s = 0; s < njt; s++) {
         if (M[s] != st->jtM[s]) return 0;      /* shape moved */
@@ -2291,7 +2276,10 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
         st->jtWdI[i] = 1.0 / wd[i];
         st->jtPhiD[i] = phiD[i];
     }
-    for (int s = 0; s < njt; s++) st->jtRadScale[s] = radScale[s];
+    for (int s = 0; s < njt; s++) {
+        st->jtRadScale[s] = radScale[s];
+        st->jtRadPinScale[s] = pinScale[s];
+    }
     for (int i = 0; i < ztot; i++) {
         st->jtPhiU[i] = (float)phiU[i];
         st->jtPhiF[i] = (float)phiF[i];
@@ -2998,7 +2986,7 @@ void bow_poly_free(void *vst)
         free(st->jtCapV); free(st->jtCapBuf); free(st->jtCapRing);
         free(st->scopeEnv); free(st->scopeMode); free(st->scopeCnt);
         free(st->jtRadScale); free(st->jtRadScaleCur); free(st->jtRadLp);
-        free(st->jtRadPinScale); free(st->jtRadPinCur);
+        free(st->jtRadPinScale); free(st->jtRadPinScaleCur);
         free(st->jtRadPrime);
         free(st->jtGateFdEps); free(st->jtGateCnt); free(st->jtGateSlp);
         free(st->jtDwTgt); free(st->jtDwCur);

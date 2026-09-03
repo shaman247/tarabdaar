@@ -30,7 +30,12 @@ final class BowStereoTests: XCTestCase {
                                reverbMix: 0.08,
                                reverbWidth: stereo ? 0.6 : 0.0,
                                maxPoly: 8)
-        engine.outGain = 0.1
+        // headroom: the fold-down invariance below is a BELOW-CEILING
+        // contract — the safety limiter is linked-stereo (one gain from
+        // max(|L|, |R|)), so a render that clips would legitimately fold
+        // down differently from the mono one. 0.07 keeps the armed peak
+        // (~0.6) under the 0.8 ceiling with the pin force radiating.
+        engine.outGain = 0.07
         return engine
     }
 

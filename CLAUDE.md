@@ -21,7 +21,7 @@ This file describes the instrument as it is. Its development history (every dele
 
 **Three voices.** The sarangi **String voice** (`SarangiKit.BowEngine` + the `CBowKernel` C friction kernel) is the default played voice. The **Tanpura** (`TanpuraEngine` + `tanpura_kernel.c`) is the default drone voice and an optional main instrument; the **Sitar** is a second `TanpuraEngine` mounted from `sitar_live.json` (the scale-model role ladder), main-instrument only. Both plucked voices charge the String kernel's sympathetic web through its inject ring.
 
-**The taraf.** The sympathetic strings are modal-jawari rows inside the String kernel (`bow_jt_*`): scale-degree strings on the raga bridge plus a chromatic set with its own level, level norm and evolution (`bow_jtc_gain`/`_norm`/`_evolve`) over the same jawari geometry. Each row radiates the DC-blocked contact force it exerts on its bone, unit-matched per row (`JtTables.rowForceScale`). A melody-follower row can live-retune to the played pitch. The Strings tab (⌘2) edits the rows; drone buttons and the Joy-Con strum pluck them.
+**The taraf.** The sympathetic strings are modal-jawari rows inside the String kernel (`bow_jt_*`): scale-degree strings on the raga bridge plus a chromatic set with its own level, level norm and evolution (`bow_jtc_gain`/`_norm`/`_evolve`) over the same jawari geometry. Each row radiates the DC-blocked contact force it exerts on its bone plus its termination force at the pin, each unit-matched per row (`JtTables.rowForceScale` / `rowPinScale`, both on the kernel's jt load ABI). A melody-follower row can live-retune to the played pitch. The Strings tab (⌘2) edits the rows; drone buttons and the Joy-Con strum pluck them.
 
 **Mac tabs:** Live ⌘1 · Strings ⌘2 · Fret Pad ⌘3 · Controls ⌘4 · Parameters ⌘5 · FX ⌘6 · Setup ⌘7 · Scope ⌘8 · Taraf ⌘9.
 
@@ -50,6 +50,8 @@ tools/test-full.sh                         # the full guard: gated DSP suites, p
 ```
 
 The DSP render suites (`TarafRemovalParityTests`, `RealtimePerformanceTests`, `RebuildCostTests`, `ZipperTests`, `LiveParamPushTests`) skip without `TARABDAAR_SLOW_TESTS=1`; `tools/test-full.sh` is required before committing any kernel, table-builder, parameter or levels change (phase 2 is skipped when phase 1 fails). The guard set is deliberately small: one render hash pins the shipped sound, `ByteNullContractTests` pins that every "0 = off" path is bit-null at rest, and logic suites pin invariants that would break silently. When you change the sound, bless the hash on purpose; when you add an optional path, add a contract case. No calibration numbers in tests and no history in test comments — the ear judges the sound, git holds the story.
+
+`tools/install-hooks.sh` installs a pre-commit hook that runs the full guard when a kernel, builder, parameter, artifact or DSP-test file is staged and the fast loop otherwise (`git commit --no-verify` skips it once).
 
 The iOS target builds with `xcodebuild -scheme Tarabdaar` against an iPad simulator (`-showdestinations` lists names). Sensors and MIDI need a physical device. Adding a file to an Xcode target: the `add-xcode-file` skill (files under `Packages/` need nothing).
 

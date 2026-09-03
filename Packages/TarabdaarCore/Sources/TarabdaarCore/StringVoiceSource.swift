@@ -160,7 +160,6 @@ public final class StringVoiceSource {
                     { $0.setJtToneLp(hz: $1) }),
         ControlKnob("bow_jt_hp", nonNegative, { $0.setJtToneHp(hz: $1) }),
         ControlKnob("bow_jt_body", unit, { $0.setJtBody($1) }),
-        ControlKnob("bow_jt_rad_pin", unit, { $0.setJtRadPin($1) }),
         ControlKnob("bow_jt_damp", unit, { $0.setTarafDamp($1) }),
         ControlKnob("bow_tone_tilt", bipolar, { $0.setToneTilt($1) }),
         // neutral = the calibrated level

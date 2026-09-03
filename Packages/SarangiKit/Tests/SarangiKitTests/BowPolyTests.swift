@@ -233,7 +233,10 @@ final class BowPolyTests: XCTestCase {
         XCTAssertLessThan(s2, sustain * 3.0, "chord energy still growing")
 
         mapper.midi(0xB0, 123, 0)                   // all off
-        _ = run(seconds: 2.5)
+        // the taraf rings on by design (and radiates its termination force
+        // as well as the bone contact force), so the settle is measured well
+        // clear of the release transient
+        _ = run(seconds: 7.5)
         let tail = run(seconds: 0.5)
         XCTAssertLessThan(tail, sustain * 0.5, "chord did not release")
     }

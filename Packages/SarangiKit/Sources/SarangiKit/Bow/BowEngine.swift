@@ -291,7 +291,6 @@ public final class BowEngine {
             jtRowChromatic = jt.rowChromatic
             jtRowApex = jt.rowApex
             jtHasChromatic = jt.hasChromatic
-            jtRowPinScale = jt.rowPinScale
             jtDwTargets = [Double](repeating: 1.0, count: jt.rowFreqs.count)
             jtDwPushed = [Double](repeating: 1.0, count: jt.rowFreqs.count)
             droneHeldMask = [Bool](repeating: false, count: jt.rowFreqs.count)
@@ -299,7 +298,8 @@ public final class BowEngine {
             if let pk = pkernel {
                 bow_poly_jt_load(pk, Int32(jt.M.count), jt.J, jt.M,
                                  jt.ca, jt.cb, jt.ca4, jt.cb4, jt.wd,
-                                 jt.rowForceScale, jt.phiD, jt.phiU, jt.phiF,
+                                 jt.rowForceScale, jt.rowPinScale,
+                                 jt.phiD, jt.phiU, jt.phiF,
                                  jt.b, jt.G, jt.G4, jt.gd, jt.gd4,
                                  jt.phys, jt.q0)
                 // pool spawn happens at build, never on the audio thread
@@ -378,11 +378,6 @@ public final class BowEngine {
             let bodyMix = bp.v("bow_jt_body", 0.0)
             if bodyMix > 0, let pk = pkernel {
                 bow_poly_jt_set_body(pk, min(bodyMix, 1.0))
-            }
-            // pin radiation: same arming rule. 0 = byte-null.
-            let pinMix = bp.v("bow_jt_rad_pin", 0.0)
-            if pinMix > 0 {
-                setJtRadPin(pinMix)
             }
             tiltPureLpHiHz = jt.lpA > 0
                 ? -log(1.0 - min(jt.lpA, 0.999999)) * jtTickRate
@@ -587,28 +582,6 @@ public final class BowEngine {
         bow_poly_jt_set_body(pk, min(max(mix01, 0.0), 1.0))
     }
 
-    /// TERMINATION (PIN) FORCE mix 0…1 (`bow_jt_rad_pin`): how much of each
-    /// row's LINEAR bridge force at the pin — T·∂u/∂x|L, i.e.
-    /// Σ_k (−1)^k·k·q_k in the same radiated units — is added to the bone
-    /// CONTACT force it radiates today, ahead of the per-row DC blocker.
-    /// 0 = contact only (bit-exact); 1 = the full bridge force. Kernel
-    /// scalar write, slewed ~40 ms in-kernel so a bound axis can sweep it.
-    public func setJtRadPin(_ mix01: Double) {
-        jtRadPinMix = min(max(mix01, 0.0), 1.0)
-        pushJtRadPin()
-    }
-
-    /// Push the mix together with the CURRENT per-row unit match (a
-    /// coefficient reload rescales the rows). Pushing 0 is byte-null — the
-    /// kernel's tick skips the term until the mix is actually raised.
-    private func pushJtRadPin() {
-        guard let pk = pkernel, !jtRowPinScale.isEmpty else { return }
-        jtRowPinScale.withUnsafeBufferPointer { sc in
-            bow_poly_jt_set_rad_pin(pk, jtRadPinMix, sc.baseAddress,
-                                    Int32(jtRowPinScale.count))
-        }
-    }
-
     /// HARMONIC EVOLUTION 0…1 (`bow_jt_evolve`): a SIGNED bone offset,
     /// lift = apex·(1 − 4^(1−2e)) (0.5 → 0 = byte-null), slewed INSIDE the
     /// kernel (~40 ms) so a tilt is a slow jawari adjustment, not a strum.
@@ -658,12 +631,6 @@ public final class BowEngine {
     }
     /// Graze-margin reference (`bow_jt_apex` at build) for the evolution map.
     private var jtApexRef = 1.0e-5
-    /// TERMINATION (PIN) FORCE radiation (`bow_jt_rad_pin`): the applied mix
-    /// and the per-row unit match currently loaded on the kernel (refreshed
-    /// by a coefficient reload, which rescales the rows).
-    private var jtRadPinMix = 0.0
-    private var jtRowPinScale: [Double] = []
-
     /// EVOLUTION REGISTER TILT (`bow_jt_ev_reg`): evolve units per OCTAVE
     /// from the tonic, a per-row SIGNED bone offset added to the global lift
     /// (kernel-slewed). + opens below-tonic rows and closes above; 0 = the
@@ -1257,6 +1224,7 @@ public final class BowEngine {
         jt.cb4.withUnsafeBufferPointer { cb4 in
         jt.wd.withUnsafeBufferPointer { wd in
         jt.rowForceScale.withUnsafeBufferPointer { radScale in
+        jt.rowPinScale.withUnsafeBufferPointer { pinScale in
         jt.phiD.withUnsafeBufferPointer { phiD in
         jt.phiU.withUnsafeBufferPointer { phiU in
         jt.phiF.withUnsafeBufferPointer { phiF in
@@ -1270,6 +1238,7 @@ public final class BowEngine {
             let ok = bow_poly_jt_set_coeffs(st, n, J, M.baseAddress,
                 ca.baseAddress, cb.baseAddress, ca4.baseAddress,
                 cb4.baseAddress, wd.baseAddress, radScale.baseAddress,
+                pinScale.baseAddress,
                 phiD.baseAddress, phiU.baseAddress, phiF.baseAddress,
                 b.baseAddress, G.baseAddress, G4.baseAddress,
                 gd.baseAddress, gd4.baseAddress, phys.baseAddress)
@@ -1280,12 +1249,10 @@ public final class BowEngine {
                 jtRowApex = jt.rowApex
                 jtHasChromatic = jt.hasChromatic
                 jtApexRef = jt.apexRef
-                jtRowPinScale = jt.rowPinScale
                 pushJtRowContact(jt)
                 pushJtEvolveOffsets()
-                pushJtRadPin()
             }
-        }}}}}}}}}}}}}}}}
+        }}}}}}}}}}}}}}}}}
         // Melody follower: refresh the retune-law constants; re-arming the
         // SAME row keeps its current pitch
         if jt.trackRow >= 0, Int(jt.trackRow) < jt.rowFreqs.count {
