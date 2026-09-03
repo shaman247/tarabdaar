@@ -40,6 +40,10 @@ public final class TanpuraEngine: @unchecked Sendable {
     /// pitch — the wrap-pull correction is applied inside the tables).
     public let slotFrequencies: [Double]
     private let slotLogF: [Double]
+    /// SCOPE TELEMETRY (2026-09-01): each slot's last commanded bend
+    /// ratio (pluck retune / live bend), so the Scope tab can place a
+    /// ringing string at its SOUNDING pitch after the touch has gone.
+    private let scopeRatio = OSAllocatedUnfairLock(initialState: [Double]())
 
     /// pending note events (sync path: audio thread drains; pool
     /// path: producers serialize through this lock into the kernel's
@@ -90,6 +94,7 @@ public final class TanpuraEngine: @unchecked Sendable {
         p = params
         slotFrequencies = freqs
         slotLogF = freqs.map { log2($0) }
+        scopeRatio.withLock { $0 = [Double](repeating: 1.0, count: freqs.count) }
         guard let c = tanpura_create(Int32(freqs.count)) else { return nil }
         ctx = c
         let taps = params.bodyFIR.isEmpty ? [1.0] : params.bodyFIR
@@ -191,6 +196,7 @@ public final class TanpuraEngine: @unchecked Sendable {
         let amp = basePluck * hi * (0.3 + 0.7 * Double(v) / 127.0)
             * max(0.0, scale)
         guard amp > 0 else { return }
+        scopeRatio.withLock { if slot < $0.count { $0[slot] = bendRatio } }
         if pooled {
             // the lock serializes producers into the kernel's SPSC ring
             evLock.withLock { _ in
@@ -219,6 +225,7 @@ public final class TanpuraEngine: @unchecked Sendable {
     public func bend(slot: Int, ratio: Double) {
         guard slot >= 0, slot < slotFrequencies.count, ratio > 0
         else { return }
+        scopeRatio.withLock { if slot < $0.count { $0[slot] = ratio } }
         if pooled {
             evLock.withLock { _ in
                 tanpura_event2(ctx, Int32(slot), 1, ratio)
@@ -274,6 +281,17 @@ public final class TanpuraEngine: @unchecked Sendable {
     public var resetCount: Int { Int(tanpura_reset_count(ctx)) }
 
     public var activeStrings: Int { Int(tanpura_active_count(ctx)) }
+
+    /// SCOPE TELEMETRY (2026-09-01): every slot's sounding pitch (mounted
+    /// × last commanded bend) and output envelope (the kernel's auto-idle
+    /// meter, output units; 0 = idle). Racy display read; poll at UI rate.
+    public func scopeSlots() -> [(hz: Double, level: Double)] {
+        let ratios = scopeRatio.withLock { $0 }
+        return slotFrequencies.indices.map { i in
+            let r = i < ratios.count ? ratios[i] : 1.0
+            return (slotFrequencies[i] * r, tanpura_slot_env(ctx, Int32(i)))
+        }
+    }
 
     /// Render stereo (mono physics through the body EQ + room).
     public func render(frames: Int, outL: UnsafeMutablePointer<Double>,

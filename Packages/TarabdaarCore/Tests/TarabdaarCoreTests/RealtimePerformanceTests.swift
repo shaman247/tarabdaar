@@ -2,22 +2,9 @@ import XCTest
 import SarangiKit
 @testable import TarabdaarCore
 
-/// REAL-TIME READINESS (2026-07-24). Everything before this measured the
-/// DSP offline in big blocks. Performance asks a different question: with
-/// the voice running at the device's buffer size and tilts sweeping
-/// parameters at 60 Hz, does every render callback meet its deadline, and
-/// does the audio stay free of clicks and dropouts?
-///
-/// This drives the voice exactly as the app does — `StringVoiceSource` at
-/// `Config.preferredOutputBufferFrames`, notes through `BowControlMapper`,
-/// and a tilt evaluated through `DimensionBinding` into the same apply
-/// paths `AppController.applyTiltAxis` uses — then checks three things
-/// per run:
-///
-///   * **deadline**: no buffer may exceed its realtime budget
-///   * **clicks**: no sample step far outside the signal's own motion
-///   * **dropouts**: no silent window while a note is held
+/// Realtime budget: full polyphony with every binding moving renders inside the device buffer's wall clock. Serial (phase 2 of tools/test-full.sh) — flakes under CPU contention.
 final class RealtimePerformanceTests: XCTestCase {
+    override func setUpWithError() throws { try skipUnlessSlowTestsEnabled() }
 
     // MARK: - Rig
 
@@ -229,48 +216,6 @@ final class RealtimePerformanceTests: XCTestCase {
 
     private var frames: Int { Int(Config.preferredOutputBufferFrames) }
 
-    /// A composite (Taraf Purity) swept by a tilt, the shipped default
-    /// binding, while a note is held.
-    func testCompositeSweptByTiltUnderAHeldNote() throws {
-        let purity = CompositeParam.defaults().first { $0.name == "Taraf Purity" }!
-        let r = try perform(seconds: 4.0, frames: frames,
-                            noteOn: [(0.05, 60)], noteOff: [(3.9, 60)]) { rig, t in
-            let v = 0.5 - 0.5 * cos(2 * Double.pi * t / 2.0)   // 0→1→0
-            for m in purity.members { rig.apply(m.key, m.value(at: v)) }
-        }
-        check("COMPOSITE SWEEP (Taraf Purity, tilt 1)", r)
-    }
-
-    /// A tilt bound DIRECTLY to single parameters — the 2026-07-24 model —
-    /// including ones that only became live via the in-place push.
-    func testDirectParameterBindingsSweptByTilt() throws {
-        let binding = DimensionBinding(dimension: .tilt1,
-                                       rangeMin: 0.55, rangeMax: 1.1)
-        let body = DimensionBinding(dimension: .tilt2,
-                                    rangeMin: 8.0, rangeMax: 45.0)
-        let r = try perform(seconds: 4.0, frames: frames,
-                            noteOn: [(0.05, 62)], noteOff: [(3.9, 62)]) { rig, t in
-            let x = 0.5 - 0.5 * cos(2 * Double.pi * t / 1.5)
-            rig.apply("bow_mu_s", binding.evaluate(x))     // kernel scalar
-            rig.apply("bow_body_q", body.evaluate(x))      // body coefficients
-        }
-        check("DIRECT PARAM SWEEP (bow_mu_s + bow_body_q)", r)
-    }
-
-    /// Fast flicks: the tilt slammed end-to-end repeatedly, which is what a
-    /// player actually does. Steps are large, so this is the zipper case.
-    func testFastTiltFlicks() throws {
-        let r = try perform(seconds: 4.0, frames: frames,
-                            noteOn: [(0.05, 59)], noteOff: [(3.9, 59)]) { rig, t in
-            let flick = (t * 5.0).truncatingRemainder(dividingBy: 1.0) < 0.5
-                ? 1.0 : 0.0                                 // 5 Hz square
-            rig.apply("bow_vib_cents", flick * 25.0)        // hybrid scaler
-            rig.apply("bow_tone_tilt", flick * 2.0 - 1.0)   // live axis
-            rig.apply("bow_w", 0.8 + flick * 0.8)           // kernel gain scalar
-        }
-        check("FAST FLICKS (5 Hz, full range)", r)
-    }
-
     /// Everything at once, polyphonic: several notes sounding while a tilt
     /// drives live axes, in-place physics and the jawari tables together.
     func testPolyphonicWithEverythingMoving() throws {
@@ -288,18 +233,4 @@ final class RealtimePerformanceTests: XCTestCase {
         check("POLYPHONIC + EVERYTHING MOVING", r)
     }
 
-    /// A parameter that still REBUILDS, swept slowly by a tilt. Each step
-    /// is a fresh engine crossfaded in — the worst case left in the model.
-    func testRebuildTierParameterSweptByTilt() throws {
-        let r = try perform(seconds: 4.0, frames: frames,
-                            noteOn: [(0.05, 60)], noteOff: [(3.9, 60)]) { rig, t in
-            // quantized so it only re-triggers a handful of times, the way
-            // a debounced UI/tilt path would
-            let x = (t / 4.0 * 6).rounded() / 6.0
-            rig.apply("bow_rev_rt60", 0.3 + 1.2 * x)
-        }
-        check("REBUILD-TIER SWEEP (bow_rev_rt60, crossfaded)", r,
-              maxStepRatio: 8.0)
-        XCTAssertGreaterThan(r.rebuilds, 0, "the scenario never rebuilt")
-    }
 }

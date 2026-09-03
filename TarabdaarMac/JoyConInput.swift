@@ -1,6 +1,8 @@
+import Combine
 import CoreBluetooth
 import Foundation
 import GameController
+import TarabdaarCore
 import IOKit.hid
 import simd
 
@@ -44,15 +46,30 @@ import simd
 /// after switching controller generations, the electrical ranges
 /// differ). Protocol per the community RE (Nohzockt/Switch2-Controllers).
 ///
+/// **Two input reports (2026-09-02, per ndeadly/switch2_controller_research):**
+/// the standard characteristic …7FD2 carries the COMMON report 0x05
+/// (buttons 4–7, sticks 0x0A/0x0D, mag 0x19, motion block at 0x2A
+/// with accel i16×3 at 0x30 + gyro at 0x36 — the layout parsed here),
+/// and CC1BBBB5-… is the Joy-Con 2 (L)'s OWN report 0x07 (buttons
+/// 2–3, stick 5–7, a motion-LENGTH byte at 0x0E and a 40-byte PACKED
+/// motion blob at 0x0F whose encoding is undocumented). A real Joy-Con
+/// 2 streams report 0x07 INSTEAD of 0x05 the moment 0x07 is
+/// subscribed — the 2026-08-21 subscribe-everything probe did exactly
+/// that ~1 s before the standard subscribe, so a first-party
+/// controller was parsed by the clone path with report-0x05 IMU
+/// offsets inside the packed blob (±6 g at rest, gyro y/z pinned at
+/// zero, a magnetometer web). So `JoyCon2BLE` subscribes ONLY …7FD2
+/// first and enables the controller-specific characteristic as a
+/// fallback after `altFallbackDelay` of silence.
+///
 /// **Third-party Switch 2 clones (2026-08-21, Mobacon):** impersonate
 /// a Joy-Con 2 byte-perfectly (advertisement AND characteristic
 /// inventory) but ignore all 0x91 commands, stream nothing on the
 /// standard input characteristic (then drop the link after 60 s), and
-/// instead stream a SHIFTED 63-byte report on the CC1BBBB5-…
-/// characteristic with no handshake at all. `JoyCon2BLE` subscribes
-/// both; the alternate stream forwards (only while the standard one
-/// is silent) to `bleAltNotification`, whose header documents the
-/// measured layout. No IMU — the clone's motion region streams zeros.
+/// stream report 0x07 on CC1BBBB5-… with no handshake at all — that
+/// is what the fallback subscribe is for. Its notifications forward
+/// to `bleAltNotification`, whose header documents the measured
+/// layout. No IMU — the clone's motion length stays zero.
 ///
 /// Handlers fire on the main queue; the host's funnels are thread-safe.
 final class JoyConInput: ObservableObject {
@@ -80,7 +97,7 @@ final class JoyConInput: ObservableObject {
     /// THE ARM AXES (2026-08-13): the calibrated three-dimension output
     /// — arm ↕, arm ↔, arm ⟲, each −1…+1 (rest = 0, sweep extremes ±1;
     /// the app-wide tilt convention since 2026-08-18) — from the joint
-    /// solve over the iPad's raw tilt report (`armTick` → `bodyCal`).
+    /// solve over the iPad's raw tilt report (`armTick` → `armCal`).
     /// Non-perpendicular sweeps are separated by the least-squares
     /// solve, which attributes shared attitude motion to whichever
     /// calibrated movement direction explains it. Change-gated +
@@ -98,6 +115,16 @@ final class JoyConInput: ObservableObject {
     /// thread; nil = fusion gone (Joy-Con detached). Display only —
     /// nothing binds to these.
     var onWristAttitude: (((Double, Double, Double)?) -> Void)?
+    /// THE WRIST CONTROL AXES (2026-09-02): wrist ↕, ↔, ⟲ (−1…+1, rest
+    /// 0) from the wrist `TiltCalibrator` over the Joy-Con's fused
+    /// attitude — fires only while a wrist calibration exists;
+    /// change-gated + quantized like the arm axes. Main thread.
+    var onWristAxes: ((Double, Double, Double) -> Void)?
+    /// JOY-CON ACCELERATION (2026-09-02): the gravity-removed
+    /// acceleration magnitude through the strike law + envelope, 0…1
+    /// (unipolar — the host maps it onto its axis), change-gated at
+    /// 1/256, every IMU packet. Main thread. 0 on detach.
+    var onJoyConAccel: ((Double) -> Void)?
 
     // Monitor state for the Setup tab's panel. All written on the main
     // queue; the stick and raw-event fields are throttled to ~15 Hz
@@ -200,92 +227,55 @@ final class JoyConInput: ObservableObject {
     @Published private(set) var yawPinned = false
     private var lastFusedPublish: CFAbsoluteTime = 0
 
-    // ARM CALIBRATION (2026-08-13) — the three iPad tilt axes, guided.
-    // Descended from the 2026-08-12 body calibration with the WRIST
-    // HALF REMOVED (no Joy-Con gravity in the features, no wrist
-    // sweeps, no tilt4): feature vector f ∈ R³ = the iPad's raw tilt
-    // report, and the whole pipeline — capture, PCA per sweep, joint
-    // least squares c = (DᵀD)⁻¹Dᵀ(f − f0), piecewise asymmetric
-    // extents, ROBUST rest merge (rest phase + each sweep's start/end
-    // windows = 7 readings, median → inliers → mean) — runs on the
-    // tilt stream itself, so NO Joy-Con is needed. A guided capture
-    // records a REST pose then three arm sweeps (↕, ↔, rotation);
-    // rest → 0.5, sweep extremes → 0/1. ZL re-captures f0 (quick
-    // re-zero); dpad-up advances, dpad-down redoes the previous phase
-    // (both optional — the panel buttons do the same).
-    struct BodyCal: Codable {
-        var f0: [Double]       // rest feature vector (3)
-        var m: [[Double]]      // solve matrix (3×3)
-        var lo: [Double]       // per-axis negative extent (3, < 0)
-        var hi: [Double]       // per-axis positive extent (3, > 0)
-    }
-    /// Feature/axis count for the arm calibration (the iPad's 3 tilts).
-    static let armDims = 3
-    /// nil = idle; 0 = rest capture; 1…3 = the three sweeps.
-    @Published private(set) var bodyCalStep: Int? = nil
-    @Published private(set) var bodyCalInfo = ""
-    /// Live calibrated arm axes for the panel (0…1 ×3, ~10 Hz).
-    @Published private(set) var bodyTilts: [Double] = []
-    static let bodyCalStepNames = [
-        "REST: hold the arm still in playing position",
-        "Sweep the ARM up and down — start from rest, end near rest",
-        "Sweep the ARM inward and outward — start from rest, end near rest",
-        "Rotate the ARM inward and outward — start from rest, end near rest",
-    ]
-    /// Short sweep names for feedback messages (phases 1…3).
-    static let bodyCalSweepNames = ["ARM ↕", "ARM ↔", "ARM ⟲"]
-    /// Secondary calibration feedback: the last phase's verdict while
-    /// capturing (sample count, both-ways, alignment against earlier
-    /// sweeps), the separation summary or discard advice afterward.
-    @Published private(set) var bodyCalDetail = ""
-    /// Live 3D sample cloud for the Setup panel's rotating scatter —
-    /// per phase (rest + the three sweeps), decimated for display and
-    /// published at ~20 Hz while samples stream in. Kept after the fit
-    /// so the finished capture can still be inspected; cleared when a
-    /// new capture begins. The fit itself always uses the full
-    /// `calSamples`, never this.
-    @Published private(set) var calCloud: [[SIMD3<Double>]] = []
-    private var lastCloudPublish: CFAbsoluteTime = 0
-    /// Calibrated-model geometry for the 3D panel: the rest point plus
-    /// the three solved movement SEGMENTS — each fitted direction
-    /// scaled by its lo/hi extents. Because `m·d = 1` by construction,
-    /// the extents are feature-space lengths along each direction, so
-    /// the segments are exactly the linear model the live solve
-    /// applies. Rebuilt at fit, on load (directions recovered as the
-    /// columns of `m⁻¹`), and on ZL re-zero (f0 moves).
-    struct CalViz {
-        var f0: SIMD3<Double>
-        var axes: [(dir: SIMD3<Double>, lo: Double, hi: Double)]
-    }
-    @Published private(set) var calViz: CalViz?
-    /// EMA-smoothed arm feature vector, updated per incoming message
-    /// (`armSmoothAlpha`). The raw report is 7-bit-quantized attitude
-    /// and a resting arm flickers ±1–2 steps across quantization
-    /// boundaries; unsmoothed, the joint solve AMPLIFIES that (its
-    /// Gram-inverse rows grow with sweep cross-talk) into visibly
-    /// jittering control axes, and the panel marker dances around the
-    /// segment crossing. The smoothed vector feeds the live solve, the
-    /// calibration capture and the marker alike — per-message α means
-    /// fast convergence while moving (60 Hz stream) and strong
-    /// averaging of the sparse rest-jitter messages.
-    private var armSmooth: SIMD3<Double>?
-    private static let armSmoothAlpha = 0.25
-    /// FRAME COALESCING (2026-08-14). The wire delivers ONE AXIS PER
-    /// MESSAGE, so a single 60 Hz report arrives as up to three
-    /// messages a few hundred µs apart — sampling the full vector at
-    /// each one records torn frames (new pitch, stale roll, stale yaw).
-    /// Measured on a circular arm motion: the per-message trail was
-    /// 100% axis-aligned segments with a 90° mean turn (a staircase),
-    /// the burst-merged trail 0% and 4° (the actual circle). Messages
-    /// within this gap update the CURRENT frame in place — trail,
-    /// capture and smoothing all see atomic frames; only a real
-    /// inter-report gap starts a new one.
-    private static let frameGap: CFAbsoluteTime = 0.004
+    // TILT CALIBRATIONS (2026-09-02): two `TiltCalibrator`s (the guided
+    // rest + three-sweep capture, PCA per sweep, joint least squares,
+    // robust rest merge — the machinery of the 2026-08-13 arm
+    // calibration, moved into TarabdaarCore so it can run twice). The
+    // ARM: the iPad's raw tilt report (`feedArmTilt` → `armTick`; no
+    // Joy-Con involvement). The WRIST: the Joy-Con's fused attitude —
+    // gravity pitch/roll + drift-learned relative yaw — ticked from
+    // `processIMU` every IMU packet. The 2026-08-12 joint R⁶ arm+wrist
+    // solve is NOT back: the wrist is an INDEPENDENT capture on the
+    // Joy-Con's own stream. Each calibrator's published state is
+    // forwarded into this object's `objectWillChange` so the Setup
+    // panels, which observe `JoyConInput`, update.
+    let armCal = TiltCalibrator(config: .arm)
+    let wristCal = TiltCalibrator(config: .wrist)
+    private var calSinks: [AnyCancellable] = []
     private var lastArmMsgT: CFAbsoluteTime = 0
-    /// EMA state as of the START of the current frame, so in-place
-    /// burst updates re-derive the smoothed value instead of advancing
-    /// the filter three times per report.
-    private var armSmoothPrev: SIMD3<Double>?
+    /// The latest wrist axes (calibrated only) — the iPad's wrist
+    /// square shows these instead of the raw attitude once calibrated.
+    private var lastWristAxes: (Double, Double, Double)?
+    /// The wrist feature's RELATIVE yaw: the fused yaw's wrap-safe
+    /// increments, drift-rate-learned while quiescent (rate under
+    /// ~0.57°/s, ~10 s constant) and leaked toward zero with a 60 s
+    /// constant — the iPad's tilt-3 law (`MotionManager.updateYaw`), so
+    /// an unpinned gyro yaw can't rail the wrist axis and a held twist
+    /// re-centres over ~a minute (ZL re-zero stays instant).
+    private var yawRel = 0.0
+    private var yawRelBias = 0.0
+    private var lastFusedYaw: Double?
+    private static let yawLeakTau = 60.0
+    /// The Joy-Con acceleration envelope (0…1) + its change gate.
+    private var jcAccelEnv = 0.0
+    private var lastJcAccelSent = 0.0
+    /// Panel readout of the envelope (~10 Hz).
+    @Published private(set) var joyConAccelLevel = 0.0
+
+    init() {
+        for cal in [armCal, wristCal] {
+            cal.objectWillChange
+                .sink { [weak self] _ in self?.objectWillChange.send() }
+                .store(in: &calSinks)
+        }
+        armCal.onAxes = { [weak self] a, b, c in self?.onArmAxes?(a, b, c) }
+        wristCal.onAxes = { [weak self] a, b, c in
+            guard let self else { return }
+            self.lastWristAxes = (a, b, c)
+            self.onWristAxes?(a, b, c)
+        }
+    }
+
     /// Raw-stream trail for the Setup panel's "Received motion (3D)"
     /// view: the UNSMOOTHED per-message feature vectors, last ~8 s.
     /// Not published — the view reads `liveTrace` inside its 60 Hz
@@ -338,7 +328,7 @@ final class JoyConInput: ObservableObject {
     @Published private(set) var jcMagActive = false
     /// Live reads for the Setup panel's 60 Hz TimelineViews — fresher
     /// than a throttled @Published mirror. Main thread only (all these
-    /// buffers and `armSmooth` are written solely on main).
+    /// buffers and the calibrators are written solely on main).
     var liveTrace: [RawTiltSample] { rawBuf }
     var liveAccelTrace: [RawAccelSample] { accelBuf }
     var liveJoyConGyro: [RawAccelSample] { jcGyroBuf }
@@ -346,7 +336,7 @@ final class JoyConInput: ObservableObject {
     var liveJoyConMag: [RawAccelSample] { jcMagBuf }
     var liveJoyConAttitude: [RawAccelSample] { jcAttitudeBuf }
     var liveJoyConLinAccel: [RawAccelSample] { jcLinAccelBuf }
-    var liveArmPos: SIMD3<Double>? { armSmooth }
+    var liveArmPos: SIMD3<Double>? { armCal.livePos }
 
     /// Append one Joy-Con IMU sample set (main thread).
     private func appendJoyConIMU(t: CFAbsoluteTime,
@@ -389,6 +379,16 @@ final class JoyConInput: ObservableObject {
         jcLinAccelBuf = []
         jcFusedActive = false
         onWristAttitude?(nil)
+        lastWristAxes = nil
+        lastFusedYaw = nil
+        yawRel = 0
+        yawRelBias = 0
+        jcAccelEnv = 0
+        joyConAccelLevel = 0
+        if lastJcAccelSent != 0 {
+            lastJcAccelSent = 0
+            onJoyConAccel?(0)
+        }
     }
 
     /// iPad raw accelerometer in (link receive queue) — display only,
@@ -405,65 +405,12 @@ final class JoyConInput: ObservableObject {
             }
         }
     }
-    /// Per-sweep dominant directions, computed as each sweep ends
-    /// (feedback only — the fit recomputes its own).
-    private var calDirs: [[Double]?] = [nil, nil, nil]
-    /// Phase-0 rest mean — the live anchor `evaluateSweep` uses to pick
-    /// each sweep's rest reading (the fit re-picks against the robust
-    /// merged rest).
-    private var calRestMean: [Double]?
-
-    /// Rest-window length used to read a sweep's start/end rest pose
-    /// (a fraction of a second of tilt-report samples). Every sweep
-    /// starts at the rest pose (ending there is good practice), so
-    /// each phase contributes two rest readings — the rest pose is
-    /// never assumed to hold perfectly still across the whole capture.
-    private static let restWindow = 15
-
-    /// Mean of a sweep's first and last `restWindow` samples — its
-    /// start and end rest readings.
-    private static func restWindowMeans(of samples: [[Double]])
-        -> (start: [Double], end: [Double]) {
-        let n = samples.first?.count ?? armDims
-        let m = max(1, min(restWindow, samples.count / 2))
-        var a = [Double](repeating: 0, count: n)
-        var b = a
-        for s in samples.prefix(m) { for i in 0..<n { a[i] += s[i] } }
-        for s in samples.suffix(m) { for i in 0..<n { b[i] += s[i] } }
-        return (a.map { $0 / Double(m) }, b.map { $0 / Double(m) })
-    }
-
-    /// Euclidean distance between two feature vectors.
-    private static func dist(_ a: [Double], _ b: [Double]) -> Double {
-        var d = 0.0
-        for (x, y) in zip(a, b) { d += (x - y) * (x - y) }
-        return d.squareRoot()
-    }
-    private var bodyCal: BodyCal? {
-        didSet {
-            armLock.lock()
-            bodyCalActiveFlag = bodyCal != nil
-            armLock.unlock()
-        }
-    }
-    private var calSamples: [[[Double]]] = []
-    private var lastBodySent: [Double]?
-    private var lastBodyPublish: CFAbsoluteTime = 0
-    /// Arm-only calibration (3-dim). v2 (2026-08-18): the feature space
-    /// moved from 0…1 to −1…+1 tilt values; a v1 record migrates exactly
-    /// in `start()` (f0′ = 2·f0−1, extents ×2 — `m` is built from unit
-    /// directions and is feature-scale-free). The retired 6-dim body
-    /// capture under `tarabdaar.bodyCal.v1` is simply ignored.
-    private static let bodyCalKey = "tarabdaar.armCal.v2"
-    private static let legacyBodyCalKey = "tarabdaar.armCal.v1"
-
     // The ARM input: the iPad's raw tilt report, written from the MIDI
     // thread; the calibration capture and the live solve tick off it
     // (hopped to the main thread) — no Joy-Con involvement.
     private let armLock = NSLock()
     private var armTilt = SIMD3<Double>(0, 0, 0)
     private var armTime: CFAbsoluteTime = 0
-    private var bodyCalActiveFlag = false
 
     private var hidManager: IOHIDManager?
     private var hidDevice: IOHIDDevice?
@@ -571,33 +518,6 @@ final class JoyConInput: ObservableObject {
     }
 
     func start() {
-        // One-time v1 → v2 arm-calibration migration (exact affine).
-        if UserDefaults.standard.data(forKey: Self.bodyCalKey) == nil,
-           let old = UserDefaults.standard.data(forKey: Self.legacyBodyCalKey),
-           var cal = try? JSONDecoder().decode(BodyCal.self, from: old) {
-            cal.f0 = cal.f0.map { $0 * 2 - 1 }
-            cal.lo = cal.lo.map { $0 * 2 }
-            cal.hi = cal.hi.map { $0 * 2 }
-            if let data = try? JSONEncoder().encode(cal) {
-                UserDefaults.standard.set(data, forKey: Self.bodyCalKey)
-            }
-        }
-        if let data = UserDefaults.standard.data(forKey: Self.bodyCalKey),
-           let cal = try? JSONDecoder().decode(BodyCal.self, from: data),
-           cal.f0.count == Self.armDims, cal.m.count == Self.armDims {
-            bodyCal = cal
-            bodyCalInfo = "Calibrated"
-            // Rebuild the panel's model segments: directions are the
-            // columns of m⁻¹ (M·D = I by the joint-solve construction).
-            if let inv = Self.invert(cal.m) {
-                calViz = CalViz(
-                    f0: SIMD3(cal.f0[0], cal.f0[1], cal.f0[2]),
-                    axes: (0..<Self.armDims).map { k in
-                        (SIMD3(inv[0][k], inv[1][k], inv[2][k]),
-                         cal.lo[k], cal.hi[k])
-                    })
-            }
-        }
         GCController.shouldMonitorBackgroundEvents = true
         let nc = NotificationCenter.default
         observers.append(nc.addObserver(
@@ -634,10 +554,10 @@ final class JoyConInput: ObservableObject {
             self.lastAltButtons = nil
             self.bleIMU = []
             self.gHat = nil
-            self.bodyTilts = []
-            self.lastBodySent = nil
             self.clearJoyConIMU()
-            if self.bodyCalStep != nil { self.cancelBodyCalibration() }
+            // A running WRIST capture has lost its stream; the arm
+            // calibration never needed the Joy-Con and carries on.
+            if self.wristCal.isCapturing { self.wristCal.cancel() }
             if self.attached == nil { self.connectedName = nil }
         }
         ble.onNotification = { [weak self] data in
@@ -739,6 +659,7 @@ final class JoyConInput: ObservableObject {
     /// SAME funnels as the standard parse; a change in the button
     /// bytes still dumps the full report for future mapping.
     private var lastAltButtons: [UInt8]?
+    private var altMotionLengthLogged = false
     private func bleAltNotification(_ d: Data) {
         guard d.count >= 8 else { return }
         let btn = [d[2], d[3], d[4]]
@@ -766,29 +687,19 @@ final class JoyConInput: ObservableObject {
         let s0 = Double(Int(d[5]) | (Int(d[6] & 0x0F) << 8))
         let s1 = Double((Int(d[6]) >> 4) | (Int(d[7]) << 4))
         processRawStick(s0, s1)
-        // IMU: zeros until the motion-enable probe finds the clone's
-        // command channel (see `startMotionProbe`). Offsets assumed to
-        // match the standard report (accel 0x30, gyro 0x36, mag 0x19)
-        // until measured otherwise; all-zero frames are inert — the
-        // fusion guards on |a| and the panels gate on nonzero.
-        if d.count >= 0x3C {
-            func i16(_ o: Int) -> Double {
-                Double(Int16(bitPattern: UInt16(d[o]) | (UInt16(d[o + 1]) << 8)))
-            }
-            let accelG = SIMD3(i16(0x30), i16(0x32), i16(0x34)) / 4096.0
-            let gyroDps = SIMD3(i16(0x36), i16(0x38), i16(0x3A)) / 16.4
-            let mag: SIMD3<Double>? = SIMD3(i16(0x19), i16(0x1B), i16(0x1D))
-            if accelG != .zero || gyroDps != .zero {
-                processIMU(accelG: accelG, gyroRadPerSec: gyroDps * .pi / 180,
-                           mag: mag)
-            }
-            let now = CFAbsoluteTimeGetCurrent()
-            appendJoyConIMU(t: now, gyroDps: gyroDps, accelG: accelG, mag: mag)
-            if now - lastIMUPublish > 0.1 {
-                lastIMUPublish = now
-                bleIMU = [accelG.x, accelG.y, accelG.z,
-                          gyroDps.x, gyroDps.y, gyroDps.z]
-            }
+        // IMU: report 0x07 carries motion as a LENGTH byte at 0x0E
+        // ({0, 30, 40}) followed by a packed blob at 0x0F whose
+        // encoding nobody has decoded (it is NOT i16 triplets — the
+        // 2026-09-02 misparse read it at the report-0x05 offsets and
+        // showed ±6 g at rest). Not parsed: a real Joy-Con 2 never
+        // reaches this path in normal operation (its raw IMU rides
+        // report 0x05 on the standard characteristic), and the clone
+        // streams length 0. Log the length once so a device that DOES
+        // fill it is visible in Console.
+        if d.count > 0x0E, d[0x0E] != 0, !altMotionLengthLogged {
+            altMotionLengthLogged = true
+            NSLog("Tarabdaar ble: alt report motion length %d — packed format, not decoded",
+                  d[0x0E])
         }
         let now = CFAbsoluteTimeGetCurrent()
         if now - lastEventPublish > 0.2 {
@@ -1284,27 +1195,24 @@ final class JoyConInput: ObservableObject {
             armTilt[axis] = value
             armTime = CFAbsoluteTimeGetCurrent()
         }
-        let consumed = bodyCalActiveFlag
         let f = [armTilt.x, armTilt.y, armTilt.z]
         armLock.unlock()
+        let consumed = armCal.isActive
         // Always tick — even when nothing consumes the value, the tick
         // feeds the Setup panel's raw-stream scope and the marker.
         DispatchQueue.main.async { [weak self] in self?.armTick(f) }
         return consumed
     }
 
-    /// One arm-stream tick on the main thread: append to the running
-    /// capture phase, or solve and drive the three calibrated arm axes.
+    /// One arm-stream tick on the main thread: the raw trail (frame-
+    /// coalesced — the wire delivers one axis per message; see
+    /// `TiltCalibrator.frameGap`), then the calibrator (capture or
+    /// solve → `onArmAxes`).
     private func armTick(_ f: [Double]) {
         let now = CFAbsoluteTimeGetCurrent()
         let raw = SIMD3(f[0], f[1], f[2])
-        let newFrame = now - lastArmMsgT >= Self.frameGap
+        let newFrame = now - lastArmMsgT >= TiltCalibrator.frameGap
         lastArmMsgT = now
-        if newFrame { armSmoothPrev = armSmooth ?? raw }
-        let base = armSmoothPrev ?? raw
-        let sm = base + (raw - base) * Self.armSmoothAlpha
-        armSmooth = sm
-        let fs = [sm.x, sm.y, sm.z]
         let sample = RawTiltSample(t: now, raw: raw)
         if newFrame || rawBuf.isEmpty {
             rawBuf.append(sample)
@@ -1315,479 +1223,28 @@ final class JoyConInput: ObservableObject {
             rawBuf.removeAll { $0.t < now - Self.traceWindow }
         }
         if !traceActive { traceActive = true }
-        if let step = bodyCalStep {
-            if newFrame || calSamples[step].isEmpty {
-                calSamples[step].append(fs)
-            } else {
-                calSamples[step][calSamples[step].count - 1] = fs
-            }
-            let count = calSamples[step].count
-            if count % 15 == 0 {
-                let need = step == 0 ? 20 : 30
-                bodyCalInfo = Self.bodyCalStepNames[step]
-                    + (count >= need ? "  (\(count) samples ✓)"
-                                     : "  (\(count) of \(need) samples)")
-            }
-            if now - lastCloudPublish > 0.05 {
-                lastCloudPublish = now
-                publishCloud()
-            }
-            return
-        }
-        guard let cal = bodyCal else { return }
-        let n = Self.armDims
-        var out = [Double](repeating: 0, count: n)
-        for k in 0..<n {
-            var c = 0.0
-            for i in 0..<n { c += cal.m[k][i] * (fs[i] - cal.f0[i]) }
-            out[k] = c >= 0 ? min(c / cal.hi[k], 1)
-                            : -min(c / cal.lo[k], 1)
-        }
-        let q = out.map { ($0 * 256).rounded() / 256 }
-        if q != lastBodySent {
-            lastBodySent = q
-            onArmAxes?(q[0], q[1], q[2])
-        }
-        if now - lastBodyPublish > 0.1 {
-            lastBodyPublish = now
-            bodyTilts = q
-        }
+        armCal.tick(raw, at: now)
     }
 
-    /// Snapshot `calSamples` for the 3D scatter, decimated to ≤600
-    /// points per phase (display only — the fit keeps every sample).
-    private func publishCloud() {
-        calCloud = calSamples.map { phase in
-            let step = max(1, phase.count / 600)
-            return phase.enumerated().compactMap { i, s in
-                i % step == 0 ? SIMD3(s[0], s[1], s[2]) : nil
-            }
-        }
+    // MARK: Calibration control (panel buttons + dpad-up/down + ZL)
+
+    /// The calibration currently CAPTURING — the dpad-up/down target
+    /// (the arm first if both somehow run at once).
+    var capturingCalibrator: TiltCalibrator? {
+        armCal.isCapturing ? armCal : (wristCal.isCapturing ? wristCal : nil)
     }
 
-    /// Recompute the MIDI-thread-readable consume flag: the calibration
-    /// owns the iPad's tilt values whenever one exists OR one is being
-    /// captured.
-    private func refreshArmConsumeFlag() {
-        armLock.lock()
-        bodyCalActiveFlag = bodyCal != nil || bodyCalStep != nil
-        armLock.unlock()
-    }
+    /// Dpad-up: advance whichever capture is running (no-op otherwise).
+    func advanceCalibration() { capturingCalibrator?.advance() }
 
-    // MARK: Arm calibration control (panel buttons + dpad-up/down)
+    /// Dpad-down during a capture: step it back one phase.
+    func redoPreviousCalibrationStep() { capturingCalibrator?.redoPrevious() }
 
-    func beginBodyCalibration() {
-        calSamples = Array(repeating: [], count: 4)
-        calDirs = [nil, nil, nil]
-        calRestMean = nil
-        bodyCalDetail = ""
-        bodyCalStep = 0
-        bodyCalInfo = Self.bodyCalStepNames[0]
-        publishCloud()
-        refreshArmConsumeFlag()
-    }
-
-    /// Advance to the next phase; after the last sweep, fit. Also on
-    /// dpad-up, so the controller hand can step through alone. A phase
-    /// that hasn't captured enough samples refuses to advance (the fit
-    /// would discard the whole run at the end anyway) and says why;
-    /// each completed sweep gets an instant verdict (`evaluateSweep`)
-    /// so a doomed run is visible long before the fit.
-    func advanceBodyCalibration() {
-        guard let step = bodyCalStep else { return }
-        let need = step == 0 ? 20 : 30
-        guard calSamples[step].count >= need else {
-            bodyCalDetail = "⚠ Can't advance — only \(calSamples[step].count) of \(need) samples; if the count isn't rising, the iPad tilt stream isn't flowing"
-            return
-        }
-        let n = Self.armDims
-        if step == 0 {
-            var mean = [Double](repeating: 0, count: n)
-            for s in calSamples[0] { for i in 0..<n { mean[i] += s[i] } }
-            for i in 0..<n { mean[i] /= Double(calSamples[0].count) }
-            calRestMean = mean
-            bodyCalDetail = "✓ Rest captured (\(calSamples[0].count) samples)"
-        } else if !evaluateSweep(step) {
-            // A fatally bad sweep (one-sided, or a near-duplicate of an
-            // earlier one) redoes ITSELF immediately — continuing the
-            // remaining phases would only postpone the discard to the
-            // fit. Samples clear; the phase prompt stays.
-            calSamples[step] = []
-            bodyCalInfo = Self.bodyCalStepNames[step] + "  — REDO"
-            publishCloud()
-            return
-        }
-        if step < 3 {
-            bodyCalStep = step + 1
-            bodyCalInfo = Self.bodyCalStepNames[step + 1]
-        } else {
-            bodyCalStep = nil
-            fitBodyCalibration()
-        }
-        refreshArmConsumeFlag()
-    }
-
-    /// Verdict when a sweep phase ends: its dominant movement direction,
-    /// whether it returned to rest, whether it crossed rest both ways,
-    /// and how aligned it is with the sweeps already captured. Returns
-    /// false when the sweep must be REDONE (the caller clears it and
-    /// stays on the phase). Extents are measured against the sweep's OWN
-    /// start/end rest readings, not the phase-0 rest — the rest pose
-    /// drifts slightly between phases, and judging against a stale rest
-    /// is how a genuine both-ways sweep used to read one-sided. ≥95%
-    /// alignment with an earlier sweep also fails; 80–95% warns but
-    /// advances (some alignment is physically expected — the three arm
-    /// motions overlap in attitude space). The fit re-derives everything
-    /// jointly; this is the early exit, not the authority.
-    private func evaluateSweep(_ step: Int) -> Bool {
-        let idx = step - 1
-        let name = Self.bodyCalSweepNames[idx]
-        let samples = calSamples[step]
-        let (startRest, endRest) = Self.restWindowMeans(of: samples)
-        // The sweep's rest reference: whichever of its start/end windows
-        // sits closer to the phase-0 rest. Ending back at rest is GOOD
-        // PRACTICE, not a requirement — a player who can't reproduce
-        // the exact rest pose after a sweep must not be forced to redo;
-        // the off-rest reading is simply ignored (the fit re-picks
-        // against the robust merged rest).
-        let anchor = calRestMean ?? startRest
-        let startOff = Self.dist(startRest, anchor)
-        let endOff = Self.dist(endRest, anchor)
-        let local = startOff <= endOff ? startRest : endRest
-        let dir = Self.dominantDirection(of: samples)
-        var lo = 0.0, hi = 0.0
-        for s in samples {
-            var c = 0.0
-            for i in 0..<dir.count { c += dir[i] * (s[i] - local[i]) }
-            lo = min(lo, c)
-            hi = max(hi, c)
-        }
-        // Feature-space thresholds doubled 2026-08-18 with the 0…1 →
-        // −1…+1 tilt rescale (all distances doubled; behavior identical).
-        guard hi > 0.04, -lo > 0.04 else {
-            calDirs[idx] = nil
-            bodyCalDetail = String(
-                format: "⚠ %@ was one-sided about its rest (%+.3f / %+.3f, need ±0.04) — redo, sweeping past the rest pose both ways; if rest sits at one end of this motion's range, the motion can't calibrate.",
-                name, lo, hi)
-            return false
-        }
-        var worst = 0.0
-        var worstIdx = -1
-        for j in 0..<idx {
-            guard let other = calDirs[j] else { continue }
-            let cos = Self.alignment(dir, other)
-            if cos > worst { worst = cos; worstIdx = j }
-        }
-        let pct = Int((worst * 100).rounded())
-        if worstIdx >= 0, worst >= 0.95 {
-            calDirs[idx] = nil
-            bodyCalDetail = "⚠ \(name) was \(pct)% aligned with \(Self.bodyCalSweepNames[worstIdx]) — near-identical movements can't be separated; redo with a distinct motion (or Cancel if \(Self.bodyCalSweepNames[worstIdx]) was the bad capture)"
-            return false
-        }
-        calDirs[idx] = dir
-        var msg = "\(name) captured (\(calSamples[step].count) samples)"
-        if max(startOff, endOff) > 0.1 {
-            msg += String(
-                format: ", %@ sat %.3f off rest (fine — using the %@ reading)",
-                startOff > endOff ? "start" : "end", max(startOff, endOff),
-                startOff > endOff ? "end" : "start")
-        }
-        var warning = ""
-        if worstIdx >= 0 {
-            if worst >= 0.8 {
-                warning = "\(pct)% aligned with \(Self.bodyCalSweepNames[worstIdx]) — separable, but the axes will cross-talk; consider Cancel and a cleaner run"
-            } else {
-                msg += ", closest to \(Self.bodyCalSweepNames[worstIdx]) at \(pct)%"
-            }
-        }
-        bodyCalDetail = warning.isEmpty ? "✓ \(msg)" : "⚠ \(msg) — \(warning)"
-        return true
-    }
-
-    /// |cos| between two direction vectors, defensively normalized.
-    private static func alignment(_ a: [Double], _ b: [Double]) -> Double {
-        let dot = zip(a, b).reduce(0) { $0 + $1.0 * $1.1 }
-        let la = (a.reduce(0) { $0 + $1 * $1 }).squareRoot()
-        let lb = (b.reduce(0) { $0 + $1 * $1 }).squareRoot()
-        guard la > 1e-12, lb > 1e-12 else { return 0 }
-        return abs(dot / (la * lb))
-    }
-
-    /// Step BACK one phase and re-capture it — the current phase's
-    /// partial samples and the previous phase's samples are cleared,
-    /// everything captured before them stands. Dpad-down during a
-    /// running calibration triggers this too (mirror of dpad-up =
-    /// advance), so the controller hand can back up alone.
-    func redoPreviousBodyCalibrationStep() {
-        guard let step = bodyCalStep, step > 0 else { return }
-        calSamples[step] = []
-        calSamples[step - 1] = []
-        if step == 1 {
-            calRestMean = nil
-        } else {
-            calDirs[step - 2] = nil
-        }
-        bodyCalStep = step - 1
-        bodyCalInfo = Self.bodyCalStepNames[step - 1] + "  — redo"
-        bodyCalDetail = ""
-        publishCloud()
-        refreshArmConsumeFlag()
-    }
-
-    func cancelBodyCalibration() {
-        bodyCalStep = nil
-        calSamples = []
-        bodyCalDetail = ""
-        bodyCalInfo = bodyCal != nil ? "Calibrated" : ""
-        refreshArmConsumeFlag()
-    }
-
-    /// Quick re-zero (ZL): the CURRENT pose becomes rest (0 on all
-    /// three arm axes) without re-fitting the directions.
+    /// ZL: the CURRENT poses become rest on BOTH calibrations (0 on
+    /// every arm and wrist axis) without re-fitting the directions.
     func recenterBody() {
-        guard var cal = bodyCal else { return }
-        // Prefer the smoothed vector — a re-zero on a raw sample would
-        // bake up to ±2 quantization steps of flicker into f0.
-        let arm: SIMD3<Double>
-        if let sm = armSmooth {
-            arm = sm
-        } else {
-            armLock.lock()
-            arm = armTilt
-            armLock.unlock()
-        }
-        cal.f0 = [arm.x, arm.y, arm.z]
-        bodyCal = cal
-        calViz?.f0 = arm
-        persistBodyCal()
-    }
-
-    private func persistBodyCal() {
-        if let cal = bodyCal, let data = try? JSONEncoder().encode(cal) {
-            UserDefaults.standard.set(data, forKey: Self.bodyCalKey)
-        }
-    }
-
-    /// Fit the joint 4-axis map from the recorded phases. Directions by
-    /// PCA per sweep, cross-talk removed by the joint pseudo-inverse,
-    /// extents measured through the final solve (so they include the
-    /// cross-talk correction), signs oriented so each sweep's dominant
-    /// side is positive.
-    private func fitBodyCalibration() {
-        let n = Self.armDims
-        let rest = calSamples[0]
-        guard rest.count >= 20 else {
-            bodyCalInfo = "Discarded — rest phase too short"
-            refreshArmConsumeFlag()
-            return
-        }
-        // The rest pose is measured SEVEN times — the rest phase plus
-        // each sweep's start and end windows — and merged ROBUSTLY:
-        // component-wise median, then the mean of the readings that
-        // agree with it. A player who doesn't reliably return to the
-        // exact rest pose leaves off-rest readings in the set; they get
-        // rejected as outliers instead of biasing f0 or failing the
-        // capture. Each sweep's extents are then measured against its
-        // own nearest inlier reading (start or end; merged f0 if
-        // neither qualifies).
-        var readings: [[Double]] = []
-        var mean0 = [Double](repeating: 0, count: n)
-        for s in rest { for i in 0..<n { mean0[i] += s[i] } }
-        for i in 0..<n { mean0[i] /= Double(rest.count) }
-        readings.append(mean0)
-
-        var dirs: [[Double]] = []
-        var windows: [(start: [Double], end: [Double])] = []
-        for k in 1...n {
-            let sweep = calSamples[k]
-            guard sweep.count >= 30 else {
-                bodyCalInfo = "Discarded — sweep \(k) (\(Self.bodyCalSweepNames[k - 1])) too short (\(sweep.count) of 30 samples)"
-                refreshArmConsumeFlag()
-                return
-            }
-            dirs.append(Self.dominantDirection(of: sweep))
-            let w = Self.restWindowMeans(of: sweep)
-            windows.append(w)
-            readings.append(w.start)
-            readings.append(w.end)
-        }
-
-        var med = [Double](repeating: 0, count: n)
-        for i in 0..<n {
-            let col = readings.map { $0[i] }.sorted()
-            med[i] = col[col.count / 2]
-        }
-        let dists = readings.map { Self.dist($0, med) }
-        let tol = max(0.1, 2 * dists.sorted()[dists.count / 2])
-        let inliers = zip(readings, dists).filter { $0.1 <= tol }.map { $0.0 }
-        var f0 = [Double](repeating: 0, count: n)
-        for e in inliers { for i in 0..<n { f0[i] += e[i] } }
-        for i in 0..<n { f0[i] /= Double(max(inliers.count, 1)) }
-        if inliers.isEmpty { f0 = med }
-        var restSpread = 0.0
-        for e in inliers { restSpread = max(restSpread, Self.dist(e, f0)) }
-        let rejected = readings.count - max(inliers.count, 1)
-
-        var localRests: [[Double]] = []
-        for w in windows {
-            let ds = Self.dist(w.start, f0)
-            let de = Self.dist(w.end, f0)
-            let best = ds <= de ? w.start : w.end
-            localRests.append(min(ds, de) <= tol ? best : f0)
-        }
-
-        // Name the failure before it becomes a numerical one: the most-
-        // aligned pair of sweep directions. Some alignment is expected
-        // (the three arm motions overlap in attitude space); past ~95%
-        // the joint solve amplifies cross-talk ~10× and the fit is junk
-        // — the Gram inversion below fails only at near-exact parallels,
-        // so it stays as the last-resort backstop.
-        var worst = 0.0
-        var worstA = 0
-        var worstB = 1
-        for a in 0..<n {
-            for b in (a + 1)..<n {
-                let cos = Self.alignment(dirs[a], dirs[b])
-                if cos > worst { worst = cos; worstA = a; worstB = b }
-            }
-        }
-        let worstPct = Int((worst * 100).rounded())
-        let worstPair = "sweeps \(worstA + 1) (\(Self.bodyCalSweepNames[worstA])) and \(worstB + 1) (\(Self.bodyCalSweepNames[worstB]))"
-
-        var gram = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
-        for a in 0..<n {
-            for b in 0..<n {
-                gram[a][b] = zip(dirs[a], dirs[b]).reduce(0) { $0 + $1.0 * $1.1 }
-            }
-        }
-        let gramInverse = Self.invert(gram)
-        guard worst < 0.95, let gInv = gramInverse else {
-            bodyCalInfo = "Discarded — \(worstPair) were nearly identical movements (\(worstPct)% aligned)"
-            bodyCalDetail = "Redo with more distinct motions — three clearly different arm movements (up/down, in/out, rotation)"
-            refreshArmConsumeFlag()
-            return
-        }
-        var m = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
-        for k in 0..<n {
-            for i in 0..<n {
-                for a in 0..<n { m[k][i] += gInv[k][a] * dirs[a][i] }
-            }
-        }
-
-        var lo = [Double](repeating: 0, count: n)
-        var hi = [Double](repeating: 0, count: n)
-        var flipped = [Bool](repeating: false, count: n)
-        for k in 0..<n {
-            // Extents about the sweep's own local rest — robust to the
-            // rest pose drifting between phases.
-            for s in calSamples[k + 1] {
-                var c = 0.0
-                for i in 0..<n { c += m[k][i] * (s[i] - localRests[k][i]) }
-                lo[k] = min(lo[k], c)
-                hi[k] = max(hi[k], c)
-            }
-            if -lo[k] > hi[k] {          // dominant side positive
-                for i in 0..<n { m[k][i] = -m[k][i] }
-                (lo[k], hi[k]) = (-hi[k], -lo[k])
-                flipped[k] = true        // keep the viz direction in step
-            }
-            guard hi[k] > 0.04, lo[k] < -0.04 else {
-                bodyCalInfo = "Discarded — sweep \(k + 1) (\(Self.bodyCalSweepNames[k])) didn't move both ways from rest"
-                bodyCalDetail = "Each sweep must cross the rest pose in both directions — e.g. ARM ↕ goes above AND below where the arm rested"
-                refreshArmConsumeFlag()
-                return
-            }
-        }
-
-        bodyCal = BodyCal(f0: f0, m: m, lo: lo, hi: hi)
-        calViz = CalViz(
-            f0: SIMD3(f0[0], f0[1], f0[2]),
-            axes: (0..<n).map { k in
-                let sign = flipped[k] ? -1.0 : 1.0
-                return (SIMD3(dirs[k][0], dirs[k][1], dirs[k][2]) * sign,
-                        lo[k], hi[k])
-            })
-        persistBodyCal()
-        calSamples = []
-        bodyCalInfo = String(
-            format: "Calibrated · extents %@",
-            (0..<n).map { String(format: "%.2f/%.2f", -lo[$0], hi[$0]) }
-                .joined(separator: "  "))
-        bodyCalDetail = String(
-            format: "Axis separation: closest sweep pair %@ at %d%% aligned (lower separates more cleanly) · rest: %d of %d readings agreed (±%.3f)%@",
-            worstPair, worstPct, readings.count - rejected, readings.count,
-            restSpread,
-            rejected > 0 ? ", \(rejected) off-rest reading\(rejected == 1 ? "" : "s") ignored" : "")
-        NSLog("Tarabdaar: arm calibration fitted — %@ · %@",
-              bodyCalInfo, bodyCalDetail)
-        refreshArmConsumeFlag()
-    }
-
-    /// Dominant movement direction of a sample cloud — the covariance's
-    /// top eigenvector by power iteration, taken about the cloud's OWN
-    /// mean. About-the-mean is load-bearing: the original code took the
-    /// covariance about the REST pose, so a sweep whose average pose sat
-    /// even slightly off rest (postural settling between phases, drift)
-    /// had a constant-offset term N·(μ−f0)(μ−f0)ᵀ that outweighed the
-    /// motion's scatter, rotating the "direction" toward the offset —
-    /// and a genuine both-ways sweep then projected strictly one-sided
-    /// (the "+0.000 / +0.395" failure). Unit length for any cloud with
-    /// spread; a degenerate (motionless) cloud returns the un-normalized
-    /// all-ones seed, which the extent checks and Gram backstop reject
-    /// downstream.
-    private static func dominantDirection(of samples: [[Double]]) -> [Double] {
-        let n = samples.first?.count ?? armDims
-        var mean = [Double](repeating: 0, count: n)
-        for s in samples { for i in 0..<n { mean[i] += s[i] } }
-        for i in 0..<n { mean[i] /= Double(max(samples.count, 1)) }
-        var cov = [Double](repeating: 0, count: n * n)
-        for s in samples {
-            for i in 0..<n {
-                let di = s[i] - mean[i]
-                for j in 0..<n { cov[i * n + j] += di * (s[j] - mean[j]) }
-            }
-        }
-        var v = [Double](repeating: 1, count: n)
-        for _ in 0..<100 {
-            var w = [Double](repeating: 0, count: n)
-            for i in 0..<n {
-                for j in 0..<n { w[i] += cov[i * n + j] * v[j] }
-            }
-            let len = (w.reduce(0) { $0 + $1 * $1 }).squareRoot()
-            guard len > 1e-12 else { break }
-            v = w.map { $0 / len }
-        }
-        return v
-    }
-
-    /// n×n inverse by Gauss-Jordan with partial pivoting.
-    private static func invert(_ a: [[Double]]) -> [[Double]]? {
-        let n = a.count
-        var m = a
-        var inv = (0..<n).map { r in
-            (0..<n).map { c in r == c ? 1.0 : 0.0 }
-        }
-        for col in 0..<n {
-            var p = col
-            for r in (col + 1)..<n where abs(m[r][col]) > abs(m[p][col]) { p = r }
-            guard abs(m[p][col]) > 1e-9 else { return nil }
-            m.swapAt(col, p)
-            inv.swapAt(col, p)
-            let d = m[col][col]
-            for j in 0..<n {
-                m[col][j] /= d
-                inv[col][j] /= d
-            }
-            for r in 0..<n where r != col {
-                let f = m[r][col]
-                guard f != 0 else { continue }
-                for j in 0..<n {
-                    m[r][j] -= f * m[col][j]
-                    inv[r][j] -= f * inv[col][j]
-                }
-            }
-        }
-        return inv
+        armCal.recenter()
+        wristCal.recenter()
     }
 
     /// One fused IMU step (accel in g; gyro rad/s; mag raw units,
@@ -1869,8 +1326,27 @@ final class JoyConInput: ObservableObject {
         let att = SIMD3(atan2(-g.x, (g.y * g.y + g.z * g.z).squareRoot()),
                         atan2(g.y, g.z),
                         yaw)
+        let lin = accelG - g
         jcAttitudeBuf.append(RawAccelSample(t: now, a: att))
-        jcLinAccelBuf.append(RawAccelSample(t: now, a: accelG - g))
+        jcLinAccelBuf.append(RawAccelSample(t: now, a: lin))
+        // THE WRIST FEATURE (2026-09-02): gravity pitch/roll plus the
+        // relative yaw (see `yawRel`), all at ±90° full scale, −1…+1 —
+        // the arm calibration's convention — into the wrist calibrator
+        // every packet (capture, or solve → `onWristAxes`).
+        updateRelativeYaw(att.z, dt: dt)
+        let wristF = SIMD3(att.x, att.y, yawRel) / (.pi / 2)
+        wristCal.tick(simd_clamp(wristF, SIMD3(repeating: -1), SIMD3(repeating: 1)),
+                      at: now)
+        // THE JOY-CON ACCELERATION AXIS (2026-09-02): |accel − ĝ| through
+        // the strike law and the iPad tracker's fast-attack / 150 ms-
+        // decay envelope, 0…1, change-gated at 1/256.
+        jcAccelEnv = max(StrikeLaw.scale01(simd_length(lin)),
+                         jcAccelEnv * exp(-dt / StrikeLaw.envelopeTau))
+        let qa = (jcAccelEnv * 256).rounded() / 256
+        if qa != lastJcAccelSent {
+            lastJcAccelSent = qa
+            onJoyConAccel?(qa)
+        }
         if let first = jcAttitudeBuf.first, first.t < now - Self.traceWindow {
             jcAttitudeBuf.removeAll { $0.t < now - Self.traceWindow }
             jcLinAccelBuf.removeAll { $0.t < now - Self.traceWindow }
@@ -1880,6 +1356,13 @@ final class JoyConInput: ObservableObject {
             lastFusedPublish = now
             let deg = 180.0 / .pi
             fusedAttitude = [att.x * deg, att.y * deg, att.z * deg]
+            joyConAccelLevel = qa
+            // Calibrated: the iPad's wrist square mirrors the SOLVED
+            // wrist axes (the arm square's rule); raw attitude otherwise.
+            if wristCal.isCalibrated, let w = lastWristAxes {
+                onWristAttitude?(w)
+                return
+            }
             // Wrist display axes for the iPad square: pitch/roll at ±90°
             // full scale (the iPad's own-attitude convention), yaw
             // wrapped to ±180° (the integrator is continuous). −1…+1.
@@ -1893,6 +1376,23 @@ final class JoyConInput: ObservableObject {
                               disp(att.y, fullScale: .pi / 2),
                               disp(yawWrapped, fullScale: .pi)))
         }
+    }
+
+    /// The wrist feature's yaw: wrap-safe increments of the fused yaw,
+    /// drift rate learned while quiescent and subtracted, leaked toward
+    /// zero with `yawLeakTau` — the iPad's `MotionManager.updateYaw`.
+    private func updateRelativeYaw(_ rawYaw: Double, dt: Double) {
+        if let last = lastFusedYaw {
+            var dy = rawYaw - last
+            if dy > .pi { dy -= 2 * .pi } else if dy < -.pi { dy += 2 * .pi }
+            let rate = dy / dt
+            if abs(rate - yawRelBias) < 0.01 {
+                yawRelBias += (rate - yawRelBias) * min(1, dt / 10)
+            }
+            yawRel += dy - yawRelBias * dt
+            yawRel -= yawRel * (dt / Self.yawLeakTau)
+        }
+        lastFusedYaw = rawYaw
     }
 
     private func noteRawEvent(_ element: GCControllerElement) {
@@ -1989,6 +1489,17 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var probeStarted = false
     private var probeStep = -1
     private var altMotionSeen = false
+    /// Notify-capable characteristics OTHER than the standard input and
+    /// command-response ones (the controller-specific report 0x07 char
+    /// among them). Subscribed only by `scheduleAltFallback` — a real
+    /// Joy-Con 2 switches to report 0x07 and silences report 0x05 the
+    /// moment 0x07 is enabled, which is what broke the IMU parse on
+    /// 2026-09-02.
+    private var deferredNotifyChars: [CBCharacteristic] = []
+    /// How long the standard input characteristic may stay silent after
+    /// its subscribe before the clone fallback subscribes the rest. A
+    /// real Joy-Con 2 streams within ~100 ms of the CCCD write.
+    static let altFallbackDelay: TimeInterval = 2.0
 
     func start() {
         central = CBCentralManager(delegate: self, queue: .main)
@@ -2119,17 +1630,21 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         // silently. A READ does surface it, and macOS reacts by
         // initiating SMP pairing automatically. So read every readable
         // characteristic (worst case we learn its bytes — the input
-        // char's read may be a live report snapshot), and subscribe
-        // every notify-capable one in case input streams somewhere
-        // nonstandard. Log-only; the real init stays in maybeBeginInit.
+        // char's read may be a live report snapshot). The other
+        // notify-capable characteristics are only COLLECTED here: the
+        // controller-specific input char is among them, and enabling
+        // it silences the standard report on a real Joy-Con 2, so the
+        // subscribe waits for `scheduleAltFallback`. Log-only; the
+        // real init stays in maybeBeginInit.
         for ch in service.characteristics ?? [] {
             if ch.properties.contains(.read) {
                 p.readValue(for: ch)
             }
             if ch.properties.contains(.notify),
                ch.uuid != Self.inputCharacteristic,
-               ch.uuid != Self.commandResponseCharacteristic {
-                p.setNotifyValue(true, for: ch)
+               ch.uuid != Self.commandResponseCharacteristic,
+               !deferredNotifyChars.contains(where: { $0.uuid == ch.uuid }) {
+                deferredNotifyChars.append(ch)
             }
             if ch.properties.contains(.write)
                 || ch.properties.contains(.writeWithoutResponse),
@@ -2149,6 +1664,26 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 NSLog("Tarabdaar ble: no command channel — subscribing input directly")
                 p.setNotifyValue(true, for: input)
                 self.onConnect?(p.name ?? "Joy-Con 2")
+                self.scheduleAltFallback(p)
+            }
+        }
+    }
+
+    /// CLONE FALLBACK (2026-09-02). `altFallbackDelay` after the
+    /// standard input subscribe, if not one report 0x05 notification
+    /// has arrived, subscribe every other notify-capable characteristic
+    /// — the controller-specific report 0x07 char (CC1BBBB5-… on a
+    /// left Joy-Con 2) is where the Mobacon clone streams. A real
+    /// Joy-Con 2 has been streaming for ~1.9 s by now and never takes
+    /// this path, so its report 0x05 IMU parse stays intact.
+    private func scheduleAltFallback(_ p: CBPeripheral) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.altFallbackDelay) { [weak self] in
+            guard let self, self.peripheral === p else { return }
+            guard self.notifCount == 0 else { return }
+            NSLog("Tarabdaar ble: standard input silent for %.1f s — subscribing %d alternate characteristic(s) (clone fallback)",
+                  Self.altFallbackDelay, self.deferredNotifyChars.count)
+            for ch in self.deferredNotifyChars {
+                p.setNotifyValue(true, for: ch)
             }
         }
     }
@@ -2181,6 +1716,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 guard let self, self.peripheral === p else { return }
                 p.setNotifyValue(true, for: input)
                 self.onConnect?(p.name ?? "Joy-Con 2")
+                self.scheduleAltFallback(p)
             }),
         ]
         for (delay, name, action) in steps {
@@ -2225,10 +1761,17 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// FEATURE_MAGNETOMETER (trevlars protocol constants) so the mag
     /// block at 0x19 streams too — without it that field stays zero
     /// and the mag panel never appears.
+    ///
+    /// The two commands are SPACED (2026-09-02): written back to back
+    /// without response, the init's ack came back as all zeros and
+    /// motion stayed off — it only armed when the clone probe happened
+    /// to re-send the pair 150 ms apart.
     private func enableFeatures() {
         let flags: [UInt8] = [0x87, 0x00, 0x00, 0x00]
         writeCommand(0x0C, 0x02, flags)   // SUBCOMMAND_FEATURE_INIT
-        writeCommand(0x0C, 0x04, flags)   // SUBCOMMAND_FEATURE_ENABLE
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.writeCommand(0x0C, 0x04, flags)   // SUBCOMMAND_FEATURE_ENABLE
+        }
     }
 
     /// One `0x91`-framed command:
@@ -2249,18 +1792,13 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         p.writeValue(Data(cmd), for: ch, type: type)
     }
 
-    /// Success detector for the motion probe: an enabled IMU is never
-    /// all-zero (the accelerometer reads gravity at rest), so nonzero
-    /// bytes in the report's mag (0x19–0x1E) or accel/gyro (0x30–0x3B)
-    /// regions mean a candidate worked — the log names it via
-    /// `probeStep`.
+    /// Success detector for the motion probe: report 0x07 carries a
+    /// motion-block LENGTH byte at 0x0E (0 with the IMU off, 30 or 40
+    /// once enabled), so a nonzero length means a candidate worked —
+    /// the log names it via `probeStep`.
     private func checkAltMotion(_ d: Data) {
-        guard !altMotionSeen, d.count >= 0x3C else { return }
-        var nonzero = false
-        for i in 0x30..<0x3C where d[i] != 0 { nonzero = true; break }
-        if !nonzero {
-            for i in 0x19..<0x1F where d[i] != 0 { nonzero = true; break }
-        }
+        guard !altMotionSeen, d.count > 0x0E else { return }
+        let nonzero = d[0x0E] != 0
         if nonzero {
             altMotionSeen = true
             NSLog("Tarabdaar ble: ALT MOTION LIVE — IMU region nonzero (after probe step %d)",
@@ -2357,10 +1895,10 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             return
         }
         if ch.uuid == Self.altInputCharacteristic {
-            // The clone's input stream. Forward only while the
-            // standard input characteristic is silent — on a real
-            // Joy-Con 2 this characteristic's traffic (if any) must
-            // not race the FD2 parse.
+            // The controller-specific report 0x07 stream — reached
+            // only via the clone fallback. Forward only while the
+            // standard input characteristic is silent, so it can
+            // never race the report-0x05 parse.
             if notifCount == 0, let d = ch.value {
                 onAltNotification?(d)
                 checkAltMotion(d)

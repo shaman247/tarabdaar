@@ -63,8 +63,11 @@ struct FretPadView: View {
                 FretPadSurface(engine: engine,
                                arrangement: $controller.fretArrangement,
                                degrees: degrees,
+                               warp: controller.fretFieldWarp,
                                recorder: recorder,
-                               joyCon: controller.joyCon)
+                               joyCon: controller.joyCon,
+                               chordActive: controller.strumChord,
+                               onChordTap: { controller.tapChord($0) })
                     .aspectRatio(Config.iPadSurfaceAspect, contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 // The scale selector's list editor (moved here from the old
@@ -118,6 +121,7 @@ struct FretPadView: View {
             FretSoundingReadout(sounding: engine.sounding,
                                 tonicFractionalMidi: pitchPad.tonicFractionalMidi)
             snapControl
+            warpControl
             velocityControl
             primeLimitControl
             tonicControl
@@ -299,6 +303,27 @@ struct FretPadView: View {
         .help("How close (horizontally) a touch must start to a fret to snap to its pitch. Only applies within the fret's vertical extent, and only at touch onset — drags glide continuously. 0 = fretless.")
     }
 
+    /// How strongly the frets warp the pitch space around them — the
+    /// `ctl_fret_warp` registry param (a LIVE control param, so it is
+    /// also on the Parameters tab, bindable to any tilt/stick axis, and
+    /// relayed to the iPad over JOYCON_STATE). This slider edits the
+    /// RESTING value; a binding's live output rides on top and is what
+    /// the surface + contours display.
+    private var warpControl: some View {
+        HStack(spacing: 6) {
+            Text("Warp").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
+            Slider(value: Binding(
+                get: { controller.paramValue("ctl_fret_warp") },
+                set: { controller.setParamValue("ctl_fret_warp", $0) }
+            ), in: 0...1)
+                .frame(width: 80)
+            Text("\(Int((controller.fretFieldWarp * 100).rounded())) %")
+                .font(.padCaption.monospacedDigit())
+                .frame(width: Typography.scaledWidth(36), alignment: .trailing)
+        }
+        .help("How strongly the frets warp the pitch space around them (the ctl_fret_warp parameter — also on the Parameters tab, bindable to a tilt/stick axis for live morphing): 0 = linear (pitch moves at a constant rate between frets); higher = pitch plateaus near each fret and transitions quickly through the middle, so a straight slide between two frets traces a logistic curve. The readout shows the LIVE value (binding included). Out of Perform mode the contour lines show the resulting territories.")
+    }
+
     private var velocityControl: some View {
         HStack(spacing: 6) {
             Text("Velocity").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
@@ -435,6 +460,49 @@ private struct DroneButtonsVisual: View {
     }
 }
 
+// MARK: - Chord bar
+
+/// The CHORD BAR (2026-08-28) — the strip below the playable band: one
+/// derived 3-tone chord per fret column (`scaleChords` / `chordBarCells`,
+/// shared with the iPad so layout and hit-tests agree). The highlighted
+/// cell is the ACTIVE strum chord (`AppController.strumChord` — whichever
+/// surface selected it); clicks are hit-tested in `handleDown`, display
+/// only here.
+private struct ChordBarVisual: View {
+    let cells: [ChordBarCell]
+    let active: ChordSelection?
+    let edgePad: CGFloat
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(cells) { c in
+                // Octave-agnostic (2026-08-30): every octave's cell of
+                // the selected degree lights — it's one pitch-class chord.
+                let sel = active?.degree == c.degreeIndex
+                let hue = pitchColor(forRatio: c.rootRatio, lightness: 0.78,
+                                     chroma: 0.16)
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(sel ? hue.opacity(0.55) : Color.white.opacity(0.05))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(hue.opacity(sel ? 0.95 : 0.4),
+                                    lineWidth: sel ? 1.5 : 1)
+                    )
+                    .overlay(
+                        Text(c.numeral)
+                            .font(.padSmall(12, weight: .semibold))
+                            .foregroundStyle(.white.opacity(sel ? 1.0 : 0.75))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.5)
+                    )
+                    .frame(width: c.rect.width, height: c.rect.height)
+                    .offset(x: edgePad + c.rect.minX, y: edgePad + c.rect.minY)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
 // MARK: - Sounding readout
 
 /// Live frequency / nearest-note / cents readout for the active touch, tinted
@@ -447,7 +515,10 @@ private struct FretSoundingReadout: View {
     var body: some View {
         let ratio = sounding.ratio
         let text: String = ratio.map { r in
-            let fractionalMidi = tonicFractionalMidi + 12.0 * log2(r)
+            // sounding.octaveSemis is the touch's ONSET-captured octave
+            // shift, so a note held across an octave step reads true.
+            let fractionalMidi = tonicFractionalMidi + sounding.octaveSemis
+                + 12.0 * log2(r)
             let freq = 440.0 * pow(2.0, (fractionalMidi - 69.0) / 12.0)
             let nearest = Int(fractionalMidi.rounded())
             let cents = Int(((fractionalMidi - Double(nearest)) * 100.0).rounded())
@@ -475,12 +546,19 @@ private struct FretPadSurface: View {
     @ObservedObject var engine: PitchPadEngine
     @Binding var arrangement: FretArrangement
     let degrees: [(ratio: Double, label: String)]
+    /// The LIVE fret pitch-warp (`controller.fretFieldWarp` — resting
+    /// param value plus any binding's output). Field + contours read it.
+    let warp: Double
     /// Stroke recorder for offline assist fitting (no-op unless armed).
     let recorder: FretGestureRecorder
     /// Held plain (NOT `@ObservedObject` — its stick axes publish at input
     /// rate and must not re-run the surface); only `$connectedName` is
     /// tapped, via `onReceive` below.
     let joyCon: JoyConInput
+    /// The ACTIVE strum chord (`AppController.strumChord`) and the chord
+    /// bar's tap route (`AppController.tapChord`).
+    let chordActive: ChordSelection?
+    let onChordTap: (ChordSelection) -> Void
 
     /// While a Joy-Con is attached its printed arrows / L pluck the drones,
     /// so the on-screen buttons hide (visual + hit-test both).
@@ -497,14 +575,6 @@ private struct FretPadSurface: View {
     /// `2^(fieldLog + snapOffsetLog)`, so the snapped pitch is exact at the
     /// onset point and finger movement glides relative to it.
     @State private var snapOffsetLog: Double = 0
-    /// The snapped fret's vertical extent, captured at onset — the
-    /// auto-vibrato ceiling axis is the finger's OUTWARD position within
-    /// it (`fretY`: 0 at the end toward the band's centre-line, 1 at the
-    /// outer end; `outerIsTop` fixes the orientation, from the shared
-    /// `fretOuterEndIsTop`). nil for unsnapped onsets: no home fret, no
-    /// auto-vibrato.
-    @State private var homeFretExtent:
-        (top: CGFloat, bottom: CGFloat, outerIsTop: Bool)? = nil
     /// Drag assist ("magnetic" intonation at stops/turns — see
     /// `FretDragAssist`). The timer drives the settle while the mouse is
     /// held still (no drag events arrive then).
@@ -535,6 +605,12 @@ private struct FretPadSurface: View {
             let placements = fretPlacements(arrangement: arrangement,
                                             degrees: degrees, size: band.size)
             let basePlacements = placements.filter { !$0.isGhost }
+            // The chord bar's cells (the strip below the band) — shared
+            // geometry with the iPad.
+            let chordCells = chordBarCells(arrangement: arrangement,
+                                           degrees: degrees,
+                                           chords: scaleChords(degrees: degrees),
+                                           size: size)
             // Perform mode: a clean playing surface — no gridlines, labels, or
             // handles, and the ghosts styled identically to the editable frets.
             let perform = engine.performanceMode
@@ -565,19 +641,32 @@ private struct FretPadSurface: View {
                             ctx.stroke(line, with: .color(.white.opacity(0.10)),
                                        lineWidth: 1)
                         }
+                        // Pitch-field contours: the territory boundaries
+                        // (log-midpoints between adjacent sounding pitches)
+                        // plus fainter quarter-pitch lines. They curve
+                        // through stacked-column blend zones and bunch
+                        // toward the boundaries as the Warp goes up.
+                        for c in fretFieldContours(placements: placements,
+                                                   size: band.size,
+                                                   warp: warp) {
+                            guard c.points.count >= 2 else { continue }
+                            var line = Path()
+                            line.move(to: c.points[0])
+                            for p in c.points.dropFirst() { line.addLine(to: p) }
+                            ctx.stroke(
+                                line,
+                                with: .color(.white.opacity(c.isBoundary ? 0.28 : 0.10)),
+                                lineWidth: 1)
+                        }
                     }
 
                     for p in placements {
                         let dim = !perform && p.isGhost
                         let hue = pitchColor(forRatio: p.ratio, lightness: 0.82,
                                              chroma: 0.20).opacity(dim ? 0.45 : 1.0)
-                        // Straight over the inner dead zone, a wavy tail
-                        // over the outer auto-vibrato zone (shared
-                        // `fretLinePoints` — the iPad draws the same).
                         var line = Path()
-                        line.addLines(fretLinePoints(x: p.x, topY: p.topY,
-                                                     bottomY: p.bottomY,
-                                                     bandHeight: band.height))
+                        line.move(to: CGPoint(x: p.x, y: p.topY))
+                        line.addLine(to: CGPoint(x: p.x, y: p.bottomY))
                         ctx.stroke(line, with: .color(hue), lineWidth: dim ? 1 : 1.5)
                         if !perform {
                             if !p.isGhost {
@@ -604,6 +693,11 @@ private struct FretPadSurface: View {
                               edgePad: edgePad)
                     .offset(x: band.minX, y: band.minY)
 
+                // The chord bar (display only — clicks are hit-tested in
+                // handleDown): the strip below the band.
+                ChordBarVisual(cells: chordCells, active: chordActive,
+                               edgePad: edgePad)
+
                 // Drone buttons (display only — presses are hit-tested in
                 // handleDown): right edge, top → vertical center. Hidden
                 // while a Joy-Con is attached (its arrows pluck the drones).
@@ -623,7 +717,8 @@ private struct FretPadSurface: View {
                 FretPadMouseCapture(
                     onMouseDown: { pt in
                         handleDown(at: toLocal(pt), placements: placements,
-                                   base: basePlacements, size: size, band: band)
+                                   base: basePlacements, size: size, band: band,
+                                   chordCells: chordCells)
                     },
                     onMouseDragged: { pt in
                         handleDrag(at: toLocal(pt), placements: placements,
@@ -642,7 +737,8 @@ private struct FretPadSurface: View {
     // MARK: Interactions
 
     private func handleDown(at spt: CGPoint, placements: [FretPlacement],
-                            base: [FretPlacement], size: CGSize, band: CGRect) {
+                            base: [FretPlacement], size: CGSize, band: CGRect,
+                            chordCells: [ChordBarCell]) {
         // Drone buttons first (both modes, full-surface coords): a click
         // starting inside a button rect is a drone press, not a note or an
         // edit. Skipped while hidden (Joy-Con attached) so the area falls
@@ -651,6 +747,13 @@ private struct FretPadSurface: View {
            let d = droneButtonRects(size: size).firstIndex(where: { $0.contains(spt) }) {
             droneDown = d
             engine.setDrone(d, pressed: true)
+            return
+        }
+        // Chord bar (full-surface coords): a click in a cell toggles the
+        // strum chord — selection only, nothing sounds until the strum.
+        if let cell = chordCells.first(where: { $0.rect.contains(spt) }) {
+            onChordTap(ChordSelection(degree: cell.degreeIndex,
+                                      octave: cell.octaveShift))
             return
         }
         // Notes and edits live in the band; the space above/below is dead.
@@ -697,7 +800,8 @@ private struct FretPadSurface: View {
     /// fret-field pitch (the approach path). Registers the touch with the
     /// drag assist and starts the settle timer.
     private func playAt(_ pt: CGPoint, placements: [FretPlacement], size: CGSize) {
-        guard let fieldLog = fretFieldLog(at: pt, placements: placements)
+        guard let fieldLog = fretFieldLog(at: pt, placements: placements,
+                                          warp: warp)
         else { return }   // no frets — nothing to play
         let onsetLog: Double
         let weights: [String: Double]
@@ -707,23 +811,16 @@ private struct FretPadSurface: View {
             snapOffsetLog = log2(hit.ratio) - fieldLog
             onsetLog = log2(hit.ratio)
             weights = [hit.id: 1.0]
-            homeFretExtent = (hit.topY, hit.bottomY,
-                              fretOuterEndIsTop(topY: hit.topY,
-                                                bottomY: hit.bottomY,
-                                                bandHeight: size.height))
         } else {
             snapOffsetLog = 0
             onsetLog = fieldLog
             weights = [:]
-            homeFretExtent = nil
         }
 
         let touch = nextTouchId()
         activeTouchId = touch
         let now = CACurrentMediaTime()
-        engine.noteOn(touchId: touch, ratio: pow(2.0, onsetLog), weights: weights,
-                      y: clamp01(Double(pt.y / size.height)),
-                      fretY: fretRelativeY(pt))
+        engine.noteOn(touchId: touch, ratio: pow(2.0, onsetLog), weights: weights)
 
         assist.setContext(placements: placements, snapDistance: snapDistance)
         assist.begin(touchId: touch, x: pt.x, y: pt.y,
@@ -750,7 +847,8 @@ private struct FretPadSurface: View {
             snapDistance: Double(snapDistance),
             ghostExtentOctaves: arrangement.ghostExtentOctaves,
             width: Double(size.width), height: Double(size.height),
-            assistParams: ["speedFloor": assist.speedFloor,
+            assistParams: ["fieldWarp": warp,
+                           "speedFloor": assist.speedFloor,
                            "speedCeiling": assist.speedCeiling,
                            "speedTau": assist.speedTau,
                            "settleTau": assist.settleTau,
@@ -827,16 +925,15 @@ private struct FretPadSurface: View {
         // gliding). Never re-snaps mid-drag; the field and assist are
         // continuous.
         guard let touch = activeTouchId else { return }
-        guard let fieldLog = fretFieldLog(at: pt, placements: placements)
+        guard let fieldLog = fretFieldLog(at: pt, placements: placements,
+                                          warp: warp)
         else { return }
         assist.setContext(placements: placements, snapDistance: snapDistance)
         let now = CACurrentMediaTime()
         let out = assist.move(touchId: touch, x: pt.x, y: pt.y,
                               uncorrectedLog: fieldLog + snapOffsetLog, time: now)
         engine.glide(touchId: touch, ratio: pow(2.0, out.log2Pitch),
-                     weights: out.weights,
-                     y: clamp01(Double(pt.y / size.height)),
-                     fretY: fretRelativeY(pt))
+                     weights: out.weights)
         recorder.sample(touchId: touch, x: pt.x, y: pt.y,
                         u: fieldLog + snapOffsetLog, o: out.log2Pitch, time: now)
     }
@@ -860,16 +957,6 @@ private struct FretPadSurface: View {
         moveOffsetX = 0
         moveOffsetY = 0
         snapOffsetLog = 0
-        homeFretExtent = nil
-    }
-
-    /// The finger's OUTWARD position within the home fret's vertical
-    /// extent (0 = the fret's end toward the band's centre-line, 1 = its
-    /// outer end), nil when the onset didn't snap to a fret.
-    private func fretRelativeY(_ pt: CGPoint) -> Double? {
-        guard let e = homeFretExtent, e.bottom > e.top else { return nil }
-        let t = clamp01(Double((pt.y - e.top) / (e.bottom - e.top)))
-        return e.outerIsTop ? 1 - t : t
     }
 
     /// Right-click deletes a (base) fret. Disabled in perform mode.
@@ -893,7 +980,8 @@ private struct FretPadSurface: View {
     private func addSegment(at pt: CGPoint, placements: [FretPlacement],
                             size: CGSize) {
         guard !degrees.isEmpty else { return }
-        let fieldLog = fretFieldLog(at: pt, placements: placements) ?? 0
+        let fieldLog = fretFieldLog(at: pt, placements: placements,
+                                    warp: warp) ?? 0
         let folded = fieldLog - fieldLog.rounded(.down)
         var bestIndex = 0
         var bestDist = Double.infinity

@@ -258,6 +258,12 @@ public class AudioEngine: ObservableObject {
     private var touchPitchSemis: [UInt16: Double] = [:]
     /// Still-held touches in play order, most-recent last.
     private var heldTouchOrder: [UInt16] = []
+    /// Per-touch expression scale (2026-08-28, the strum chord — absent =
+    /// 1). Delivered by `touchExpr` ahead of the onset, consumed at
+    /// `touchOn` (String: the mapper's per-slot scale; Tanpura/Sitar: the
+    /// pluck level) and live-routed to the mapper while a String-voice
+    /// touch is held.
+    private var touchExprScale: [UInt16: Double] = [:]
 
     /// Lightweight lock guarding the performance-readout scalars below.
     /// Separate from `lock` so the Live tab's poll never contends with the
@@ -294,8 +300,25 @@ public class AudioEngine: ObservableObject {
 
     // MARK: - Setup
 
+    /// THE GLIDE QUEUE (2026-08-31): the control layer the public touch
+    /// API funnels through — an onset within `ctl_glide_thresh` of the
+    /// previous one is queued as a glissando waypoint instead of
+    /// mounting a fresh note; the sequencer's timer then drives the
+    /// sounding voice through every queued pitch via the direct path
+    /// below. Pure pass-through at the default threshold 0.
+    public let glideQueue = GlideSequencer()
+
     public init() {
         setupAudio()
+        glideQueue.onTouchOn = { [weak self] id, pitch, vel in
+            self?.touchOnDirect(id, pitchSemis: pitch, velocity: vel)
+        }
+        glideQueue.onTouchGlide = { [weak self] id, pitch in
+            self?.touchGlideDirect(id, pitchSemis: pitch)
+        }
+        glideQueue.onTouchOff = { [weak self] id in
+            self?.touchOffDirect(id)
+        }
     }
 
     private func setupAudio() {
@@ -736,6 +759,38 @@ public class AudioEngine: ObservableObject {
                                   active: meterActive)
     }
 
+    /// VOICE/TARAF VOLUME READOUT (2026-08-24): the radiated level of the
+    /// MAIN VOICE and of the TARAF (the String kernel's sympathetic jt
+    /// bus), for the iPad toolbar's volume scope. Voice = the String
+    /// physics' voice bus plus — when the Live-tab instrument is the
+    /// tanpura/sitar — that node's output (energy sum; the tanpura node
+    /// counts only while it IS the main instrument, so the drone doesn't
+    /// swamp the played voice's meter). Taraf = the jt bus, whichever
+    /// voice charges it (bow, sitar halo, `tp_taraf`). EXACT interval
+    /// RMS (integrate-and-dump per source — RMS of the audio since the
+    /// caller's previous poll, no envelope, no smoothing: decay rates
+    /// read true), linear, 1.0 ≈ 0 dBFS. ONE poller owns the dump
+    /// semantics (the AppController relay). Thread-safe.
+    public func volumeLevels() -> (voice: Double, taraf: Double) {
+        let bus = stringVoiceSource?.busLevels() ?? (voice: 0, taraf: 0)
+        lock.lock()
+        let inst = mainInstrumentStorage
+        let tp = tanpuraSource
+        let st = sitarSource
+        lock.unlock()
+        var voiceSq = bus.voice * bus.voice
+        switch inst {
+        case .string: break
+        case .tanpura:
+            let l = tp?.outputLevel() ?? 0
+            voiceSq += l * l
+        case .sitar:
+            let l = st?.outputLevel() ?? 0
+            voiceSq += l * l
+        }
+        return (voiceSq.squareRoot(), bus.taraf)
+    }
+
     /// Recompute `(pitchHz, expression, active)` for the primary held voice
     /// from the tracked MPE maps. `lock` must be held; pure read → locals.
     private func meterSnapshotLocked() -> (Double, Double, Bool) {
@@ -803,39 +858,86 @@ public class AudioEngine: ObservableObject {
     // hardware). All entry points are thread-safe (called on the link
     // receive queue, which plays the CoreMIDI thread's old role).
 
-    /// Touch onset. In tanpura main-instrument mode the pluck fires HERE,
-    /// immediately, at the exact bent pitch — onset and pitch arrive in one
-    /// frame, so the MIDI path's pending-pluck-on-next-bend contraption has
-    /// no wire-path equivalent. `posY` (fret-band y, 0…1) feeds the String
-    /// voice's fret-linger / auto-vibrato; the tanpura pluck ignores it
-    /// (a pluck decays on its own), and nil keeps the legacy behavior.
-    public func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double,
-                        posY: Double? = nil, fretY: Double? = nil) {
+    /// Touch onset — through the GLIDE QUEUE (2026-08-31): the sequencer
+    /// either passes the onset straight to `touchOnDirect` (a fresh
+    /// note) or queues it as a glissando waypoint for the sounding voice
+    /// (no new note mounts; the sequencer's glide timer drives
+    /// `touchGlideDirect` instead). Exact pass-through at the default
+    /// `ctl_glide_thresh` 0.
+    public func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) {
+        glideQueue.touchOn(id, pitchSemis: pitchSemis, velocity: velocity)
+    }
+
+    /// The glide queue's exemption mark (the strum chord) — delivered by
+    /// the ingest just before the flagged touch's `touchOn`.
+    public func touchGlideExempt(_ id: UInt16) {
+        glideQueue.markExempt(id)
+    }
+
+    /// Pitch update for a live touch — through the glide queue: a drag
+    /// on a queued-but-not-yet-reached note retargets its waypoint; a
+    /// drag on the voice's owning touch meends the voice directly
+    /// (mapped onto the voice's wire id).
+    public func touchGlide(_ id: UInt16, pitchSemis: Double) {
+        glideQueue.touchGlide(id, pitchSemis: pitchSemis)
+    }
+
+    /// Touch release — through the glide queue: a release inside the
+    /// onset window is deferred (release grace) or just accelerates the
+    /// in-flight glide; everything else forwards to `touchOffDirect`.
+    public func touchOff(_ id: UInt16) {
+        glideQueue.touchOff(id)
+    }
+
+    /// Touch onset, the DIRECT path (below the glide queue). In tanpura
+    /// main-instrument mode the pluck fires HERE, immediately, at the
+    /// exact bent pitch — onset and pitch arrive in one frame, so the
+    /// MIDI path's pending-pluck-on-next-bend contraption has no
+    /// wire-path equivalent.
+    private func touchOnDirect(_ id: UInt16, pitchSemis: Double,
+                               velocity: Double) {
         lock.lock()
         touchPitchSemis[id] = pitchSemis
         heldTouchOrder.removeAll { $0 == id }
         heldTouchOrder.append(id)
         let inst = mainInstrumentStorage
         let src = stringVoiceSource
+        let exprScale = touchExprScale[id] ?? 1.0
         let snap = meterSnapshotLocked()
         lock.unlock()
         storeMeter(snap)
         if inst != .string {
             let hz = 440.0 * pow(2.0, (pitchSemis - 69.0) / 12.0)
-            pluckMainTouch(inst, hz: hz, velocity: velocity, touch: id)
+            pluckMainTouch(inst, hz: hz, velocity: velocity, touch: id,
+                           exprScale: exprScale)
             return
         }
         src?.mapper.touchOn(id, pitchSemis: pitchSemis, velocity: velocity,
-                            posY: posY, fretY: fretY)
+                            exprScale: exprScale)
     }
 
-    /// Pitch/position update for a live touch (post-onset glide, or a
-    /// vertical move along a fret). String voice: the mapper's 9 Hz meend
-    /// smoother carries the pitch motion, the y travel recharges the linger
-    /// envelopes. Tanpura: live-retune the ringing string kernel-side,
-    /// exactly as the MIDI bend path did (y is ignored).
-    public func touchGlide(_ id: UInt16, pitchSemis: Double,
-                           posY: Double? = nil, fretY: Double? = nil) {
+    /// Per-touch expression scale (the strum chord's live loudness —
+    /// see `LinkPerformanceSink.touchExpr`). Arrives before the touch's
+    /// onset and on any change while held; String-voice touches update
+    /// the mapper's per-slot scale live (the chord swells), plucked
+    /// mains consume it at the onset only (a sounded pluck can't swell).
+    public func touchExpr(_ id: UInt16, exprScale: Double) {
+        lock.lock()
+        touchExprScale[id] = exprScale
+        let inst = mainInstrumentStorage
+        let src = stringVoiceSource
+        lock.unlock()
+        if inst == .string {
+            src?.mapper.setExprScale(exprScale, forTouch: id)
+        }
+    }
+
+    /// Pitch update, the DIRECT path (post-onset glide / the sequencer's
+    /// trajectory). String voice: the mapper tracks the pitch directly
+    /// (2026-08-24 — the 9 Hz meend smoother is gone; meend is the
+    /// finger's own movement). Tanpura: live-retune the ringing string
+    /// kernel-side, exactly as the MIDI bend path did.
+    private func touchGlideDirect(_ id: UInt16, pitchSemis: Double) {
         lock.lock()
         guard touchPitchSemis[id] != nil else { lock.unlock(); return }
         touchPitchSemis[id] = pitchSemis
@@ -854,16 +956,17 @@ public class AudioEngine: ObservableObject {
             }
             return
         }
-        src?.mapper.touchGlide(id, pitchSemis: pitchSemis, posY: posY,
-                               fretY: fretY)
+        src?.mapper.touchGlide(id, pitchSemis: pitchSemis)
     }
 
-    /// Touch release. String voice: bow lift (the string rings). Tanpura:
-    /// fast-release the slot (`tp_rel_t60`). A stale tanpura slot is
-    /// released even after a mode switch back to the String voice.
-    public func touchOff(_ id: UInt16) {
+    /// Touch release, the DIRECT path. String voice: bow lift (the
+    /// string rings). Tanpura: fast-release the slot (`tp_rel_t60`). A
+    /// stale tanpura slot is released even after a mode switch back to
+    /// the String voice.
+    private func touchOffDirect(_ id: UInt16) {
         lock.lock()
         touchPitchSemis.removeValue(forKey: id)
+        touchExprScale.removeValue(forKey: id)
         heldTouchOrder.removeAll { $0 == id }
         let inst = mainInstrumentStorage
         let tpSlot = tanpuraTouchSlot.removeValue(forKey: id)
@@ -883,10 +986,13 @@ public class AudioEngine: ObservableObject {
 
     /// The link-drop kill path: every bow off, every tanpura touch slot
     /// released, every drone button up. Called on disconnect or staleness —
-    /// the wire's stuck-note safety net.
+    /// the wire's stuck-note safety net. Clears the glide queue too (its
+    /// voices are being silenced here).
     public func touchesAllOff() {
+        glideQueue.reset()
         lock.lock()
         touchPitchSemis.removeAll(keepingCapacity: true)
+        touchExprScale.removeAll(keepingCapacity: true)
         heldTouchOrder.removeAll(keepingCapacity: true)
         let tpSlots = Array(tanpuraTouchSlot.values)
         tanpuraTouchSlot.removeAll(keepingCapacity: true)
@@ -911,22 +1017,12 @@ public class AudioEngine: ObservableObject {
         stringVoiceSource?.mapper.setAxis(expr: v01)
     }
 
-    /// The String voice's per-touch linger envelope state (expression
-    /// charge, auto-vib depth + ceiling), keyed by wire touch id — the
-    /// display feed AppController paces onto the LINGER_STATE frame so
-    /// the iPad's overlay shows what is actually being evaluated. Empty
-    /// while the tanpura is the main instrument (its plucks don't linger).
-    public func lingerDisplay() -> [BowEngine.LingerTouchState] {
-        lock.lock()
-        let src = stringVoiceSource
-        lock.unlock()
-        return src?.currentEngine()?.lingerDisplay() ?? []
-    }
-
     /// Touch-keyed twin of `pluckMain` — the plucked main instruments'
-    /// (tanpura / sitar) wire-path onset.
+    /// (tanpura / sitar) wire-path onset. `exprScale` (default 1) scales
+    /// the pluck level — the strum chord's expression, onset-only here.
     private func pluckMainTouch(_ inst: MainInstrument, hz: Double,
-                                velocity: Double, touch id: UInt16) {
+                                velocity: Double, touch id: UInt16,
+                                exprScale: Double = 1.0) {
         lock.lock()
         let (level, fingerTouch, drive, _) = pluckTrimsLocked(inst)
         let src = pluckSourceLocked(inst)
@@ -935,7 +1031,8 @@ public class AudioEngine: ObservableObject {
               let slot = engine.nearestSlot(toHz: hz, toleranceCents: 60)
         else { return }
         let vel = Int((velocity * 127.0).rounded())
-        engine.pluck(slot: slot, velocity: min(max(vel, 0), 127), scale: level,
+        engine.pluck(slot: slot, velocity: min(max(vel, 0), 127),
+                     scale: level * exprScale,
                      bendRatio: hz / engine.slotFrequencies[slot],
                      touch: fingerTouch, drive: drive)
         lock.lock()
@@ -946,8 +1043,8 @@ public class AudioEngine: ObservableObject {
     // MARK: - Sarangi-model voice bridge (the String physics instrument)
 
     /// Route one MPE message to the String source. The `BowControlMapper`
-    /// allocates gut-string slots physically (poly chords, mono meend on a
-    /// single line) with per-channel MPE pitch bend; CCs 11/1/74/2/75 drive the
+    /// allocates gut-string slots physically (every note-on a fresh
+    /// string) with per-channel MPE pitch bend; CCs 11/1/74/2/75 drive the
     /// expr/press/pos/tilt axes; aftertouch is player vibrato. Also updates the
     /// `hostedChannel*` bookkeeping so the Live readout tracks pitch/expression.
     private func routeSarangiModelMIDI(channel: UInt8, statusHi: UInt8,
@@ -1108,6 +1205,10 @@ public class AudioEngine: ObservableObject {
             }
             let src = StringVoiceSource()
             src.mapper.bendRange = Config.midiPitchBendRange
+            // Voice/taraf VOLUME READOUT (2026-08-24): always armed — the
+            // metered split-bus render is bit-exact against the fused
+            // path (`BusMeterTests`), so auditions/parity are untouched.
+            src.setBusMeter(true)
             stringVoiceSource = src
         }
         if let src = stringVoiceSource, on != stringVoiceConnected {
@@ -1450,6 +1551,9 @@ public class AudioEngine: ObservableObject {
     /// voice releases its held notes; switching away from the tanpura just
     /// drops pending plucks (its strings ring out — their nature).
     public func setMainInstrument(_ inst: MainInstrument) {
+        // Any in-flight glissando references the outgoing voice's notes
+        // (released just below) — forget it before switching.
+        glideQueue.reset()
         lock.lock()
         guard inst != mainInstrumentStorage else { lock.unlock(); return }
         let old = mainInstrumentStorage
@@ -1675,6 +1779,12 @@ public class AudioEngine: ObservableObject {
     public func setStringJtEvolve(_ e01: Double) {
         stringVoiceSource?.setJtEvolve(e01)
     }
+    public func setStringJtEvolveReg(_ reg: Double) {
+        stringVoiceSource?.setJtEvolveReg(reg)
+    }
+    public func setStringJtEvolveChromatic(_ e01: Double) {
+        stringVoiceSource?.setJtEvolveChromatic(e01)
+    }
     public func setStringTwang(_ amt01: Double) {
         stringVoiceSource?.setTwang(amt01)
     }
@@ -1692,6 +1802,80 @@ public class AudioEngine: ObservableObject {
                                              ringR: Double, driveR: Double,
                                              droneHot: Bool)? {
         stringVoiceSource?.jtGateProbe()
+    }
+
+    // MARK: - Scope telemetry (2026-09-01)
+
+    /// The Mac Scope tab's one poll: what the MAIN VOICE is sounding
+    /// (pitch + level per string, on whichever instrument is armed) and
+    /// every modal-jawari taraf row's pitch, level and harmonic
+    /// character. Display only — nothing here feeds the physics.
+    public struct ScopeSnapshot {
+        public struct Voice {
+            /// Stable identity across polls (slot + string generation),
+            /// so the display can draw one trajectory per string.
+            public let id: Int
+            public let pitchHz: Double
+            /// Held (bow down / touch down); a released string rings on.
+            public let held: Bool
+            /// 0…1 display level (log-mapped from the source's meter —
+            /// relative, for colour).
+            public let level: Double
+        }
+        public var voices: [Voice] = []
+        public var taraf: [BowEngine.ScopeRow] = []
+        public var instrument: MainInstrument = .string
+    }
+
+    /// Arm/disarm the String kernel's display meters (the Scope tab does
+    /// this on appear/disappear; unarmed = the exact legacy render).
+    public func setScopeArmed(_ on: Bool) {
+        stringVoiceSource?.setScopeArmed(on)
+    }
+
+    /// Bowed-string ring envelope (bridge-wave chunk peak) → 0…1 display
+    /// level: ~60 dB below a firmly bowed string reads 0.
+    static func bowScopeLevel01(_ senv: Double) -> Double {
+        guard senv > 0 else { return 0 }
+        return min(1, max(0, 1 + 20 * log10(senv / 0.5) / 60))
+    }
+
+    /// Plucked-string output envelope (output units, 1.0 at the pluck)
+    /// → 0…1 display level over the same 60 dB.
+    static func pluckScopeLevel01(_ env: Double) -> Double {
+        guard env > 0 else { return 0 }
+        return min(1, max(0, 1 + 20 * log10(env) / 60))
+    }
+
+    /// Thread-safe; allocates — poll at UI rate only.
+    public func scopeSnapshot() -> ScopeSnapshot {
+        lock.lock()
+        let inst = mainInstrumentStorage
+        let src = stringVoiceSource
+        let pluck = pluckSourceLocked(inst)
+        let heldSlots = Set(tanpuraTouchSlot.values)
+        lock.unlock()
+        var snap = ScopeSnapshot()
+        snap.instrument = inst
+        snap.taraf = src?.scopeRows() ?? []
+        switch inst {
+        case .string:
+            for (i, s) in (src?.scopeSlots() ?? []).enumerated()
+                where s.level > 0 || s.gated {
+                snap.voices.append(.init(
+                    id: i << 32 | Int(s.serial), pitchHz: s.f0Hz,
+                    held: s.gated, level: Self.bowScopeLevel01(s.level)))
+            }
+        case .tanpura, .sitar:
+            guard let engine = pluck?.currentEngine() else { break }
+            for (i, s) in engine.scopeSlots().enumerated()
+                where s.level > 0 {
+                snap.voices.append(.init(
+                    id: i, pitchHz: s.hz, held: heldSlots.contains(i),
+                    level: Self.pluckScopeLevel01(s.level)))
+            }
+        }
+        return snap
     }
 
     /// String-voice render-deadline telemetry (see
@@ -1745,8 +1929,25 @@ public class AudioEngine: ObservableObject {
         case "bow_jt_gov":    setStringJtGov(value)
         case "bow_jt_damp":   setStringTarafDamp(value)
         case "bow_gain":      stringVoiceSource?.setMasterGain(value)
+        case "bow_bal":       stringVoiceSource?.setBusBalance(value)
+        case "bow_jt_comp_thresh":
+            stringVoiceSource?.setJtCompParam(.thresh, value)
+        case "bow_jt_comp_ratio":
+            stringVoiceSource?.setJtCompParam(.ratio, value)
+        case "bow_jt_comp_atk_ms":
+            stringVoiceSource?.setJtCompParam(.atkMs, value)
+        case "bow_jt_comp_rel_ms":
+            stringVoiceSource?.setJtCompParam(.relMs, value)
+        case "bow_jt_cap":
+            stringVoiceSource?.setJtCapParam(.hard, value)
+        case "bow_jt_cap_ratio":
+            stringVoiceSource?.setJtCapParam(.ratio, value)
+        case "bow_jt_cap_bus":
+            stringVoiceSource?.setJtCapParam(.bus, value)
         case "bow_jt_sel":    setStringTarafSelectivity(value)
         case "bow_jt_evolve": setStringJtEvolve(value)
+        case "bow_jt_ev_reg": setStringJtEvolveReg(value)
+        case "bow_jtc_evolve": setStringJtEvolveChromatic(value)
         case "bow_twang":     setStringTwang(value)
         case "bow_tone_tilt": setStringToneTilt(value)
         default:

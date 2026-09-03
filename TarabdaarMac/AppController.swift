@@ -140,6 +140,15 @@ final class AppController: ObservableObject {
         ControlAxes.dims.firstIndex(of: .strike) ?? 5
     static let accelAxisIndex =
         ControlAxes.dims.firstIndex(of: .acceleration) ?? 6
+    /// THE FRET PITCH WARP (2026-08-25): the live value of the
+    /// `ctl_fret_warp` control param — the fret field's logistic
+    /// reshaping amount. Written only by the `applyParamToVoice`
+    /// interception (which hops to main), so the Parameters-tab resting
+    /// value AND a tilt/stick binding's live output both land here; read
+    /// by the Mac Fret Pad surface (field + contours) and relayed to the
+    /// iPad over JOYCON_STATE (where the pad's own field reads it).
+    @Published private(set) var fretFieldWarp: Double = 0
+
     private let strikeLock = NSLock()
     private var strikeWindow = StrikeBlendWindow(windowS: 2.0)
     private var strikeMeasure = 0.0        // last wire value 0…1
@@ -149,6 +158,100 @@ final class AppController: ObservableObject {
     /// still (the wire is change-gated, so measurement events alone would
     /// freeze the blend mid-slide).
     private var strikeTimer: DispatchSourceTimer?
+
+    /// THE FINGER-ACCEL DIMENSION (2026-08-24). `.fingerAccel` is the
+    /// playing finger's pitch acceleration (−1…+1, `FingerAccelTracker`
+    /// — the shared law the iPad's toolbar scope also renders), fed from
+    /// the ingest touch taps (wire AND the local pads/auditions,
+    /// namespaced so their u16 ids can't collide) under the
+    /// newest-sounding-touch rule, plus a 30 Hz decay tick while bound
+    /// (frames are change-gated, so a finger coming to REST would
+    /// otherwise freeze the value at its last reading). A plain bipolar
+    /// axis: applies through `applyTiltAxis` like a tilt — no blend.
+    static let fingerAxisIndex =
+        ControlAxes.dims.firstIndex(of: .fingerAccel) ?? 7
+    /// THE JOY-CON WRIST + ACCELERATION AXES (2026-09-02). Wrist ↕/↔/⟲
+    /// come from `JoyConInput.wristCal` (the Joy-Con's fused attitude
+    /// through its own guided calibration) as plain bipolar axes; Joy-Con
+    /// Accel is the gravity-removed acceleration through the strike
+    /// law's envelope, 0…1 — UNIPOLAR, so it maps onto the axis' −1…+1
+    /// as `2·level − 1` and the binding curve reads rest at x 0 (the
+    /// `.acceleration` convention).
+    static let wristAxisIndices = (
+        ControlAxes.dims.firstIndex(of: .tilt4) ?? 8,
+        ControlAxes.dims.firstIndex(of: .wrist2) ?? 9,
+        ControlAxes.dims.firstIndex(of: .wrist3) ?? 10)
+    static let jcAccelAxisIndex =
+        ControlAxes.dims.firstIndex(of: .jcAccel) ?? 11
+    private let fingerLock = NSLock()
+    private var fingerTracker = FingerAccelTracker()
+    private var fingerOrder: [Int] = []          // sounding keys, old→new
+    private var fingerPitch: [Int: Double] = [:]
+    private var fingerLast = 0.0
+    private var fingerActive = false
+    private var fingerTimer: DispatchSourceTimer?
+
+    /// SCOPE (2026-09-01): every touch currently DOWN with its latest
+    /// finger pitch — both lanes (wire + the Mac pads/keyboard/auditions),
+    /// oldest first. Read straight from the finger registry above, which
+    /// tracks touches whether or not the `.fingerAccel` axis is bound; it
+    /// is the finger's truth ABOVE the glide queue, so a parked or queued
+    /// finger shows here even while the voice sounds elsewhere.
+    func currentTouches() -> [(id: Int, pitchSemis: Double)] {
+        fingerLock.lock()
+        defer { fingerLock.unlock() }
+        return fingerOrder.compactMap { k in fingerPitch[k].map { (k, $0) } }
+    }
+
+    private func fingerGate(_ source: Int, _ id: UInt16, _ on: Bool) {
+        let key = source << 16 | Int(id)
+        fingerLock.lock()
+        fingerOrder.removeAll { $0 == key }
+        if on { fingerOrder.append(key) } else { fingerPitch[key] = nil }
+        fingerLock.unlock()
+        fingerEvaluate()
+    }
+
+    private func fingerPitchUpdate(_ source: Int, _ id: UInt16,
+                                   _ pitch: Double) {
+        let key = source << 16 | Int(id)
+        fingerLock.lock()
+        fingerPitch[key] = pitch
+        let isNewest = fingerOrder.last == key
+        fingerLock.unlock()
+        if isNewest { fingerEvaluate() }
+    }
+
+    /// Sample the tracker (touch events + the 30 Hz tick) and drive the
+    /// axis on change. Feeding the SAME pitch again decays the tracker,
+    /// so the tick alone relaxes a resting finger to 0.
+    private func fingerEvaluate() {
+        fingerLock.lock()
+        guard fingerActive else { fingerLock.unlock(); return }
+        let newest = fingerOrder.last
+        let v = fingerTracker.sample(
+            id: newest, pitchSemis: newest.flatMap { fingerPitch[$0] },
+            at: ProcessInfo.processInfo.systemUptime)
+        let changed = abs(v - fingerLast) > 1e-3
+        if changed { fingerLast = v }
+        fingerLock.unlock()
+        if changed { applyTiltAxis(Self.fingerAxisIndex, v) }
+    }
+
+    private func updateFingerTimer(active: Bool) {
+        if active, fingerTimer == nil {
+            let t = DispatchSource.makeTimerSource(
+                queue: .global(qos: .userInitiated))
+            t.schedule(deadline: .now(), repeating: 1.0 / 30.0,
+                       leeway: .milliseconds(5))
+            t.setEventHandler { [weak self] in self?.fingerEvaluate() }
+            t.resume()
+            fingerTimer = t
+        } else if !active, let t = fingerTimer {
+            t.cancel()
+            fingerTimer = nil
+        }
+    }
 
     private func rebuildTiltEvalSnapshot() {
         var byAxis: [[(MapTarget, DimensionBinding)]] =
@@ -172,6 +275,17 @@ final class AppController: ObservableObject {
         lastBlendOut.removeAll()
         strikeLock.unlock()
         updateStrikeTimer(active: strikeActive)
+        // Finger-accel axis: track/tick only while it has bindings; a
+        // fresh binding starts from a clean tracker (no stale spike).
+        let fingerBound = !byAxis[Self.fingerAxisIndex].isEmpty
+        fingerLock.lock()
+        if fingerBound != fingerActive {
+            fingerTracker.reset()
+            fingerLast = 0
+        }
+        fingerActive = fingerBound
+        fingerLock.unlock()
+        updateFingerTimer(active: fingerBound)
     }
 
     private func updateStrikeTimer(active: Bool) {
@@ -277,7 +391,25 @@ final class AppController: ObservableObject {
             arm2: lastArmAxes?.1 ?? 0,
             arm3: lastArmAxes?.2 ?? 0,
             armLive: lastArmAxes != nil,
-            strikeWindowS: win), force: force)
+            strikeWindowS: win,
+            fieldWarp: fretFieldWarp,
+            octaveShift: pitchPad.octaveShift), force: force)
+    }
+
+    /// Joy-Con dpad ←/→ (2026-08-27): step the playing range down/up one
+    /// whole octave, clamped ±3 (`PitchPadEngine.octaveShiftRange`). The
+    /// shift lives in the shared pad engine — the ONE outbound-pitch
+    /// point on both platforms — and the iPad learns it through the
+    /// JOYCON_STATE `octave` byte (TLP v11), forced like the connect
+    /// edges: it is state, not display, so it must beat the pacing.
+    /// Main thread (the Joy-Con handlers land there).
+    private func shiftOctave(_ delta: Int) {
+        let next = min(max(pitchPad.octaveShift + delta,
+                           PitchPadEngine.octaveShiftRange.lowerBound),
+                       PitchPadEngine.octaveShiftRange.upperBound)
+        guard next != pitchPad.octaveShift else { return }
+        pitchPad.octaveShift = next
+        sendJoyConDisplay(force: true)
     }
 
     /// The iPad raw-tilt funnel. With an arm calibration, the solve
@@ -538,6 +670,50 @@ final class AppController: ObservableObject {
             }
             return nil
         }
+        // Control-layer keys: the controller strum — the chord's
+        // expression (pushed live to the held notes so a bound stick
+        // swells the ringing chord) and the accel-trigger threshold
+        // (0–127 strike-byte units; ≥127 = off). Consumed by the strum
+        // machinery, not the voice.
+        if key == "ctl_strum_expr" {
+            let v = min(max(value, 0), 1)
+            strumExpr = v
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                for h in self.strumHeld {
+                    self.pitchPad.setTouchExpr(touchId: h.id,
+                                               exprScale: v * h.weight)
+                }
+            }
+            return nil
+        }
+        if key == "ctl_strum_thresh" {
+            strumThresh01 = value >= 126.5 ? .infinity : value / 127.0
+            return nil
+        }
+        // Control-layer keys: the GLIDE QUEUE (2026-08-31) — queued
+        // glissandi. Consumed by the sequencer in front of the voice
+        // routing, not the voice itself.
+        if key.hasPrefix("ctl_glide_") {
+            audio.glideQueue.setControl(key, value)
+            return nil
+        }
+        // Control-layer key: the fret pitch warp — pad geometry, not a
+        // voice parameter. Publishes the live value for the Mac surface
+        // and relays it to the iPad's field over JOYCON_STATE (paced +
+        // coalesced by the link, so a stick binding at input rate costs
+        // at most one frame per link tick). The GLIDE QUEUE shares the
+        // value: its trajectories curve linear → logistic with it.
+        if key == "ctl_fret_warp" {
+            let v = min(max(value, 0), 1)
+            audio.glideQueue.setWarp(v)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.fretFieldWarp != v else { return }
+                self.fretFieldWarp = v
+                self.sendJoyConDisplay()
+            }
+            return nil
+        }
         switch spec.apply {
         case .live:
             audio.setStringControlParam(key, value)
@@ -559,11 +735,222 @@ final class AppController: ObservableObject {
 
     // jt overload watchdog (see start())
     private var jtStatsTimer: Timer?
-    private var lingerPushTimer: Timer?
 
-    /// Joy-Con drone strum (main queue only): bumped on every L
-    /// press/release so a stale scheduled stagger press can't fire.
-    private var droneStrumGen = 0
+    /// VOLUME READOUT relay (2026-08-24): 60 Hz poll of the radiated
+    /// voice/taraf levels (`AudioEngine.volumeLevels` — integrate-and-
+    /// dump, so each poll reads the exact RMS of its own ~16.7 ms slice;
+    /// this timer is the ONE poller that owns the dump) → the
+    /// JOYCON_STATE vol bytes (TLP v9) for the iPad toolbar's volume
+    /// scope. Change-gated on the encoded bytes (here AND in the link),
+    /// so a silent instrument costs one poll and no wire traffic.
+    private var volMeterTimer: DispatchSourceTimer?
+    private var lastVolBytes: (UInt8, UInt8) = (0, 0)  // timer queue only
+
+    private func startVolMeterRelay() {
+        let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        t.schedule(deadline: .now(), repeating: 1.0 / 60.0,
+                   leeway: .milliseconds(3))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            let l = self.audio.volumeLevels()
+            let bytes = (TLPVolume.byte(fromLinear: l.voice),
+                         TLPVolume.byte(fromLinear: l.taraf))
+            guard bytes != self.lastVolBytes else { return }
+            self.lastVolBytes = bytes
+            self.link.setVolumeLevels(voice: bytes.0, taraf: bytes.1)
+        }
+        t.resume()
+        volMeterTimer = t
+    }
+
+    // MARK: - Controller strum (Joy-Con L)
+
+    /// CONTROLLER STRUM (reworked 2026-08-28 to a HELD CHORD, main queue
+    /// only): pressing L sounds ALL the configured strum strings
+    /// (`InstrumentState.strumStringIds`, Strings tab) at once as
+    /// ordinary NOTES IN THE MAIN VOICE — through the shared `pitchPad`
+    /// engine, the same in-process touch path the Mac pad and the
+    /// keyboard player use. The notes therefore sound on whichever main
+    /// instrument is selected (String bow / Tanpura / Sitar plucks),
+    /// allocate fresh strings under the normal laws, charge the taraf
+    /// like played notes, and carry a firm strike velocity for the
+    /// `bow_attack_vel` articulation law. The chord SUSTAINS while the
+    /// button is held and note-offs on release — no sweep, no fixed
+    /// gate (the same-day staggered-staccato version and its
+    /// `ctl_strum_stagger`/`ctl_strum_gate` knobs are gone). Touch ids
+    /// are GENERATION-scoped so a re-press retriggers through fresh ids,
+    /// and a press always closes any chord still held (a lost release
+    /// edge must never leak a ringing note).
+    ///
+    /// Two triggers hold the chord (2026-08-28): the L button
+    /// (`strumLHeld`) and the ACCEL TRIGGER (`strumAccelHeld` — the
+    /// iPad's strike envelope crossing `ctl_strum_thresh`); the chord
+    /// releases only when neither holds it. `ctl_strum_expr` is the
+    /// chord's EXPRESSION (Joy-Con stick Y by default): applied at the
+    /// strike and pushed live to the held notes so the ringing chord
+    /// swells with the stick.
+    /// THE CHORD BAR (2026-08-28): the strip below the Fret Pad's band
+    /// offers a derived 3-tone chord per fret (`scaleChords` — see
+    /// ChordBar.swift); the ACTIVE selection is what the strum plays,
+    /// falling back to the Strings tab's configured set when nothing is
+    /// selected — and a selection change lands IMMEDIATELY: a chord
+    /// ringing at the edge retunes in place (`retuneStrumChord`).
+    /// Fed from BOTH surfaces through the same edge path: iPad
+    /// taps ride the PERF_STATE chord bytes (TLP v12) into
+    /// `ingest.onChordSelect`, Mac taps go `tapChord` → the shared
+    /// `pitchPad` → the local pump → `localIngest.onChordSelect` — so
+    /// this published value is always what the next strum will sound.
+    /// Performance state, never persisted.
+    @Published var strumChord: ChordSelection?
+
+    private var strumGen = 0
+    /// The ringing chord's touches with their Shepard octave-copy weights
+    /// (weight 1.0 for the configured fallback set) — each note's live
+    /// expression is `strumExpr × weight`.
+    private var strumHeld: [(id: Int, weight: Double)] = []
+    private var strumLHeld = false
+    private var strumAccelHeld = false
+    private var strumExpr = 1.0                 // ctl_strum_expr
+    /// `ctl_strum_thresh` mapped to the 0…1 strike domain; ≥127 = off
+    /// (.infinity — never crossed, and an armed hold releases on the
+    /// next strike event since every value sits below ∞).
+    private var strumThresh01 = Double.infinity
+    /// Accel-trigger retrigger cooldown deadline (systemUptime): armed
+    /// for 100 ms at each accel release so a jittery envelope can't
+    /// re-strike instantly. Main-queue only. The L button ignores it.
+    private var strumAccelCooldownUntil: TimeInterval = 0
+    /// Distinct touchId namespace on the shared engine, far from the
+    /// pad's mouse counter and the keyboard player's 1_000_000 base.
+    private static let strumTouchBase = 2_000_000
+
+    func strum(pressed: Bool) {
+        strumLHeld = pressed
+        if pressed {
+            strikeStrumChord()      // a press always retriggers
+        } else if !strumAccelHeld {
+            releaseStrum()
+        }
+    }
+
+    /// The Mac chord bar's tap gesture: toggles against the ACTIVE chord
+    /// (whichever surface set it), routed through the shared engine so
+    /// the same edge path updates `strumChord`. Octave-agnostic
+    /// (2026-08-30): compared and stored by DEGREE alone (octave 0 —
+    /// tapping any octave's cell of the selected degree deselects).
+    func tapChord(_ sel: ChordSelection) {
+        pitchPad.setChordSelection(strumChord?.degree == sel.degree
+            ? nil : ChordSelection(degree: sel.degree, octave: 0))
+    }
+
+    /// What the next strum sounds, as (ratio, weight) pairs: the active
+    /// chord-bar chord under the SHEPARD REGISTER LAW (2026-08-30,
+    /// `shepardChordNotes` — pitch-class chord centered in the octave
+    /// below the tonic, octave copies raised-cosine weighted so a VII
+    /// chord sits no higher than a I chord and any octave's cell sounds
+    /// identically), else the configured strum set at weight 1. A
+    /// selection dangling past a scale shrink falls back silently.
+    private func strumNotes() -> [(ratio: Double, weight: Double)] {
+        if let sel = strumChord {
+            let degs = scaleDegrees(from: pitchPad.scale)
+            if sel.degree >= 0, sel.degree < degs.count {
+                return shepardChordNotes(
+                    rootRatio: degs[sel.degree].ratio,
+                    intervals: scaleChords(degrees: degs)[sel.degree].intervals)
+            }
+        }
+        return sarangi.state.strumStringRatios.map { ($0, 1.0) }
+    }
+
+    private func strikeStrumChord() {
+        releaseStrum()
+        strumGen += 1
+        let gen = strumGen
+        for (i, note) in strumNotes().enumerated() {
+            let touch = Self.strumTouchBase + (gen % 1024) * 64 + i
+            // The strum is a fixed-register anchor (its members carry
+            // their own octaves, like the drones) — exempt from the
+            // playing-range octave shift, and from the glide queue (the
+            // chord's near-simultaneous onsets must never chain into a
+            // glissando).
+            pitchPad.noteOn(touchId: touch, ratio: note.ratio,
+                            velocity01: 0.9, octaveShifted: false,
+                            exprScale: strumExpr * note.weight,
+                            glideExempt: true)
+            strumHeld.append((touch, note.weight))
+        }
+    }
+
+    private func releaseStrum() {
+        for h in strumHeld { pitchPad.noteOff(touchId: h.id) }
+        strumHeld.removeAll()
+    }
+
+    /// A chord-selection change while the chord is RINGING switches the
+    /// held notes in place (2026-08-29): members glide to the new chord's
+    /// pitches (one render block on the bow, a kernel-side retune on the
+    /// plucked mains — no new attack) and take their new Shepard weights
+    /// live, a shrinking chord note-offs the surplus, a growing one
+    /// strikes the extra members fresh. Ids stay index-deterministic
+    /// within the generation, so a shrink→grow within one hold reuses
+    /// released ids safely (a touchOn on a reused token is a retrigger by
+    /// onsetSeq).
+    private func retuneStrumChord() {
+        guard !strumHeld.isEmpty else { return }
+        let notes = strumNotes()
+        for i in strumHeld.indices where i < notes.count {
+            pitchPad.glide(touchId: strumHeld[i].id, ratio: notes[i].ratio)
+            if strumHeld[i].weight != notes[i].weight {
+                strumHeld[i].weight = notes[i].weight
+                pitchPad.setTouchExpr(touchId: strumHeld[i].id,
+                                      exprScale: strumExpr * notes[i].weight)
+            }
+        }
+        if strumHeld.count > notes.count {
+            for h in strumHeld[notes.count...] {
+                pitchPad.noteOff(touchId: h.id)
+            }
+            strumHeld.removeSubrange(notes.count...)
+        }
+        while strumHeld.count < notes.count {
+            let i = strumHeld.count
+            let touch = Self.strumTouchBase + (strumGen % 1024) * 64 + i
+            pitchPad.noteOn(touchId: touch, ratio: notes[i].ratio,
+                            velocity01: 0.9, octaveShifted: false,
+                            exprScale: strumExpr * notes[i].weight,
+                            glideExempt: true)
+            strumHeld.append((touch, notes[i].weight))
+        }
+    }
+
+    /// The accel trigger's edge detector, fed by every strike-envelope
+    /// change (the link receive queue) and the link-drop reset. Rising
+    /// through the threshold strikes the chord; falling back below the
+    /// SAME threshold releases immediately — unless L is holding — and
+    /// arms a 100 ms retrigger cooldown so a jittery envelope hovering at
+    /// the threshold can't machine-gun the chord (2026-08-29: the release
+    /// cooldown replaced the 60% release hysteresis). State is
+    /// main-owned, so the edges hop queues (the cheap pre-check reads are
+    /// benign races: the main block re-tests before acting; the cooldown
+    /// clock is main-only).
+    private func strumAccelSense(_ v: Double) {
+        let up = !strumAccelHeld && v >= strumThresh01
+        let down = strumAccelHeld && v < strumThresh01
+        guard up || down else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            if !self.strumAccelHeld, v >= self.strumThresh01,
+               now >= self.strumAccelCooldownUntil {
+                self.strumAccelHeld = true
+                self.strikeStrumChord()
+            } else if self.strumAccelHeld, v < self.strumThresh01 {
+                self.strumAccelHeld = false
+                self.strumAccelCooldownUntil = now + 0.1
+                if !self.strumLHeld { self.releaseStrum() }
+            }
+        }
+    }
+
     /// Latest axis values for the iPad display relay (main queue):
     /// stick = Joy-Con stick, wrist = the Joy-Con's fused attitude
     /// (nil until the fusion runs / after detach), arm = the
@@ -729,6 +1116,8 @@ final class AppController: ObservableObject {
             self.strikeMeasure = v
             self.strikeLock.unlock()
             self.evaluateStrikeBlend()
+            // The strum accel trigger rides the same envelope.
+            self.strumAccelSense(v)
         }
         // Note-lifecycle edges anchor the per-note blend windows (a
         // retrigger re-anchors its id; releases fall back to the
@@ -740,7 +1129,34 @@ final class AppController: ObservableObject {
             if on { self.strikeWindow.noteOn(id, at: now) }
             else { self.strikeWindow.noteOff(id) }
             self.strikeLock.unlock()
+            self.fingerGate(0, id, on)
         }
+        // The `.fingerAccel` dimension's pitch feed — the wire lane plus
+        // the Mac pads/auditions' local lane, id-namespaced (source 0/1)
+        // so the two u16 spaces can't collide in the tracker.
+        ingest.onTouchPitch = { [weak self] id, pitch in
+            self?.fingerPitchUpdate(0, id, pitch)
+        }
+        pitchPad.localIngest?.onTouchGate = { [weak self] id, on in
+            self?.fingerGate(1, id, on)
+        }
+        pitchPad.localIngest?.onTouchPitch = { [weak self] id, pitch in
+            self?.fingerPitchUpdate(1, id, pitch)
+        }
+        // The chord bar's selection edges (TLP v12) — the wire lane (iPad
+        // taps) and the local lane (the Mac bar via `tapChord`) both land
+        // in `strumChord`, so the published value is always what the next
+        // strum sounds — and a chord RINGING at the edge retunes to the
+        // new selection in place (2026-08-29).
+        let chordEdge: (ChordSelection?) -> Void = { [weak self] sel in
+            DispatchQueue.main.async {
+                guard let self, self.strumChord != sel else { return }
+                self.strumChord = sel
+                self.retuneStrumChord()
+            }
+        }
+        ingest.onChordSelect = chordEdge
+        pitchPad.localIngest?.onChordSelect = chordEdge
         // TarabLink: inbound TLP SysEx from MIDIInput's reassembler;
         // outbound through the same wired-first SysEx send the legacy
         // blobs used ("iPad" name match; BLE bypasses the filter inside).
@@ -766,6 +1182,8 @@ final class AppController: ObservableObject {
             self.strikeMeasure = 0
             self.strikeLock.unlock()
             self.evaluateStrikeBlend()
+            // An accel-held strum chord must not outlive the link.
+            self.strumAccelSense(0)
         }
         link.onEvent = { [weak self] event in
             switch event {
@@ -819,9 +1237,11 @@ final class AppController: ObservableObject {
             self?.applyComposite(slotCC: cc, value: value)
         }
         // Joy-Con: the printed arrows pluck the drone buttons, L strums
-        // all three. The five control axes (2026-08-13): arm 0–2 (the
-        // iPad's tilts, calibrated through the arm solve or raw when
-        // uncalibrated), stick 3/4 — each axis has exactly one source.
+        // all three. The control axes: arm 0–2 (the iPad's tilts,
+        // calibrated through the arm solve or raw when uncalibrated),
+        // stick 3/4, and since 2026-09-02 the Joy-Con's wrist ↕/↔/⟲ +
+        // acceleration (`wristAxisIndices` / `jcAccelAxisIndex`) — each
+        // axis has exactly one source.
         joyCon.onArmAxes = { [weak self] t1, t2, t3 in
             guard let self else { return }
             self.applyTiltAxis(0, t1)
@@ -845,45 +1265,51 @@ final class AppController: ObservableObject {
             self.lastStickAxes = (x01, y01)
             self.sendJoyConDisplay()
         }
+        joyCon.onWristAxes = { [weak self] w1, w2, w3 in
+            guard let self else { return }
+            self.applyTiltAxis(Self.wristAxisIndices.0, w1)
+            self.applyTiltAxis(Self.wristAxisIndices.1, w2)
+            self.applyTiltAxis(Self.wristAxisIndices.2, w3)
+        }
+        joyCon.onJoyConAccel = { [weak self] level in
+            self?.applyTiltAxis(Self.jcAccelAxisIndex, level * 2 - 1)
+        }
         joyCon.onButton = { [weak self] control, pressed in
             guard let self else { return }
             switch control {
-            case .dpadLeft:  self.audio.setDronePressed(0, pressed)
+            case .dpadLeft:
+                // ←/→ step the playing range an octave (2026-08-27;
+                // they were drone buttons 0/2 before — ↓ keeps drone 1).
+                guard pressed else { return }
+                self.shiftOctave(-1)
             case .dpadDown:
-                // During a running body calibration, dpad-down steps
-                // BACK one phase (mirror of dpad-up = advance); it's a
-                // drone button otherwise. The release still clears the
-                // drone so a press held across the capture start can't
-                // stick.
-                if self.joyCon.bodyCalStep != nil {
-                    if pressed { self.joyCon.redoPreviousBodyCalibrationStep() }
+                // During a running arm/wrist calibration, dpad-down
+                // steps BACK one phase (mirror of dpad-up = advance);
+                // it's a drone button otherwise. The release still
+                // clears the drone so a press held across the capture
+                // start can't stick.
+                if self.joyCon.capturingCalibrator != nil {
+                    if pressed { self.joyCon.redoPreviousCalibrationStep() }
                     else { self.audio.setDronePressed(1, false) }
                 } else {
                     self.audio.setDronePressed(1, pressed)
                 }
-            case .dpadRight: self.audio.setDronePressed(2, pressed)
+            case .dpadRight:
+                guard pressed else { return }
+                self.shiftOctave(+1)
             case .l:
-                // Strum: the three drone buttons staggered like a
-                // tanpura sweep; release rings them out. The generation
-                // counter keeps a quick tap's release from leaving a
-                // still-scheduled press stuck in the hold cycle.
-                self.droneStrumGen += 1
-                let gen = self.droneStrumGen
-                if pressed {
-                    for i in 0..<3 {
-                        DispatchQueue.main.asyncAfter(
-                            deadline: .now() + Double(i) * 0.09
-                        ) {
-                            guard self.droneStrumGen == gen else { return }
-                            self.audio.setDronePressed(i, true)
-                        }
-                    }
-                } else {
-                    for i in 0..<3 { self.audio.setDronePressed(i, false) }
-                }
+                // Sound the CONFIGURED string set as a HELD MAIN-VOICE
+                // chord (reworked 2026-08-28; before that: a staccato
+                // sweep, the drone voice, and originally the three
+                // drone buttons): all the Strings tab's strum members
+                // at once while L is held, released with the button —
+                // default low Sa · low Pa, remappable to raga chords
+                // (members are scale degrees, so a chord follows the
+                // scale). See `strum(pressed:)`.
+                self.strum(pressed: pressed)
             case .zl:
-                // ZL re-zeroes the body axes: the CURRENT pose becomes
-                // rest (0.5 across all four).
+                // ZL re-zeroes the arm AND wrist axes: the CURRENT
+                // poses become rest (0 on all six).
                 guard pressed else { return }
                 self.joyCon.recenterBody()
             case .sl, .sr, .stickClick, .minus, .capture:
@@ -892,10 +1318,10 @@ final class AppController: ObservableObject {
                 // visible in the panel chips.
                 break
             case .dpadUp:
-                // Advances a running body calibration (no-op otherwise)
-                // so the controller hand can step phases alone.
+                // Advances a running arm/wrist calibration (no-op
+                // otherwise) so the controller hand can step phases alone.
                 guard pressed else { return }
-                self.joyCon.advanceBodyCalibration()
+                self.joyCon.advanceCalibration()
             }
         }
         // The `0x05` relay's `connected` bit hides the drone buttons on
@@ -911,23 +1337,8 @@ final class AppController: ObservableObject {
         joyCon.start()
         // (sendJoyConDisplay below relays the stick + wrist axes to the
         // iPad's toolbar squares.)
-        // Fret-linger display feed (2026-08-18): poll the String voice's
-        // per-touch envelope state at 20 Hz and relay it as LINGER_STATE
-        // frames, so the iPad's touch overlay shows the expression charge
-        // and auto-vibrato the Mac is ACTUALLY evaluating (no client-side
-        // replica to drift from the live parameters). The link dedupes —
-        // an unchanged (usually empty) poll never reaches the wire.
-        lingerPushTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 20.0,
-                                               repeats: true) { [weak self] _ in
-            guard let self else { return }
-            func b(_ v: Double) -> UInt8 {
-                UInt8(min(max(v, 0.0), 1.0) * 255.0 + 0.5)
-            }
-            self.link.setLingerState(self.audio.lingerDisplay().map {
-                TLPLingerTouch(id: $0.id, charge: b($0.charge),
-                               vib: b($0.vib), vibCeil: b($0.vibCeil))
-            })
-        }
+        // Voice/taraf volume readout → iPad (JOYCON_STATE vol bytes).
+        startVolMeterRelay()
         // jt overload watchdog: the String voice's async jawari web drops
         // drive blocks / flat-fills when it misses its realtime budget —
         // audible clicking. Log only when the counters GROW.
@@ -1539,6 +1950,17 @@ final class AppController: ObservableObject {
         case "drone1", "drone2", "drone3":
             let i = Int(String(name.dropFirst(5)))! - 1
             audio.setDronePressed(i, value > 0.5)
+        // Controller strum: value > 0.5 = press (the main-voice chord
+        // sounds and holds), ≤ 0.5 = release (note-off) — the Joy-Con L
+        // path, so a score must send both edges.
+        case "strum":
+            strum(pressed: value > 0.5)
+        // Chord bar selection: value = the degree index to select (root
+        // octave 0 — the base band), negative = deselect. Routed through
+        // the shared engine so the full edge path is exercised.
+        case "chord":
+            pitchPad.setChordSelection(value < 0 ? nil
+                : ChordSelection(degree: Int(value), octave: 0))
         // Tilt performance axes (the iPad tilts' CC71/73/72 targets):
         // purity/decay 0..1, tone tilt -1..1. Runtime playing state —
         // NOT `string.<key>` build scalars (no engine rebuild).

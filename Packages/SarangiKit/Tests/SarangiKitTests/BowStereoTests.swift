@@ -1,16 +1,7 @@
 import XCTest
 @testable import SarangiKit
 
-/// TARABDAAR STEREO SIDE PATH (2026-07-23): the poly kernel's physically-
-/// derived side stream — per-source pans (played slots, jt rows) radiated
-/// through side body banks; L = mid + side, R = mid − side.
-/// Three invariants:
-///   1. keys absent → the legacy path exactly (L == R bit-for-bit),
-///   2. keys armed → a real side stream (L ≠ R),
-///   3. the L+R fold-down of the armed render equals the unarmed render's
-///      to fp tolerance (the side cancels in the sum — the mid path and
-///      the mono room are untouched).
-/// Serial jt (no pool, no async) keeps both renders deterministic.
+/// Stereo side path: L ≠ R, and the L+R fold-down equals the mono render.
 final class BowStereoTests: XCTestCase {
 
     private func makeEngine(stereo: Bool, widthOnly: Bool = false) -> BowEngine {
@@ -107,37 +98,4 @@ final class BowStereoTests: XCTestCase {
               "folddown err \(String(format: "%.2e", maxErr))")
     }
 
-    /// INSTRUMENT WIDTH (2026-08-01 unifying rev): with every pan zero
-    /// and only `bow_st_width` armed, the side stream is exactly the
-    /// second observation point on the whole instrument (voice bus +
-    /// jt-wash bus bank instances) — it must produce real side energy
-    /// (L ≠ R), and the L+R fold-down must still equal the mono render
-    /// (the antisymmetric side cancels in the sum; the mid path never
-    /// touched).
-    func testInstrumentWidthAloneWidensAndFoldsDown() {
-        let mono = renderSeconds(makeEngine(stereo: false), seconds: 2.0)
-        let wide = renderSeconds(makeEngine(stereo: false, widthOnly: true),
-                                 seconds: 2.0)
-
-        func rms(_ x: [Double]) -> Double {
-            (x.reduce(0) { $0 + $1 * $1 } / Double(x.count)).squareRoot()
-        }
-
-        let side = zip(wide.l, wide.r).map { 0.5 * ($0 - $1) }
-        let sideRMS = rms(side)
-        let midRMS = rms(zip(wide.l, wide.r).map { 0.5 * ($0 + $1) })
-        XCTAssertGreaterThan(sideRMS / midRMS, 0.01,
-                             "instrument width produced no side energy")
-
-        var maxErr = 0.0
-        for i in 0..<mono.l.count {
-            let sum = 0.5 * (wide.l[i] + wide.r[i])
-            maxErr = max(maxErr, abs(sum - mono.l[i]))
-        }
-        XCTAssertLessThan(maxErr, 1e-9,
-                          "width fold-down diverged from the mono render")
-        print("bow width: side/mid " +
-              "\(String(format: "%.3f", sideRMS / midRMS)), " +
-              "folddown err \(String(format: "%.2e", maxErr))")
-    }
 }

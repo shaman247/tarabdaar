@@ -40,7 +40,6 @@ public final class TarabLink {
     public var sendRaw: ((_ sysex: [UInt8], _ isEvent: Bool) -> Void)?
     public var onPerfState: ((TLPPerfState) -> Void)?
     public var onJoyConState: ((TLPJoyConState) -> Void)?
-    public var onLingerState: ((TLPLingerState) -> Void)?
     public var onEvent: ((TLPEvent) -> Void)?
     public var onStatus: ((Status) -> Void)?
     /// Fired once when the link goes stale or down while anything might be
@@ -59,9 +58,6 @@ public final class TarabLink {
     private var joyCon: JoyConTiltDisplay?
     private var joyConDirty = false
     private var joyConSeq: UInt16 = 0
-    private var linger: [TLPLingerTouch] = []
-    private var lingerDirty = false
-    private var lingerSeq: UInt16 = 0
     private var lastSentUs: UInt32 = 0        // any outbound frame
     private var lastPingUs: UInt32 = 0
     private var pingId: UInt8 = 0
@@ -145,17 +141,24 @@ public final class TarabLink {
         }
     }
 
-    /// Host role: the latest per-touch linger envelope state (display
-    /// feed for the iPad's overlay). Latest-wins, paced like JOYCON_STATE;
-    /// callers push on their own cadence (AppController's ~20 Hz poll) and
-    /// should push once with `[]` when the last touch ends.
-    public func setLingerState(_ touches: [TLPLingerTouch]) {
+    /// Host role: the latest voice/taraf VOLUME READOUT bytes (TLP v9,
+    /// `TLPVolume` log mapping) — they ride every JOYCON_STATE frame.
+    /// Change-gated here, so a silent instrument dirties nothing and the
+    /// heartbeat alone re-delivers the resting 0s.
+    public func setVolumeLevels(voice: UInt8, taraf: UInt8) {
         queue.async {
-            guard self.linger != touches else { return }
-            self.linger = touches
-            self.lingerDirty = true
+            guard voice != self.volVoice || taraf != self.volTaraf
+            else { return }
+            self.volVoice = voice
+            self.volTaraf = taraf
+            // The frame needs a display to ride — seed the idle one if
+            // no Joy-Con state was ever set (emit guards on nil).
+            if self.joyCon == nil { self.joyCon = .idle }
+            self.joyConDirty = true
         }
     }
+    private var volVoice: UInt8 = 0
+    private var volTaraf: UInt8 = 0
 
     /// Complete inbound SysEx (F0…F7) from either leg's receiver.
     /// Non-TLP messages are ignored. Any thread.
@@ -182,13 +185,6 @@ public final class TarabLink {
                 >= TarabLink.heartbeatUs
             if joyConDirty || (heartbeat && joyCon != nil) {
                 emitJoyConLocked()
-            }
-            if lingerDirty {
-                lingerDirty = false
-                lingerSeq &+= 1
-                outbox.enqueue(.lingerState(TLPLingerState(
-                    stateSeq: lingerSeq, timestampUs: now,
-                    touches: linger)))
             }
             if LinkClock.elapsedUs(from: lastPingUs, to: now)
                 >= TarabLink.pingIntervalUs {
@@ -229,7 +225,10 @@ public final class TarabLink {
             // Blend window → 50 ms wire units (v7), floor 1 so a tiny
             // configured window never encodes as the "unset" 0.
             strikeWin: UInt8(min(max((j.strikeWindowS / 0.05).rounded(),
-                                     1), 255)))))
+                                     1), 255)),
+            volVoice: volVoice, volTaraf: volTaraf,
+            fieldWarp: UInt8(min(max(j.fieldWarp, 0), 1) * 255.0 + 0.5),
+            octave: UInt8(bitPattern: Int8(clamping: j.octaveShift)))))
     }
 
     private func enqueueEventLocked(_ event: TLPEvent) {
@@ -287,9 +286,6 @@ public final class TarabLink {
         case .joyConState(let s):
             guard acceptState(type: TLP.typeJoyConState, seq: s.stateSeq) else { return }
             onJoyConState?(s)
-        case .lingerState(let s):
-            guard acceptState(type: TLP.typeLingerState, seq: s.stateSeq) else { return }
-            onLingerState?(s)
         case .event(let seq, let event):
             if case .hello = event {
                 // A hello is a stream epoch: the peer (re)started, its

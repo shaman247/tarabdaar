@@ -2,7 +2,7 @@ import Foundation
 
 /// The complete marshaled input set of the C bow kernel — the per-voice
 /// columns (empty since the linear web was deleted), 5 modal-body arrays and
-/// the 61-scalar list, in the exact C-signature order.
+/// the 66-scalar list, in the exact C-signature order.
 public struct BowKernelTables: Sendable {
     public var sr: Double
     public var L: [Int32]
@@ -45,7 +45,7 @@ public struct JtTables: Sendable {
     public var M: [Int32] = []
     public var ca: [Double] = [], cb: [Double] = []
     public var ca4: [Double] = [], cb4: [Double] = []
-    public var wd: [Double] = [], phiO: [Double] = [], phiD: [Double] = []
+    public var wd: [Double] = [], phiD: [Double] = []
     public var phiU: [Double] = [], phiF: [Double] = []
     public var b: [Double] = [], G: [Double] = [], G4: [Double] = []
     public var gd: [Double] = [], gd4: [Double] = []
@@ -62,6 +62,12 @@ public struct JtTables: Sendable {
     /// (not passed to C). Lets the host map a requested drone pitch to
     /// its nearest jawari-taraf row (`BowEngine.dronePress`).
     public var rowFreqs: [Double] = []
+    /// BRIDGE-FORCE RADIATION (2026-09-02; the only radiation since
+    /// 2026-09-03), per row: the force → radiated-velocity unit match
+    /// gout·π·wj/(mu·L·wd1) that multiplies the kernel's zone
+    /// force-density sum (gout = gain × the t60 norm — the level law the
+    /// deleted pickup shape used to carry). Load-ABI `radScale`.
+    public var rowForceScale: [Double] = []
     /// One-pole tone-control coefficient on the radiated jt sum
     /// (bow_jt_lp, Hz; ≥ 20 kHz ⇒ 0 = bypass, the byte-exact legacy
     /// path). Applied via bow_jt_set_lp — NOT part of the load ABI.
@@ -76,6 +82,22 @@ public struct JtTables: Sendable {
     public var trackT60: Double = 0
     public var trackFhf: Double = 4000
     public var trackBst: Double = 2.0e-4
+    /// TWO BRIDGES (2026-09-02): per row, whether it sits on the
+    /// CHROMATIC bridge (`bow_jtc_*`) rather than the raga one
+    /// (`bow_jt_*`), plus the per-row contact constants the kernel
+    /// applies through `bow_poly_jt_set_row_contact` (alpha / hcB and
+    /// the deep-substep threshold 2.5 × the row's own apex) and the
+    /// row's apex for the engine's per-bridge evolve map. `hasChromatic`
+    /// false = every row is raga = the setter is never called (byte-null)
+    /// and the evolve map is the one global lift.
+    public var rowChromatic: [Bool] = []
+    public var rowApex: [Double] = []
+    public var rowAlpha: [Double] = []
+    public var rowHcB: [Double] = []
+    public var hasChromatic: Bool = false
+    /// The raga bridge's apex (`bow_jt_apex` at build) — the evolve
+    /// map's reference for raga rows (phys[3] / 2.5).
+    public var apexRef: Double = 1.0e-5
     public init() {}
 }
 
@@ -114,10 +136,41 @@ public enum BowTables {
     /// the mode allocation is fixed at build, and the kernel only ever
     /// TRIMS the active count as the pitch rises); the tables just carry
     /// the row index + the law constants for `bow_poly_jt_track_config`.
+    /// THE CHROMATIC BRIDGE'S RESTING VALUES (2026-09-02): what a
+    /// chromatic row is built with when the artifact/overrides carry no
+    /// `bow_jtc_*` key — by construction the SAME numbers the raga bridge
+    /// ships with (the artifact's `bow_jt_*` values and the builder's
+    /// legacy fallbacks), so at rest the two bridges are the same jawari
+    /// and the split changes nothing but the string set; every knob then
+    /// diverges independently. The registry's `bow_jtc_*` defaults MUST
+    /// equal these (the DEFAULT = ENGINE-TRUTH contract, pinned by
+    /// `TarabSetTests`) — the artifact never carries the keys, so what
+    /// the Parameters tab shows is what the engine plays.
+    public static let chromaticBridgeDefaults: [String: Double] = [
+        "bow_jtc_gain": 0.3, "bow_jtc_drive": 0.03,
+        "bow_jtc_apex": 1.0e-5, "bow_jtc_zone": 0.006,
+        "bow_jtc_radius": 0.3,
+        "bow_jtc_alpha": 1.3, "bow_jtc_hcb": 8.0,
+        "bow_jtc_norm": 0.0, "bow_jtc_fhf": 4000.0,
+        "bow_jtc_bst": 2.0e-4, "bow_jtc_evolve": 0.5,
+    ]
+
+    /// `chromatic` (2026-09-02, index-aligned with `rows`; nil = every row
+    /// on the raga bridge, the byte-exact legacy build): rows flagged
+    /// true are built with the CHROMATIC bridge's geometry and contact
+    /// law (`bow_jtc_*`, resting at `chromaticBridgeDefaults`) — their
+    /// own bone profile (apex / zone / radius), radiation tap, level
+    /// norm, string damping corner and inharmonicity, and their own
+    /// level/drive (baked into the row taps as ratios against the raga
+    /// bridge's global `phys` gain/drive, which stay the kernel's
+    /// scalars). The per-row contact constants (alpha / hcB / the deep
+    /// threshold at 2.5 × the row's apex) ride `rowAlpha`/`rowHcB`/
+    /// `rowApex` for `BowEngine` to push (`bow_poly_jt_set_row_contact`).
     public static func buildJawariTables(
         rows: [(f: Double, gain: Double, t60: Double)],
         srk: Double, bp: BowParams,
-        trackRowIndex: Int? = nil) -> JtTables? {
+        trackRowIndex: Int? = nil,
+        chromatic: [Bool]? = nil) -> JtTables? {
         // No arming switch (2026-08-02): the modal-jawari block IS the
         // taraf, so it builds whenever there are rows to build. The only
         // "off" is an empty row set (every tarab string disabled).
@@ -127,41 +180,68 @@ public enum BowTables {
         // around the apex — a narrowed zone concentrates J on the
         // active region (measured closer-to-converged than J16 at
         // 10 mm). Default 0.010 = the pre-J8z6 tables.
-        let zoneW = bp.v("bow_jt_zone", 0.010)
-        let radius = bp.v("bow_jt_radius", 0.3)
+        let zoneWR = bp.v("bow_jt_zone", 0.010)
+        let radiusR = bp.v("bow_jt_radius", 0.3)
         // bow_jt_evolve is NOT applied here: the harmonic-evolution axis
         // is a LIVE slewed bone offset in the kernel (equivalent to
         // scaling apex — the parabola shifts uniformly), pushed by
         // `BowEngine.setJtEvolve`. Building it into the profile would
         // double-apply it and turn every tilt frame into a table swap
         // (the bone stepping under a wrapped string = the strum).
-        let apex = bp.v("bow_jt_apex", 1.0e-5)
+        let apexR = bp.v("bow_jt_apex", 1.0e-5)
         let kc = bp.v("bow_jt_kc", 1.0e10)
-        let alpha = bp.v("bow_jt_alpha", 1.3)
+        let alphaR = bp.v("bow_jt_alpha", 1.3)
         // Tarabdaar tone knobs (2026-07-23; defaults = the legacy hardcoded
         // values, so untouched artifacts build byte-identical tables):
         // hcb = contact hysteresis damping, fhf = HF damping corner of the
         // per-mode t60 law, bst = stiffness inharmonicity coefficient.
-        let hcB = bp.v("bow_jt_hcb", 8.0)
+        let hcBR = bp.v("bow_jt_hcb", 8.0)
         let gain = bp.v("bow_jt_gain", 1.0)
         let drive = bp.v("bow_jt_drive", 1.0)
-        let fmax = 18000.0, fHf = bp.v("bow_jt_fhf", 4000.0)
+        let fmax = 18000.0, fHfR = bp.v("bow_jt_fhf", 4000.0)
         let mcap = Int(bp.v("bow_jt_mcap", 64.0) + 0.5)
         let div = max(1, Int(bp.v("bow_jt_div", 1.0) + 0.5))
-        let norm = bp.v("bow_jt_norm", 0.0)
+        let normR = bp.v("bow_jt_norm", 0.0)
+        let bstR = bp.v("bow_jt_bst", 2.0e-4)
+        // the chromatic bridge's own values (resting = the raga bridge's
+        // shipped numbers, see chromaticBridgeDefaults)
+        func cv(_ k: String) -> Double { bp.v(k, chromaticBridgeDefaults[k] ?? 0.0) }
+        let hasChrom = chromatic?.contains(true) ?? false
+        let zoneWC = cv("bow_jtc_zone"), radiusC = cv("bow_jtc_radius")
+        let apexC = cv("bow_jtc_apex"), alphaC = cv("bow_jtc_alpha")
+        let hcBC = cv("bow_jtc_hcb"), fHfC = cv("bow_jtc_fhf")
+        let normC = cv("bow_jtc_norm"), bstC = cv("bow_jtc_bst")
+        // level/drive ride the taps as ratios against the kernel's global
+        // (raga) phys scalars — a silenced raga bridge silences the
+        // ratio's denominator, so the chromatic set goes with it
+        let gainMulC = gain > 1e-12 ? cv("bow_jtc_gain") / gain : 0.0
+        let driveMulC = drive > 1e-12 ? cv("bow_jtc_drive") / drive : 0.0
         let rW = 2.0e-4
         let mu = Double.pi * rW * rW * 7850.0
         let dt = Double(div) / srk
         let dt4 = dt / 4.0
         var T = JtTables()
         T.J = Int32(J)
-        for row in rows {
+        T.hasChromatic = hasChrom
+        T.apexRef = apexR
+        for (ri, row) in rows.enumerated() {
+            let chrom = chromatic.map { $0.indices.contains(ri) && $0[ri] } ?? false
+            let zoneW = chrom ? zoneWC : zoneWR
+            let radius = chrom ? radiusC : radiusR
+            let apex = chrom ? apexC : apexR
+            let alpha = chrom ? alphaC : alphaR
+            let fHf = chrom ? fHfC : fHfR
+            let norm = chrom ? normC : normR
+            T.rowChromatic.append(chrom)
+            T.rowApex.append(apex)
+            T.rowAlpha.append(alpha)
+            T.rowHcB.append(chrom ? hcBC : hcBR)
             let f0s = row.f
             T.rowFreqs.append(f0s)
             let L = min(0.30, max(0.08, 0.25 * 296.0 / f0s))
             let fx = min(fmax, 0.42 * srk / Double(div))
             let M = max(16, min(mcap, Int(fx / f0s)))
-            let bst = bp.v("bow_jt_bst", 2.0e-4)
+            let bst = chrom ? bstC : bstR
             var w0 = [Double](repeating: 0, count: M)
             var wd = [Double](repeating: 0, count: M)
             for k in 0..<M {
@@ -215,27 +295,31 @@ public enum BowTables {
                 bprof[j] = apex - d * d / (2.0 * radius)
             }
             T.b.append(contentsOf: bprof)
-            // bow_jt_tap (2026-07-26): the RADIATION tap position as a
-            // fraction of L. Radiated harmonic k weighs |sin(k·π·tap)|:
-            // the legacy 0.90 humps at h5 and NULLS h10 — it muffles
-            // exactly the high-harmonic cluster the jawari formant
-            // lives in. Sliding toward the bridge moves the hump up
-            // (0.95 → h10, 0.97 → h16) and drops the fundamental away.
-            // The DRIVE tap stays at the fitted 0.90 so recruitment
-            // charging is untouched; 0.90 radiation = byte-exact.
-            let xO = bp.v("bow_jt_tap", 0.90) * L
+            // The DRIVE tap: the played string's bridge force enters each
+            // row at the fitted 0.90 L (|sin(k·π·0.9)| per mode). Roadmap
+            // item 2 (docs/sarangi.md) is to drive from the termination.
             let xD = 0.90 * L
-            var phiO = [Double](repeating: 0, count: M)
             // t60-response normalization (python jt_tables mirror)
-            let gout = row.gain * pow(5.0 / max(row.t60, 0.5), norm)
+            var gout = row.gain * pow(5.0 / max(row.t60, 0.5), norm)
+            var gdrv = row.gain
+            // the chromatic bridge's own level/drive (raga rows: the
+            // exact legacy arithmetic — no multiply)
+            if chrom { gout *= gainMulC; gdrv *= driveMulC }
             for k in 0..<M {
-                phiO[k] = amp2 * sin(Double(k + 1) * Double.pi * xO / L)
                 let pd = amp2 * sin(Double(k + 1) * Double.pi * xD / L)
-                T.phiO.append(gout * phiO[k])
-                T.phiD.append(row.gain * pd / mu)
+                T.phiD.append(gdrv * pd / mu)
             }
             T.phiU.append(contentsOf: phi)
             T.phiF.append(contentsOf: phi.map { $0 * wj / mu })
+            // BRIDGE-FORCE RADIATION unit match (2026-09-02, baked
+            // 2026-09-03 — the 0.90 L velocity pickup and `bow_jt_tap`
+            // are gone): with T = mu·(L·wd1/π)² the termination force
+            // T·∂u/∂x of a unit mode-1 ring maps to the old pickup's
+            // velocity amplitude through gout·π/(mu·L·wd1) — so the
+            // fitted level law carries over and every mode radiates
+            // flat in those units; × wj because the kernel sums force
+            // DENSITIES over the zone.
+            T.rowForceScale.append(gout * Double.pi * wj / (mu * L * wd[0]))
             // static wrap q0 (fixed-point, 300 iterations — the python
             // builder verbatim)
             var q0 = [Double](repeating: 0, count: M)
@@ -260,7 +344,7 @@ public enum BowTables {
             T.q0.append(contentsOf: q0)
             T.M.append(Int32(M))
         }
-        T.phys = [kc, alpha, hcB, 2.5 * apex, gain, drive, Double(div)]
+        T.phys = [kc, alphaR, hcBR, 2.5 * apexR, gain, drive, Double(div)]
         T.threads = Int32(bp.v("bow_jt_threads", 0.0).rounded())
         T.async = bp.v("bow_jt_async", 0.0) > 0.5 ? 1 : 0
         // Tarabdaar jt tone LP (2026-07-23): one-pole on the radiated jt sum,
@@ -580,6 +664,12 @@ public enum BowTables {
             bp.v("bow_jaw_rho", 0.0),                  // jawari collision
             bp.v("bow_jaw_roll", 0.0),                 // rolling contact
             bp.v("bow_jaw_roll_amp", 0.005),
+            bp.v("bow_loss_reg", 0.0),                 // register damping
+                                                       // (0 = bit-null)
+            bp.v("bow_slide_rate", 900.0),             // slide dulling
+            bp.v("bow_slide_dull", 0.0),               // (dull 0 = bit-null)
+            bp.v("bow_slide_noise", 0.0),              // accel-driven finger
+            bp.v("bow_slide_acc", 25000.0),            // noise (0 = bit-null)
         ]
         return t
     }

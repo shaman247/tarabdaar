@@ -195,6 +195,8 @@ public enum SyncedScaleStore {
 ///   extent; v3 added the flags byte; v4 added the free per-segment x;
 ///   v5 added the drone ratios; v6 dropped from 4 to 3 drones (older blobs
 ///   are rejected — both apps ship the format together).
+///   (The fret pitch warp is deliberately NOT in this blob: `ctl_fret_warp`
+///   is a live registry param, streamed to the iPad over JOYCON_STATE.)
 public enum FretArrangementSysEx {
     public static let nonCommercialID: UInt8 = 0x7D
     public static let arrangementSubID: UInt8 = 0x03
@@ -385,12 +387,26 @@ public struct JoyConTiltDisplay: Equatable {
     /// actually governs the strike→acceleration blend (TLP v7). 2.0
     /// when never received (link down, legacy sender).
     public var strikeWindowS: Double
+    /// The Mac's `ctl_fret_warp` fret pitch-warp amount (0…1, TLP v10) —
+    /// with `connected` one of the fields the pad ACTS on: the fret
+    /// field resolves touch pitch through it, so a Mac-side binding
+    /// (e.g. the Joy-Con stick) performs the warp live. 0 when never
+    /// received (link down = the linear field).
+    public var fieldWarp: Double
+    /// The Mac's playing-range OCTAVE SHIFT in whole octaves (−3…+3,
+    /// TLP v11 — Joy-Con dpad ←/→). Acted on by the pad through
+    /// `PitchPadEngine.octaveShift` — ONSET-captured per touch, so a
+    /// sounding note keeps its birth octave and only new onsets take
+    /// the new range — and shown in the toolbar. 0 when never received
+    /// (link down = no shift).
+    public var octaveShift: Int
 
     public init(stickX: Double, stickY: Double, wrist1: Double,
                 wrist2: Double, stickLive: Bool, bodyLive: Bool,
                 connected: Bool, wrist3: Double = 0, arm1: Double = 0,
                 arm2: Double = 0, arm3: Double = 0,
-                armLive: Bool = false, strikeWindowS: Double = 2.0) {
+                armLive: Bool = false, strikeWindowS: Double = 2.0,
+                fieldWarp: Double = 0, octaveShift: Int = 0) {
         self.stickX = stickX
         self.stickY = stickY
         self.wrist1 = wrist1
@@ -404,6 +420,10 @@ public struct JoyConTiltDisplay: Equatable {
         self.armLive = armLive
         self.connected = connected
         self.strikeWindowS = strikeWindowS
+        self.fieldWarp = min(max(fieldWarp, 0), 1)
+        self.octaveShift = min(max(octaveShift,
+                                   PitchPadEngine.octaveShiftRange.lowerBound),
+                               PitchPadEngine.octaveShiftRange.upperBound)
     }
 
     /// The at-rest/no-link display: everything centred and dim.
@@ -447,13 +467,6 @@ public final class ScaleSyncReceiver: ObservableObject {
     /// `connected` is the one field the surface acts on (drone buttons
     /// hide while a controller plays the drones).
     @Published public private(set) var joyConTilt = JoyConTiltDisplay.idle
-
-    /// The Mac's fret-linger display stream (LINGER_STATE, 2026-08-18):
-    /// per-touch expression charge + auto-vibrato depth/ceiling as the
-    /// Mac's filter actually evaluates them, keyed by WIRE touch id
-    /// (match via `PitchPadEngine.wireId(forTouch:)`). Display-only,
-    /// nothing persists; cleared on link drop.
-    @Published public private(set) var linger: [LingerTouchDisplay] = []
 
     /// Fired on the main thread with each decoded state (scale + tonic +
     /// margin). The receiver also persists it via `SyncedScaleStore`.
@@ -634,38 +647,59 @@ public final class ScaleSyncReceiver: ObservableObject {
 
     public func applyJoyCon(_ tilt: JoyConTiltDisplay) {
         DispatchQueue.main.async { [weak self] in
-            self?.joyConTilt = tilt
+            // Change-gated (2026-08-24): JOYCON_STATE frames stream at up
+            // to 30 Hz while the volume readout moves; an unchanged tilt
+            // display must not re-render every toolbar pane each frame.
+            guard let self, self.joyConTilt != tilt else { return }
+            self.joyConTilt = tilt
         }
     }
 
-    public func applyLinger(_ touches: [LingerTouchDisplay]) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.linger != touches else { return }
-            self.linger = touches
-        }
-    }
+    /// VOLUME READOUT history (2026-08-24): the Mac's radiated voice/
+    /// taraf levels — the JOYCON_STATE vol bytes on the `TLPVolume` 0…1
+    /// log scale — stamped with receive time. Deliberately NOT
+    /// `@Published`: frames arrive at up to 30 Hz while sound plays, and
+    /// the toolbar's volume scope polls this at UI rate inside a
+    /// `TimelineView` instead (the strike scope's pattern), so level
+    /// motion never re-renders the toolbar.
+    public let volumeHistory = VolumeHistory()
 }
 
-/// One touch's Mac-evaluated linger envelopes, decoded to 0…1 for the
-/// iPad's overlay: expression charge (1 = full, falling as the note
-/// lingers), auto-vibrato depth, and the y-set ceiling it grows toward.
-public struct LingerTouchDisplay: Equatable, Sendable {
-    public let id: UInt16
-    public let charge: Double
-    public let vib: Double
-    public let vibCeil: Double
+/// Thread-safe rolling buffer of received (voice, taraf) volume levels
+/// (0…1 log scale — see `TLPVolume`). Samples are sparse: change-gated
+/// 30 Hz while levels move, the link's 250 ms heartbeat at rest — the
+/// scope forward-fills between them.
+public final class VolumeHistory {
+    public struct Sample: Sendable {
+        public let t: TimeInterval        // ProcessInfo systemUptime
+        public let voice: Double
+        public let taraf: Double
+    }
+    private let lock = NSLock()
+    private var samples: [Sample] = []
+    /// Retention window — comfortably longer than any display window, so
+    /// the scope always has the one sample preceding its left edge to
+    /// forward-fill from.
+    private static let window: TimeInterval = 8.0
 
-    public init(id: UInt16, charge: Double, vib: Double, vibCeil: Double) {
-        self.id = id
-        self.charge = charge
-        self.vib = vib
-        self.vibCeil = vibCeil
+    public init() {}
+
+    /// Append one received level pair (any thread).
+    public func record(voice: Double, taraf: Double) {
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        samples.append(Sample(t: now, voice: voice, taraf: taraf))
+        let cutoff = now - Self.window
+        if let first = samples.first, first.t < cutoff {
+            samples.removeFirst(samples.firstIndex { $0.t >= cutoff } ?? 0)
+        }
+        lock.unlock()
     }
 
-    public init(_ t: TLPLingerTouch) {
-        id = t.id
-        charge = Double(t.charge) / 255.0
-        vib = Double(t.vib) / 255.0
-        vibCeil = Double(t.vibCeil) / 255.0
+    /// Snapshot for drawing (any thread).
+    public func snapshot() -> [Sample] {
+        lock.lock()
+        defer { lock.unlock() }
+        return samples
     }
 }

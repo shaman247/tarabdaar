@@ -118,6 +118,8 @@ The setters clamp values into the same ranges as the UI sliders.
 |-----------------------|------------------|--------|
 | `param.<key>` / `string.<key>` | per-key | **Any** parameter in `ParamRegistry` — e.g. `param.bow_jt_gain`, `param.bow_rev_mix`, `param.bow_vib_cents`. Both prefixes are equivalent (`string.` is the historical spelling). Routed through `AppController.setParamValue`, the same path the Parameters-tab sliders take, so a sweep shows in the UI and persists; `live`/`hybrid` keys apply instantly, `rebuild` keys ride a debounced engine rebuild. A key the registry doesn't know still lands as a raw artifact override. See [parameters.md](parameters.md). |
 | `drone1`..`drone3`    | press/release    | Press (`>0.5`) / release a Fret Pad drone (jawari-taraf row). |
+| `strum`               | press/release    | The controller strum (the Joy-Con L path): `>0.5` sounds the held main-voice chord, `≤0.5` releases it — a score must send both edges. |
+| `chord`               | degree / −1      | Select the chord bar's chord for the strum: value = the degree index (root octave 0), negative = deselect (fall back to the configured strum set). See [fret-pad.md](fret-pad.md). |
 | `stringPurity`        | 0..1             | Taraf purity axis (composite slot 1: full buzzy chorus → clean kin — sweeps the jawari tone LP `bow_jt_lp` down from open AND recruitment profile `bow_jt_sel` 0.5→0, from the fitted taraf down to the played note's harmonic kin at held loudness). Runtime, no rebuild. |
 | `stringTarafDecay`    | 0..1             | Taraf decay axis (composite slot 2: natural → choked). |
 | `stringToneTilt`      | -1..1            | Tone tilt axis (composite slot 3: bass → treble). |

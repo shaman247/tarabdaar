@@ -22,6 +22,7 @@ struct ContentView: View {
     /// they publish reaches SwiftUI through `scaleSync`.
     private let link: TarabLink
     private let playState: OutboundPlayState
+    private let fingerAccel: FingerAccelSampler
 
     /// Holds the destination-count subscription OUTSIDE the view tree.
     /// A `.onReceive(midi.$destinationCount…)` modifier re-subscribes on
@@ -42,6 +43,10 @@ struct ContentView: View {
         _midi = StateObject(wrappedValue: sharedMidi)
         _pad = StateObject(wrappedValue: PitchPadEngine(state: state))
         self.playState = state
+        // Display-only finger-accel feed for the toolbar scope (the
+        // shared `FingerAccelTracker` law; the Mac evaluates its own
+        // instance for the `.fingerAccel` bindings).
+        self.fingerAccel = FingerAccelSampler(state: state)
         let link = TarabLink(role: .pad)
         link.attach(playState: state)
         self.link = link
@@ -101,9 +106,15 @@ struct ContentView: View {
                     break
                 }
             }
-            link.onJoyConState = { [weak scaleSync] s in
+            link.onJoyConState = { [weak scaleSync, weak pad] s in
                 // Frame u8 (centre 128) → the −1…+1 display convention.
                 func ax(_ b: UInt8) -> Double { Double(b) / 255.0 * 2.0 - 1.0 }
+                // Volume readout (TLP v9): into the polled history, NOT
+                // the published display — level motion must not
+                // re-render the toolbar (the scope polls at UI rate).
+                scaleSync?.volumeHistory.record(
+                    voice: TLPVolume.value01(s.volVoice),
+                    taraf: TLPVolume.value01(s.volTaraf))
                 scaleSync?.applyJoyCon(JoyConTiltDisplay(
                     stickX: ax(s.stickX),
                     stickY: ax(s.stickY),
@@ -118,21 +129,36 @@ struct ContentView: View {
                     arm3: ax(s.arm3),
                     armLive: s.flags & TLPJoyConState.flagArmLive != 0,
                     strikeWindowS: s.strikeWin == 0
-                        ? 2.0 : Double(s.strikeWin) * 0.05))
-            }
-            // Fret-linger display stream: the Mac's per-touch envelope
-            // state (expression charge, auto-vib depth/ceiling) → the
-            // touch overlay, matched by wire id.
-            link.onLingerState = { [weak scaleSync] s in
-                scaleSync?.applyLinger(s.touches.map(LingerTouchDisplay.init))
+                        ? 2.0 : Double(s.strikeWin) * 0.05,
+                    // TLP v10: the Mac's live ctl_fret_warp — the fret
+                    // field resolves touch pitch through it.
+                    fieldWarp: Double(s.fieldWarp) / 255.0,
+                    // TLP v11: the playing-range octave shift (i8).
+                    octaveShift: Int(Int8(bitPattern: s.octave))))
+                // The shift acts at the engine's outbound-pitch point
+                // (main-thread model, like applyJoyCon's publish).
+                let oct = Int(Int8(bitPattern: s.octave))
+                DispatchQueue.main.async {
+                    guard let pad, pad.octaveShift != oct else { return }
+                    pad.octaveShift = oct
+                }
             }
             // Link gone (down or stale) → the Mac's display axes are
             // history: dim every square (the arm pane falls back to the
             // iPad's own raw attitude) and un-hide the drone buttons.
-            link.onStatus = { [weak scaleSync] status in
+            link.onStatus = { [weak scaleSync, weak pad] status in
                 if !status.isUp || status.isStale {
                     scaleSync?.applyJoyCon(.idle)
-                    scaleSync?.applyLinger([])
+                    // The Mac's levels are history too — drop the scope
+                    // to silence instead of freezing at the last value.
+                    scaleSync?.volumeHistory.record(voice: 0, taraf: 0)
+                    // And the octave shift with them — .idle shows 0, so
+                    // the engine must agree (a re-link resends the truth
+                    // via the forced state push).
+                    DispatchQueue.main.async {
+                        guard let pad, pad.octaveShift != 0 else { return }
+                        pad.octaveShift = 0
+                    }
                 }
             }
             pad.onPanic = { [weak link] in link?.send(event: .panic) }
@@ -159,7 +185,8 @@ struct ContentView: View {
                        arrangement: scaleSync.fretArrangement
                            ?? FretArrangement.keyboardArrangement(
                                degrees: scaleDegrees(from: pad.scale)),
-                       motion: motion)
+                       motion: motion,
+                       fingerAccel: fingerAccel)
     }
 }
 

@@ -8,7 +8,10 @@ import Foundation
 /// test rig for the ingest path the iPad wire uses.
 public final class LocalLinkPump {
     private let state: OutboundPlayState
-    private let ingest: LinkIngest
+    /// Exposed so the Mac can hang its control-layer taps (the
+    /// `.fingerAccel` dimension's onTouchGate/onTouchPitch) on the local
+    /// pads' frame diffs the same way it does on the wire ingest.
+    public let ingest: LinkIngest
 
     public init(state: OutboundPlayState, ingest: LinkIngest) {
         self.state = state

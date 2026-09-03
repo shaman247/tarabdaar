@@ -15,15 +15,15 @@ continuous **field** interpolated from the frets:
   fret's vertical extent → exactly that fret's pitch; **between** two
   stacked frets → a linear y-interpolation across the gap; **above/below**
   all of them → clamped to the nearest one.
-- The field at the touch = the **linear log-pitch x-interpolation between
-  the two closest columns horizontally** — the nearest at-or-left and the
-  nearest right of the touch (`fretFieldLog`). Beyond the outermost columns
-  the line through the outermost **pair extrapolates**, so the edges keep
-  the local slope instead of going flat (a single-column layout holds its
+- The field at the touch = the **log-pitch x-interpolation between the two
+  closest columns horizontally** — the nearest at-or-left and the nearest
+  right of the touch (`fretFieldLog`). Beyond the outermost columns the
+  line through the outermost **pair extrapolates**, so the edges keep the
+  local slope instead of going flat (a single-column layout holds its
   pitch everywhere).
 
-So dragging right of S plays S at S's line, r at r's line, and the straight
-log-pitch line between them in the gap — pitch always moves toward the
+So dragging right of S plays S at S's line, r at r's line, and the
+log-pitch curve between them in the gap — pitch always moves toward the
 neighbor you're dragging at. Continuous
 everywhere: both sides of a column agree on the column's own pitch, and the
 y-resolution is continuous in y. (Earlier revisions used global
@@ -35,6 +35,68 @@ interpolation removes the whole failure class.)
 There are no discontinuities anywhere: onset snapping only ever adds a
 constant offset, drags follow the continuous field, and the drag assist is
 slew-limited/additive on top.
+
+## Pitch warp — frets bend the space around them (2026-08-24; live param 2026-08-25)
+
+**`ctl_fret_warp`** ("pitch warp", the "Fret pad" registry group; the Mac
+Fret Pad toolbar's **Warp** slider edits the same value, 0…100 %)
+reshapes every fret-to-fret interpolation — the x-blend between columns AND
+the y-blend across a stacked column's gap — through a **normalized
+logistic** (`fretWarp`):
+
+```
+w(t) = (σ(g·(t−½)) − σ(−g/2)) / (σ(g/2) − σ(−g/2)),   g = 14 · warp
+```
+
+At 0 it is exactly the identity (the historic linear field, bit for bit);
+as it rises, pitch **plateaus around each fret and transitions quickly
+through the middle of the gap** — a straight constant-rate slide between
+two adjacent frets traces a logistic pitch curve, arriving early and
+leaving late. The law is fixed at w(0)=0 / w(1)=1 (frets stay exact),
+symmetric (w(t)+w(1−t)=1 — the **midpoint between two frets never moves**,
+so the territory boundary is warp-invariant), and strictly monotone, so
+the field keeps all its continuity guarantees. Beyond the outermost
+columns the extrapolation stays linear (the warp is only defined between
+frets). At the top (g = 14) the center slope is ≈ 3.5× linear and the
+quarter-gap point sounds ≈ 3 % of the interval instead of 25 %.
+
+The amount is a **live control param** (`ctl_fret_warp`, `.live`, def 0),
+not layout state — like `ctl_strike_window` it never reaches the voice:
+`AppController.applyParamToVoice` intercepts the key, publishes the live
+value for the Mac surface (`AppController.fretFieldWarp`), and relays it
+to the iPad over the **JOYCON_STATE frame (TLP v10)**, where
+`FretPadSurfaceIOS` resolves every touch onset/move through it
+(`scaleSync.joyConTilt.fieldWarp`; 0 = linear while the link is down —
+moot, since a linkless iPad makes no sound anyway). That makes it
+**performable**: it sits on the Parameters tab with a mapping button like
+every param, so binding it to a tilt/stick axis (e.g. the Joy-Con stick)
+morphs the pad mid-phrase — stick at rest = the linear meend-friendly
+field, stick pushed = a near-quantized field for fast runs on one
+string. The relay rides the link's paced, latest-wins state lane, so a
+stick wiggling at input rate costs at most one frame per 120 Hz tick.
+Because touch pitch is evaluated iPad-side at event rate, a warp change
+retunes a MOVING finger continuously (both position and warp enter the
+same continuous field); a finger holding perfectly still simply keeps its
+pitch until it next moves. The resting value persists with the other
+control defaults and in presets; it is deliberately NOT in the
+arrangement blob or the layout files. Guards: `FretWarpTests`.
+
+### Contour overlay (Mac, edit mode)
+
+Out of Perform mode the Mac surface draws the field's **iso-pitch
+contours** (`fretFieldContours`): the **territory boundaries** — the
+log-midpoints between adjacent sounding pitches, the line where the field
+crosses from one pitch's territory into the next — brighter (white 0.28),
+plus fainter quarter-pitch minor contours (white 0.10). Between two plain
+columns a boundary is a straight vertical line; through a stacked column's
+blend zone it **curves** (the column's own pitch slides r → R with y, so
+the halfway line bows toward the neighbor). The minors are what make the
+warp visible: at 0 they sit at the linear quarter positions, and as the
+Warp rises they bunch against the boundaries — plateaus around the frets,
+a cliff in the middle. The solve is exact, not sampled in x: per scanline
+and column pair the crossing is `x = a + w⁻¹((c−l)/(r−l))·(b−a)` via
+`fretWarpInverse`, one crossing per pair (the warp is monotone). Perform
+mode and the iPad draw no contours — clean playing surface.
 
 ## Playing model — onset-only snapping
 
@@ -197,80 +259,23 @@ now the same 42 px in screen space). Old (v1) recordings still load — the
 fitter derives fret x from the old mapping — but record fresh sessions on
 the free-fret surface and refit.
 
-## Fret linger & y-depth auto-vibrato (2026-08-18)
+## Touch indicator & onset strike display
 
-The fret is a control surface, not just a pitch: **where the finger sits
-along the fret, and whether it keeps moving, shape the note's life**. Two
-per-note envelopes run in `BowControlFilter` (String voice only — a
-tanpura pluck decays on its own):
+Each touch draws a per-touch **indicator ring** — cool cyan while the
+finger glides, warming to amber as the drag assist's stop detector
+engages — plus the "original → corrected" pitch readout whenever the
+sounding pitch differs from the raw field pitch under the finger.
 
-- **Linger decay** — a finger resting on a fret without moving slowly
-  loses expression: the played expression is scaled by
-  `floor + (1−floor)·charge`, where the charge starts at 1 on every
-  articulation and eases toward 0 with `bow_linger_decay` (default 8 s
-  time constant; floor 0, so a parked note eventually fades out through
-  the expression-lift zone). **Stroking the finger vertically along the
-  fret recharges it** toward the base value with `bow_linger_recharge`
-  (0.35 s) — the movement drive is the vertical speed in band-heights/s,
-  smoothed ~100 ms, reaching full strength at `bow_linger_speed`
-  (0.35 band/s).
-- **Auto-vibrato** — every note is born vibrato-free and grows one over
-  time (`bow_avib_grow`, 2.5 s) toward a ceiling set by the touch's
-  **position within its HOME FRET's vertical extent** (the fret snapped
-  at onset; the ceiling axis was briefly the whole pad band — moved to
-  the fret itself the same day). The fret is split **asymmetrically
-  toward the pad's edge (2026-08-20)**: the `bow_avib_dead` = 0.7
-  fraction of the fret from its **inner end** (the end toward the pad's
-  vertical centre-line) is the vibrato-free landing zone, and depth
-  ramps to full (`bow_avib_cents`, 30 ¢ at `bow_avib_hz` 5.2 Hz) at the
-  fret's **outer end** — the top 30% for frets in the pad's upper half,
-  the bottom 30% for frets at or below the centre (shared
-  `fretOuterEndIsTop`; the wire's `fretY` is already outward-oriented
-  by the surfaces). Both surfaces **mark the zone on the fret itself**:
-  the outer 30% of each fret line draws as a subtle wavy tail
-  (`fretLinePoints` — the marking sits at the 0.7 default and does not
-  track edits to `bow_avib_dead`). **An unsnapped (approach/fretless)
-  onset has no home fret and gets no auto-vibrato at all** — expression
-  decay still runs off the band y. The same vertical movement that
-  recharges expression **returns the vibrato to its no-vibrato birth
-  state**; when the finger rests again, the bloom restarts toward
-  wherever the finger now sits on the fret. The home fret is fixed at
-  onset (drags never re-snap, and the note's fret identity shouldn't
-  wander mid-stroke).
+(A 2026-08-18 **fret-linger / y-depth auto-vibrato** layer — expression
+decay on lingering notes shown as a shrinking arc on this ring, an
+auto-vibrato grown toward the fret's outer end marked by wavy fret
+tails, the `bow_linger_*`/`bow_avib_*` parameter group, the TLP v4/v5
+`posY`/`fretY` touch bytes and the Mac→iPad `LINGER_STATE` display
+stream — was **removed on 2026-08-23** (TLP v8). Fret lines draw plain
+again, the ring is a plain circle, and held notes hold their
+expression. Do not revive without a fresh design.)
 
-Both envelopes are first-order at kernel rate — smooth by construction, no
-zipper, and any fresh articulation (retrigger, legato re-point) resets them
-to full expression / no vibrato. All eight knobs live in the Parameters
-tab's **Fret linger** group and apply in place.
-
-**Scope — only touches that report a fret-band y engage any of this.** The
-two fret surfaces pass their band-normalized y with every onset and drag,
-plus the within-fret y for snapped onsets; both travel per touch in the
-`PERF_STATE` frame (TLP **v4/v5**: `posY` + `fretY` bytes, each behind a
-validity flag — see [MIDI & Audio](midi-and-audio.md)). The Mac keyboard,
-audition scores, external MIDI and the whole `.midi` mapper path carry no
-y and stay bit-exact on the legacy path (`FretLingerTests` pins this, and
-`TarafRemovalParityTests` still passes untouched). The iPad evaluates
-nothing, as always — it just streams the positions.
-
-**The iPad shows the state at a glance (2026-08-18 evening; merged into
-ONE ring 2026-08-20).** The per-touch indicator ring IS the linger
-display — no extra rings: it is an **expression gauge** (a bright arc
-from 12 o'clock whose sweep is the charge — full circle = full
-expression, shrinking as the note lingers, refilling as the finger
-strokes the fret, over a faint full track) that **turns wavy with the
-vibrato** — the arc's wave height is the current depth (a smooth arc
-means none, the waves swell as the vibrato blooms) while the faint track
-wobbles at the **ceiling** amplitude, showing where the finger's spot on
-the fret will take it. The
-numbers are NOT recomputed on the iPad: the Mac streams the envelopes it
-is actually evaluating as `LINGER_STATE` frames (~20 Hz poll of the
-engine, wire-id keyed — the same "display what actually drives it"
-round-trip as the Joy-Con arm axes), so parameter edits on the Mac are
-reflected exactly and the overlay can never drift from the sound. The Mac
-preview pad has no such overlay (play it with sound up).
-
-**Onset strike ripple (2026-08-20).** The same indicator also receipts
+**Onset strike ripple (2026-08-20).** The indicator also receipts
 the accelerometer strike estimate ([sensors.md](sensors.md)): at every
 onset a white impact ring expands from the touch ring and fades over
 ~0.5 s, its reach, brightness and stroke weight all scaled by the
@@ -285,12 +290,13 @@ reading doesn't vanish with the finger: the display exists to calibrate
 one's strike, and staccato is exactly where that matters. This is the
 LOCAL estimate drawn at capture time (the exact
 value that rode the wire's velocity byte into `bow_attack_vel`), not a
-Mac round-trip — unlike the linger overlay there is nothing Mac-side to
+Mac round-trip — there is nothing Mac-side to
 drift from, since the byte is consumed as sent. Because a staccato
 touch may never move again after its onset, the indicator model runs a
 short ~15 Hz redraw ticker (`.common` runloop mode) while a ripple or
 ghost is decaying; it dies with them. No motion source (previews) = no
-ripple, no number.
+ripple, no number. The Mac preview pad has no such overlay (play it
+with sound up).
 
 ## Layout
 
@@ -405,7 +411,8 @@ the same pitch was called two things (`2-` drawn as `r`); the table was
 deleted and the default scale took the sargam names itself, which is why
 they survive — as the scale's labels, editable and replaceable like any
 other scale's. Load a preset (Major, Dorian, …) or a saved scale and the pad
-speaks THAT scale's labels instead.
+speaks THAT scale's labels instead (the 12-TET Chromatic preset keeps the
+sargam names — see [Scales & Tuning](scales-and-tuning.md#playing-scale-tarabdaarmac-fret-pad-tab--ipad)).
 
 ## Editing
 
@@ -456,8 +463,37 @@ in a separate side column — that made the whole right edge dead space and
 swallowed touches aimed at the rightmost fret.)
 
 **Hidden while a Joy-Con is attached (2026-08-13, BOTH surfaces):** with a
-controller attached the player plays the drones from it (printed arrows =
-the three buttons, L = strum), so both surfaces hide the on-screen buttons —
+controller attached the player plays the drones from it (**↓** = drone
+button 2 — since 2026-08-27 **← / →** step the playing-range **octave
+shift** instead of pressing drones 1/3 (±3, `AppController.shiftOctave` →
+`PitchPadEngine.octaveShift`, relayed as the JOYCON_STATE `octave` byte,
+TLP v11 — the toolbars show the offset; onset-captured per touch, so a
+sounding note keeps its birth octave through every glide; drones, the
+tarab and the strum deliberately do not shift); **L = the configurable strum**, 2026-08-27, reworked
+2026-08-28 to a held chord — holding it sounds the Strings tab's own strum
+SET all at once as a **held chord in the MAIN voice**
+(`AppController.strum(pressed:)` → the shared `pitchPad` engine, the same
+in-process touch path as the Mac pad/keyboard — so the notes follow the
+Live tab's instrument picker, allocate fresh strings, charge the taraf,
+and carry a firm 0.9 strike velocity for `bow_attack_vel`). The chord
+sustains while L is held and note-offs on release. **`ctl_strum_expr`
+(2026-08-28) is the chord's own expression** — a per-note scale on the
+chord notes' bow-expression axis (Tanpura/Sitar mains: the pluck level,
+onset-only), bound to the **Joy-Con stick Y** by default and pushed live
+to the held notes, so the stick swells the ringing chord without touching
+the melody's expression. **`ctl_strum_thresh` (2026-08-28) adds an accel
+trigger**: the iPad's strike envelope (the Strike dimension's own
+measurement) crossing the threshold strikes the chord exactly as an L
+press does, releasing the moment it falls back below the SAME threshold —
+a 100 ms retrigger cooldown after each release (2026-08-29, replacing the
+original ~60% release hysteresis) keeps a jittery envelope hovering at
+the threshold from machine-gunning the chord (default 127 = off; the L
+button ignores the cooldown). Default set low Sa · low Pa, remappable to raga chords since
+members are scale-degree string references. The first 08-27 version swept the set as staggered
+staccato notes (`ctl_strum_stagger`/`ctl_strum_gate`, both retired);
+earlier same-day it strummed through the drone voice, and before
+2026-08-27 it pressed the three drone buttons), so both surfaces hide the on-screen
+buttons —
 visual *and* hit-test; their area falls through to the band / dead space
 like any other point, and they reappear on disconnect. Mac: the surface
 reads `JoyConInput.connectedName != nil`, tapping only the `$connectedName`
@@ -593,6 +629,85 @@ the String voice's jt web carries them.
   default) when auditioning, and check the mapped string first when a
   button seems dead.
 
+## Chord bar (2026-08-28)
+
+The dead strip **below the playable band** is the **chord bar**: the same
+horizontal layout as the frets, but each fret column carries a **chord
+label** — the roman numeral of a 3-tone chord rooted on that fret's
+degree, derived from the configured scale (`ChordBar.swift` in
+TarabdaarCore, shared by both surfaces — geometry, labels and hit-tests
+can never disagree). **Tapping a cell selects that chord as what the
+controller strum plays** (Joy-Con L / the accel trigger — see
+[Sound Design](sound-design.md)); tapping any cell of the selected degree
+deselects it, and with nothing selected the strum falls back to the
+Strings tab's configured set (default low Sa · low Pa).
+**Chords are OCTAVE-AGNOSTIC (2026-08-30)**: a chord is a pitch-class
+object — a I chord sounds the same from any Sa cell, every octave copy of
+the selected degree highlights, and the tapped cell's octave normalizes
+to 0 at selection (`toggleChordSelection` / `AppController.tapChord`).
+The sounding register is fixed by the **Shepard register law**
+(`shepardChordNotes`): each chord tone's octave copies are weighted by a
+raised-cosine window over log2 frequency, two octaves wide, centered on
+the middle of the **octave below the tonic** — the two copies inside the
+support get complementary weights summing to exactly 1 (octave spacing
+shifts the cos² window by π/2), so total chord energy is root-independent
+and as a progression walks up the scale the upper copy fades out while
+the lower fades in: a VII chord sits no higher than a I chord, Shepard
+style. Weights drive the notes' per-slot expression scale (multiplied
+with `ctl_strum_expr`); flanks under 0.02 are dropped for polyphony
+(≤ 6 notes per chord). Guard: `ChordBarTests` Shepard cases.
+**A selection change lands
+immediately (2026-08-29)**: if the strum chord is ringing at the edge,
+its held notes switch to the new chord in place
+(`AppController.retuneStrumChord` — members glide to the new pitches
+and take their new Shepard weights live with no new attack, a shrinking
+chord releases the surplus, a growing one strikes the extra members;
+deselecting mid-hold retunes to the configured fallback set the same
+way). Selection is performance state
+— never persisted, cleared at launch, and exempt from the playing-range
+octave shift like every anchor gesture.
+
+**Chord derivation** (`scaleChords`): for each enabled degree the root is
+joined by the scale's own best **third** — any pitch class folding to
+250–450 ¢ above the root, "close to or between" the just minor (316 ¢)
+and major (386 ¢) thirds, classified to whichever it sits nearer — and
+best **fifth** (perfect 650–750 ¢ — the pentatonic's 40/27 wolf at 680 ¢
+counts — diminished 550–650 ¢, augmented 750–850 ¢). Quality priority is
+**major > minor > diminished > augmented**, which is why the full
+12-tone scale offers all major chords. A missing member is omitted
+rather than faked: the major-pentatonic II is just root + fifth, and a
+lone root still gets a cell.
+
+**Numerals** are harmony's own vocabulary, not the scale labels (chord
+function is a different naming axis, like the concert note names): each
+degree maps to the chromatic table I ♭II II ♭III III IV ♯IV V ♭VI VI
+♭VII VII by nearest semitone class, and the accidental is DROPPED when
+the scale holds no other class in that ordinal family — natural minor
+reads **i ii° III iv v VI VII**, the 12-tone scale keeps ♭II beside II.
+Case is quality (upper = major, lower = minor, ° diminished, + augmented;
+third-less chords stay plain uppercase). Guard: `ChordBarTests`.
+
+**Layout** mirrors the frets (`chordBarCells`): one cell column per fret
+column, repeated across the octave ghosts; a lone fret (S, P in the
+keyboard layout) takes the bar's full height while stacked frets split it
+in their own band order — so the default 12-tone keyboard layout reads as
+a komal/tivra top row over a shuddha bottom row with I and V spanning
+both. Cell taps are claimed at ONSET only, in the surface touch handlers
+(like the drone buttons); nothing sounds until the strum plays.
+
+**The selection crosses the wire as held state** (TLP v12): the pad's
+active chord rides every PERF_STATE frame as the `chordDegree`/
+`chordOctave` bytes (0xFF = none; since the 2026-08-30 octave-agnostic
+rework `chordOctave` is always 0 — a reserved field, still decoded), and
+the Mac acts on the CHANGE edges
+(`LinkIngest.onChordSelect` — heartbeat repeats are silent, so an idle
+iPad never clobbers a Mac-local selection). The Mac's own bar taps travel
+the identical in-process path (`AppController.tapChord` → the shared
+`pitchPad` → the local pump), so `AppController.strumChord` — what the
+Mac bar highlights — is always literally what the next strum sounds; the
+iPad highlights its own outbound selection. Audition route: `voiceParam`
+name `chord`, value = degree index (octave 0), negative = deselect.
+
 ## On the iPad
 
 The Fret Pad **runs on the iPad** — TarabdaarMac edits, Tarabdaar performs. The
@@ -606,7 +721,9 @@ derivable from the scale), so it's pushed as a **third SysEx message**
 `[degreeIndex][x14: 2×7-bit][topY][bottomY][enabled]` per segment, then the
 3 drone ratios as 14-bit cents-above-−1200 — x quantized to 14 bits, y to 7;
 `flags` is RESERVED, always 0 since tap legato was deleted 2026-08-02 and
-decoded ignored; v6 = the 4 → 3 drone reduction) alongside the scale
+decoded ignored; v6 = the 4 → 3 drone reduction; the fret pitch warp is
+deliberately NOT here — it is the live `ctl_fret_warp` param, relayed
+over JOYCON_STATE) alongside the scale
 message, sent whenever the arrangement changes while the Fret Pad is the
 active layout. Pre-v6 blobs / pre-v4 stored docs are
 rejected and fall back to the default. `ScaleSyncReceiver` decodes it into
@@ -651,7 +768,9 @@ on the iPad is exactly what the Fret Pad tab shows**.
   playable band rect (`fretPadBandRect`), band↔pixel
   mapping (`fretPixelX(forBandX:)` / `fretBandX(atPixelX:)`), per-frame
   `fretPlacements`, the pitch field (`fretFieldLog` + `fretColumnLog` —
-  two-column x-interpolation, y-resolved columns), onset `fretSnap`, edit
+  two-column x-interpolation, y-resolved columns, `fretWarp` logistic
+  reshaping), the edit-mode contour solver (`fretFieldContours` +
+  `fretWarpInverse`), onset `fretSnap`, edit
   hit-testing `fretGrab`, `fretFillCells`.
 - `Packages/TarabdaarCore/Sources/TarabdaarCore/FretArrangementStore.swift` —
   `_Current.json` debounced autosave (atomic writes), ids minted on decode;
@@ -665,10 +784,11 @@ on the iPad is exactly what the Fret Pad tab shows**.
   `loadFretLayout(name:)` / `deleteFretLayout(name:)` + `fretLayoutName`).
 - `Packages/TarabdaarCore/Sources/TarabdaarCore/ScaleSync.swift` —
   `PadLayout.fretPad`, `FretArrangementSysEx` (subtype `0x03`, blob v6),
-  `FretArrangementSyncStore`, and `ScaleSyncReceiver.fretArrangement`.
+  `FretArrangementSyncStore`, and `ScaleSyncReceiver.fretArrangement` —
+  plus `JoyConTiltDisplay.fieldWarp`, the live warp's Mac→iPad carrier.
 - `TarabdaarMac/Views/FretPadView.swift` — the Mac tab: toolbar (Panic / Scale
   menu / Layout menu / Reset / Octave ± / Perform / Drones / Rec / readout /
-  Snap / Velocity / Prime / Tonic — the tonic being a typed Hz field plus a
+  Snap / Warp / Velocity / Prime / Tonic — the tonic being a typed Hz field plus a
   note menu of the half-octave around it; see
   [Scales & Tuning — The tonic](scales-and-tuning.md#the-tonic-tarabdaarmac-fret-pad-tab)),
   Canvas surface, AppKit mouse capture,

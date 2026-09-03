@@ -332,6 +332,11 @@ public final class SoundingState: ObservableObject {
     /// to 1. A single entry at 1 is an exact pitch; two or three mean a
     /// soft-margin / triple-junction blend. Empty when silent.
     @Published public var weights: [String: Double] = [:]
+    /// The ONSET-captured octave shift (semitones) of whichever touch
+    /// updated `ratio` last — the readouts add it so the displayed Hz is
+    /// the pitch actually sounding, even for a note held across an
+    /// octave step (the live `octaveShift` may already differ).
+    @Published public var octaveSemis: Double = 0
 
     public init() {}
 }
@@ -352,15 +357,25 @@ public final class PitchPadEngine: ObservableObject {
     /// The active scale. Seeded from the bundled default (`Default.json`,
     /// falling back to the in-code `PitchScale.defaultJI`) so the pad
     /// opens on a scale loaded from disk rather than a hard-coded value.
-    @Published public var scale: PitchScale = ScaleStore.loadDefault()
+    @Published public var scale: PitchScale = ScaleStore.loadDefault() {
+        didSet {
+            // A chord-bar selection referencing a degree the new scale no
+            // longer has is cleared (a smaller-or-equal scale keeps it —
+            // the chord itself re-derives from the new degrees).
+            if let sel = chordSelection,
+               sel.degree >= scaleDegrees(from: scale).count {
+                setChordSelection(nil)
+            }
+        }
+    }
     /// Name of the currently-loaded user scale, shown in the toolbar's
     /// Scale menu. `nil` means the default or an unsaved working scale —
     /// "Save" then routes to "Save As…" since there's no name to
     /// overwrite.
     @Published public var currentScaleName: String? = nil
     /// The tonic's integer note anchor — the "1/1". ALWAYS starts at
-    /// `defaultTonicMidi` (G#3): the tonic is not persisted on either side, so
-    /// every launch opens on G#3 and the session tonic is set fresh from the
+    /// `defaultTonicMidi` (D4): the tonic is not persisted on either side, so
+    /// every launch opens on D4 and the session tonic is set fresh from the
     /// Fret Pad tab.
     @Published public var tonicMidi: Int = PitchPadEngine.defaultTonicMidi
     /// Fractional tonic refinement in CENTS (±50) on top of `tonicMidi` —
@@ -404,10 +419,34 @@ public final class PitchPadEngine: ObservableObject {
     /// Bounds both the typed Hz and the Fret Pad's note menu.
     public static let tonicNoteRange = 24...107
 
-    /// The tonic every launch opens on: **G#3** (207.652 Hz).
-    public static let defaultTonicMidi = 56
+    /// The tonic every launch opens on: **D4** (293.665 Hz).
+    public static let defaultTonicMidi = 62
 
     public var tonicFractionalMidi: Double { Double(tonicMidi) + tonicCents / 100.0 }
+
+    /// PLAYING-RANGE OCTAVE SHIFT (2026-08-27): whole-octave transpose of
+    /// every played touch, ±3 (Joy-Con dpad ←/→ on the Mac; relayed to
+    /// the iPad as the JOYCON_STATE `octave` byte, TLP v11). Applied at
+    /// the ONE outbound-pitch point (`noteOn`/`glide`), so the fret
+    /// field, snapping and drag assist are untouched — and it is
+    /// **ONSET-CAPTURED per touch (2026-08-28)**: a note keeps the shift
+    /// it was born with for its whole life, glides included, so stepping
+    /// the octave mid-phrase never yanks a sounding note; only the NEXT
+    /// onset takes the new range (the attack-family rule, not the
+    /// fieldWarp live rule). Drones and the tarab are degree-resolved
+    /// elsewhere and never shift. Not persisted — like the tonic, every
+    /// launch opens at 0.
+    @Published public var octaveShift: Int = 0 {
+        didSet {
+            let c = min(max(octaveShift, Self.octaveShiftRange.lowerBound),
+                        Self.octaveShiftRange.upperBound)
+            if c != octaveShift { octaveShift = c }
+        }
+    }
+    public static let octaveShiftRange = -3...3
+    /// The shift as a fractional-MIDI offset.
+    public var octaveShiftSemis: Double { Double(octaveShift) * 12.0 }
+
     @Published public var velocity: Int = 92
     /// Half-width of the soft interpolation zone around each cell
     /// boundary, in pixels. See `docs/pitch-pad.md` (Inner & outer
@@ -477,6 +516,11 @@ public final class PitchPadEngine: ObservableObject {
     /// Mac in-process lane (nil on iPad).
     private let localPump: LocalLinkPump?
 
+    /// The local lane's ingest (nil on iPad) — where the Mac hangs the
+    /// `.fingerAccel` control taps so local pads and audition scores
+    /// drive the dimension exactly like the wire does.
+    public var localIngest: LinkIngest? { localPump?.ingest }
+
     /// Fired on `panic()` so the iPad owner can send the reliable PANIC
     /// event alongside the cleared state (nil on the Mac).
     public var onPanic: (() -> Void)?
@@ -490,6 +534,10 @@ public final class PitchPadEngine: ObservableObject {
     /// every active finger's cell stays lit simultaneously (polyphonic
     /// fills, no flicker).
     private var touchWeights: [Int: [String: Double]] = [:]
+    /// Per-touch octave shift in semitones, CAPTURED at onset — glides
+    /// replay this, never the live `octaveShiftSemis`, so a mid-hold
+    /// octave step can't jump a sounding note (0 for exempt notes).
+    private var touchOctaveSemis: [Int: Double] = [:]
 
     /// Mac path: the pad drives the local `AudioEngine` through its own
     /// `OutboundPlayState` → `LinkIngest` pump — the same frame-diff path
@@ -533,37 +581,48 @@ public final class PitchPadEngine: ObservableObject {
     /// fractional MIDI (`tonicFractionalMidi + 12·log2(ratio)`) — no
     /// nearest-semitone pinning, no note+bend split, no MPE channel: the
     /// wire's state frame carries onset and exact pitch atomically.
-    /// `y` is the touch's fret-band position (0…1 top→bottom) when the
-    /// surface knows one — it rides the outbound frame and drives the
-    /// Mac-evaluated fret-linger expression decay. `fretY` is the OUTWARD
-    /// position within the touch's HOME fret's vertical extent (snapped
-    /// onsets only; 0 = the fret's end toward the pad's centre-line, 1 =
-    /// its outer end) — the auto-vibrato ceiling axis.
-    /// nil (the keyboard, scripts, unsnapped onsets for `fretY`) keeps the
-    /// corresponding legacy behavior.
     /// `velocity01` — per-note ONSET STRIKE VELOCITY 0…1 (2026-08-19: the
     /// iPad's accelerometer estimate; consumed on the Mac by the String
     /// voice's `bow_attack_vel` velocity→sharpness law). nil = the flat
     /// `velocity` constant, the historic behavior.
+    /// `octaveShifted: false` exempts the note from the playing-range
+    /// octave shift (the Joy-Con strum: its members carry their OWN
+    /// octaves, an anchor gesture like the drones). The captured 0
+    /// holds through any glide, like every onset-captured shift.
+    /// `exprScale` (0…1, default 1 = neutral) — the note's expression
+    /// scale (the strum chord's loudness, 2026-08-28); in-process only,
+    /// live-updatable through `setTouchExpr` while held.
+    /// `glideExempt: true` keeps the note out of the GLIDE QUEUE
+    /// (2026-08-31; the strum chord — its members land milliseconds
+    /// apart and must never chain into a glissando); in-process only.
     public func noteOn(touchId: Int, ratio: Double,
-                       weights: [String: Double] = [:], y: Double? = nil,
-                       fretY: Double? = nil, velocity01: Double? = nil) {
+                       weights: [String: Double] = [:],
+                       velocity01: Double? = nil,
+                       octaveShifted: Bool = true,
+                       exprScale: Double = 1.0,
+                       glideExempt: Bool = false) {
         let r = clampRatio(ratio)
         currentRatio[touchId] = r
         touchWeights[touchId] = weights
-        let pitchSemis = tonicFractionalMidi + 12.0 * log2(r)
+        // Capture the octave shift for this touch's whole life (glides
+        // replay it) — a mid-hold octave step must not move this note.
+        let octSemis = octaveShifted ? octaveShiftSemis : 0
+        touchOctaveSemis[touchId] = octSemis
+        let pitchSemis = tonicFractionalMidi + octSemis + 12.0 * log2(r)
         playState.touchOn(touchId, pitchSemis: pitchSemis,
                           velocity: velocity01 ?? Double(velocity) / 127.0,
-                          posY: y, fretY: fretY)
+                          exprScale: exprScale, glideExempt: glideExempt)
         sounding.ratio = r
+        sounding.octaveSemis = octSemis
         refreshSoundingWeights()
     }
 
-    /// The wire id the outbound state assigned to a live touch — the key
-    /// the Mac's LINGER_STATE display frames use, so the iPad overlay can
-    /// match them back to its on-screen touches. nil once released.
-    public func wireId(forTouch touchId: Int) -> UInt16? {
-        playState.wireId(for: touchId)
+    /// Live expression-scale update for a held note (the strum chord's
+    /// swell) — a change-gated write into the outbound state, delivered
+    /// like a glide (in-process; the wire carries no expression).
+    public func setTouchExpr(touchId: Int, exprScale: Double) {
+        guard currentRatio[touchId] != nil else { return }
+        playState.touchExpr(touchId, exprScale)
     }
 
     /// Recompute the published fill weights as the per-seed max across all
@@ -579,14 +638,13 @@ public final class PitchPadEngine: ObservableObject {
     }
 
     /// Glide an already-held note to a new ratio. Just a pitch write into
-    /// the outbound state (change-gated inside) — continuity is the Mac
-    /// smoother's job, and the wire carries at most one fresh frame per
-    /// sender tick regardless of how fast the finger reports.
-    /// `y`/`fretY` nil = leave the touch's stored positions unchanged (the
-    /// assist's settle ticks glide the pitch without fresh y knowledge).
+    /// the outbound state (change-gated inside) — the Mac ramps to each
+    /// update within one render block (no meend smoother since
+    /// 2026-08-24: meend IS the finger's trajectory), and the wire
+    /// carries at most one fresh frame per sender tick regardless of how
+    /// fast the finger reports.
     public func glide(touchId: Int, ratio: Double,
-                      weights: [String: Double]? = nil, y: Double? = nil,
-                      fretY: Double? = nil) {
+                      weights: [String: Double]? = nil) {
         guard currentRatio[touchId] != nil else { return }
         let r = clampRatio(ratio)
         currentRatio[touchId] = r
@@ -597,15 +655,20 @@ public final class PitchPadEngine: ObservableObject {
             touchWeights[touchId] = weights
             refreshSoundingWeights()
         }
+        // The ONSET-captured shift, never the live one — a glide is the
+        // same note continuing, so it stays in its birth octave.
+        let octSemis = touchOctaveSemis[touchId] ?? octaveShiftSemis
         playState.touchGlide(touchId,
-                             pitchSemis: tonicFractionalMidi + 12.0 * log2(r),
-                             posY: y, fretY: fretY)
+                             pitchSemis: tonicFractionalMidi + octSemis
+                                 + 12.0 * log2(r))
         sounding.ratio = r
+        sounding.octaveSemis = octSemis
     }
 
     public func noteOff(touchId: Int) {
         currentRatio.removeValue(forKey: touchId)
         touchWeights.removeValue(forKey: touchId)
+        touchOctaveSemis.removeValue(forKey: touchId)
         playState.touchOff(touchId)
         if currentRatio.isEmpty {
             sounding.ratio = nil
@@ -623,6 +686,31 @@ public final class PitchPadEngine: ObservableObject {
         playState.setDrone(index, pressed)
     }
 
+    // MARK: - Chord bar (2026-08-28)
+
+    /// THIS surface's active strum chord (the chord bar below the fret
+    /// band) — what its own cells highlight. Rides the outbound frame as
+    /// held state (TLP v12); the Mac side consumes the change edges
+    /// (`LinkIngest.onChordSelect`) into the strum. Performance state:
+    /// not persisted, cleared implicitly at launch.
+    @Published public private(set) var chordSelection: ChordSelection?
+
+    /// Set (or clear, with nil) the chord selection outright.
+    public func setChordSelection(_ sel: ChordSelection?) {
+        if chordSelection != sel { chordSelection = sel }
+        playState.setChordSelection(sel)
+    }
+
+    /// The tap gesture: tapping any cell of the selected DEGREE deselects
+    /// it, any other cell selects that chord. Octave-agnostic
+    /// (2026-08-30): chords are pitch-class objects — the tapped cell's
+    /// octave normalizes to 0 (the Shepard register law fixes the
+    /// sounding register; see `shepardChordNotes`).
+    public func toggleChordSelection(_ sel: ChordSelection) {
+        setChordSelection(chordSelection?.degree == sel.degree
+            ? nil : ChordSelection(degree: sel.degree, octave: 0))
+    }
+
     /// The user-facing PANIC (buttons): clears everything held AND fires
     /// the reliable wire panic event via `onPanic`.
     public func panic() {
@@ -638,6 +726,7 @@ public final class PitchPadEngine: ObservableObject {
         playState.clearAll()
         currentRatio.removeAll()
         touchWeights.removeAll()
+        touchOctaveSemis.removeAll()
         sounding.ratio = nil
         sounding.weights = [:]
     }

@@ -49,6 +49,30 @@ public final class TanpuraVoiceSource {
         /// the sink is skipped entirely — nothing is written, byte-null.
         var injectGain = 0.0
         var monoBuf: [Double]
+        /// OUTPUT LEVEL METER (2026-08-24): the node's finished output,
+        /// INTEGRATE-AND-DUMP like `BowEngine`'s bus meter (second rev —
+        /// no envelope, no smoothing): the callback accumulates the mono
+        /// mixdown's sum of squares, `outputLevel()` returns the exact
+        /// RMS since its previous call. Written by the render callback
+        /// under the state lock.
+        var meterSum = 0.0
+        var meterFrames = 0
+        var meterLast = 0.0
+
+        /// Fold one finished output buffer into the interval accumulator
+        /// (render thread; brief lock).
+        func meterOutput(outL: UnsafePointer<Float>,
+                         outR: UnsafePointer<Float>, frames n: Int) {
+            var s = 0.0
+            for i in 0..<n {
+                let m = 0.5 * (Double(outL[i]) + Double(outR[i]))
+                s += m * m
+            }
+            os_unfair_lock_lock(&lock)
+            meterSum += s
+            meterFrames += n
+            os_unfair_lock_unlock(&lock)
+        }
         init() {
             bufL = [Double](repeating: 0, count: maxFrames)
             bufR = [Double](repeating: 0, count: maxFrames)
@@ -160,8 +184,25 @@ public final class TanpuraVoiceSource {
                 st.feedSink(sink, gain: injectGain,
                             outL: outL, outR: outR, frames: n)
             }
+            st.meterOutput(outL: outL, outR: outR, frames: n)
             return noErr
         }
+    }
+
+    /// RMS of the node's output (mono mixdown, output units) since the
+    /// previous call — exact interval RMS, no smoothing; the previous
+    /// reading repeats when nothing rendered in between. 0 while
+    /// unarmed/silent. Safe from any thread; poll at UI rate.
+    public func outputLevel() -> Double {
+        os_unfair_lock_lock(&state.lock)
+        defer { os_unfair_lock_unlock(&state.lock) }
+        if state.meterFrames > 0 {
+            state.meterLast =
+                (state.meterSum / Double(state.meterFrames)).squareRoot()
+            state.meterSum = 0
+            state.meterFrames = 0
+        }
+        return state.meterLast
     }
 
     /// Pull `frames` through the exact audio-callback path, for tests and

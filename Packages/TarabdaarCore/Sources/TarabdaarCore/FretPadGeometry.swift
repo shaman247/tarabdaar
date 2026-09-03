@@ -370,59 +370,59 @@ public func fretPlacements(arrangement: FretArrangement,
     return out
 }
 
-// MARK: - Auto-vibrato zone (fret linger)
-
-/// Which end of a fret is its **outer** end — the auto-vibrato zone (the
-/// wire's `fretY` runs 0 at the inner end → 1 at the outer end). Frets
-/// whose centre sits in the band's upper half open **upward** (top 30%);
-/// frets at or below the band's centre-line open **downward**. Shared by
-/// both surfaces so the zone marking, the streamed `fretY` and the Mac
-/// preview can never disagree.
-public func fretOuterEndIsTop(topY: CGFloat, bottomY: CGFloat,
-                              bandHeight: CGFloat) -> Bool {
-    (topY + bottomY) / 2 < bandHeight / 2
-}
-
-/// Fraction of a fret's length, from its INNER (band-centre-side) end,
-/// with no auto-vibrato — the surfaces' zone marking. Mirrors the shipped
-/// default of `bow_avib_dead` (the Mac's parameter is the live truth; the
-/// drawing does not track edits to it).
-public let fretVibratoDeadFraction: CGFloat = 0.7
-
-/// The fret's line as a polyline: a straight run over the dead zone, then
-/// a **wavy tail** over the outer vibrato zone — the "slight indicator"
-/// both surfaces draw (the wave grows toward the tip, echoing the touch
-/// ring's wavy vibrato display). Falls back to the plain segment for
-/// degenerate extents.
-public func fretLinePoints(x: CGFloat, topY: CGFloat, bottomY: CGFloat,
-                           bandHeight: CGFloat) -> [CGPoint] {
-    let h = bottomY - topY
-    guard h > 1 else {
-        return [CGPoint(x: x, y: topY), CGPoint(x: x, y: bottomY)]
-    }
-    let outerIsTop = fretOuterEndIsTop(topY: topY, bottomY: bottomY,
-                                       bandHeight: bandHeight)
-    let zone = h * (1 - fretVibratoDeadFraction)
-    let boundary = outerIsTop ? topY + zone : bottomY - zone
-    let amp: CGFloat = 2.0
-    let cycles: CGFloat = 2.5
-    var pts = [CGPoint(x: x, y: outerIsTop ? bottomY : topY),
-               CGPoint(x: x, y: boundary)]
-    let steps = 24
-    for i in 1...steps {
-        let t = CGFloat(i) / CGFloat(steps)     // 0 boundary → 1 outer tip
-        let y = outerIsTop ? boundary - t * zone : boundary + t * zone
-        pts.append(CGPoint(x: x + amp * t * sin(t * cycles * 2 * .pi), y: y))
-    }
-    return pts
-}
-
 // MARK: - Pitch field
 
 /// Frets closer together than this (px) count as one **column** for the
 /// pitch field — stacked variants (r over R) share a column, and a fret
 /// nudged a hair off another doesn't create a sliver-thin glide zone.
 let fretColumnEps: CGFloat = 0.5
+
+// MARK: Warp law
+
+/// Maximum logistic gain at warp = 1 (`ctl_fret_warp` full). At the top the plateau around
+/// each fret covers most of the gap (center slope ≈ 3.5× linear); 0 is the
+/// identity, and the curve morphs continuously between them.
+let fretWarpMaxGain = 14.0
+
+/// The fret-warp transfer: reshape an interpolation parameter `t` (0…1,
+/// 0 = one fret, 1 = the other) through a **normalized logistic**, so pitch
+/// lingers near each fret and transitions quickly through the middle.
+///
+///   w(t) = (σ(g·(t−½)) − σ(−g/2)) / (σ(g/2) − σ(−g/2)),  g = 14·amount
+///
+/// Exactly the identity at `amount` 0 (and the g→0 limit), fixed at
+/// w(0)=0 / w(1)=1, symmetric (w(t)+w(1−t)=1 — the midpoint stays the
+/// midpoint), and strictly monotone, so the field stays continuous and
+/// exact on every fret.
+public func fretWarp(_ t: Double, amount: Double) -> Double {
+    guard amount > 1e-6 else { return t }
+    let g = fretWarpMaxGain * min(amount, 1)
+    let s0 = 1.0 / (1.0 + exp(g / 2))            // σ(−g/2)
+    let s1 = 1.0 - s0                            // σ(g/2)
+    let s = 1.0 / (1.0 + exp(-g * (t - 0.5)))
+    return (s - s0) / (s1 - s0)
+}
+
+/// Inverse of `fretWarp` on [0, 1] — used by the contour solver to place an
+/// iso-pitch crossing exactly.
+public func fretWarpInverse(_ w: Double, amount: Double) -> Double {
+    guard amount > 1e-6 else { return w }
+    let g = fretWarpMaxGain * min(amount, 1)
+    let s0 = 1.0 / (1.0 + exp(g / 2))
+    let s1 = 1.0 - s0
+    let s = min(max(s0 + w * (s1 - s0), 1e-12), 1 - 1e-12)
+    return 0.5 + log(s / (1 - s)) / g
+}
+
+/// Distinct column x's, ascending — frets within `fretColumnEps` share one.
+func fretColumnXs(_ placements: [FretPlacement]) -> [CGFloat] {
+    var columns: [CGFloat] = []
+    for x in placements.map(\.x).sorted()
+    where columns.last.map({ x - $0 > fretColumnEps }) ?? true {
+        columns.append(x)
+    }
+    return columns
+}
 
 /// log2 pitch of the fret field at `pt` — the simplest model that respects
 /// the layout: **interpolate between the closest fret columns horizontally**.
@@ -445,17 +445,22 @@ let fretColumnEps: CGFloat = 0.5
 /// TOWARD the neighbor you're dragging at — never toward the layout's mean
 /// (the failure of the earlier global inverse-distance blends). Exactly a
 /// fret's pitch on the fret line (inside its extent). `nil` with no frets.
+///
+/// `warp` (the `ctl_fret_warp` registry param, 0…1 — a LIVE control, on
+/// the Mac the intercepted param value and on the iPad the value relayed
+/// over JOYCON_STATE) reshapes every fret-to-fret
+/// interpolation — the x-blend between columns and the y-blend inside a
+/// stacked column — through `fretWarp`'s logistic, so pitch plateaus around
+/// each fret. 0 keeps the historic linear field exactly. Beyond the
+/// outermost columns the extrapolation stays linear (the warp is only
+/// defined between frets).
 public func fretFieldLog(at pt: CGPoint,
-                         placements: [FretPlacement]) -> Double? {
+                         placements: [FretPlacement],
+                         warp: Double = 0) -> Double? {
     guard !placements.isEmpty else { return nil }
-    // Distinct column x's, ascending (frets within `fretColumnEps` share one).
-    var columns: [CGFloat] = []
-    for x in placements.map(\.x).sorted()
-    where columns.last.map({ x - $0 > fretColumnEps }) ?? true {
-        columns.append(x)
-    }
+    let columns = fretColumnXs(placements)
     func pitch(atColumn cx: CGFloat) -> Double {
-        fretColumnLog(atY: pt.y, columnX: cx, placements: placements)
+        fretColumnLog(atY: pt.y, columnX: cx, placements: placements, warp: warp)
     }
     guard columns.count >= 2 else { return pitch(atColumn: columns[0]) }
     // The pair the touch's x falls between — or the outermost pair, whose
@@ -466,15 +471,17 @@ public func fretFieldLog(at pt: CGPoint,
     let l = pitch(atColumn: a)
     let r = pitch(atColumn: b)
     let t = Double((pt.x - a) / (b - a))
-    return l + (r - l) * t
+    let tw = (t >= 0 && t <= 1) ? fretWarp(t, amount: warp) : t
+    return l + (r - l) * tw
 }
 
 /// A column's log2 pitch at height `y`: exactly a member fret's pitch inside
-/// its vertical extent (overlapping extents: nearest center wins), a linear
-/// y-interpolation across the gap between two stacked frets, and clamped to
-/// the nearest fret beyond the column's ends. Continuous in `y`.
+/// its vertical extent (overlapping extents: nearest center wins), a
+/// y-interpolation across the gap between two stacked frets (linear, or
+/// `fretWarp`-shaped when `warp` > 0), and clamped to the nearest fret
+/// beyond the column's ends. Continuous in `y`.
 func fretColumnLog(atY y: CGFloat, columnX cx: CGFloat,
-                   placements: [FretPlacement]) -> Double {
+                   placements: [FretPlacement], warp: Double = 0) -> Double {
     var inside: FretPlacement? = nil       // extent contains y, nearest center
     var above: FretPlacement? = nil        // bottomY ≤ y, greatest bottomY
     var below: FretPlacement? = nil        // topY ≥ y, smallest topY
@@ -498,7 +505,7 @@ func fretColumnLog(atY y: CGFloat, columnX cx: CGFloat,
     case (let a?, let b?):
         let gap = b.topY - a.bottomY
         guard gap > 1e-6 else { return log2(a.ratio) }
-        let t = Double((y - a.bottomY) / gap)
+        let t = fretWarp(Double((y - a.bottomY) / gap), amount: warp)
         return log2(a.ratio) + (log2(b.ratio) - log2(a.ratio)) * t
     case (let a?, nil):
         return log2(a.ratio)
@@ -507,6 +514,113 @@ func fretColumnLog(atY y: CGFloat, columnX cx: CGFloat,
     case (nil, nil):
         return 0   // unreachable: the column was picked from `placements`
     }
+}
+
+// MARK: - Field contours (edit-mode visualization)
+
+/// One iso-pitch contour polyline of the fret field. `level` is the log2
+/// pitch it traces; `isBoundary` marks the **territory boundaries** — the
+/// log-midpoints between adjacent sounding pitches, the line where the field
+/// crosses from one pitch's territory into the next — vs the fainter minor
+/// contours (the quarter-pitch lines) that make the warp's plateau/cliff
+/// shape visible: with the warp up they hug the boundaries; at 0 they
+/// sit at the linear quarter positions.
+public struct FretFieldContour {
+    public let level: Double
+    public let isBoundary: Bool
+    public let points: [CGPoint]
+
+    public init(level: Double, isBoundary: Bool, points: [CGPoint]) {
+        self.level = level; self.isBoundary = isBoundary; self.points = points
+    }
+}
+
+/// Solve the field's iso-pitch contours over the band, exactly: for each
+/// scanline y and each adjacent column pair `(a, b)` the field is
+/// `l(y) + (r(y) − l(y)) · fretWarp(t)`, so a level crossing sits at
+/// `x = a + fretWarpInverse((c−l)/(r−l)) · (b−a)` — one crossing per pair
+/// per scanline (the warp is monotone). Beyond the outermost columns the
+/// linear extrapolation is solved the same way (no warp there). Levels are
+/// the boundaries (log-midpoints) between adjacent distinct sounding
+/// pitches plus minor quarter-pitch lines. Polylines are per (level,
+/// region), split wherever the level leaves the region, so every returned
+/// run is a continuous curve. Empty with fewer than two columns (the field
+/// is flat in x).
+public func fretFieldContours(placements: [FretPlacement], size: CGSize,
+                              warp: Double,
+                              ySamples: Int = 64) -> [FretFieldContour] {
+    let columns = fretColumnXs(placements)
+    guard columns.count >= 2, size.height > 0, ySamples >= 2 else { return [] }
+
+    // Distinct sounding log-pitches, ascending.
+    var pitches: [Double] = []
+    for p in placements.map({ log2($0.ratio) }).sorted()
+    where pitches.last.map({ p - $0 > 1e-6 }) ?? true {
+        pitches.append(p)
+    }
+    guard pitches.count >= 2 else { return [] }
+
+    // Contour levels between each adjacent pitch pair.
+    var levels: [(level: Double, isBoundary: Bool)] = []
+    for i in 0..<(pitches.count - 1) {
+        let (lo, hi) = (pitches[i], pitches[i + 1])
+        levels.append((lo + 0.25 * (hi - lo), false))
+        levels.append(((lo + hi) / 2, true))
+        levels.append((lo + 0.75 * (hi - lo), false))
+    }
+
+    // Column pitches per scanline, computed once and shared by every level.
+    let ys = (0...ySamples).map {
+        CGFloat($0) / CGFloat(ySamples) * size.height
+    }
+    let columnLogs: [[Double]] = ys.map { y in
+        columns.map {
+            fretColumnLog(atY: y, columnX: $0, placements: placements,
+                          warp: warp)
+        }
+    }
+
+    var out: [FretFieldContour] = []
+    // Regions: -1 = left extrapolation, 0..count-2 = the pairs,
+    // count-1 = right extrapolation.
+    for region in -1...(columns.count - 1) {
+        let pair = min(max(region, 0), columns.count - 2)
+        let (a, b) = (columns[pair], columns[pair + 1])
+        for (level, isBoundary) in levels {
+            var run: [CGPoint] = []
+            func flush() {
+                if run.count >= 2 {
+                    out.append(FretFieldContour(level: level,
+                                                isBoundary: isBoundary,
+                                                points: run))
+                }
+                run.removeAll(keepingCapacity: true)
+            }
+            for (yi, y) in ys.enumerated() {
+                let l = columnLogs[yi][pair]
+                let r = columnLogs[yi][pair + 1]
+                guard abs(r - l) > 1e-9 else { flush(); continue }
+                let w = (level - l) / (r - l)
+                let t: Double
+                switch region {
+                case -1:                    // left of the first column
+                    guard w < 0 else { flush(); continue }
+                    t = w                   // linear extrapolation
+                case columns.count - 1:     // right of the last column
+                    guard w > 1 else { flush(); continue }
+                    t = w
+                default:
+                    guard w >= 0, w <= 1 else { flush(); continue }
+                    t = fretWarpInverse(w, amount: warp)
+                }
+                let x = a + CGFloat(t) * (b - a)
+                guard x >= 0, x <= size.width else { flush(); continue }
+                run.append(CGPoint(x: x, y: y))
+            }
+            flush()
+        }
+    }
+    return out
 }
 
 // MARK: - Onset snap

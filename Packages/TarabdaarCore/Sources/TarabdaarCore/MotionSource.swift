@@ -82,9 +82,24 @@ public extension MotionSource {
     /// persistent strike scope (2026-08-23), so the scope's 0–127 trace
     /// always reads exactly what a tap at that magnitude would send.
     static func strikeScale01(_ g: Double) -> Double {
+        StrikeLaw.scale01(g)
+    }
+}
+
+/// The strike law as a type-free entry point (2026-09-02): the Mac's
+/// Joy-Con acceleration dimension runs the same log-scale map + the
+/// same fast-attack/150 ms-decay envelope over the Joy-Con's
+/// gravity-removed acceleration, and it has no `MotionSource` to hang
+/// the static on.
+public enum StrikeLaw {
+    /// Acceleration magnitude (g) → 0…1, log-scale across
+    /// [`velocityMinG`, `velocityMaxG`], 0 at or below the floor.
+    public static func scale01(_ g: Double) -> Double {
         guard g > Config.velocityMinG else { return 0.0 }
         let clamped = min(g, Config.velocityMaxG)
         return log(clamped / Config.velocityMinG)
             / log(Config.velocityMaxG / Config.velocityMinG)
     }
+    /// The envelope's decay time constant (s) — the iPad tracker's.
+    public static let envelopeTau = 0.15
 }

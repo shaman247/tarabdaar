@@ -1,16 +1,123 @@
 # Glide System
 
+The instrument has TWO glide layers today:
+
+1. **Direct finger glide** — the Fret Pad's native behavior: the touch
+   position resolves to a pitch (the fret field / onset snap) and
+   `PitchPadEngine` writes it into the outbound state at full
+   resolution. Dragging glides smoothly without retriggering, and the
+   pitch always tracks the finger. Since the TLP cutover (2026-08-14)
+   there is no bend re-send loop, and since 2026-08-24 there is no
+   Mac-side meend smoother — the String voice's filter ramps log2 f0
+   linearly to the latest wire target within one render block, so all
+   dragged meend is the finger's own trajectory at wire rate. See
+   [Fret Pad](fret-pad.md).
+2. **The GLIDE QUEUE (2026-08-31)** — queued glissandi across
+   *overlapping touches*, below. **Off by default** (`ctl_glide_on` 0 =
+   pure pass-through).
+
+## The Glide Queue (2026-08-31)
+
+`GlideSequencer` (`Packages/TarabdaarCore/.../GlideSequencer.swift`) is
+a control layer in front of the voice routing: `AudioEngine` funnels its
+public `touchOn`/`touchGlide`/`touchOff` through one instance, so every
+touch source — iPad wire, Mac pads, the keyboard player, audition
+`touchOn` scores — obeys the same law. The in-process MIDI path
+(`sendHostedMIDI`, auditions' `noteOn`/`glide`, external controllers)
+bypasses it entirely, so the parity substrate is untouched.
+
+**The law — the OVERLAP rule.** With `ctl_glide_on` armed, a new onset
+that **overlaps the sounding chain in time** — some member of the chain
+(its resting owner, or a queued note) is still physically down — does
+**not** mount a fresh string: it is queued as a waypoint, and the
+sounding voice **glides** to it. Every overlapping onset joins the
+queue and the trajectory hits each queued pitch **in sequence**. Once
+every chained touch has lifted, the chain is over: the next tap is an
+ordinary fresh attack, and **releases are never deferred** — a lone
+tap's note-off lands the instant the finger lifts, so staccato
+articulation is exactly the historic one. (The first cut gated
+chaining on a `ctl_glide_thresh` time window with a release-grace
+deferral; that sustained every staccato tap for the whole window and
+was replaced by the overlap rule the same day — do not resurrect the
+window.) Note the flip side: with the toggle armed, a second finger
+landing while another is held always chains — overlapping-touch
+polyphony is what the toggle trades away; switch it off (or bind it)
+to play polyphonically.
+
+- **Speed** — `ctl_glide_rate` semitones/second per segment,
+  × `ctl_glide_held` (< 1, slower) while the touch being left is still
+  held (deliberate expressive meend; lifting mid-glide snaps back to
+  the full rate), × `ctl_glide_catchup` (> 1, faster) while the current
+  target is not the **end** of the queue — the trajectory hurries
+  through intermediate pitches to catch the player up.
+- **Shape** — each segment runs through `fretWarp(progress,
+  ctl_fret_warp)` in log-pitch space: linear at warp 0, logistic at 1 —
+  exactly the curve a finger tracing between two adjacent frets would
+  play on the warped field, so the pad's warp knob shapes queued glides
+  and dragged glides with one law.
+- **Overshoot & correction** — the run's *final* approach (nothing
+  further queued) aims `ctl_glide_over` × the glide distance **past**
+  the target (capped ±50 ¢), then settles back onto the exact pitch at
+  a gentler rate (~0.3× the approach, floored at 60 ms) — the human
+  player's land-and-correct, glide-backs included. Mid-queue arrivals
+  never overshoot (the trajectory is hurrying and hits its waypoints
+  dead-on), and a note queued mid-correction abandons the settle and
+  glides onward from wherever the pitch is. The waypoint is consumed
+  only at the settle, so ownership/release/glide-back semantics are
+  untouched. Default 0.08; 0 = every glide lands exactly.
+- **Releases** — a queued note released before the trajectory reaches
+  it stays queued (the glide still hits its pitch), it just no longer
+  holds the chain open; arriving on an already-lifted waypoint with
+  nothing further queued releases the voice **on arrival**. A repeat
+  tap at the chain's current pitch (±25 ¢, nothing queued) passes
+  through as a real re-attack — a second finger can re-strike the
+  sounding note.
+- **Ownership** — after arriving at a waypoint, that waypoint's
+  physical touch owns the sounding voice: its drags meend it and its
+  release ends it, mapped onto the voice's original wire id (the voice
+  layer never learns the queued ids). A queued finger dragging *before*
+  the glide arrives retargets its waypoint live — the trajectory lands
+  where the finger is.
+- **Parked fingers & glide-back** — past chain members still down are
+  *parked*: only the current owner's drags drive the voice, and a
+  parked finger's movements are remembered **silently** (without this,
+  the held first finger's wire id — the voice's own downstream id —
+  fell through to pass-through and every wiggle yanked the pitch back:
+  the two-finger oscillation bug, fixed same day). Releasing the owner
+  while fingers are parked glides **back** to the most recent one, at
+  that finger's *current* position, at the full released rate; parked
+  fingers cascade most-recent-first, and only when every member has
+  lifted does the bow come up. A parked finger lifting is silent — it
+  just leaves the chain.
+- **Exemptions** — the controller strum chord's members carry an
+  in-process `glideExempt` flag (`TLPTouch`, like `exprScale`: never on
+  the wire) so near-simultaneous chord onsets can never chain into a
+  glissando. Drones are a different path entirely.
+
+**Voice-agnostic.** The sequencer sits above the instrument routing, so
+the plucked mains get it too: on the Tanpura/Sitar a queued onset
+becomes a kernel-side bend of the ringing string instead of a fresh
+pluck — a glissando without re-plucks.
+
+**Not a legato revival.** The 2026-08-24 removal of the legato/steal
+allocation laws stands: this is a queue *above* allocation. A captured
+onset never becomes a note-on at all; every note that actually mounts
+still gets a fresh string, and with the toggle off the sequencer is
+byte-for-byte pass-through (the inert-default contract — parity guards
+unaffected).
+
+The five knobs live in the Parameters tab's **Glide** group (all
+`.live`, per-note scope, tilt-bindable — a tilt on `ctl_glide_rate` is
+the legacy keyboard's tilt-driven glide speed, reborn). Guards:
+`GlideSequencerTests`.
+
+---
+
 > **Note.** The waypoint-queue / sigmoid system below is the **legacy
 > keyboard** glide, which is no longer on the playing path (`NoteManager`
 > runs only as the tilt/mapping host — see [Architecture](architecture.md)).
-> The active playing surface, the **Fret Pad**, glides **directly**: the
-> touch position resolves to a pitch (the fret field / onset snap) and
-> `PitchPadEngine` writes it into the outbound state at full resolution —
-> dragging glides smoothly without retriggering, and the pitch always
-> tracks the finger. Since the TLP cutover (2026-08-14) there is no bend
-> re-send loop: the wire carries at most one fresh state frame per sender
-> tick, and continuity between updates is the Mac-side 9 Hz meend
-> smoother's job (as it always was). See [Fret Pad](fret-pad.md).
+> It is the historical ancestor of the Glide Queue above (waypoint queue,
+> sigmoid easing, tilt-driven speed) but none of its code is shared.
 
 The glide system below controls pitch transitions on the **legacy
 keyboard**. It operated in two modes: **tap glides** (waypoint queue with

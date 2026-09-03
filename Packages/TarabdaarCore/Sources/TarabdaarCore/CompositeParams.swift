@@ -59,8 +59,22 @@ public enum ControlAxes {
     /// directly (that would double-apply). UNIPOLAR: the binding curve's
     /// x-domain reads silence at 0 and a hard strike at 1 (the
     /// tilts/stick rest at the centre instead).
+    /// `.fingerAccel` (2026-08-24): the playing finger's pitch
+    /// acceleration, −1…+1 with rest 0 like the tilts — a plain axis
+    /// driven through `applyTiltAxis` (unlike the strike pair, no blend),
+    /// evaluated on the Mac from the wire pitch stream at up to frame
+    /// rate plus a 30 Hz decay tick while bound.
+    /// THE JOY-CON WRIST + ACCELERATION (2026-09-02, axes 8–11): Wrist
+    /// ↕/↔/⟲ = the Joy-Con's fused attitude through the wrist
+    /// `TiltCalibrator` (plain bipolar axes via `applyTiltAxis`, driven
+    /// only while a wrist calibration exists), and Joy-Con Accel = the
+    /// gravity-removed acceleration through the strike law's envelope,
+    /// UNIPOLAR like `.acceleration` (the host maps 0…1 onto the axis'
+    /// −1…+1 so the curve reads rest at x 0). Appended so the earlier
+    /// indices stay put.
     public static let dims: [InputDimension] = [
         .tilt1, .tilt2, .tilt3, .stickX, .stickY, .strike, .acceleration,
+        .fingerAccel, .tilt4, .wrist2, .wrist3, .jcAccel,
     ]
 }
 

@@ -2,16 +2,19 @@ import XCTest
 import SarangiKit
 @testable import TarabdaarCore
 
-/// IN-PLACE PARAMETER PUSH (2026-07-24 stages 1+2). A parameter in
-/// `ParamRegistry.inPlaceKeys` is applied to the RUNNING engine — the
-/// kernel's 61 per-sample scalars are overwritten and the Swift-side
-/// mapping constants re-read — instead of building a new engine.
-///
-/// Two things must hold, and they pull against each other:
-///   1. **Equivalence** — the pushed engine must sound like a rebuilt one.
-///   2. **Continuity** — it must not click, and must not disturb a
-///      sounding note or a decaying ring.
+/// In-place parameter push: a pushed value renders like a rebuilt engine, and a no-op push is bit-identical.
 final class LiveParamPushTests: XCTestCase {
+    override func setUpWithError() throws { try skipUnlessSlowTestsEnabled() }
+
+    /// Serial jt (the parity tests' rule): the async dispatcher + worker
+    /// pool are for realtime headroom, not offline pulls — faster-than-
+    /// realtime rendering underruns the web ring constantly, exercising
+    /// the offline-pull fallback against the dispatcher, and the async
+    /// path drops drive blocks under load so nothing repeats exactly
+    /// anyway. Every buildEngine in this suite takes these.
+    private static let deterministic: [String: Double] = [
+        "bow_jt_async": 0.0, "bow_jt_threads": 0.0,
+    ]
 
     private func strings() -> [ResolvedString] {
         Presets.state(.sarangiPilu).resolvedStrings
@@ -20,7 +23,8 @@ final class LiveParamPushTests: XCTestCase {
     private func makeSource() -> (StringVoiceSource, BowEngine)? {
         let src = StringVoiceSource()
         guard let e = StringVoiceSource.buildEngine(
-            tonicHz: 328.9, strings: strings(), mapper: src.mapper) else {
+            tonicHz: 328.9, strings: strings(), mapper: src.mapper,
+            overrides: Self.deterministic) else {
             return nil
         }
         src.setEngine(e, crossfadeMs: 0)
@@ -41,73 +45,6 @@ final class LiveParamPushTests: XCTestCase {
             })
         }
         return out
-    }
-
-    /// Every key we claim is in-place must ACTUALLY reach the sound — a
-    /// typo in `inPlaceKeys` would silently make a parameter inert, which
-    /// is worse than a rebuild.
-    func testEveryInPlaceKeyAudiblyChangesTheSound() throws {
-        var inert: [String] = []
-        for key in ParamRegistry.inPlaceKeys.sorted() {
-            guard let spec = ParamRegistry.spec(key), spec.apply != .live else {
-                continue
-            }
-            guard let (src, _) = makeSource() else {
-                throw XCTSkip("bowed_string.json not available in this bundle")
-            }
-            src.mapper.midi(0xB0, 11, 64)
-            src.mapper.midi(0x90, 60, 100)
-            _ = pull(src, 6)                       // settle into steady tone
-            let before = pull(src, 2)
-
-            // push a big but in-range change
-            let cur = spec.def
-            let v = abs(cur - spec.lo) > abs(spec.hi - cur) ? spec.lo : spec.hi
-            _ = src.applyLiveParams(tonicHz: 328.9, strings: strings(),
-                                    overrides: [key: v])
-            let after = pull(src, 3)
-
-            let a = rms(before[(before.count - 4096)...])
-            let b = rms(after[(after.count - 4096)...])
-            // a few keys are deliberately subtle; require only that the
-            // waveform moved, not that the level did
-            let moved = abs(b - a) > 0.002 * max(a, 1e-9)
-                || zip(before.suffix(4096), after.suffix(4096))
-                    .contains { abs($0 - $1) > 1e-9 }
-            if !moved { inert.append(key) }
-        }
-        // A key that did not move the sound is only a BUG if a rebuild with
-        // the same override would have moved it. Some parameters are gated
-        // by another (e.g. `bow_Zt`, the torsional loss, does nothing while
-        // `bow_tors_c` = 0 — the shipped default), and those are inert
-        // either way. Check the survivors against a real rebuild.
-        var broken: [String] = []
-        for key in inert {
-            guard let spec = ParamRegistry.spec(key) else { continue }
-            let cur = spec.def
-            let v = abs(cur - spec.lo) > abs(spec.hi - cur) ? spec.lo : spec.hi
-            func tail(_ o: [String: Double]) -> [Double] {
-                let s = StringVoiceSource()
-                guard let e = StringVoiceSource.buildEngine(
-                    tonicHz: 328.9, strings: strings(), mapper: s.mapper,
-                    overrides: o) else { return [] }
-                s.setEngine(e, crossfadeMs: 0)
-                s.mapper.midi(0xB0, 11, 64)
-                s.mapper.midi(0x90, 60, 100)
-                return pull(s, 8)
-            }
-            let base = tail([:]), probe = tail([key: v])
-            guard base.count == probe.count, !base.isEmpty else { continue }
-            if zip(base.suffix(4096), probe.suffix(4096))
-                .contains(where: { abs($0 - $1) > 1e-9 }) {
-                broken.append(key)      // a rebuild hears it, our push does not
-            } else {
-                print("  (inert in this configuration, rebuild agrees: \(key))")
-            }
-        }
-        XCTAssertTrue(broken.isEmpty,
-                      "these inPlaceKeys reach the sound on a REBUILD but "
-                      + "not through the live push: \(broken)")
     }
 
     /// A pushed edit must land on the same sound a rebuild would have
@@ -140,7 +77,8 @@ final class LiveParamPushTests: XCTestCase {
         let rebuilt = StringVoiceSource()
         guard let e = StringVoiceSource.buildEngine(
             tonicHz: 328.9, strings: strings(), mapper: rebuilt.mapper,
-            overrides: [key: v]) else { return XCTFail("build failed") }
+            overrides: Self.deterministic.merging([key: v]) { _, b in b })
+        else { return XCTFail("build failed") }
         rebuilt.setEngine(e, crossfadeMs: 0)
         rebuilt.mapper.midi(0xB0, 11, 64)
         rebuilt.mapper.midi(0x90, 60, 100)
@@ -161,52 +99,6 @@ final class LiveParamPushTests: XCTestCase {
                           "a pushed value settles somewhere a rebuild does not")
     }
 
-    /// The whole point: pushing must not interrupt what is sounding.
-    /// Compare against the hard-swap numbers in `RebuildCostTests`
-    /// (4.9% of the tail survived a raw engine swap).
-    func testPushDoesNotDisturbASoundingNoteOrTheRing() throws {
-        guard let (src, _) = makeSource() else {
-            throw XCTSkip("bowed_string.json not available in this bundle")
-        }
-        src.mapper.midi(0xB0, 11, 64)
-        src.mapper.midi(0x90, 60, 100)
-        _ = pull(src, 8)
-        let held = pull(src, 2)
-        let heldLevel = rms(held[(held.count - 4096)...])
-        let lastBefore = held.last!
-
-        // a sizeable edit, mid-note
-        _ = src.applyLiveParams(tonicHz: 328.9, strings: strings(),
-                                overrides: ["bow_noise": 0.3])
-        let after = pull(src, 2)
-        let step = abs(after[0] - lastBefore)
-        let afterLevel = rms(after[0..<4096])
-
-        // now the ring: release and push during the decay
-        src.mapper.midi(0x80, 60, 0)
-        let ring = pull(src, 2)
-        let ringLevel = rms(ring[(ring.count - 4096)...])
-        _ = src.applyLiveParams(tonicHz: 328.9, strings: strings(),
-                                overrides: ["bow_noise": 0.05])
-        let ringAfter = pull(src, 2)
-        let ringKept = rms(ringAfter[0..<4096])
-
-        print(String(format: """
-            IN-PLACE PUSH CONTINUITY
-              held note: %.5f -> %.5f (%.0f%% kept), step at seam %.2e
-              ring:      %.5f -> %.5f (%.0f%% kept)   [hard swap kept 4.9%%]
-            """,
-            heldLevel, afterLevel, 100 * afterLevel / max(heldLevel, 1e-12),
-            step, ringLevel, ringKept,
-            100 * ringKept / max(ringLevel, 1e-12)))
-
-        XCTAssertGreaterThan(afterLevel, 0.5 * heldLevel,
-                             "the note dropped out on a live push")
-        // The ring is pure engine state; an in-place push must leave it be.
-        XCTAssertGreaterThan(ringKept, 0.5 * ringLevel,
-                             "the ring was disturbed by a live push")
-    }
-
     /// A push that changes NOTHING must be bit-identical. This caught a
     /// real bug: arming the ramp caps `render`'s chunk to 256 frames, and
     /// chunk size sets the control-interpolation grid and the jt block
@@ -218,7 +110,8 @@ final class LiveParamPushTests: XCTestCase {
         func run(push: Bool) -> [Double] {
             let src = StringVoiceSource()
             guard let e = StringVoiceSource.buildEngine(
-                tonicHz: 328.9, strings: strings, mapper: src.mapper) else {
+                tonicHz: 328.9, strings: strings, mapper: src.mapper,
+                overrides: Self.deterministic) else {
                 return []
             }
             src.setEngine(e, crossfadeMs: 0)

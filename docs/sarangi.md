@@ -26,7 +26,20 @@ Python render's C source) at 96 kHz, decimated to 48 kHz, with:
   block IS the sympathetic response and its only other setting was "no taraf
   at all"; the block builds whenever there are enabled tarab rows, running
   ASYNC one‑block‑late on its own worker pool so the audio callback never
-  waits). Since the **2026‑07‑22
+  waits. **2026‑08‑31: one jt‑web computer at a time** — the async
+  dispatcher's `jt_run_job` and `bow_poly_process3`'s offline‑pull
+  fallback share the string states, the schedule scratch and the pool
+  rendezvous; under offline test pulls (faster than realtime, the web
+  ring underruns constantly) they could dispatch the pool CONCURRENTLY,
+  crossing the `jtDone`/`jtGen` counting so the one‑waiter completion
+  signal woke the wrong dispatcher — the render thread slept forever at
+  0% CPU (a full guard run burned 30 min wedged). Fixed with the
+  `jtDispMx` dispatch‑owner mutex around the whole web computation in
+  both paths (taken only when a pool/dispatcher exists — the plain
+  serial parity path never locks), a `broadcast` completion, and
+  rendezvous waits that break on `jtQuit` so a teardown can never strand
+  a dispatcher. Sync‑only: `TarafRemovalParityTests` passed unchanged).
+  Since the **2026‑07‑22
   J8z6 update** the shipping jt config is **J8/zone6**: `bow_jt_J` 8
   with the new `bow_jt_zone` 0.006 key (default 0.010 = legacy) — the
   contact lives in ~6 mm around the apex, so a narrowed zone concentrates
@@ -67,14 +80,66 @@ Python render's C source) at 96 kHz, decimated to 48 kHz, with:
   bone under the wrap and audibly strummed under a tilt
   (`JtEvolveSweepTests` pins the click‑free sweep, and `bow_jt_set_lift`
   stays offline‑only). Pitch shifts stay ≤ 16 cents across the travel.
-  **The formant voicing pair (2026‑07‑26 evening):** the cascade alone
-  peaked at h2–h6 because the radiated tap sat at 0.90 L — |sin(k·π·tap)|
-  humps at h5 and NULLS h10, muffling exactly the cluster the jawari
-  formant lives in. `bow_jt_tap` (rebuild/in‑place, default 0.90 =
-  byte‑exact; RADIATION only — the drive tap stays fitted at 0.90 so
-  recruitment charging is untouched) slides the tap toward the bridge:
-  at 0.96–0.98 the weight approaches the bridge force (+6 dB/oct to
-  ~h25) and fills h8–h14. `bow_jt_hp` (`.live`, one‑pole HP on the
+  **The register tilt (2026‑08‑27, `bow_jt_ev_reg`, −1…1, default 0 =
+  byte‑null, `.live`):** the bone offset above is ONE global scalar, but
+  the cascade it opens is amplitude‑gated — only rows whose ring reaches
+  the grazing band ignite — and the rows that get there and STAY there
+  are the low Sa/Pa anchors: kin to nearly every played note (the
+  recruitment lattice charges them coherently all phrase), longest t60
+  (their fundamentals sit far below the `bow_jt_fhf` f² corner), largest
+  displacement per unit energy (u ∝ p/ω). So at high evolve they sit in
+  the cascading band for their whole multi‑second ring — the sustained
+  sarod‑drone bloom heard from the low strings. `bow_jt_ev_reg` makes
+  that emergent bias a playable axis: evolve units per OCTAVE from the
+  tonic, evaluated per row on the SAME margin map (e_row = clamp(e +
+  reg·log2(tonic/f_row), 0, 1), offset = lift(e_row) − lift(e) — every
+  row stays on the calibrated ×4…×¼ span) and pushed as per‑row bone
+  offsets ADDED to the global lift (`bow_poly_jt_set_evolve_ofs`,
+  row‑slewed ~40 ms in `jt_tick_string` — row‑owned state, serial and
+  pool advance identically; a sleeping quiescence‑gate row wakes on a
+  material move of its own target, and the engine reuses setJtEvolve's
+  cumulative dead‑band so a bound tilt's sensor jitter never moves
+  bones). Positive opens the below‑tonic rows toward the band (the
+  drone bloom on demand — measured +17 % rms on the low‑Sa drone ring
+  at reg 0.8, kin‑charged playing drives it far harder) while pressing
+  the above‑tonic web closed, so the bloom comes WITHOUT web‑wide buzz;
+  negative reverses it. It rides the evolution knob (offsets are
+  differences on the map, recomputed when either moves), so
+  evolve×register make a 2‑D jawari surface — both tilt‑bindable.
+  Guards: `testEvolveRegisterBloomsTheLowRows` (byte‑null at 0 + the
+  low‑row bloom), `testEvolveRegisterSweepIsClickFree`.
+  **The radiated observable (2026‑09‑03 — bridge‑force radiation):** the
+  rows radiate their CONTACT FORCE on the jawari bone (the zone
+  force‑density sum × spacing, DC‑blocked ~8 Hz, unit‑matched per row by
+  `JtTables.rowForceScale` = gout·π·wj/(mu·L·wd1) so the fitted level law
+  carried over). Until then they radiated a velocity PICKUP at
+  `bow_jt_tap` 0.90 L whose |sin(k·π·tap)| comb humped h5/h15 and NULLED
+  h10 in every row — the "two clusters" the Taraf tab exposed — and the
+  2026‑07‑26 "formant voicing" answer was to slide the tap toward the
+  bridge. The pickup, `bow_jt_tap`, `bow_jtc_tap` and the one‑day
+  `bow_jt_rad_force` mix (2026‑09‑02) are DELETED — do not revive; the
+  force radiates every mode flat in the pickup's units, the buzz
+  harmonics the comb muffled now radiate (≈ +5…8 dB hotter taraf,
+  measured), and the drive tap stays fitted at 0.90 L (roadmap item 2).
+  Two consequences of the observable, measured 2026‑09‑03: the contact
+  pulse train carries a large low‑frequency swing (the DC blocker takes
+  only the static preload), so `bow_jt_gain` now GLIDES ~40 ms inside the
+  kernel (`jtGainCur`) and so does each row's radiation scale
+  (`jtRadScaleCur`, per jt tick — the two‑bridge chromatic level rides
+  `bow_jtc_gain / bow_jt_gain`, so a `bow_jt_gain` sweep re‑scales every
+  chromatic row per update; a 60 Hz stepped scale splashed impulses ~10×
+  the signal — ZipperTests' fast flick) — both bit‑null when constant; and
+  an INSTANT bone move (evolve 0.5 → 0) radiates the bone slapping into a
+  ringing string as a real ~0.3 step ~32 ms later (a physical thump the
+  velocity pickup never showed; the kernel's 40 ms bone slew makes tilt
+  sweeps clean — `testEvolveSweepIsClickFree` now starts its triangle at
+  rest). The opened graze (`bow_jt_ev_reg`) reads ~8 dB QUIETER in
+  contact force while its cascade doubles (the string touches the bone
+  less), and the quiet grazing haze under‑radiates versus the linear
+  pickup (force ∝ η^1.3) — both are the contact‑only observable: the
+  PIN force at the string's rigid termination (T·∂u/∂x at L, linear,
+  comb‑free) is NOT yet radiated — see roadmap item 1b.
+  `bow_jt_hp` (`.live`, one‑pole HP on the
   radiated jt sum after the tone LP, kernel `bow_poly_jt_set_hp`, 0 =
   byte‑null) then drops the fundamental band. Measured tap 0.98 +
   hp 1200 at evolve 1: cluster h4–h8 within 4 dB of each other, h1
@@ -427,9 +492,10 @@ Python render's C source) at 96 kHz, decimated to 48 kHz, with:
   accelerometer estimate ([sensors.md](sensors.md)) or MIDI/audition
   velocity, and the key at its 0 default keeps the historic press‑only
   law bit‑exact — the velocity byte was carried but discarded before).
-  Everything in the Articulation group acts on FRESH attacks only —
-  glides are held notes/legato steals and never re‑articulate, so glide
-  character is untouched by construction,
+  Everything in the Articulation group acts on FRESH attacks — since
+  2026‑08‑24 every note‑on is one (each note mounts a fresh string);
+  within‑note finger glides never re‑articulate, so glide character is
+  untouched by construction,
 - the **sustain‑liveness layer** (2026‑08‑01, fitted to clean SWAM Violin 3
   captures): a post‑onset settle (`bow_settle_db`) that eases the stroke off
   its capture overshoot (since 2026‑08‑19 `bow_settle_sharp` exempts a
@@ -438,11 +504,21 @@ Python render's C source) at 96 kHz, decimated to 48 kHz, with:
   balance; 0 = bit‑null), three seeded Ornstein–Uhlenbeck walks
   (`bow_drift_*`) that give a held note its slow pitch/level/timbre wander,
   and a glide‑rate bow lightening (`bow_glide_dip_db`) that articulates
-  legato transitions — measurements and traps in
+  finger glides (meend) — measurements and traps in
   [sound-design.md](sound-design.md),
 - **polyphony as physics**: `bow_live_poly 8` gut strings on ONE shared
-  bridge (delay‑free junction) — chords are extra strings, a single line is
-  mono meend on one string (9 Hz glide smoother).
+  bridge (delay‑free junction). **Every note‑on mounts a fresh string
+  (2026‑08‑24)** — the mono‑meend re‑bow, the effective‑mono legato
+  steal and the note‑off glide‑back to a held predecessor were all
+  removed: a new note takes an unused slot (else the longest‑released,
+  else steals the oldest sounding note), its serial bump snaps the
+  pitch, and note‑off just lifts the bow (the string rings on its
+  slot at its frozen pitch). Pitch glides exist only WITHIN a note — the
+  finger dragging its own string. **The 9 Hz meend smoother is also gone
+  (2026‑08‑24, same day):** the filter ramps log2 f0 linearly to the
+  latest target across each render block (continuous, on target within
+  one block), so ALL meend is the player's finger, delivered at wire
+  rate — the instrument adds no glide shaping of its own.
 
 The whole instrument — played strings + taraf + body + radiation + room — is
 the kernel; it needs ONLY **`bowed_string.json`** and renders **straight to
@@ -568,9 +644,13 @@ place.
   radiation), diffusely decorrelated at high frequency, because above
   the Schroeder crossover a real body's radiation is a dense
   overlapping mode field where two listening positions see random
-  independent mode shapes. The fitted mid has no resolved modal
-  structure up there (its 9 signature modes all sit 55–250 Hz; the
-  upper spectrum ships as flat `c0` feedthrough), so the
+  independent mode shapes. When this shipped (2026‑08‑01) the fitted
+  mid had no resolved modal structure up there (its 9 signature modes
+  all sit 55–250 Hz; the upper spectrum shipped as flat `c0`
+  feedthrough — that flatness was later measured at ±0.3 dB over
+  250–6500 Hz and fixed by the 2026‑08‑24 **formant forest** bake: the
+  mid's diffuse tail `bow_body_tail_*` now runs 32 modes / 280–6500 Hz
+  at radiation 2.5, see [sound‑design.md](sound-design.md)), so the
   observation‑point DIFFERENCE is modelled the way the mid models the
   diffuse region itself: a **diffuse‑field difference bank** — 16
   dense random‑sign side‑only modes, 700 Hz – 6.5 kHz, Q ≈ 12,
@@ -619,9 +699,82 @@ physics write‑ups if they are ever wanted back.
 
 ## Sympathetic strings (the Strings tab, ⌘2)
 
-The tarab live in their own **Strings tab** (`StringsView`) as **one flat pool
+**TWO SETS ON TWO BRIDGES (2026-09-02).** The real sarangi carries its tarab
+in two families — the **chromatic set** (~15 strings through the main
+bridge, tuned semitone by semitone) and the **raga sets** (on separate small
+bridges, tuned to the notes of the raga) — and each bridge has its own
+jawari. Tarabdaar's taraf is split the same way: every `StringSpec` carries
+a `set` (`TarabSet.raga` / `.chromatic`, persisted as a string; absent =
+raga, so every pre-split document reads as all raga strings). The **raga
+set** is the bank described below — scale-degree strings on the
+`bow_jt_*` bridge. The **chromatic set** is 15 semitone strings (low Ga …
+tivra Ma, the historic `chromaticRatios` row of raga.build_strings,
+`RagaTuning.buildChromaticSpecs`, gain 0.6 / t60 3.0 — above the jawari
+selection's `bow_jt_gmin` so it SOUNDS, unlike the 0.40-gain choir deleted
+2026-07-25) whose `degree` is a **semitone (0…11) into the fixed JI
+chromatic grid** (`RagaTuning.chromaticRatio`) off the same tonic: still no
+ratio or Hz in the document, still retuned by a tonic move, but
+deliberately NOT by a scale edit — the chromatic set is tuned once,
+whatever the raga. It sits on its own bridge, the **`bow_jtc_*` group**
+("Chromatic bridge (jawari taraf)" in the Parameters tab): the twin of
+every `bow_jt_*` bridge knob — level, drive, graze depth, contact zone /
+bone radius (`bow_jt_zone`/`bow_jt_radius` joined the raga group the same
+day), contact law, level norm, contact damping, damping corner,
+inharmonicity, and its own live **evolution** axis (the radiation tap
+twin lived one day: 2026-09-03 the bridge-force radiation replaced the
+0.90 L pickup for the whole web, and `bow_jt_tap`/`bow_jtc_tap` went with
+it) — while the
+web-wide taraf controls (tone LP/HP, body, governor, damping, comp, cap,
+recruitment, register tilt) stay shared. Mechanics: the bone GEOMETRY of a
+bridge was always per-row kernel data, so the builder
+(`BowTables.buildJawariTables(rows:…:chromatic:)`) bakes chromatic rows
+with the `bow_jtc_*` profile and per-row level/drive scales (ratios
+against the raga bridge's global `phys` gain/drive); the CONTACT LAW
+(alpha, hcB, the deep-substep threshold at 2.5 × that bridge's apex) is
+per row in the kernel via `bow_poly_jt_set_row_contact` (drone-setter
+contract — never called for an all-raga rig = byte-null; a chromatic row
+resting at the raga values ticks bit-identically — a case of SarangiKit's `ByteNullContractTests`, plus the parity hash), and
+`bow_jtc_evolve` rides the existing per-row bone-offset path
+(`bow_poly_jt_set_evolve_ofs`): each chromatic row evaluates the margin map
+on its own apex at its own evolve, minus the raga bridge's global lift
+(`BowEngine.pushJtEvolveOffsets`). Resting values are pinned equal to the
+raga bridge's shipped numbers (`BowTables.chromaticBridgeDefaults` ==
+the registry defaults, `TarabSetTests` — the artifact never carries the
+keys, so DEFAULT = ENGINE TRUTH), so the split alone adds strings, not a
+new sound. Kernel row order: the raga bridge's rows (exactly the
+pre-split `jawariRows` selection), then the chromatic bridge's (selected
+by the same rule on its own — `StringVoiceSource.jawariRowPlan`, the ONE
+plan build and live reload share), then the follower; a pitch on both
+bridges resolves drone presses to its raga row. The pool invariant below
+is PER BRIDGE (Sa on both is the instrument's own layout); the raga set
+lists first in the document. The Strings tab shows two tables — "Raga
+strings (side bridges)" with the follower pinned above it, "Chromatic
+strings (main bridge)" under a semitone dropdown (`+k` + the scale's own
+label where it has that pitch, else the grid fraction) — each with its
+own +, Enable/Disable all, and a "Reset chromatic set" beside "Regenerate
+from scale" (which now rebuilds the raga set only). The drone/strum
+auto-mappings stay on the raga bridge; the pickers list both. **Schema 3
+→ 4 migration:** a pre-split document is seeded with the default
+chromatic set on decode, its raga rows untouched, ONCE (the re-saved
+document is schema 4; a deleted chromatic set stays deleted). The persist
+key is not bumped. `TarafRemovalParityTests` was deliberately re-blessed
+for the grown default document (and again 2026-09-03 for the bridge-force
+radiation). (This is NOT the 2026-08-26 sitar bank:
+that was a second raga-tuned bank with a different jawari preset, rejected
+by ear and removed the next day; this is the instrument's chromatic set,
+resting at the same jawari.) CPU: ~9% of a core per awake row — Pilu is
+now 19 + 15 = 34 rows; the pool starves somewhere past ~40, so an
+overgrown bank shows as taraf drop/flatten, not as callback overruns.
+**Recruitment note:** `bow_jt_sel` (and the Taraf Purity composite) weighs
+every row by kinship to the played pitches — with the chromatic set
+mounted every semitone has a unison row, so a "non-kin" note no longer
+exists and kin-only still rings the chromatic unison (that is the set
+doing its job; `TarafRecruitTests` measures the raga law on the raga
+bridge alone, `Presets.state(_:chromatic: false)`).
+
+The RAGA set lives in the **Strings tab** (`StringsView`) as **one flat pool
 of strings** — a `StringSpec` (`Model/StringSpec.swift`) is `degree, octave,
-gain, t60, enabled`. **The pitch is SCALE-DEFINED (2026-07-25)**: `degree`
+gain, t60, enabled` (+ `set`). **The pitch is SCALE-DEFINED (2026-07-25)**: `degree`
 indexes `InstrumentState.scaleRatios` — the ONE centralized scale, mirrored
 from the Pitch Pad on every change — and `octave` shifts it by whole
 octaves, so a string can only ever sound a pitch of the scale, and a scale
@@ -749,6 +902,74 @@ parity for the surviving rows (the fixture's chromatic segment is skipped;
 the fixture was exported detune-off, which is now the only mode);
 `buildSpecs(scaleRatios:)` is the degree-space layout builder.
 
+## Jawari modelling roadmap (2026‑09‑02)
+
+What the Taraf tab's spectra exposed, and the improvements proposed for
+the modal‑jawari rows, in the order they are worth doing. Status marks
+what has landed.
+
+1. **Radiate the bridge contact force, not a 0.90 L pickup — BAKED IN
+   2026‑09‑03: the force IS the radiation; the pickup, `bow_jt_tap` /
+   `bow_jtc_tap` and the one‑day `bow_jt_rad_force` mix are deleted, and
+   `TarafRemovalParityTests` was deliberately re‑blessed for it.** The
+   legacy output was a velocity pickup φO_k = sin(k·π·tap) at 0.90 L,
+   whose comb humped modes 5/15 and nulled mode 10 in every row — the
+   "two clusters" — and which no real taraf has: a sympathetic string
+   drives the body through the force it exerts on its bridge at the
+   termination. The kernel's contact solve already computes the zone
+   force densities every tick; `jt_core` sums them (read‑only, after the
+   dissipative scaling; the impulse into the modes is untouched) and the
+   tick radiates the DC‑blocked (~8 Hz one‑pole, primed to the first
+   sample) force. Unit match per row, from the builder
+   (`JtTables.rowForceScale` = gout·π·wj/(mu·L·wd1), riding the load ABI
+   in the slot `phiO` used to take): with T = mu·(L·wd1/π)² the
+   termination force of a unit mode‑1 ring maps to the old pickup's
+   velocity amplitude, so the fitted level law carried over — measured in
+   the test scaffold ≈ +7.6 dB hotter ring / +4.8 dB while bowing than the
+   pickup (the buzz harmonics the comb muffled now add; trim with
+   `bow_jt_gain`) — and every mode radiates FLAT in those units, so the
+   Taraf tab's single modal‑energy spectrum is also the radiated one. It
+   shipped as a 0…1 mix for one day (2026‑09‑02); the user judged mix 1
+   "sounds great" and it was baked the next day. Guard:
+   `JtForceRadiationTests` (finite, DC‑free ring at the calibrated order;
+   deterministic).
+1b. **Add the termination (pin) force to the radiation.** The modal basis
+   is pinned at L; the bone only grazes the last few mm, so the bridge
+   assembly receives BOTH the pin force T·∂u/∂x|L (linear in the modal
+   state, weight ∝ k — flat in velocity units, no comb) and the bone
+   contact force (the buzz, nonlinear, radiated since 2026‑09‑03). Item 1
+   radiates the contact part alone — which is what the user heard and
+   approved — so the quiet grazing haze under‑radiates (force ∝ η^1.3),
+   an opened graze reads quieter, and bone moves thump. Adding the pin
+   term (signs: both act on the same bridge; the static parts cancel in
+   the DC blocker) would restore the linear string tone under the buzz.
+   Cheap: Σ(−1)^k·k·q_k per row per tick. To be judged by ear against the
+   contact‑only sound before it ships.
+2. **Drive from the termination too.** The bridge force enters each row
+   through a second, fixed 0.90 L tap (φD), so the null at mode 10 is
+   squared and modes 10/20 are never charged. A shared‑bridge excitation
+   couples into mode k through the mode slope at the end (∝ k·(−1)^k, no
+   null). Same pattern: an option first, then a re‑fit of the recruitment
+   levels.
+3. **Two‑way coupling among the rows.** Each row is driven one way from the
+   played string and never feels the other rows; on the instrument the rows
+   exchange energy through the shared bridge, which is what makes a taraf
+   bloom as a web. The silent coupling web (`bow_cpl_*`) approximates this
+   on the linear side; feeding the modal rows' summed bridge force (now
+   available — the item‑1 tap) back into the junction would make it
+   physical. Stability is the risk: keep the one‑sample lag the drive uses.
+4. **Bone profile.** The parabola is right near the apex, but a real jawari
+   surface is an asymmetric arc with a longer, gentler slope toward the nut;
+   that lengthens the buzz cascade rather than deepening it. Build‑time
+   table, cheap to try.
+5. **Damping law.** Per‑mode loss is a constant plus an f² roll‑off around
+   `bow_jt_fhf`; real strings add an air term ∝ f and a bending term ∝ f².
+   Modest, but it sets how long the high cluster survives the cascade.
+6. **Port the tanpura contact string** (the fitted r7 modal‑contact string
+   with the jiva thread) under the sarangi web. The sitar‑taraf experiment
+   tried a second bank of those and was removed for CPU (~9 %/core/row);
+   revisit only if 1–3 don't get there.
+
 ## Presets & resources
 
 **One preset** ships, generated in code by `Presets.state`:
@@ -829,33 +1050,50 @@ reaches it via `AudioEngine.sendHostedMIDI` → `routeSarangiModelMIDI` →
 the machinery that fed it — `CombString.bufferCopy()`, `ResonatorBank`'s
 snapshot/DFT path (`BankSnapshot.swift`) — was deleted with the coupled
 network on 2026‑07‑24. The sympathetic strings still ring in and out of
-resonance as the played pitch slides; today's telemetry is the Live tab's
-jt/render meters, not a per‑string harmonic view.
+resonance as the played pitch slides. **2026‑09‑01: the Mac Scope tab
+(⌘8) is the per‑string view again**, built on display‑only KERNEL meters
+rather than a bank snapshot/DFT: `bow_poly_scope_arm` turns on, per
+modal‑jawari row, a peak envelope of the row's own radiated (post‑cap)
+sample every tick and per‑mode peak envelopes of the first 16 modes'
+modal velocities |p_k| every 4th tick — the string's own energy per mode,
+which with the flat bridge‑force radiation is also its radiated spectrum up
+to a constant (worker‑owned state, telemetry‑grade racy reads — the
+gate‑probe convention);
+`bow_poly_scope_jt` reads them with the row's CURRENT f0 (the follower's
+retune) and its asleep flag, levels scaled by the jt output gain into
+voice‑bus units; `bow_poly_scope_slots` reads each played string's ring
+envelope (`senv`, the bridge‑wave chunk peak) so released strings still
+meter. Armed only while the tab shows; disarmed = the exact legacy tick,
+and `ScopeTelemetryTests` pins the armed render byte‑identical. The
+tab's levels, centroids and drawing are described in
+[UI Layout](ui-layout.md).
 
 ## Tests
 
-`Packages/SarangiKit/Tests/SarangiKitTests/` (21 tests, down from 83 when the
-upstream‑parity suites went with the code they covered):
+Consolidated on 2026‑09‑03 to the bare guard set (the fitted‑number suites
+and benches went — the sound is judged by ear; history lives in git):
 
-- **`BowedStringEngineTests`** — the live String path: table shape, the
-  formula body's lockstep values, articulation physics, the modal‑jawari
-  block on vs off, and `testNoWebVoicesAreBuilt` (the linear taraf web stays
-  deleted).
-- **`BowPolyTests`** — mapper slot allocation/stealing, the slot‑steal mount
-  landing in the fresh‑contact state, an 8‑note max‑force chord staying
-  bounded and releasing, a triad sounding all three fundamentals.
-- **`BowStereoTests`** — the side path arms, L ≠ R, and the L+R fold‑down
-  still equals the mono render.
-- **`BowControlsTests`** — the control‑mapping law (gate one‑pole, meend
-  glide, the ANALYTIC Schelleng press envelope) against the shipping
-  artifact. The measured‑wedge variants went with `BowWedge`, a
-  sarangi‑era `calibrate_wedge` table the pure‑physics artifact never
-  carried — they had been silently skipping.
-- **`ModelTests`** — the tarab bank layout and note‑name round trip.
+- **`TarafRemovalParityTests`** (TarabdaarCore, gated) — the SHA‑256 of one
+  rendered phrase pins the whole shipped signal path. Bless deliberately.
+- **`ByteNullContractTests`** (SarangiKit) — every optional path armed at
+  its resting value renders bit‑identically: scope meters, bus meter, FX
+  rack, cap, comp, balance, governor, twang, inject, damp, tilt, body,
+  register, master gain, tone LP bypass. Add a case per new "0 = off" knob.
+- **Kernel lockstep** — `BowedStringEngineTests` (formula body, table
+  shapes, the shared `stringBP()`/`testTaraf` scaffold), `BowPolyTests` (a
+  chord stays bounded), `BowStereoTests` (fold‑down invariance),
+  `TanpuraEngineTests` (exporter golden), `TouchMapperTests` (touch path ≡
+  MIDI path — the parity substrate).
+- **Realtime / rebuild / in‑place** (TarabdaarCore, gated, phase 2 serial) —
+  `RealtimePerformanceTests`, `RebuildCostTests` (crossfade budget, silent
+  publish), `ZipperTests` (fast flick), `LiveParamPushTests`.
+- **Model and wire** (fast) — `ParamUnificationTests`, `PresetCodingTests`,
+  `TLPCodecTests`, `TarabLinkTests`, `LinkIngestTests`,
+  `GlideSequencerTests`, `ScaleLabelTests`, `TarabRatioTests`,
+  `DroneStringTests`, `FretLayoutTests`, `FretWarpTests`, `ChordBarTests`,
+  `TarabSetTests`, `LegacyMigrationTests`, `ScalePresetTests`.
 
-The instrument's real regression guard lives next door:
-**`TarafRemovalParityTests`** in TarabdaarCore pins a SHA‑256 of a rendered
-phrase. Run with `cd Packages/SarangiKit && swift test`.
+Run `cd Packages/SarangiKit && swift test` and `tools/test-full.sh`.
 
 ## Calibration notes
 

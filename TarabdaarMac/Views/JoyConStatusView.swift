@@ -33,6 +33,9 @@ struct JoyConStatusView: View {
                 joyConIMUPanels
             }
             bodyPanel
+            if joyCon.jcFusedActive || joyCon.wristCal.isCalibrated {
+                wristPanel
+            }
             if joyCon.traceActive {
                 HStack(alignment: .top, spacing: 12) {
                     receivedPanel
@@ -139,6 +142,21 @@ struct JoyConStatusView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                if !joyCon.wristCal.axes.isEmpty || joyCon.jcFusedActive {
+                    // The wrist control axes (calibrated) + the
+                    // acceleration envelope — what the bindings see.
+                    LabeledContent("Wrist axes") {
+                        Text(joyCon.wristCal.axes.isEmpty
+                             ? "uncalibrated — see Wrist calibration below"
+                             : joyCon.wristCal.axes
+                                .map { String(format: "%+.2f", $0) }
+                                .joined(separator: "  ")
+                               + String(format: "   accel %.2f",
+                                        joyCon.joyConAccelLevel))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 if !joyCon.hidAxes.isEmpty || joyCon.calPhase != .idle {
                     LabeledContent("HID axes") {
                         Text(joyCon.hidAxes
@@ -180,73 +198,19 @@ struct JoyConStatusView: View {
     /// the tilt stream; the Joy-Con is optional (dpad stepping, ZL
     /// re-zero).
     private var bodyPanel: some View {
-        Panel(title: "Arm calibration") {
-            VStack(alignment: .leading, spacing: 8) {
-                if joyCon.bodyCalStep == nil {
-                    HStack(spacing: 10) {
-                        Button("Calibrate arm tilts…") {
-                            joyCon.beginBodyCalibration()
-                        }
-                        if !joyCon.bodyCalInfo.isEmpty {
-                            Text(joyCon.bodyCalInfo)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    // Post-run detail: the separation summary after a
-                    // fit, the redo advice after a discard.
-                    if !joyCon.bodyCalDetail.isEmpty {
-                        Text(joyCon.bodyCalDetail)
-                            .font(.caption)
-                            .foregroundStyle(joyCon.bodyCalDetail.hasPrefix("⚠")
-                                             ? AnyShapeStyle(Color.orange)
-                                             : AnyShapeStyle(.secondary))
-                    }
-                    Text("The app's single tilt calibration: the iPad streams raw attitude and this capture learns the whole map — rest pose, movement directions and ranges (rest = 0.5 on every axis). Needs only the iPad on the arm; the Joy-Con is optional (dpad-up advances, dpad-down steps back, ZL re-zeroes the rest pose). Four phases. Start each sweep from rest and end near rest if you can — all seven rest readings are merged robustly, and a reading that isn't at rest is simply ignored, never a redo. A one-sided or duplicate sweep clears itself and repeats on the spot.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(joyCon.bodyCalInfo)
-                        .font(.body.weight(.medium))
-                        .foregroundStyle(Color.accentColor)
-                    // Per-phase verdict for the LAST completed phase:
-                    // sample count, both-ways, alignment vs earlier
-                    // sweeps — a doomed pair shows here immediately.
-                    if !joyCon.bodyCalDetail.isEmpty {
-                        Text(joyCon.bodyCalDetail)
-                            .font(.caption)
-                            .foregroundStyle(joyCon.bodyCalDetail.hasPrefix("⚠")
-                                             ? AnyShapeStyle(Color.orange)
-                                             : AnyShapeStyle(.secondary))
-                    }
-                    HStack(spacing: 10) {
-                        Button(joyCon.bodyCalStep == 3 ? "Finish" : "Next") {
-                            joyCon.advanceBodyCalibration()
-                        }
-                        Button("Redo previous") {
-                            joyCon.redoPreviousBodyCalibrationStep()
-                        }
-                        .disabled(joyCon.bodyCalStep == 0)
-                        Button("Cancel") { joyCon.cancelBodyCalibration() }
-                    }
-                    .font(.caption)
-                }
-                if !joyCon.bodyTilts.isEmpty {
-                    Text("body  " + joyCon.bodyTilts
-                        .map { String(format: "%+.2f", $0) }
-                        .joined(separator: "  "))
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                }
-                if joyCon.calCloud.contains(where: { !$0.isEmpty })
-                    || joyCon.calViz != nil {
-                    CalCloudView(cloud: joyCon.calCloud,
-                                 currentPhase: joyCon.bodyCalStep,
-                                 viz: joyCon.calViz,
-                                 joyCon: joyCon)
-                }
-            }
-        }
+        TiltCalPanel(
+            cal: joyCon.armCal, title: "Arm calibration",
+            intro: "The iPad's tilt calibration: the iPad streams raw attitude and this capture learns the whole map — rest pose, movement directions and ranges (rest = 0 on every axis). Needs only the iPad on the arm; the Joy-Con is optional (dpad-up advances, dpad-down steps back, ZL re-zeroes the rest pose). Four phases. Start each sweep from rest and end near rest if you can — all seven rest readings are merged robustly, and a reading that isn't at rest is simply ignored, never a redo. A one-sided or duplicate sweep clears itself and repeats on the spot.")
+    }
+
+    /// The WRIST calibration (2026-09-02): the same guided capture over
+    /// the Joy-Con's fused attitude — wrist up/down, in/out, rotation
+    /// → the Wrist ↕/↔/⟲ control axes. Shown once the Joy-Con's motion
+    /// fusion is live (or a calibration already exists).
+    private var wristPanel: some View {
+        TiltCalPanel(
+            cal: joyCon.wristCal, title: "Wrist calibration",
+            intro: "The Joy-Con's tilt calibration: hold the Joy-Con in the playing grip and capture a rest pose, then three wrist sweeps — up/down, inward/outward, clockwise/counterclockwise — each starting from rest. The fit learns the rest pose and the three movement directions from the Joy-Con's fused attitude (gravity pitch/roll + drift-corrected yaw) and turns them into the Wrist ↕ / ↔ / ⟲ dimensions on the Controls tab (rest = 0, sweep extremes ±1). Dpad-up advances, dpad-down steps back, ZL re-zeroes the rest pose. Without a calibration the wrist axes stay silent; Joy-Con Accel needs no calibration.")
     }
 
     /// The Mac twin of the iPad's GYRO overlay: the same 3D attitude
@@ -569,47 +533,116 @@ private struct VectorTrailView: View {
     }
 }
 
-// MARK: - Calibration sample cloud (3D)
+// MARK: - Guided calibration panel + sample cloud (3D)
 
-/// Rotating 3D scatter of the arm-calibration capture, live while
+/// One guided-calibration panel (2026-09-02: shared by the arm and the
+/// wrist): the start button or the running phase prompt, the live
+/// verdict line, the calibrated axes readout and the rotating sample
+/// cloud with the fitted model.
+private struct TiltCalPanel: View {
+    @ObservedObject var cal: TiltCalibrator
+    let title: String
+    let intro: String
+
+    var body: some View {
+        Panel(title: title) {
+            VStack(alignment: .leading, spacing: 8) {
+                if cal.step == nil {
+                    HStack(spacing: 10) {
+                        Button(cal.isCalibrated ? "Recalibrate…" : "Calibrate…") {
+                            cal.begin()
+                        }
+                        if !cal.info.isEmpty {
+                            Text(cal.info)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.caption)
+                    if !cal.detail.isEmpty {
+                        Text(cal.detail)
+                            .font(.caption)
+                            .foregroundStyle(cal.detail.hasPrefix("⚠")
+                                             ? Color.orange : .secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text(intro)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(cal.info)
+                        .font(.system(.body).weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !cal.detail.isEmpty {
+                        Text(cal.detail)
+                            .font(.caption)
+                            .foregroundStyle(cal.detail.hasPrefix("⚠")
+                                             ? Color.orange : .secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack(spacing: 10) {
+                        Button(cal.step == 3 ? "Finish" : "Next") {
+                            cal.advance()
+                        }
+                        Button("Redo previous") {
+                            cal.redoPrevious()
+                        }
+                        .disabled(cal.step == 0)
+                        Button("Cancel") { cal.cancel() }
+                    }
+                    .font(.caption)
+                }
+                if !cal.axes.isEmpty {
+                    Text("axes  " + cal.axes
+                        .map { String(format: "%+.2f", $0) }
+                        .joined(separator: "  "))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                if cal.cloud.contains(where: { !$0.isEmpty }) || cal.viz != nil {
+                    CalCloudView(cal: cal)
+                }
+            }
+        }
+    }
+}
+
+/// Rotating 3D scatter of a guided-calibration capture, live while
 /// samples stream in: the REST cluster plus the three sweep arcs in
-/// tilt space (t1/t2/t3, the iPad's raw axes). A slow turntable spin
-/// with depth-scaled dot size/opacity supplies the parallax; the white
-/// ring marks the rest cluster's centre, so how cleanly the arcs
+/// feature space (the calibrator's three input axes). A slow turntable
+/// spin with depth-scaled dot size/opacity supplies the parallax; the
+/// white ring marks the rest cluster's centre, so how cleanly the arcs
 /// intersect at rest reads directly off the picture. Overlaid on the
 /// raw data: the CALIBRATED MODEL — three straight segments through
 /// the fitted rest point, each solved direction scaled by its lo/hi
 /// extents (what the live solve actually applies; how closely they
 /// hug the arcs is the fit quality) — and a yellow "you are here"
-/// marker at the current arm position. The view is centred on the
-/// rest cluster (else the fitted rest) and auto-scaled to the data.
-/// The capture stays on screen after the fit; the model segments show
+/// marker at the current position. The view is centred on the rest
+/// cluster (else the fitted rest) and auto-scaled to the data. The
+/// capture stays on screen after the fit; the model segments show
 /// whenever a calibration exists, including right after launch.
 private struct CalCloudView: View {
-    let cloud: [[SIMD3<Double>]]
-    /// Highlight the running phase; nil (idle/after fit) draws all
-    /// phases at full strength.
-    let currentPhase: Int?
-    /// The fitted model (nil while uncalibrated).
-    let viz: JoyConInput.CalViz?
-    /// Read (not observed) for `liveArmPos` — the "you are here"
-    /// marker samples it fresh inside each 60 Hz timeline tick.
-    let joyCon: JoyConInput
+    /// Observed for the cloud/phase/model; `livePos` is READ fresh
+    /// inside each 60 Hz timeline tick for the marker.
+    @ObservedObject var cal: TiltCalibrator
 
     private static let colors: [Color] = [.white, .orange, .green, .cyan]
-    private static let names = ["Rest", "Arm ↕", "Arm ↔", "Arm ⟲"]
     /// Turntable rate in rad/s — one revolution ≈ 21 s.
     private static let spin = 0.3
 
     var body: some View {
+        let names = ["Rest"] + cal.config.sweepNames
         VStack(alignment: .leading, spacing: 4) {
             TimelineView(.periodic(from: .now, by: 1.0 / 60.0)) { tl in
                 Canvas { ctx, size in
                     Self.draw(ctx, size: size,
                               azimuth: tl.date.timeIntervalSinceReferenceDate
                                   * Self.spin,
-                              cloud: cloud, currentPhase: currentPhase,
-                              viz: viz, armPos: joyCon.liveArmPos)
+                              cloud: cal.cloud, currentPhase: cal.step,
+                              viz: cal.viz, pos: cal.livePos,
+                              featureNames: cal.config.featureNames)
                 }
             }
             .frame(height: 230)
@@ -619,10 +652,10 @@ private struct CalCloudView: View {
                 ForEach(0..<4, id: \.self) { i in
                     HStack(spacing: 4) {
                         Circle().fill(Self.colors[i]).frame(width: 6, height: 6)
-                        Text(Self.names[i])
+                        Text(names[i])
                     }
                 }
-                if viz != nil {
+                if cal.viz != nil {
                     HStack(spacing: 4) {
                         Rectangle().fill(Color.secondary)
                             .frame(width: 10, height: 2)
@@ -631,7 +664,7 @@ private struct CalCloudView: View {
                 }
                 HStack(spacing: 4) {
                     Circle().fill(Color.yellow).frame(width: 6, height: 6)
-                    Text("Arm now")
+                    Text(cal.config.markerName)
                 }
             }
             .font(.caption2)
@@ -642,11 +675,12 @@ private struct CalCloudView: View {
     private static func draw(_ ctx: GraphicsContext, size: CGSize,
                              azimuth: Double,
                              cloud: [[SIMD3<Double>]], currentPhase: Int?,
-                             viz: JoyConInput.CalViz?, armPos: SIMD3<Double>?) {
+                             viz: TiltCalibrator.Viz?, pos: SIMD3<Double>?,
+                             featureNames: [String]) {
         let all = cloud.flatMap { $0 }
         // The fitted model's segment endpoints participate in centring
         // and auto-scale alongside the raw samples (so a fresh launch
-        // with no cloud still frames the model), as does the live arm
+        // with no cloud still frames the model), as does the live
         // marker.
         var segments: [(a: SIMD3<Double>, b: SIMD3<Double>, phase: Int)] = []
         if let viz {
@@ -656,7 +690,7 @@ private struct CalCloudView: View {
             }
         }
         var extentPts = all + segments.flatMap { [$0.a, $0.b] }
-        if let armPos { extentPts.append(armPos) }
+        if let pos { extentPts.append(pos) }
         guard !extentPts.isEmpty else {
             ctx.draw(Text("waiting for samples…")
                 .font(.caption).foregroundColor(.gray),
@@ -700,15 +734,16 @@ private struct CalCloudView: View {
         }
 
         // Feature axes through the rest centre, for orientation.
-        for (axis, label) in [(SIMD3<Double>(1, 0, 0), "t1"),
-                              (SIMD3<Double>(0, 1, 0), "t2"),
-                              (SIMD3<Double>(0, 0, 1), "t3")] {
+        let unit = [SIMD3<Double>(1, 0, 0), SIMD3<Double>(0, 1, 0),
+                    SIMD3<Double>(0, 0, 1)]
+        for (i, axis) in unit.enumerated() {
             let a = project(c - axis * maxR)
             let b = project(c + axis * maxR)
             var path = Path()
             path.move(to: CGPoint(x: a.x, y: a.y))
             path.addLine(to: CGPoint(x: b.x, y: b.y))
             ctx.stroke(path, with: .color(.gray.opacity(0.25)), lineWidth: 0.5)
+            let label = i < featureNames.count ? featureNames[i] : "t\(i + 1)"
             ctx.draw(Text(label).font(.system(size: 8)).foregroundColor(.gray),
                      at: CGPoint(x: b.x, y: b.y))
         }
@@ -772,10 +807,10 @@ private struct CalCloudView: View {
                        with: .color(.white.opacity(0.9)), lineWidth: 1)
         }
 
-        // "You are here": the live arm position, topmost, with its raw
-        // tilt values (−1…+1) beside it.
-        if let armPos {
-            let q = project(armPos)
+        // "You are here": the live position, topmost, with its feature
+        // values (−1…+1) beside it.
+        if let pos {
+            let q = project(pos)
             ctx.fill(Path(ellipseIn: CGRect(x: q.x - 4, y: q.y - 4,
                                             width: 8, height: 8)),
                      with: .color(.yellow))
@@ -785,7 +820,7 @@ private struct CalCloudView: View {
             // Keep the label inside the canvas: lead on the left half,
             // trail on the right.
             let onLeft = q.x < Double(size.width) / 2
-            ctx.draw(Text(tiltLabel(armPos))
+            ctx.draw(Text(tiltLabel(pos))
                 .font(.system(size: 9).monospacedDigit())
                 .foregroundColor(.yellow),
                 at: CGPoint(x: q.x + (onLeft ? 8 : -8), y: q.y - 8),
@@ -793,7 +828,7 @@ private struct CalCloudView: View {
         }
     }
 
-    /// "(+.4, −.2, −.3)" — the marker's raw tilt values, one decimal,
+    /// "(+.4, −.2, −.3)" — the marker's feature values, one decimal,
     /// leading zero dropped.
     private static func tiltLabel(_ p: SIMD3<Double>) -> String {
         func f(_ v: Double) -> String {

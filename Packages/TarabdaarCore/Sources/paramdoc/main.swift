@@ -19,25 +19,9 @@ func num(_ v: Double) -> String {
     return String(format: "%g", v)
 }
 
-func scopeLabel(_ s: ParamScope) -> String {
-    switch s {
-    case .global:  return "global"
-    case .perNote: return "per-note"
-    }
-}
-
-/// The honest apply timing: the registry's strategy is a routing hint,
-/// and the truth for `.rebuild` keys depends on `inPlaceKeys` — most of
-/// them land on the RUNNING kernel with no rebuild at all.
-func timingLabel(_ p: ParamSpec) -> String {
-    switch p.apply {
-    case .live:    return "live"
-    case .hybrid:  return "hybrid"
-    case .rebuild:
-        return ParamRegistry.inPlaceKeys.contains(p.key)
-            ? "in-place" : "rebuild"
-    }
-}
+// Scope/timing labels and legend texts come from ParamScope/ParamTiming
+// in TarabdaarCore — the SAME strings the Parameters tab renders per row,
+// so the app and this document cannot tell different stories.
 
 var out = """
 <!-- AUTO-GENERATED — DO NOT EDIT.
@@ -57,12 +41,15 @@ to a composite.
 
 Each parameter carries two audit columns (2026-08-23):
 
-**Scope** — who it acts on:
 
-| Scope | Meaning |
-|---|---|
-| `global` | ONE shared mechanism — the bridge/body, the taraf bank, the room/FX/output chain, the shared string physics, or a control axis every note rides together. Changing it moves the whole instrument at once. |
-| `per-note` | Runs SEPARATELY for each note: every sounding note carries its own state for it (onset clock, settle/linger envelope, vibrato phase, drift walk, strike-blend window), so simultaneous notes are affected independently. The attack family is CAPTURED at the articulation edge — an edit changes subsequent onsets, never a sounding note. |
+"""
+
+// ---- Scope/timing legends (the SHARED strings the app also renders) ----
+out += "**Scope** — who it acts on:\n\n| Scope | Meaning |\n|---|---|\n"
+for s in [ParamScope.global, .perNote] {
+    out += "| `\(s.label)` | \(s.explanation) |\n"
+}
+out += """
 
 The line follows per-note CONTROL STATE, not physics plumbing: friction
 and string-construction values are `global` even though every string
@@ -73,10 +60,18 @@ simultaneous notes.
 
 | Timing | Meaning |
 |---|---|
-| `live` | A dedicated runtime setter — instant everywhere, including through tilt/strike bindings and composites. The right kind for continuous real-time control. |
-| `in-place` | A build scalar whose change lands on the RUNNING kernel (no rebuild, no lost ring) — but it persists as an override and flushes through a ~0.2 s debounce, in the Parameters tab and through bindings alike. Fine for set-and-listen editing; for continuous binding prefer a `live` parameter. |
-| `rebuild` | Needs a fresh engine: ~0.2 s debounce, then an off-main rebuild adopted through a crossfade. |
-| `hybrid` | Instant at or below the built headroom (a live 0–1 kernel scaler); pushing above the built value rebuilds. The two hybrids (jawari buzz, vibrato depth) used to appear twice under separate names (`bow_jaw_gain`, `bow_vibrato`) — they are one knob now. |
+
+"""
+for t in [ParamTiming.live, .inPlace, .rebuild, .hybrid] {
+    out += "| `\(t.label)` | \(t.explanation) |\n"
+}
+out += """
+
+A few `live`-routed keys carry an explicit `rebuild` timing because
+their setter schedules a slow re-mount (the tanpura register/scale-shape
+family — seconds of CPU, debounced). The one shipped hybrid (vibrato
+depth) used to appear twice under separate names (`bow_vibrato`); it is
+one knob now.
 
 **Composite parameters** are named 0–1 macros built from these
 parameters: each member sweeps its own low→high range as the composite
@@ -119,7 +114,7 @@ for (group, params) in ParamRegistry.groups {
         if p.apply == .hybrid, let rest = p.restFraction {
             def = "\(num(p.def)) built · rests at \(num(rest))× the built value"
         }
-        out += "| `\(p.key)` | \(p.label) | \(num(p.lo)) … \(num(p.hi)) | \(def) | \(scopeLabel(p.scope)) | \(timingLabel(p)) | \(p.help) |\n"
+        out += "| `\(p.key)` | \(p.label) | \(num(p.lo)) … \(num(p.hi)) | \(def) | \(p.scope.label) | \(p.timing.label) | \(p.help) |\n"
     }
     out += "\n"
 }

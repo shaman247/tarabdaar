@@ -18,13 +18,12 @@ public final class OutboundPlayState {
         let velocity: UInt8
         var pressure: UInt8
         var pitch: Float
-        /// Fret-band y (0–255 ↔ 0…1), nil when the producer has none
-        /// (keyboard, scripts) — the wire flag stays clear then and the
-        /// Mac keeps the legacy behavior for this touch.
-        var posY: UInt8?
-        /// Within-fret y (0–255 ↔ 0…1 down the HOME fret's extent), nil
-        /// for unsnapped/fretless touches — no home fret, no auto-vibrato.
-        var fretY: UInt8?
+        /// In-process only (the Mac strum chord's expression) — see
+        /// `TLPTouch.exprScale`. Wire frames never carry it.
+        var exprScale: Double
+        /// In-process only (the strum chord's glide-queue exemption) —
+        /// see `TLPTouch.glideExempt`. Wire frames never carry it.
+        let glideExempt: Bool
     }
     private var touches: [(token: AnyHashable, touch: Touch)] = []
     /// Wire ids carry a per-instance namespace in the top 4 bits so two
@@ -47,6 +46,9 @@ public final class OutboundPlayState {
     /// Strike-scale envelope, already quantized to the wire byte.
     private var strikeByte: UInt8 = 0
     private var droneMask: UInt8 = 0
+    /// The chord bar's active strum chord (TLP v12) — held state like the
+    /// drone mask; nil = none selected.
+    private var chordSelection: ChordSelection?
     private var backgrounded = false
     private var stateSeq: UInt16 = 0
     private var dirtyFlag = false
@@ -62,15 +64,9 @@ public final class OutboundPlayState {
 
     // MARK: producers (any thread)
 
-    /// `posY` is the touch's fret-band y (0…1 top→bottom) when the
-    /// producer knows one — it feeds the Mac-evaluated fret-linger /
-    /// auto-vibrato. `fretY` is the OUTWARD position within the touch's
-    /// home fret's vertical extent (snapped onsets only; 0 = the end
-    /// toward the pad's centre-line, 1 = the outer end) — the auto-vibrato
-    /// ceiling axis. nil = the touch carries no such value.
     public func touchOn(_ token: AnyHashable, pitchSemis: Double,
                         velocity: Double, pressure: Double = 0,
-                        posY: Double? = nil, fretY: Double? = nil) {
+                        exprScale: Double = 1.0, glideExempt: Bool = false) {
         lock.lock()
         touches.removeAll { $0.token == token }
         let t = Touch(wireId: idNamespace | (nextWireId & 0x0FFF),
@@ -78,46 +74,39 @@ public final class OutboundPlayState {
                       velocity: clamp255(velocity),
                       pressure: clamp255(pressure),
                       pitch: Float(pitchSemis),
-                      posY: posY.map(clamp255),
-                      fretY: fretY.map(clamp255))
+                      exprScale: exprScale,
+                      glideExempt: glideExempt)
         nextWireId &+= 1
         nextOnsetSeq &+= 1
         touches.append((token, t))
         markDirtyLockedThenNotify()
     }
 
-    /// `posY`/`fretY` nil = leave the stored value as it stands (a
-    /// pitch-only update must not erase the position a fret surface
-    /// already reported).
-    public func touchGlide(_ token: AnyHashable, pitchSemis: Double,
-                           posY: Double? = nil, fretY: Double? = nil) {
+    /// Live expression update for a held touch (in-process only — the
+    /// wire serializes no expression; the Mac strum chord's swell).
+    public func touchExpr(_ token: AnyHashable, _ exprScale: Double) {
+        lock.lock()
+        guard let i = touches.firstIndex(where: { $0.token == token }),
+              touches[i].touch.exprScale != exprScale else {
+            lock.unlock()
+            return
+        }
+        touches[i].touch.exprScale = exprScale
+        markDirtyLockedThenNotify()
+    }
+
+    public func touchGlide(_ token: AnyHashable, pitchSemis: Double) {
         lock.lock()
         guard let i = touches.firstIndex(where: { $0.token == token }) else {
             lock.unlock()
             return
         }
-        let newY = posY.map(clamp255) ?? touches[i].touch.posY
-        let newFretY = fretY.map(clamp255) ?? touches[i].touch.fretY
-        guard touches[i].touch.pitch != Float(pitchSemis)
-                || touches[i].touch.posY != newY
-                || touches[i].touch.fretY != newFretY else {
+        guard touches[i].touch.pitch != Float(pitchSemis) else {
             lock.unlock()
             return
         }
         touches[i].touch.pitch = Float(pitchSemis)
-        touches[i].touch.posY = newY
-        touches[i].touch.fretY = newFretY
         markDirtyLockedThenNotify()
-    }
-
-    /// The wire id this state assigned to a live touch token, nil when the
-    /// token isn't held. Display plumbing: the host's LINGER_STATE frames
-    /// key by wire id, and the pad's touch overlay needs to match them
-    /// back to its own touches.
-    public func wireId(for token: AnyHashable) -> UInt16? {
-        lock.lock()
-        defer { lock.unlock() }
-        return touches.first { $0.token == token }?.touch.wireId
     }
 
     public func touchOff(_ token: AnyHashable) {
@@ -129,6 +118,17 @@ public final class OutboundPlayState {
     }
 
     /// value ∈ −1…+1 (rest = 0).
+    /// The NEWEST sounding touch's (wire id, fractional-MIDI pitch), or
+    /// nil while nothing sounds — the `touches` array is append-ordered,
+    /// so the last entry is the newest. Display-only read (the iPad's
+    /// finger-accel scope samples it at UI rate); any thread.
+    public func newestTouch() -> (id: UInt16, pitchSemis: Double)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let last = touches.last else { return nil }
+        return (last.touch.wireId, Double(last.touch.pitch))
+    }
+
     public func setTilt(_ axis: Int, _ value: Double) {
         lock.lock()
         guard tilt.indices.contains(axis), tilt[axis] != value else {
@@ -174,6 +174,15 @@ public final class OutboundPlayState {
         markDirtyLockedThenNotify()
     }
 
+    /// The chord bar's selection (nil = none) — change-gated held state,
+    /// like the drone mask.
+    public func setChordSelection(_ sel: ChordSelection?) {
+        lock.lock()
+        guard chordSelection != sel else { lock.unlock(); return }
+        chordSelection = sel
+        markDirtyLockedThenNotify()
+    }
+
     public func setBackgrounded(_ b: Bool) {
         lock.lock()
         guard backgrounded != b else { lock.unlock(); return }
@@ -210,18 +219,19 @@ public final class OutboundPlayState {
             accelZ: s16g(accelG[2]),
             droneMask: droneMask,
             strike: strikeByte,
+            chordDegree: chordSelection.map {
+                UInt8(min(max($0.degree, 0), 254))
+            } ?? TLPPerfState.chordNone,
+            chordOctave: UInt8(bitPattern: Int8(clamping:
+                chordSelection?.octave ?? 0)),
             touches: touches.map { pair in
-                var flags: UInt8 = 0
-                if pair.touch.posY != nil { flags |= TLPTouch.flagPosYValid }
-                if pair.touch.fretY != nil { flags |= TLPTouch.flagFretYValid }
-                return TLPTouch(id: pair.touch.wireId,
-                                onsetSeq: pair.touch.onsetSeq,
-                                velocity: pair.touch.velocity,
-                                pressure: pair.touch.pressure,
-                                flags: flags,
-                                posY: pair.touch.posY ?? 0,
-                                fretY: pair.touch.fretY ?? 0,
-                                pitch: pair.touch.pitch)
+                TLPTouch(id: pair.touch.wireId,
+                         onsetSeq: pair.touch.onsetSeq,
+                         velocity: pair.touch.velocity,
+                         pressure: pair.touch.pressure,
+                         pitch: pair.touch.pitch,
+                         exprScale: pair.touch.exprScale,
+                         glideExempt: pair.touch.glideExempt)
             })
     }
 

@@ -28,6 +28,12 @@ struct MacMainWindow: View {
         case parameters = "Parameters"
         case fx = "FX"
         case setup = "Setup"
+        /// 2026-09-01: the performance scope — touched vs sounding
+        /// pitches and every taraf row's level + harmonic character.
+        case scope = "Scope"
+        /// 2026-09-02: the per-row taraf panel — level, radiated vs modal
+        /// spectra, the radiation-tap comb.
+        case taraf = "Taraf"
     }
 
     var body: some View {
@@ -41,8 +47,8 @@ struct MacMainWindow: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(
-            // Hidden buttons for keyboard shortcuts: ⌘1..⌘7 jump to each tab
-            // (Live … Setup). Plain Buttons don't render anything since they're
+            // Hidden buttons for keyboard shortcuts: ⌘1..⌘9 jump to each tab
+            // (Live … Taraf). Plain Buttons don't render anything since they're
             // sized to zero and clipped — the keyboardShortcut modifiers register
             // with the window's responder chain.
             ZStack {
@@ -82,7 +88,7 @@ struct MacMainWindow: View {
                 ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 640)
+            .frame(maxWidth: 800)
             Spacer(minLength: 12)
         }
     }
@@ -97,6 +103,8 @@ struct MacMainWindow: View {
         case .parameters: ParametersView(controller: controller)
         case .fx:         FXView(controller: controller)
         case .setup:      SetupView(controller: controller)
+        case .scope:      ScopeView(controller: controller)
+        case .taraf:      TarafScopeView(controller: controller)
         }
     }
 }

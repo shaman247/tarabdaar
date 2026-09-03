@@ -60,6 +60,7 @@ __pycache__/
 _archive/
 auditions/
 auditions-ci/
+auditions-glide/
 
 # Media & render artifacts (asset-catalog images are re-included below)
 *.png

@@ -13,7 +13,7 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     case keyY           = 4
     case slider1        = 5
     case slider2        = 6
-    case tilt4          = 7    // wrist up/down — RETIRED (wrist axes removed 2026-08-13)
+    case tilt4          = 7    // wrist up/down — REVIVED 2026-09-02 (Joy-Con wrist calibration axis 1; retired 2026-08-13…09-02, the case survived so bindings decoded)
     case stickX         = 8    // Joy-Con stick
     case stickY         = 9
     /// The accelerometer STRIKE/ACCELERATION pair (2026-08-23, split same
@@ -32,6 +32,28 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     /// global axes.)
     case strike         = 10
     case acceleration   = 11
+    /// FINGER ACCELERATION (2026-08-24): the playing finger's pitch
+    /// acceleration — the SIGNED second derivative of the newest sounding
+    /// touch's pitch trajectory, soft-saturated to −1…+1
+    /// (`FingerAccelTracker`, ±1 half-way at 25 000 ¢/s²; up = +).
+    /// BIPOLAR like the tilts: rest/constant-rate meend = 0 = curve
+    /// centre; the finger accelerating upward reads +, braking an upward
+    /// slide (or accelerating downward) reads −. Mac-evaluated from the
+    /// wire pitch stream; the iPad's toolbar scope shows its own
+    /// display-only computation of the same law.
+    case fingerAccel    = 12
+    /// THE JOY-CON WRIST (2026-09-02): three −1…+1 axes from the Joy-Con's
+    /// fused attitude through its own guided calibration (`TiltCalibrator`
+    /// `.wrist` — rest + three sweeps: wrist up/down, in/out, rotation),
+    /// the wrist's twin of the iPad arm calibration. `.tilt4` is the
+    /// first (up/down); these are the other two. Rest = 0 like the tilts.
+    case wrist2         = 13   // wrist in/out
+    case wrist3         = 14   // wrist rotation
+    /// JOY-CON ACCELERATION (2026-09-02): the Joy-Con's gravity-removed
+    /// acceleration magnitude through the iPad strike law (`StrikeLaw`:
+    /// log-scale 0…1 + fast-attack/150 ms-decay envelope). UNIPOLAR like
+    /// `.acceleration` — rest reads at the curve's LEFT end (x 0).
+    case jcAccel        = 15
     case none           = -1
 
     public var label: String {
@@ -39,11 +61,15 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
         case .tilt1:         return "Arm ↕"
         case .tilt2:         return "Arm ↔"
         case .tilt3:         return "Arm ⟲"
-        case .tilt4:         return "Wrist ↕ (retired)"
+        case .tilt4:         return "Wrist ↕"
+        case .wrist2:        return "Wrist ↔"
+        case .wrist3:        return "Wrist ⟲"
+        case .jcAccel:       return "Joy-Con Accel"
         case .stickX:        return "Stick X"
         case .stickY:        return "Stick Y"
         case .strike:        return "Strike"
         case .acceleration:  return "Acceleration"
+        case .fingerAccel:   return "Finger Accel"
         case .accelPressure: return "Pressure"
         case .keyY:          return "Key Y"
         case .slider1:       return "Slider 1"
@@ -59,10 +85,14 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
         case .tilt2:         return "A↔"
         case .tilt3:         return "A⟲"
         case .tilt4:         return "W↕"
+        case .wrist2:        return "W↔"
+        case .wrist3:        return "W⟲"
+        case .jcAccel:       return "JA"
         case .stickX:        return "SX"
         case .stickY:        return "SY"
         case .strike:        return "St"
         case .acceleration:  return "Ac"
+        case .fingerAccel:   return "FA"
         case .accelPressure: return "Pr"
         case .keyY:          return "Y"
         case .slider1:       return "S1"
@@ -74,13 +104,14 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     public var isPerNote: Bool { self == .accelPressure || self == .keyY }
     public var isTilt: Bool {
         self == .tilt1 || self == .tilt2 || self == .tilt3 || self == .tilt4
+            || self == .wrist2 || self == .wrist3
     }
     public var isSlider: Bool { self == .slider1 || self == .slider2 }
 
     /// The real dimensions (excludes .none).
     public static let real: [InputDimension] = [
-        .tilt1, .tilt2, .tilt3, .tilt4, .stickX, .stickY,
-        .strike, .acceleration,
+        .tilt1, .tilt2, .tilt3, .tilt4, .wrist2, .wrist3, .stickX, .stickY,
+        .strike, .acceleration, .fingerAccel, .jcAccel,
         .accelPressure, .keyY, .slider1, .slider2,
     ]
 }
@@ -360,7 +391,9 @@ public struct DimensionMapping: Codable, Equatable {
                 bindings: defaults[slot].map { [$0] } ?? [],
                 defaultValue: target.midpointValue)
         }
-        return DimensionMapping(mappings: m)
+        // The strum-expression default binding is seeded by `pruned()`
+        // (shared with the existing-install path).
+        return DimensionMapping(mappings: m).pruned()
     }
 
     // MARK: - Persistence
@@ -413,6 +446,19 @@ public struct DimensionMapping: Codable, Equatable {
             if m[key] == nil {
                 m[key] = ParameterMapping(bindings: [], defaultValue: 0.5)
             }
+        }
+        // The controller strum's expression ships bound to the Joy-Con
+        // stick Y (2026-08-28): full-throw linear — stick down = silent
+        // chord, centre = half, up = full. Seeded only when the key is
+        // ENTIRELY absent (fresh installs and pre-feature documents); an
+        // entry the user emptied persists as an empty mapping and stays
+        // that way.
+        let strumKey = MapTarget(paramKey: "ctl_strum_expr").storageKey
+        if m[strumKey] == nil {
+            m[strumKey] = ParameterMapping(
+                bindings: [DimensionBinding(dimension: .stickY,
+                                            rangeMin: 0, rangeMax: 1)],
+                defaultValue: 1.0)
         }
         return DimensionMapping(mappings: m)
     }

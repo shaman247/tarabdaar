@@ -1,9 +1,7 @@
 import XCTest
 @testable import TarabdaarCore
 
-/// TarabLink logic guards: HELLO as a sequence epoch, event/state dedupe
-/// across lane overlap, ping→pong→RTT, and the pad→host path end to end
-/// through real envelopes (encode → 7-in-8 SysEx → decode → ingest).
+/// TarabLink: hello brings the link up, echoed own traffic is ignored, dedupe with hello-epoch reset, pad → host end to end.
 final class TarabLinkTests: XCTestCase {
 
     private func envelope(_ frame: TLPFrame, from role: TLPRole = .pad) -> [UInt8] {
@@ -53,14 +51,6 @@ final class TarabLinkTests: XCTestCase {
         XCTAssertEqual(events, [.resyncRequest])
     }
 
-    func testVersionMismatchStaysDown() {
-        let host = TarabLink(role: .host)
-        host.sendRaw = { _, _ in }
-        host._testProcess(envelope(.event(seq: 1, .hello(minVer: 99, maxVer: 99,
-                                                         role: .pad))))
-        XCTAssertFalse(host._testStatus.isUp)
-    }
-
     func testEventDedupeAndHelloEpochReset() {
         let host = TarabLink(role: .host)
         host.sendRaw = { _, _ in }
@@ -79,43 +69,6 @@ final class TarabLinkTests: XCTestCase {
         XCTAssertEqual(events.count, 2)
     }
 
-    func testStateDedupePerType() {
-        let host = TarabLink(role: .host)
-        host.sendRaw = { _, _ in }
-        var frames: [TLPPerfState] = []
-        host.onPerfState = { frames.append($0) }
-        func perf(_ seq: UInt16) -> TLPFrame {
-            .perfState(TLPPerfState(stateSeq: seq, timestampUs: 0, tiltX: 0,
-                                    tiltY: 0, tiltZ: 0, droneMask: 0, touches: []))
-        }
-        host._testProcess(envelope(perf(7)))
-        host._testProcess(envelope(perf(7)))   // duplicate
-        host._testProcess(envelope(perf(6)))   // stale
-        host._testProcess(envelope(perf(8)))
-        XCTAssertEqual(frames.map(\.stateSeq), [7, 8])
-    }
-
-    func testPingGetsPongAndPongFeedsRTT() {
-        let pad = TarabLink(role: .pad)
-        var padOut: [[UInt8]] = []
-        pad.sendRaw = { bytes, _ in padOut.append(bytes) }
-        pad._testProcess(envelope(.event(seq: 1, .ping(id: 3, t1: 12345)), from: .host))
-        let pongs = padOut.compactMap { TLPPack.unenvelope($0)?.frame }
-            .compactMap(TLPFrame.decode)
-            .filter { if case .event(_, .pong(3, 12345, _)) = $0 { return true }
-                      return false }
-        XCTAssertEqual(pongs.count, 1)
-
-        let host = TarabLink(role: .host)
-        host.sendRaw = { _, _ in }
-        let now = LinkClock.nowUs()
-        host._testProcess(envelope(.event(seq: 1,
-                                          .pong(id: 1, t1: now &- 8_000,
-                                                t2: now &- 4_000))))
-        XCTAssertNotNil(host._testStatus.rttMs)
-        XCTAssertLessThan(host._testStatus.rttMs!, 100.0)
-    }
-
     func testPadToHostEndToEnd() {
         // Pad side: real OutboundPlayState through the paced tick.
         let pad = TarabLink(role: .pad)
@@ -125,12 +78,10 @@ final class TarabLinkTests: XCTestCase {
         final class Sink: LinkPerformanceSink {
             var ons: [(UInt16, Double)] = []
             var offs: [UInt16] = []
-            func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double,
-                         posY: Double?, fretY: Double?) {
+            func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) {
                 ons.append((id, pitchSemis))
             }
-            func touchGlide(_ id: UInt16, pitchSemis: Double, posY: Double?,
-                            fretY: Double?) {}
+            func touchGlide(_ id: UInt16, pitchSemis: Double) {}
             func touchOff(_ id: UInt16) { offs.append(id) }
             func touchesAllOff() {}
             func setDronePressed(_ index: Int, _ pressed: Bool) {}

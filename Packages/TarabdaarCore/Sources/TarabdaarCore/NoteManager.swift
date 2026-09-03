@@ -272,10 +272,12 @@ public class NoteManager: ObservableObject {
             return slider1Value
         case .slider2:
             return slider2Value
-        case .tilt4, .stickX, .stickY, .strike, .acceleration:
+        case .tilt4, .wrist2, .wrist3, .jcAccel, .stickX, .stickY,
+             .strike, .acceleration, .fingerAccel:
             // Mac-side axes — the iPad never evaluates them (the
             // strike/acceleration pair travels as the PERF_STATE strike
-            // byte, not through this map).
+            // byte, and finger accel is derived from the wire pitch
+            // stream on the Mac; the iPad's scope is display-only).
             return 0
         case .none:
             return 0.5

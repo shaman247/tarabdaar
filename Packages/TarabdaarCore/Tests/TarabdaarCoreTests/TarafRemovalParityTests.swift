@@ -3,24 +3,11 @@ import CryptoKit
 import SarangiKit
 @testable import TarabdaarCore
 
-/// TARAF-WEB REMOVAL PARITY (2026-07-24). The linear sympathetic web was
-/// deleted from the String voice; the modal-jawari block is the whole taraf
-/// now. The removal is only legitimate if the shipped default reproduces —
-/// sample for sample — what the old code produced with the web silenced
-/// (`bow_taraf_Z` 0), which is the sound this change was adopted from.
-///
-/// The reference was captured from the PRE-removal build (commit 19fe7f4,
-/// in a worktree) with the web silenced, and is pinned here as a SHA-256 of
-/// the rendered samples. To reproduce it:
-///
-///     git worktree add /tmp/pre 19fe7f4 && cp this file into it
-///     cd /tmp/pre/Packages/TarabdaarCore
-///     TARABDAAR_TARAF_REF=write swift test -c release --filter TarafRemovalParity
-///
-/// which also drops the raw float32 samples in `<repo>/build/` (gitignored;
-/// `TARABDAAR_TARAF_REF_PATH` overrides). If that file is present a failure
-/// reports the worst differing sample; otherwise it reports the hash.
+/// RENDER PARITY: the SHA-256 of one rendered phrase pins the whole shipped
+/// String-voice signal path — kernel, table builders, taraf, levels. Any
+/// unblessed change to the sound fails here; bless it on purpose or fix it.
 final class TarafRemovalParityTests: XCTestCase {
+    override func setUpWithError() throws { try skipUnlessSlowTestsEnabled() }
 
     private static var writing: Bool {
         ProcessInfo.processInfo.environment["TARABDAAR_TARAF_REF"] == "write"
@@ -59,138 +46,42 @@ final class TarafRemovalParityTests: XCTestCase {
         return u.appendingPathComponent("build/taraf_removal_ref.raw")
     }
 
-    /// A short scripted phrase: two overlapping notes with expression and a
-    /// release tail, so the string, the body, the jawari web and the room
-    /// all contribute to the comparison.
+    /// The phrase lives in `BusPhrase` (shared with BusMeterTests /
+    /// TarafCapTests since 2026-09-01): two overlapping notes with
+    /// expression and a release tail, so the string, the body, the
+    /// jawari web and the room all contribute to the comparison. The
+    /// unmetered NEUTRAL render is cached there and rendered at most
+    /// once per process — this suite renders fresh audio exactly once
+    /// (the reproducibility check below), which also proves the cache
+    /// exact. The write path (reference capture in the pre-removal
+    /// worktree) renders fresh with the web-silencing overrides.
     private func render() throws -> [Float] {
-        let src = StringVoiceSource()
-        let strings = Presets.state(.sarangiPilu).resolvedStrings
-        guard let e = StringVoiceSource.buildEngine(
-            tonicHz: 328.9, strings: strings, mapper: src.mapper,
-            overrides: Self.referenceOverrides) else {
-            throw XCTSkip("bowed_string.json not available in this bundle")
+        if Self.writing {
+            return try BusPhrase.render(
+                meter: false, overrides: Self.referenceOverrides).out
         }
-        src.setEngine(e, crossfadeMs: 0)
-        let sr = src.modelSR
-        let block = 128
-        src.mapper.midi(0xB0, 11, 40)              // expression, as the pads do
-
-        var out: [Float] = []
-        var t = 0.0
-        // (time, status, d1, d2)
-        let events: [(Double, UInt8, UInt8, UInt8)] = [
-            (0.05, 0x90, 64, 100),                 // note on
-            (0.60, 0x91, 71, 90),                  // second voice
-            (1.10, 0x80, 64, 0),
-            (1.50, 0x81, 71, 0),
-        ]
-        var next = 0
-        while t < 2.5 {
-            while next < events.count, events[next].0 <= t {
-                let e = events[next]
-                src.mapper.midi(e.1, e.2, e.3)
-                next += 1
-            }
-            let (l, r) = src.renderForTesting(frames: block)
-            for i in 0..<block { out.append(l[i]); out.append(r[i]) }
-            t += Double(block) / sr
-        }
-        return out
+        return try BusPhrase.neutral(metered: false).out
     }
 
-    /// The comparison is only meaningful if the render repeats exactly.
+    /// The comparison is only meaningful if the render repeats exactly —
+    /// and every suite leaning on `BusPhrase`'s cached baseline needs
+    /// exactly this guarantee, so the ONE fresh render this suite pays
+    /// is compared against the shared cache rather than a second fresh
+    /// copy.
     func testSerialRenderIsReproducible() throws {
-        let a = try render(), b = try render()
-        XCTAssertEqual(a, b, "the serial jt render is not deterministic — "
-                       + "the parity comparison below cannot mean anything")
+        let fresh = try BusPhrase.render(meter: false).out
+        let cached = try BusPhrase.neutral(metered: false).out
+        XCTAssertEqual(fresh, cached,
+                       "the serial jt render is not deterministic — the "
+                       + "parity comparison below (and every cached "
+                       + "BusPhrase baseline) cannot mean anything")
     }
-
-    /// SHA-256 of the blessed reference render, 240128 float32 samples. The
-    /// hash is the checked-in half of the guard: it cannot be re-blessed by
-    /// re-running the capture on the current tree, which a raw-file golden
-    /// would silently allow. The optional file only supplies diagnostics.
-    ///
-    /// RE-BLESSED 2026-08-01 (deliberately, third time that day) for the
-    /// SUSTAIN-LIVENESS layer
-    /// (8f76d505e08fdb27e982d691acfcf6dc2a5d9c790b9749ae1e782ef8f78c6101):
-    /// the artifact gained the fitted-to-SWAM liveness keys — post-onset
-    /// settle (`bow_settle_db` 7 / 130 ms), OU drift (pitch 0.55 ¢, level
-    /// 0.15 dB, force 0.3 dB at 1.2 Hz) and the glide bow-lightening
-    /// (`bow_glide_dip_db` 5 @ 900 ¢/s) — all deterministic (per-slot
-    /// seeded xorshift; `testSerialRenderIsReproducible` still passes) and
-    /// all bit-null with the keys absent (`LivenessTests` pins that).
-    /// This same hash ALSO carries the WIDTH UNIFICATION (landed in
-    /// parallel the same day): the stereo seeds folded to the one
-    /// `bow_st_width` 0.2 (`bow_st_spread`/`bow_st_played`/`bow_st_body`
-    /// unseeded — the legacy pans render disarmed here), so the L/R
-    /// content is the diffuse-field difference bank on both buses. The
-    /// width side is antisymmetric by construction
-    /// (`BowStereoTests` pins the fold-down at ~1e-17 kernel-side); the
-    /// liveness keys are why the MID moved relative to the body-rev
-    /// reference.
-    /// RE-BLESSED 2026-08-01 (deliberately, second time that day) for the
-    /// BODY-SIDE READOUT
-    /// (d3dac8159feb247bfcc5d5f26262640d230eaf1368b0ce844403e72d048fd759):
-    /// the new `bow_st_body` seed (0.4) arms the body heard from two
-    /// observation points, which moves L/R content — this render hashes
-    /// BOTH channels. Verified before re-blessing: the mono fold-down of
-    /// the new render matches the previous reference to float32 precision
-    /// (max delta 5.6e-9 — the side is antisymmetric by construction),
-    /// and the L/R deltas are exactly equal-and-opposite.
-    /// RE-BLESSED 2026-08-18 (deliberately) for the DAMPED SETTLE
-    /// (8d1ea0dd475b17c8b0675eef5459d3464387d8452bf7d136e459bb4c7c3b9e5a
-    /// was the prior hash): the build pre-roll now renders with the
-    /// taraf choked (t60 50 ms, `setJtSettleDamp`) and restores the
-    /// natural ring (byte-null momentum scalar) before publish, so the
-    /// q0 relax chime dies inside the discarded blocks instead of
-    /// asymptoting at ~-50 dBFS and riding out ~10 s after launch —
-    /// publish peak fell to -93 dBFS and `settleBlocks` dropped 5 → 3
-    /// (~60% of the old rebuild latency). This render starts from that
-    /// silent, settled state: the phrase itself is untouched physics,
-    /// but every sample moves because the residual chime under it is
-    /// gone.
-    /// RE-BLESSED 2026-08-17 (deliberately) for the QUIESCENCE GATE at
-    /// its baked 40 dB floor
-    /// (afa6e932569f98fd136fcc11f88ab87862740fd47ca6930d414dc047b49ead19
-    /// was the prior hash): the idle-CPU gate freezes jt rows resting
-    /// below the floor, and at 40 dB the phrase's opening 50 ms of
-    /// silence sleeps the quietest rows — the truncated sub-floor tail
-    /// moves samples near the first note-on by ~7e-4 (≈ −60 dBFS, the
-    /// woken rows resume their frozen static wrap). The gate at its
-    /// earlier 60 dB floor was verified hash-identical under the prior
-    /// reference (no row slept inside this phrase); 40 is baked because
-    /// a PRESSED resting bone (`bow_jt_evolve` → 0) sustains a steady
-    /// low-mode limit cycle ABOVE the 60 dB floor (stock rig ×3.34,
-    /// hot-gain rig ×6.6 — sub-audible, but it held the whole web awake
-    /// at idle). `bow_jt_gate` 0 (the escape hatch) still renders the
-    /// raw physics.
-    /// RE-BLESSED 2026-08-01 (deliberately) for the COHERENCE rev
-    /// (a17280cf3ba3d655fba14a675259696430235db2385c94e5e72cab7c6c484625):
-    /// the generated bank's CROWD t60s shortened ~×0.6 (the three drone
-    /// anchors keep their fitted ring — `RagaTuning.buildSpecs`), and the
-    /// stereo seeds moved (`bow_st_spread` 0.7 → 0.2, `bow_rev_width`
-    /// 0.6 → 0.8 — this render hashes BOTH channels, so the seed change
-    /// is in the hash even though the mono fold-down is invariant). The
-    /// new `bow_jt_body` path was verified byte-null at its 0 default
-    /// before re-blessing.
-    /// RE-BLESSED 2026-07-26 (deliberately) for the NO-DUPLICATES tarab
-    /// pool: the generated bank folds the historic Sa/Pa doubling rows —
-    /// exact-unison twins since the detune removal — into their strongest
-    /// twin (24 → 19 rows for Pilu), so the default web rings those
-    /// pitches once instead of twice.
-    /// RE-BLESSED 2026-07-25 (deliberately) before that for the
-    /// scale-defined tarab (f4c22c0cced56eec94a099bda552d03c0f710ba326
-    /// 9b020bc577c14038580f7c): the default bank's pitches moved from the
-    /// fitted per-string detunes onto the exact JI grid (the fitted table
-    /// cannot be expressed as scale degrees, and was retired with the
-    /// string-table law), and the settle pre-roll grew 4 → 5 blocks for
-    /// the resulting unison chime. The chromatic-removal and web-removal
-    /// steps before it were verified hash-identical under the ORIGINAL
-    /// reference
-    /// (eac0460aac9194bc899fd3c918278e139b1a474722eb7fe1014eb528417d923c,
-    /// captured at commit 19fe7f4 with `bow_taraf_Z` 0 / `bow_open_Z` 0).
+    /// The blessed render's SHA-256. Re-bless DELIBERATELY when the shipped
+    /// sound changes (write mode: `TARABDAAR_TARAF_REF=write`), and say why
+    /// in the commit. Last bless 2026-09-03: bridge-force radiation + the
+    /// 5-block settle pre-roll.
     private static let referenceSHA256 =
-        "4b445c635c9ca9cf2956fb4d64200766150fd182ad0b4304fc784ab221232fca"
+        "fde438455d331f510bff81eb54cbe55a538d3052b4697db007c3f6bdd661909f"
 
     func testDefaultMatchesTheSilencedWebReference() throws {
         let y = try render()

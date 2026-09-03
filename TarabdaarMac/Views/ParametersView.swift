@@ -10,12 +10,13 @@ import SwiftUI
 /// parameter's value in native units and a mapping menu that binds it to a
 /// tilt or drops it into a composite — no parameter is special.
 ///
-/// Apply semantics come from `ParamRegistry`: `.live` rows take effect
-/// instantly, `.rebuild` rows ride a debounced off-main engine rebuild, and
-/// `.hybrid` rows (jawari buzz, vibrato depth) are instant up to their
-/// built value and rebuild above it. That is what collapsed the old
-/// duplicate pairs — "web buzz" vs "jawari buzz", two "vibrato depth"
-/// knobs — into one row each.
+/// Apply semantics come from `ParamRegistry`, and each row's description
+/// states the SHARED scope/timing vocabulary (`ParamScope`/`ParamTiming`
+/// — the same strings paramdoc renders into docs/parameters.md): live
+/// (instant everywhere), in-place (running kernel, ~0.2 s debounce),
+/// rebuild (crossfaded), hybrid (instant up to the built depth). The
+/// unification is what collapsed the old duplicate pairs — "web buzz" vs
+/// "jawari buzz", two "vibrato depth" knobs — into one row each.
 struct ParametersView: View {
     @ObservedObject var controller: AppController
     @ObservedObject var stringStore: StringParamStore
@@ -58,7 +59,7 @@ struct ParametersView: View {
                 Text("PARAMETERS")
                     .font(.padCaption.weight(.bold))
                     .foregroundStyle(.secondary)
-                Text("Every parameter of the String instrument, in native units. A value here is where the parameter rests when nothing is driving it; tilts and composites modulate on top. Use the mapping button on a row to bind it to a tilt or add it to a composite. Click a row label to show its description; double-click to reset it. Rows tagged \u{201C}rebuild\u{201D} re-apply a moment after the value settles; everything else is instant.")
+                Text("Every parameter of the String instrument, in native units. A value here is where the parameter rests when nothing is driving it; tilts and composites modulate on top. Use the mapping button on a row to bind it to a tilt or add it to a composite. Click a row label to show its description — it states the parameter's scope (global vs per-note) and timing: live (instant everywhere — the kind to bind for continuous control), in-place (lands on the running kernel ~0.2 s after the value settles), rebuild (crossfaded engine rebuild), or hybrid (instant up to the built depth). Double-click a label to reset it.")
                     .font(.padCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -211,18 +212,16 @@ private struct ParamRow: View {
         }
     }
 
-    /// The apply strategy is an implementation detail as of 2026-07-24 —
-    /// a rebuild is now crossfaded in (no cut ring, no click) about a fifth
-    /// of a second after the value settles, so no row is tagged. The
-    /// tooltip still says which, for anyone chasing latency.
+    /// Scope + timing come from the SHARED vocabulary in `ParamRegistry`
+    /// (`ParamScope`/`ParamTiming.summary`) — the same strings paramdoc
+    /// renders into docs/parameters.md, so this description can never
+    /// tell a different story than the documentation. (2026-08-24 fix:
+    /// the old text derived timing from the apply STRATEGY alone and
+    /// claimed "crossfaded engine rebuild" for every in-place key.)
     private var helpText: String {
-        var s = spec.help
-        switch spec.apply {
-        case .live:    s += "\n\nApplies instantly."
-        case .rebuild: s += "\n\nRe-applies through a crossfaded engine rebuild (~0.2 s after the value settles)."
-        case .hybrid:  s += "\n\nInstant up to the built value; above it, a crossfaded rebuild (~0.2 s)."
-        }
-        return s
+        spec.help
+            + "\n\nScope: \(spec.scope.label) — \(spec.scope.summary)."
+            + "\nTiming: \(spec.timing.label) — \(spec.timing.summary)."
     }
 
     /// Compact read-out of what drives this parameter: tilt chips + the

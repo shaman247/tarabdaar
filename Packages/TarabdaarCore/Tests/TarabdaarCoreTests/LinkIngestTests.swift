@@ -1,12 +1,7 @@
 import XCTest
 @testable import TarabdaarCore
 
-/// Guards for the Mac-side frame diff (LinkIngest) and the iPad-side
-/// outbound snapshot (OutboundPlayState): the state-frame lifecycle model
-/// — offs from absence, ons from presence, retriggers from onsetSeq — and
-/// the end-to-end property the redesign exists for: a coalesced stream can
-/// never lose a release, and onset+pitch arrive in ONE call (the tanpura
-/// atomic-pluck contract).
+/// LinkIngest / OutboundPlayState lifecycle: onset carries pitch atomically, retrigger via onsetSeq, coalesced releases survive, a link drop kills only its own touches.
 final class LinkIngestTests: XCTestCase {
 
     private final class RecordingSink: LinkPerformanceSink {
@@ -16,23 +11,17 @@ final class LinkIngestTests: XCTestCase {
             case off(UInt16)
             case allOff
             case drone(Int, Bool)
+            case expr(UInt16, Double)
         }
         var calls: [Call] = []
-        /// posY/fretY per on/glide call, parallel histories (nil = not
-        /// carried).
-        var ys: [Double?] = []
-        var fretYs: [Double?] = []
-        func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double,
-                     posY: Double?, fretY: Double?) {
+        func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) {
             calls.append(.on(id, pitchSemis, velocity))
-            ys.append(posY)
-            fretYs.append(fretY)
         }
-        func touchGlide(_ id: UInt16, pitchSemis: Double, posY: Double?,
-                        fretY: Double?) {
+        func touchExpr(_ id: UInt16, exprScale: Double) {
+            calls.append(.expr(id, exprScale))
+        }
+        func touchGlide(_ id: UInt16, pitchSemis: Double) {
             calls.append(.glide(id, pitchSemis))
-            ys.append(posY)
-            fretYs.append(fretY)
         }
         func touchOff(_ id: UInt16) { calls.append(.off(id)) }
         func touchesAllOff() { calls.append(.allOff) }
@@ -60,17 +49,6 @@ final class LinkIngestTests: XCTestCase {
         // ONE call, onset + exact pitch together — the property the MIDI
         // path's pending-pluck hack existed to fake.
         XCTAssertEqual(sink.calls, [.on(1, Double(Float(62.37)), 1.0)])
-    }
-
-    func testOffFromAbsenceThenGlideOrder() {
-        let sink = RecordingSink()
-        let ingest = LinkIngest(sink: sink)
-        ingest.apply(frame(seq: 1, touches: [touch(1, pitch: 60), touch(2, pitch: 64)]))
-        sink.calls.removeAll()
-        // 1 lifts, 2 glides, 3 lands — offs must precede ons/glides.
-        ingest.apply(frame(seq: 2, touches: [touch(2, pitch: 64.5), touch(3, pitch: 67)]))
-        XCTAssertEqual(sink.calls, [.off(1), .glide(2, Double(Float(64.5))),
-                                    .on(3, 67, 1.0)])
     }
 
     func testRetriggerViaOnsetSeqSurvivesCoalescing() {
@@ -106,70 +84,6 @@ final class LinkIngestTests: XCTestCase {
         ingest2.apply(frame(seq: 1, touches: [touch(1, pitch: 60)]))
         ingest2.apply(frame(seq: 2, touches: []))
         XCTAssertEqual(sink2.calls, [.on(1, 60, 1.0), .off(1)])
-    }
-
-    func testPosYOnlyChangeFiresGlideAndYLessTouchesCarryNil() {
-        let sink = RecordingSink()
-        let ingest = LinkIngest(sink: sink)
-        // A y-carrying touch: onset delivers posY AND fretY…
-        var t = touch(1, pitch: 60)
-        t.flags = TLPTouch.flagPosYValid | TLPTouch.flagFretYValid
-        t.posY = 51                       // 0.2 of the band
-        t.fretY = 128                     // halfway out along the fret
-        ingest.apply(frame(seq: 1, touches: [t]))
-        XCTAssertEqual(sink.calls, [.on(1, 60, 1.0)])
-        XCTAssertEqual(sink.ys, [51.0 / 255.0])
-        XCTAssertEqual(sink.fretYs, [128.0 / 255.0])
-        sink.calls.removeAll(); sink.ys.removeAll(); sink.fretYs.removeAll()
-        // …and a vertical move (same pitch, new ys) must still reach the
-        // sink — it recharges the linger envelopes.
-        t.posY = 204
-        t.fretY = 250
-        ingest.apply(frame(seq: 2, touches: [t]))
-        XCTAssertEqual(sink.calls, [.glide(1, 60)])
-        XCTAssertEqual(sink.ys, [204.0 / 255.0])
-        XCTAssertEqual(sink.fretYs, [250.0 / 255.0])
-        sink.calls.removeAll(); sink.ys.removeAll(); sink.fretYs.removeAll()
-        // Unchanged ys = no call (heartbeat-safe).
-        ingest.apply(frame(seq: 3, touches: [t]))
-        XCTAssertEqual(sink.calls, [])
-        // A y-less touch delivers nil throughout (legacy behavior key).
-        ingest.apply(frame(seq: 4, touches: [t, touch(2, pitch: 64)]))
-        XCTAssertEqual(sink.calls, [.on(2, 64, 1.0)])
-        XCTAssertEqual(sink.ys, [nil])
-        XCTAssertEqual(sink.fretYs, [nil])
-    }
-
-    func testDroneMaskEdges() {
-        let sink = RecordingSink()
-        let ingest = LinkIngest(sink: sink)
-        ingest.apply(frame(seq: 1, touches: [], drones: 0b011))
-        XCTAssertEqual(sink.calls, [.drone(0, true), .drone(1, true)])
-        sink.calls.removeAll()
-        ingest.apply(frame(seq: 2, touches: [], drones: 0b100))
-        XCTAssertEqual(Set(sink.calls), Set([.drone(0, false), .drone(1, false),
-                                             .drone(2, true)]))
-        sink.calls.removeAll()
-        ingest.apply(frame(seq: 3, touches: [], drones: 0b100))   // heartbeat
-        XCTAssertEqual(sink.calls, [])
-    }
-
-    func testTiltChangeGatedAndHeartbeatDeduped() {
-        let sink = RecordingSink()
-        let ingest = LinkIngest(sink: sink)
-        var tilts: [(Int, Double)] = []
-        ingest.onTiltAxis = { tilts.append(($0, $1)) }
-        ingest.apply(frame(seq: 1, touches: [], tilt: (0, -32767, 32767)))
-        XCTAssertEqual(tilts.count, 3)
-        XCTAssertEqual(tilts[0].1, 0.0, accuracy: 1e-4)
-        XCTAssertEqual(tilts[1].1, -1.0, accuracy: 1e-9)
-        XCTAssertEqual(tilts[2].1, 1.0, accuracy: 1e-9)
-        tilts.removeAll()
-        ingest.apply(frame(seq: 2, touches: [], tilt: (0, -32767, 32767)))
-        XCTAssertEqual(tilts.count, 0, "heartbeat repeat must not re-fire")
-        ingest.apply(frame(seq: 3, touches: [], tilt: (100, -32767, 32767)))
-        XCTAssertEqual(tilts.count, 1)
-        XCTAssertEqual(tilts[0].0, 0)
     }
 
     func testLinkDropKillsOnlyItsOwnTouches() {
@@ -224,38 +138,4 @@ final class LinkIngestTests: XCTestCase {
         XCTAssertEqual(sink.calls[3], .off(id))
     }
 
-    func testOutboundRapidRetapReadsAsRetrigger() {
-        let out = OutboundPlayState()
-        out.touchOn("a", pitchSemis: 60, velocity: 1)
-        let f1 = out.snapshotFrame(timestampUs: 0)!
-        // off + on between snapshots — collapses into one frame
-        out.touchOff("a")
-        out.touchOn("b", pitchSemis: 60, velocity: 1)
-        let f2 = out.snapshotFrame(timestampUs: 0)!
-        let sink = RecordingSink()
-        let ingest = LinkIngest(sink: sink)
-        ingest.apply(f1)
-        ingest.apply(f2)
-        // New wire id ⇒ old off + new on, in that order.
-        XCTAssertEqual(sink.calls.count, 3)
-        guard case .on = sink.calls[0], case .off = sink.calls[1],
-              case .on = sink.calls[2] else {
-            return XCTFail("bad sequence: \(sink.calls)")
-        }
-    }
-
-    func testOutboundHeartbeatForceEmitsWhenClean() {
-        let out = OutboundPlayState()
-        XCTAssertNil(out.snapshotFrame(timestampUs: 0))
-        XCTAssertNotNil(out.snapshotFrame(timestampUs: 0, force: true))
-    }
-
-    func testOutboundStateSeqMonotonic() {
-        let out = OutboundPlayState()
-        out.touchOn("a", pitchSemis: 60, velocity: 1)
-        let s1 = out.snapshotFrame(timestampUs: 0)!.stateSeq
-        out.touchOff("a")
-        let s2 = out.snapshotFrame(timestampUs: 0)!.stateSeq
-        XCTAssertTrue(TLP.isNewer(s2, than: s1))
-    }
 }

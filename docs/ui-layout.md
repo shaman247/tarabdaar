@@ -99,7 +99,7 @@ Small text — captions, table columns, row labels, pad labels, graph annotation
 
 - **ConnectionPill** — shows USB-MIDI input status (`MIDI: N src` when sources are visible, `no MIDI in` otherwise). Click to pop a detailed status panel.
 - **KeyboardPlayPill** — toggles computer-keyboard note input (off by default). The pill reads `Keys` (green) when on, `Keys off` otherwise; clicking opens a popover with the enable toggle, an **Octave shift** stepper (−3…+3), and a legend of the key layout. See **Computer keyboard** below.
-- **Tab picker** — segmented control: Live / Strings / Fret Pad / Controls / Parameters / FX / Setup. ⌘1…⌘7 jump to each. (The Sarangi tab was removed in the 2026-07-24 parameter unification — its physics sliders and preset toolbar moved into **Parameters**. The FX tab is the 2026-08-01 four-insert rack — see [FX](fx.md).)
+- **Tab picker** — segmented control: Live / Strings / Fret Pad / Controls / Parameters / FX / Setup / Scope. ⌘1…⌘8 jump to each. (The Scope tab is the 2026-09-01 performance scope — see below.) (The Sarangi tab was removed in the 2026-07-24 parameter unification — its physics sliders and preset toolbar moved into **Parameters**. The FX tab is the 2026-08-01 four-insert rack — see [FX](fx.md).)
 
 ### Computer keyboard
 
@@ -112,6 +112,27 @@ The Mac can play notes from the **computer keyboard** (`KeyboardNotePlayer`, own
 ### Live tab
 
 MIDI input status (source count + status message), an audio render-time readout, and two live **time-series graphs** of the currently-played voice: **PITCH** (log-frequency, y-axis fixed to the Fret Pad's playable range — labelled with the nearest note name + Hz) and **VOLUME** (the commanded CC11 Expression, 0–100%). Traces are drawn as smooth Catmull-Rom curves (rounding the sample-to-sample steps). Both read `AudioEngine.performanceReadout()` — derived at the single MIDI choke point, so they reflect every source (the USB iPad, the Mac Fret Pad, the simulator). The graphs show a fixed **6-second** window and scroll **smoothly**: a 60 Hz timer appends timestamped samples to a ring buffer and a `TimelineView(.animation)` redraws every display frame, placing each sample at an x set by its age, so the trace slides left continuously instead of stepping at the sample rate.
+
+### Scope tab (⌘8) — the performance at a glance (2026-09-01)
+
+`ScopeView.swift`. One **pitch field** — time along x (a fixed **8-second** window scrolling smoothly, the Live tab's timestamped-ring + `TimelineView` law: sampled at 60 Hz, redrawn at display rate in a `Canvas`; **2026-09-02 de-jitter** — every trace is ONE stroke per contiguous run, a Catmull-Rom spline for pitch lines / a polyline for lanes, filled with a linear gradient whose stops are the per-sample colours, so neither colour nor geometry is quantized into flickering runs), log-frequency along y with the **scale's own degree labels as gridlines** (every enabled degree in every octave inside the axis, `octaveMarked`; the tonic lines brighter; the axis = the scale's compass ± an octave, widened to cover every taraf row and every current pitch) — carrying three layers:
+
+- **Touched pitches** (white halo lines, ○ at the right edge): every finger currently down, from the finger registry that the `.fingerAccel` dimension keeps (`AppController.currentTouches` — wire AND local lanes). It sits **above the glide queue**, so a parked or queued finger shows here even while the voice sounds elsewhere; on a plucked main instrument the touch line is the finger while the sounding line is the string.
+- **Sounding pitches of the main voice** (**magma** by level — `ScopeColor.level`, the ONE level ramp shared with the iPad strike scope since 2026-09-02; ● + `label Hz` readouts at the right edge): one trajectory per **physical string** — the bowed slots' target pitch (mapper snapshot) + ring envelope (the kernel's per-string bridge-wave chunk peak, `bow_poly_scope_slots`), or the plucked instrument's strings at their **bent** pitch (`TanpuraEngine.scopeSlots` — mounted × last commanded bend) with the kernel's auto-idle envelope (`tanpura_slot_env`). Held strings draw thick, released-but-ringing ones thin. String identity is slot + generation, so a remount starts a new trajectory.
+- **Taraf lanes**: every modal-jawari row as a horizontal line at its pitch whose **luminance is the row's radiated level** (its own peak envelope AFTER the per-string cap, in output units, on the iPad volume scope's 60 dB scale; 2026-09-02 — was opacity) and whose **hue is its harmonic character** (amber = fundamental-heavy … blue = the high jawari cluster: the energy-weighted spectral centroid of the kernel's per-mode radiated envelopes |φO_k·p_k|, modes 1–16, on a log mode axis, EMA-smoothed ~150 ms so the hue doesn't breathe with the mode beats). A silent row draws only a faint dotted resting line; the **melody follower's** lane moves with the played note (the kernel reports its slewed retune pitch). Ringing rows are labelled in the right gutter.
+
+A legend explains the three encodings. The per-row panel moved to its own tab on 2026-09-02 (below).
+
+### Taraf tab (⌘9) — the sympathetic rows, one strip each (2026-09-02)
+
+`TarafScopeView.swift`, sharing `ScopeModel` with the Scope tab. Every modal-jawari row, pitch-sorted: the scale label (`scaleLabel(forRatio:)`; `follow` for the melody follower, `·c` for a chromatic-bridge row, a moon glyph + dimming for a row asleep under the quiescence gate), Hz, the radiated level (bar coloured on the lane hue + dB on the 60 dB scale), then two 16-mode spectra on 40 dB under the row's own peak, bars coloured by mode index on the taraf hue law:
+
+- **Modal energy** — p_k² (the kernel's per-mode velocity envelopes squared): the string's energy per mode. Since 2026-09-03 the rows radiate their bridge contact force, which weighs every mode flat in these units, so this is also the row's radiated spectrum up to a constant — the jawari's upward cascade as it happens and as it is heard. (On 2026-09-02, for one day, the panel showed a "radiated vs modal" pair with the 0.90 L pickup's |sin(k·π·0.9)| comb overlaid — humps at modes 5/15, a NULL at mode 10, the "two clusters" every row showed; that comb was the pickup, not the body, and the pickup is gone.)
+- The spectral centroid (mode units, EMA-smoothed like the lane hue).
+
+The kernel read behind it is `bow_poly_scope_jt`'s per-mode modal envelopes; `ScopeTelemetryTests` pins the meters and `JtForceRadiationTests` the radiation.
+
+**Plumbing.** `AudioEngine.scopeSnapshot()` (voices on whichever main instrument is armed + `BowEngine.ScopeRow`s) is polled at 30 Hz on the main queue by `ScopeModel`. The taraf meters live in the kernel (`bow_poly_scope_arm` / `_scope_jt`; per-row peak envelope every tick + per-mode envelopes every 4th tick, worker-owned, telemetry-grade racy reads like the gate probe) and are **armed only while the tab is showing** (`setScopeArmed` on appear/disappear, re-applied across rebuilds by `StringVoiceSource`); disarmed, the jt tick is the exact legacy code path and `ScopeTelemetryTests` pins the armed render byte-identical to the unarmed one — nothing here feeds the physics, and the parity hash is untouched.
 
 ### Strings tab (⌘2)
 

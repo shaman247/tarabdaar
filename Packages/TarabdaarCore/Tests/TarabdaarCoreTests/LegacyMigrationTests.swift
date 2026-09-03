@@ -2,12 +2,7 @@ import XCTest
 import SarangiKit
 @testable import TarabdaarCore
 
-/// The Starpad/TarabPad → Tarabdaar identity migration (renamed
-/// Starpad → TarabPad 2026-08-12, → Tarabdaar 2026-08-13 before anything
-/// shipped): legacy preset extensions rename in place, and the newest
-/// surviving legacy preferences domain imports once with the
-/// `starpad.`/`tarabpad.` prefixes mapped — never clobbering values the
-/// user has already written under the new identity.
+/// Starpad / TarabPad → Tarabdaar one-time migration of presets and defaults.
 final class LegacyMigrationTests: XCTestCase {
 
     private var tmp: URL!

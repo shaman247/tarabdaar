@@ -34,6 +34,43 @@ public enum RagaTuning {
     ]
     public static func raga(id: Int) -> Raga { ragas.first { $0.id == id } ?? ragas[0] }
 
+    /// The CHROMATIC bridge's pitch grid (2026-09-02): the 12 JI swara
+    /// ratios above, indexed by semitone. A chromatic string's `degree`
+    /// is a semitone into this grid — fixed, whatever the playing scale
+    /// says (the real chromatic set is tuned once and stays; only the
+    /// tonic moves it). Wrapped mod 12 so an out-of-range degree still
+    /// resolves.
+    public static func chromaticRatio(semitone: Int) -> Double {
+        jiRatios[((semitone % 12) + 12) % 12] ?? 1.0
+    }
+
+    /// The grid as fraction text, by semitone — the chromatic rows' own
+    /// name when the playing scale has no degree at that pitch (the
+    /// naming rule: a pitch the scale can't label shows its ratio).
+    public static let chromaticFractions: [String] = [
+        "1/1", "16/15", "9/8", "6/5", "5/4", "4/3",
+        "45/32", "3/2", "8/5", "5/3", "16/9", "15/8",
+    ]
+
+    /// The CHROMATIC SET's layout (2026-09-02): 15 consecutive semitones
+    /// from low Ga (−8) up to tivra Ma (+6) — the historic
+    /// `chromaticRatios` row of raga.build_strings (0.625 … 1.406),
+    /// re-expressed as (semitone, octave) references into the JI
+    /// chromatic grid, one string per semitone, pitch-sorted. Gain 0.6:
+    /// above the jawari selection's `bow_jt_gmin` (0.5) so the set
+    /// SOUNDS — the deleted 2026-07-25 chromatic choir sat at 0.40 and
+    /// never did — and under the raga rows' 0.7–0.95 (on the instrument
+    /// the raga sets carry the ring; the chromatic set is the haze that
+    /// answers every note). t60 3.0 = the crowd law.
+    public static func buildChromaticSpecs() -> [StringSpec] {
+        (-8...6).map { k -> StringSpec in
+            let octave = Int((Double(k) / 12.0).rounded(.down))
+            let semitone = k - 12 * octave
+            return StringSpec(degree: semitone, octave: octave,
+                              gain: 0.6, t60: 3.0, set: .chromatic)
+        }
+    }
+
     /// JI swara ratios for a raga's semitone intervals (degrees from Sa).
     public static func ratios(forIntervals intervals: [Int]) -> [Double] {
         intervals.map { jiRatios[(($0 % 12) + 12) % 12] ?? 1.0 }

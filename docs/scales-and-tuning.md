@@ -28,6 +28,34 @@ the in-code fallback for a missing resource (and the iPad's scale before the
 first sync) — **keep them in step**. Disabled pitches drop from the fret
 layout but stay listed to toggle back in.
 
+The Scale menu's **Scales** submenu holds the built-in presets
+(`ScalePreset`): the modes, major/minor variants and pentatonics, each
+rendered from the same 12-tone JI ratio table as the default and labelled by
+degree number — plus, since 2026-09-02, **12-TET Chromatic**, the full
+equal-tempered scale for playing alongside instruments in equal temperament.
+It keeps the default scale's sargam labels and keyboard rows; only the
+ratios differ.
+
+**How a tempered scale fits a rational model.** Every scale pitch is a
+`num/den` rational — in the JSON on disk and as two 14-bit integers in the
+[scale-sync blob](midi-and-audio.md#scale-sync-mac--ipad) — and a tempered
+semitone is irrational, so the preset ships each `2^(k/12)` as its best
+rational approximation with both terms under the blob's 16383 bound
+(`ScalePreset.equalTemperedRatios`, e.g. 11011/10393 for the semitone). The
+residual is below 0.0001 ¢, three orders of magnitude under the tonic's own
+0.01 ¢ wire resolution, so nothing in the app can tell it from true equal
+temperament — and the wire format, the persisted scale, the iPad's decode
+and the tarab's `(degree, octave)` references are all untouched.
+`ScalePresetTests` pins the bound and the accuracy. The scale editor shows
+the big fractions in its ratio fields, which is honest: retune one and it
+is that rational; "snap to simple fractions" pulls it back to JI.
+Loading the preset keeps the tarab's row LAYOUT (twelve degrees, same as the
+default) and simply retunes every row to the tempered pitch. The
+**chromatic taraf set** is deliberately unaffected — it sits on the fixed
+JI chromatic grid by design (see [Sarangi](sarangi.md)), so under the
+tempered scale the chromatic bridge's strings sit up to ~16 ¢ from the
+played pitches, as a sarangi's fixed tarab would.
+
 ### The tonic (TarabdaarMac Fret Pad tab)
 
 The tonic is the app's ONE absolute pitch — every other pitch (frets, tarab
@@ -38,14 +66,14 @@ is the only place it's set. Two controls, both writing the same value
 
 - **Hz field** — type an absolute frequency (`setTonic(hz:)`, 20 … 4000 Hz);
   this is the app's only Hz input, and the way to tune off a 12-TET note
-  (0.01 Hz ≈ 0.08 ¢ at G#3). Whatever you type splits into the anchor plus a
+  (0.01 Hz ≈ 0.06 ¢ at D4). Whatever you type splits into the anchor plus a
   remainder inside ±50 ¢, the range the
   [scale-sync blob](midi-and-audio.md#scale-sync-mac--ipad) encodes (0.01 ¢
   resolution). It is a **plain `TextField`**: it was briefly a scroll-wheel
   `ScrollableField` (cents per detent) and that **crashed the app** — removed
   2026-08-02, along with `nudgeTonic(cents:)`. Don't re-add scroll-stepping
   here.
-- **Note menu** — the pitch label ("G#3") as a dropdown listing only the notes
+- **Note menu** — the pitch label ("D4") as a dropdown listing only the notes
   **within half an octave** of the current tonic (a tritone either side, 13
   semitones, clipped to `PitchPadEngine.tonicNoteRange` = MIDI 24 … 107 =
   C1 … B7). The window **re-centers on each pick**, so walking further is
@@ -56,17 +84,18 @@ is the only place it's set. Two controls, both writing the same value
 A "+12.0¢" readout follows the two fields whenever the tonic sits off its note
 anchor (blank when exact). The iPad's tonic is read-only, mirrored over SysEx.
 
-**The tonic ALWAYS starts at G#3** (`PitchPadEngine.defaultTonicMidi` = MIDI
-56, 207.652 Hz — was D4 until 2026-08-11), every Mac launch. It is
+**The tonic ALWAYS starts at D4** (`PitchPadEngine.defaultTonicMidi` = MIDI
+62, 293.665 Hz — was G#3 2026-08-11 … 2026-08-31, D4 before that), every Mac
+launch. It is
 **deliberately not persisted**: the session tonic is a
 per-sitting decision, and a stale restored one silently retunes the whole
 instrument, since the frets, the tarab and the drones all resolve against it.
 (A `tarabdaar.tonicHz` UserDefaults key used to restore it — removed 2026-07-30;
 don't reinstate it.) Everything else about the scale — the degrees, their
-labels, the layout — *is* persisted, so a session opens on your scale at G#3.
+labels, the layout — *is* persisted, so a session opens on your scale at D4.
 The iPad is unaffected: it opens on the last state the Mac pushed
 (`SyncedScaleStore`, a one-way mirror, not a preference of its own) and takes
-the Mac's G#3 on the next connect.
+the Mac's D4 on the next connect.
 
 ### Sympathetic tuning (Mac)
 

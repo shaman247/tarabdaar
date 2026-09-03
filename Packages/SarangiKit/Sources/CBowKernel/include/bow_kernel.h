@@ -20,7 +20,7 @@
  * it was deleted with the rest of the upstream-parity machinery
  * (2026-07-24) along with its ~18 mono entry points.
  */
-void *bow_poly_init(int nb, double sr, /* voices */ int nv, const int *L, const double *cs, const double *cp, const double *w0, const double *w1, const double *w2, const double *w3, const double *w4, const double *g, const double *lpA, const double *wout, const double *kap, const double *alphaw, const double *jw, const double *jl, const double *jn, const double *chg, const double *zdrv, const double *zi, const double *twt, /* body */ int K, const double *ba1, const double *ba2, const double *bn0, const double *bA, const double *bC, double yinf, double c0, double dcRho, /* voice-force path + bow */ double pgain, double pA, double bowW, double kret, double retA, double retMode, double rb0, double ra1, double ra2, double kdisp, double bowWidth, double bowCont, double Z, double Zt, double mu_s, double mu_d, double v0f, double nutA, double brA, double thLeak, double thA, double thD, double thFloor, double bowDisp, double jq, double jq2, double zload, double tdirect, double tshape, double tmix, double nA, double nT, double nPow, double nzHi, double nzLo, double nDir, double nzHiD, double passive, double gutG, double dispN, double nailK, double f0Open, double gutA2, double tdirUni, double torsRatio, double torsG, double torsC, double ageAp, double ageMs, double v0Powp, double v0Refp, double hairHzp, double hairRefp, double crWp, double crMsp, double jawRhop, double jawRollp, double jawRollAmpp);
+void *bow_poly_init(int nb, double sr, /* voices */ int nv, const int *L, const double *cs, const double *cp, const double *w0, const double *w1, const double *w2, const double *w3, const double *w4, const double *g, const double *lpA, const double *wout, const double *kap, const double *alphaw, const double *jw, const double *jl, const double *jn, const double *chg, const double *zdrv, const double *zi, const double *twt, /* body */ int K, const double *ba1, const double *ba2, const double *bn0, const double *bA, const double *bC, double yinf, double c0, double dcRho, /* voice-force path + bow */ double pgain, double pA, double bowW, double kret, double retA, double retMode, double rb0, double ra1, double ra2, double kdisp, double bowWidth, double bowCont, double Z, double Zt, double mu_s, double mu_d, double v0f, double nutA, double brA, double thLeak, double thA, double thD, double thFloor, double bowDisp, double jq, double jq2, double zload, double tdirect, double tshape, double tmix, double nA, double nT, double nPow, double nzHi, double nzLo, double nDir, double nzHiD, double passive, double gutG, double dispN, double nailK, double f0Open, double gutA2, double tdirUni, double torsRatio, double torsG, double torsC, double ageAp, double ageMs, double v0Powp, double v0Refp, double hairHzp, double hairRefp, double crWp, double crMsp, double jawRhop, double jawRollp, double jawRollAmpp, double lossRegp, double slideRatep, double slideDullp, double slideNoisep, double slideAccp);
 
 void bow_poly_process(void *vst, int n, int stride, const double *f0, const double *vb, const double *fb, const double *beta, const double *gate, const double *xv, double *out);
 
@@ -47,7 +47,7 @@ int bow_poly_active(const void *vst, int b);
    are documented at the definition. bow_poly_jt_load MALLOCS and is
    init-only: to change coefficients on a running kernel use
    bow_poly_jt_set_coeffs. */
-void bow_poly_jt_load(void *vst, int njt, int J, const int *M, const double *ca, const double *cb, const double *ca4, const double *cb4, const double *wd, const double *phiO, const double *phiD, const double *phiU, const double *phiF, const double *b, const double *G, const double *G4, const double *gd, const double *gd4, const double *phys, const double *q0);
+void bow_poly_jt_load(void *vst, int njt, int J, const int *M, const double *ca, const double *cb, const double *ca4, const double *cb4, const double *wd, const double *radScale, const double *phiD, const double *phiU, const double *phiF, const double *b, const double *G, const double *G4, const double *gd, const double *gd4, const double *phys, const double *q0);
 
 /* Persistent jt worker pool for the deferred post-pass — call OFF the audio
    thread (engine build); nth < 2 = the serial path. */
@@ -118,6 +118,24 @@ void bow_poly_jt_set_damp_t60(void *vst, double t60);
    Drone-setter contract (plain scalar writes; the jt tick reads). */
 void bow_poly_jt_set_gov(void *vst, double amt, double refDisp);
 
+/* PER-STRING VOICE-RELATIVE CAP (Tarabdaar 2026-09-01, `bow_jt_cap`):
+   each modal-jawari row's RADIATED output held at or below ratio × the
+   played voice's own peak (instant attack, ~1.2 s-τ release ≈ 7 dB/s,
+   tracked on the voice bus inside the render loop — the taraf may ring
+   on after a note but no single string peaks above what the voice
+   reached). Per-row 150 ms peak envelope + gain (3 ms toward reduction,
+   120 ms recovery); hard 0..1 = the fraction of the dB overshoot removed
+   (1 = a hard relative limiter), 0 = off, byte-null. A pure output gain
+   per row — the string physics, the governor and the gate are untouched,
+   and a blooming anchor row is held without ducking its neighbours.
+   bus 0..1 (2026-09-02, `bow_jt_cap_bus`) blends the SCOPE: 0 = per
+   string (above); 1 = per taraf — the rows stand and the summed web is
+   held against the same ceiling (the 2026-08-31 bus limiter, now inside
+   the kernel's hold walk); between, the rows remove hard·(1−bus) of their
+   own overshoot and the sum removes hard·bus of what remains.
+   Dimensionless (rides the host trim/expression). Drone-setter contract. */
+void bow_poly_jt_set_cap(void *vst, double hard, double ratio, double bus);
+
 /* jt QUIESCENCE GATE (Tarabdaar 2026-08-17, `bow_jt_gate`): the idle-CPU
    gate — a row whose peak LOW-MODE momentum stays below refDisp·wd1
    for ~30 ms with no bridge drive above its wake bound and no drone
@@ -131,6 +149,28 @@ void bow_poly_jt_set_gov(void *vst, double amt, double refDisp);
    currently sleeping (telemetry/tests; any thread). */
 void bow_poly_jt_set_gate(void *vst, double refDisp);
 int bow_poly_jt_gate_asleep(void *vst);
+
+/* SCOPE TELEMETRY (Tarabdaar 2026-09-01): display-only meters for the
+   Mac Scope/Taraf tabs. _scope_arm turns the per-row meters on (off =
+   the exact legacy tick). _scope_jt reads per row: current f0 (Hz; the
+   follower's live retune), radiated peak envelope in voice-bus units,
+   quiescence-gate asleep flag, and the first K per-mode MODAL velocity
+   envelopes |p_k| (row-major, K per row — the string's own energy per
+   mode; with the flat bridge-force radiation also its radiated spectrum
+   up to a constant). _scope_slots reads each played string's ring
+   envelope (string units, relative). Telemetry-grade racy reads; any
+   thread. Never read by the physics, never called by a parity twin. */
+void bow_poly_scope_arm(void *vst, int on);
+int bow_poly_scope_jt(void *vst, int nrows, double *f0, double *level, unsigned char *asleep, float *modes, int K);
+int bow_poly_scope_slots(void *vst, double *level, int n);
+
+/* BRIDGE-FORCE RADIATION (Tarabdaar 2026-09-02; THE radiation since
+   2026-09-03): every modal-jawari row radiates its DC-blocked CONTACT
+   FORCE on its bone, unit-matched by the builder's per-row `radScale`
+   (JtTables.rowForceScale, passed through bow_poly_jt_load /
+   bow_poly_jt_set_coeffs in the slot the deleted 0.90 L pickup shape
+   `phiO` used to take). The pickup, `bow_jt_tap` and the one-day
+   `bow_jt_rad_force` mix are gone — do not revive. */
 /* gate probe telemetry: out = {asleep rows, total rows, max ring/floor
    ratio, max drive/eps ratio, drone-hot 0/1} since the last read
    (ratios reset on read; >1 names the condition blocking sleep). Any
@@ -140,7 +180,7 @@ void bow_poly_jt_gate_probe(void *vst, double out[5]);
 /* jt tone HP (Tarabdaar 2026-07-26): one-pole high-pass on the radiated jt
    sum, applied AFTER the tone LP inside the same output walk — the
    jawari-formant voicing (quiets the taraf's fundamental band under the
-   high-harmonic cluster; pairs with the `bow_jt_tap` radiation tap).
+   high-harmonic cluster).
    Same contract as set_lp: a = 1 - exp(-2*pi*fc/sr) at the kernel rate,
    a <= 0 = bypass (byte-exact legacy), mid + side states preserved on
    coefficient moves. Plain scalar write, any thread. */
@@ -167,6 +207,33 @@ void bow_poly_jt_set_body(void *vst, double mix);
    map (apex · (1 − 4^(1−2e))). Clamped ±1e-3. 0 at rest = byte-null. */
 void bow_poly_jt_set_evolve(void *vst, double meters);
 
+/* EVOLUTION REGISTER TILT (Tarabdaar 2026-08-27): per-row SIGNED bone
+   offsets in meters, ADDED to the global evolution lift above and
+   slewed per jt tick per row (~40 ms, the evolve constant) — the live
+   form of the `bow_jt_ev_reg` parameter (BowEngine owns the
+   register→offset map: evolve units per octave from the tonic, so the
+   low anchor rows can sit in the grazing band — the sarod-drone bloom
+   — while the high web presses closed, or the reverse). Writes
+   min(n, njt) rows, clamped ±1e-3; wakes a sleeping quiescence-gate
+   row whose own target materially moves. Never calling it is
+   byte-null (and all-zeros is bit-exact). */
+void bow_poly_jt_set_evolve_ofs(void *vst, const double *ofs, int n);
+
+/* TWO BRIDGES (Tarabdaar 2026-09-02): per-row CONTACT LAW — the
+   chromatic sympathetic set sits on its own jawari (`bow_jtc_*`), so
+   each row carries its own contact stiffness exponent (alpha),
+   hysteretic contact damping (hcb) and deep-substep penetration
+   threshold (deep = 2.5 × that bridge's apex); the bone GEOMETRY of a
+   bridge is already per-row table data (the builder bakes it). Any
+   array may be NULL (that constant is left as is). Writes min(n, njt)
+   rows, clamped (alpha 1…3, hcb >= 0, deep >= 1e-7). Never calling
+   it is byte-null, and a row written with exactly the global phys
+   values ticks bit-identically to the unarmed path. Drone-setter
+   contract (plain array stores, any thread). */
+void bow_poly_jt_set_row_contact(void *vst, const double *alpha,
+                                 const double *hcb, const double *deep,
+                                 int n);
+
 /* RECRUITMENT weights (Tarabdaar 2026-07-26): per-row scale on the BRIDGE
    drive into each modal-jawari string — the taraf-selectivity axis. The
    host computes each row's harmonic kinship to the currently played
@@ -191,8 +258,10 @@ void bow_poly_jt_drive_weights(void *vst, const double *w, int n);
 void bow_poly_jt_set_gain_mul(void *vst, double m);
 
 /* LIVE PARAMETERS: overwrite state in place so a physics edit applies
-   without rebuilding the engine. set_scalars replaces the 61 per-sample
-   scalars (same order as bow_poly_init), leaving tables and running state
+   without rebuilding the engine. set_scalars replaces the 66 per-sample
+   scalars (same order as bow_poly_init; a shorter block from an older
+   caller zeroes the trailing register-damping/slide scalars = legacy
+   behavior), leaving tables and running state
    untouched. set_body / jt_set_coeffs replace coefficient ARRAYS while
    KEEPING every history — the body resonators stay click-free and the
    jawari web relaxes into its new geometry. Both return 1 on success, 0
@@ -203,7 +272,7 @@ int bow_poly_set_body(void *vst, int K, const double *ba1, const double *ba2,
 int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
                            const double *ca, const double *cb,
                            const double *ca4, const double *cb4,
-                           const double *wd, const double *phiO,
+                           const double *wd, const double *radScale,
                            const double *phiD, const double *phiU,
                            const double *phiF, const double *b,
                            const double *G, const double *G4,

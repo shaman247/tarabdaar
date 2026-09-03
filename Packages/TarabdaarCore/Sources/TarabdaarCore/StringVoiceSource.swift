@@ -161,8 +161,18 @@ public final class StringVoiceSource {
     private var masterGain = 1.0  // bow_gain neutral = the calibrated level
     private var tarafSel = 0.5    // bow_jt_sel neutral = the fitted profile
     private var jtEvolve = 0.5    // bow_jt_evolve neutral = fitted bone
+    private var jtEvolveReg = 0.0 // bow_jt_ev_reg neutral = uniform bone
+    private var jtEvolveChrom = 0.5 // bow_jtc_evolve neutral = the chromatic bridge's fitted bone
     private var twang = 0.0       // bow_twang 0 = plain bridge (byte-null)
     private var jtInjectGain = 0.0  // inject-ring arm: 0 = no foreign drive (byte-null)
+    private var busMeterOn = false  // bus volume meter (voice/taraf readout)
+    private var scopeOn = false     // Scope tab telemetry (display only)
+    private var busBalance = 0.0    // bow_bal: 0 = neutral (byte-null)
+    // bow_jt_comp_*: taraf-bus compressor (thresh 0 = off, byte-null)
+    private var jtComp = (thresh: 0.0, ratio: 4.0, atkMs: 5.0, relMs: 150.0)
+    // bow_jt_cap*: voice-relative taraf cap (hard 0 = off, byte-null);
+    // bus = scope blend, 0 per string … 1 per taraf
+    private var jtCap = (hard: 0.0, ratio: 1.0, bus: 0.0)
 
     /// Radiated-jt tone LP corner (`bow_jt_lp`, runtime path; Hz,
     /// <= 0 = the build-time state). Control-thread safe.
@@ -209,6 +219,26 @@ public final class StringVoiceSource {
         currentEngine()?.jtGateProbe()
     }
 
+    /// SCOPE TELEMETRY (2026-09-01): arm the kernel's display-only
+    /// per-row/per-slot meters (see `BowEngine.setScopeArmed`). Runtime
+    /// display state — re-applied across rebuilds. Control thread.
+    public func setScopeArmed(_ on: Bool) {
+        scopeOn = on
+        currentEngine()?.setScopeArmed(on)
+    }
+
+    /// The taraf rows' scope read (see `BowEngine.scopeRows`); empty
+    /// unarmed. Any thread.
+    public func scopeRows() -> [BowEngine.ScopeRow] {
+        currentEngine()?.scopeRows() ?? []
+    }
+
+    /// The played strings' scope read (see `BowEngine.scopeSlots`). Any
+    /// thread.
+    public func scopeSlots() -> [BowEngine.ScopeSlot] {
+        currentEngine()?.scopeSlots() ?? []
+    }
+
     /// Master gain (`bow_gain`, .live 2026-08-23): the performance volume
     /// of the whole radiated instrument, multiplying the fitted trim at
     /// the engine's ramped output gain — instant (~25 ms glide), no
@@ -253,6 +283,22 @@ public final class StringVoiceSource {
         currentEngine()?.setJtEvolve(jtEvolve)
     }
 
+    /// Evolution register tilt (`bow_jt_ev_reg`): per-row bone offsets by
+    /// octave from the tonic — + blooms the low anchor rows (the sarod
+    /// drone) while pressing the high web closed. Control-thread safe.
+    public func setJtEvolveReg(_ reg: Double) {
+        jtEvolveReg = min(max(reg, -1.0), 1.0)
+        currentEngine()?.setJtEvolveRegister(jtEvolveReg)
+    }
+
+    /// The chromatic bridge's harmonic evolution 0…1 (`bow_jtc_evolve`,
+    /// 2026-09-02): the twang axis of the chromatic set alone, on its own
+    /// bridge's apex (BowEngine owns the map). Control-thread safe.
+    public func setJtEvolveChromatic(_ e01: Double) {
+        jtEvolveChrom = min(max(e01, 0.0), 1.0)
+        currentEngine()?.setJtEvolveChromatic(jtEvolveChrom)
+    }
+
     /// Sitar twang 0…1 (`bow_twang`): the played strings' grazing bridge
     /// fold — 0 = plain bridge (byte-exact). Control-thread safe.
     public func setTwang(_ amt01: Double) {
@@ -271,6 +317,76 @@ public final class StringVoiceSource {
     public func setJtInjectGain(_ g: Double) {
         jtInjectGain = max(g, 0.0)
         currentEngine()?.setJtInjectGain(jtInjectGain)
+    }
+
+    /// VOICE↔TARAF BALANCE (`bow_bal`, .live 2026-08-24): −1 = voice
+    /// only, 0 = neutral (bit-exact), +1 = taraf only — an attenuator
+    /// pair at the engine's bus merge (never a boost). Runtime playing
+    /// state, re-applied across rebuilds. Control-thread safe.
+    public func setBusBalance(_ b: Double) {
+        busBalance = min(max(b, -1.0), 1.0)
+        currentEngine()?.setBusBalance(busBalance)
+    }
+
+    /// TARAF COMPRESSOR (`bow_jt_comp_*`, .live 2026-08-24): one field
+    /// of the jt-bus compressor — the four are cached together and the
+    /// whole set is pushed to the running engine on every edit (and
+    /// re-applied across rebuilds). Threshold 0 = off, byte-null.
+    /// Control-thread safe.
+    public enum JtCompField { case thresh, ratio, atkMs, relMs }
+    public func setJtCompParam(_ field: JtCompField, _ value: Double) {
+        switch field {
+        case .thresh: jtComp.thresh = max(value, 0.0)
+        case .ratio:  jtComp.ratio = max(value, 1.0)
+        case .atkMs:  jtComp.atkMs = max(value, 0.0)
+        case .relMs:  jtComp.relMs = max(value, 1.0)
+        }
+        pushJtComp(to: currentEngine())
+    }
+
+    private func pushJtComp(to engine: BowEngine?) {
+        engine?.setJtComp(thresh: jtComp.thresh, ratio: jtComp.ratio,
+                          atkMs: jtComp.atkMs, relMs: jtComp.relMs)
+    }
+
+    /// PER-STRING VOICE-RELATIVE TARAF CAP (`bow_jt_cap*`, .live;
+    /// per string since 2026-09-01): every sympathetic row held at or
+    /// below `ratio` × the voice bus's own decaying peak, inside the
+    /// kernel's jt tick — the runaway-bloom lever (see
+    /// `BowEngine.setJtCap`); `bus` (`bow_jt_cap_bus`) blends the scope
+    /// from per string (0) to per taraf (1). The triple is cached
+    /// together, pushed whole on every edit and re-applied across
+    /// rebuilds. Hard 0 = off, byte-null. Control-thread safe.
+    public enum JtCapField { case hard, ratio, bus }
+    public func setJtCapParam(_ field: JtCapField, _ value: Double) {
+        switch field {
+        case .hard:  jtCap.hard = min(max(value, 0.0), 1.0)
+        case .ratio: jtCap.ratio = max(value, 0.01)
+        case .bus:   jtCap.bus = min(max(value, 0.0), 1.0)
+        }
+        pushJtCap(to: currentEngine())
+    }
+
+    private func pushJtCap(to engine: BowEngine?) {
+        engine?.setJtCap(hard: jtCap.hard, ratio: jtCap.ratio,
+                         bus: jtCap.bus)
+    }
+
+    /// BUS VOLUME METER (2026-08-24): arm the engine's voice/taraf bus
+    /// meter for the iPad's volume readout. Runtime state — cached here
+    /// and re-applied across rebuilds. The metered render is bit-exact
+    /// against the unmetered one (`BusMeterTests`). Control-thread safe.
+    public func setBusMeter(_ on: Bool) {
+        busMeterOn = on
+        currentEngine()?.setBusMeter(on)
+    }
+
+    /// The (voice, taraf) bus RMS since the previous call (exact
+    /// interval RMS, integrate-and-dump — see `BowEngine.busLevels`) —
+    /// (0, 0) while the voice is unarmed or the meter is off. Safe from
+    /// any thread; one poller owns the dump semantics.
+    public func busLevels() -> (voice: Double, taraf: Double) {
+        currentEngine()?.busLevels() ?? (0, 0)
     }
 
     /// Voice→taraf inject write — the ONE render-thread entry point:
@@ -407,8 +523,15 @@ public final class StringVoiceSource {
             if masterGain != 1.0 { engine.setMasterGain(masterGain) }
             if tarafSel != 0.5 { engine.setTarafSelectivity(tarafSel) }
             if jtEvolve != 0.5 { engine.setJtEvolve(jtEvolve) }
+            if jtEvolveReg != 0 { engine.setJtEvolveRegister(jtEvolveReg) }
+            if jtEvolveChrom != 0.5 { engine.setJtEvolveChromatic(jtEvolveChrom) }
             if twang > 0 { engine.setTwang(twang) }
             if jtInjectGain > 0 { engine.setJtInjectGain(jtInjectGain) }
+            if busMeterOn { engine.setBusMeter(true) }
+            if scopeOn { engine.setScopeArmed(true) }
+            if busBalance != 0 { engine.setBusBalance(busBalance) }
+            if jtComp.thresh > 0 { pushJtComp(to: engine) }
+            if jtCap.hard > 0 { pushJtCap(to: engine) }
             for point in FXPoint.allCases
                 where fxSettings[point.rawValue] != FXSettings() {
                 engine.setFX(point, fxSettings[point.rawValue])
@@ -507,7 +630,13 @@ public final class StringVoiceSource {
     /// 3 -93, 5 -102. Three keeps ~13 dB under the -80 bar
     /// (`testShortPreRollIsNoLouderOnPublishThanTheOldLongOne`) for
     /// hotter-than-stock rigs, at ~60% of the old rebuild latency.
-    static var settleBlocks = 3
+    /// 3 → 5 on 2026-09-03 (bridge-force radiation): the choked settle
+    /// chime radiates ~7 dB hotter per block through the contact force
+    /// than through the deleted velocity pickup — the publish peak
+    /// measured −74/−80/−87/−102 dBFS at 3/4/5/8 blocks, so 3 broke the
+    /// −80 dBFS bar and 4 only grazed it (`RebuildCostTests`). ~+140 ms
+    /// of off-thread rebuild latency, never a dropout.
+    static var settleBlocks = 5
 
     /// IN-PLACE PARAMETER PUSH (2026-07-24): apply an edit to the RUNNING
     /// engine instead of building a new one. Recomputes the kernel's
@@ -550,11 +679,12 @@ public final class StringVoiceSource {
         // build is the expensive part (~3.4 ms) — skip it unless a jt key
         // is actually involved.
         if needsJawariTables {
-            let rows = Self.jawariRows(bp: bp, tonicHz: tonicHz,
-                                       taraf: taraf, follower: follower)
+            let plan = Self.jawariRowPlan(bp: bp, tonicHz: tonicHz,
+                                          strings: strings, follower: follower)
             tables.jt = BowTables.buildJawariTables(
-                rows: rows, srk: modelSR * Double(osf), bp: bp,
-                trackRowIndex: follower != nil ? rows.count - 1 : nil)
+                rows: plan.rows, srk: modelSR * Double(osf), bp: bp,
+                trackRowIndex: follower != nil ? plan.rows.count - 1 : nil,
+                chromatic: plan.chromatic)
         }
         engine.setLiveParams(bp: bp, scalars: tables.scalars, tables: tables)
         return true
@@ -638,6 +768,38 @@ public final class StringVoiceSource {
         return jtRows
     }
 
+    /// TWO BRIDGES (2026-09-02): the row plan for a string set carrying
+    /// both bridges — `jawariRows` (the selection above: class coverage,
+    /// `bow_jt_gmin`, `bow_jt_max`) runs PER BRIDGE, so each set is
+    /// selected on its own and a pitch present on both bridges keeps both
+    /// rows. Kernel row order: the raga bridge's rows, then the chromatic
+    /// bridge's, then the follower (last, as before — its index is still
+    /// `rows.count - 1`; `droneRow(forExactHz:)` hits the raga row first).
+    /// The ONE plan `buildEngine` and the in-place path share — the same
+    /// unification rule as `jawariRows` itself. An all-raga set yields
+    /// exactly `jawariRows`' rows with every flag false.
+    static func jawariRowPlan(bp: BowParams, tonicHz: Double,
+                              strings: [ResolvedString],
+                              follower: (gain: Double, t60: Double)? = nil)
+        -> (rows: [(f: Double, gain: Double, t60: Double)], chromatic: [Bool]) {
+        let enabled = strings.filter(\.enabled)
+        let raga = enabled.filter { !$0.chromatic }
+            .map { (f: $0.freq, gain: $0.gain, t60: $0.t60) }
+        let chrom = enabled.filter(\.chromatic)
+            .map { (f: $0.freq, gain: $0.gain, t60: $0.t60) }
+        let ragaRows = jawariRows(bp: bp, tonicHz: tonicHz, taraf: raga)
+        let chromRows = chrom.isEmpty ? []
+            : jawariRows(bp: bp, tonicHz: tonicHz, taraf: chrom)
+        var rows = ragaRows + chromRows
+        var flags = [Bool](repeating: false, count: ragaRows.count)
+            + [Bool](repeating: true, count: chromRows.count)
+        if let fw = follower {
+            rows.append((f: tonicHz * 0.5, gain: fw.gain, t60: fw.t60))
+            flags.append(false)
+        }
+        return (rows, flags)
+    }
+
     public static func buildEngine(tonicHz: Double,
                                    strings: [ResolvedString],
                                    mapper: BowControlMapper,
@@ -671,14 +833,15 @@ public final class StringVoiceSource {
                                                tonic: tonicHz, bp: bp,
                                                taraf: taraf)
         // MODAL-JAWARI taraf: the shared selection (also the in-place
-        // path's), so live jt edits see exactly these rows. The melody
-        // follower (when enabled) is the LAST row, marked for the
-        // kernel's live retune.
-        let rows = jawariRows(bp: bp, tonicHz: tonicHz, taraf: taraf,
-                              follower: follower)
+        // path's), so live jt edits see exactly these rows — per bridge
+        // since 2026-09-02 (`jawariRowPlan`). The melody follower (when
+        // enabled) is the LAST row, marked for the kernel's live retune.
+        let plan = jawariRowPlan(bp: bp, tonicHz: tonicHz, strings: strings,
+                                 follower: follower)
         tables.jt = BowTables.buildJawariTables(
-            rows: rows, srk: sr * Double(osf), bp: bp,
-            trackRowIndex: follower != nil ? rows.count - 1 : nil)
+            rows: plan.rows, srk: sr * Double(osf), bp: bp,
+            trackRowIndex: follower != nil ? plan.rows.count - 1 : nil,
+            chromatic: plan.chromatic)
         let engine = BowEngine(tables: tables, mapper: mapper, bp: bp,
                                sr: sr, rfir: [],
                                eLp: bp.v("bow_rad_lp", 8000.0),

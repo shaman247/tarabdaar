@@ -171,6 +171,12 @@ public final class BowEngine {
     private var selKinStrength: [Double] = [] // (p·q)^-kinExp per kin
     private var selRowFreqs: [Double] = []     // row f0s (builder)
     private var jtTrackRowIdx = -1            // follower row: always weight 1
+    // TWO BRIDGES (2026-09-02): per-row bridge membership + apex (the
+    // builder's), for the per-bridge evolve map and the Scope tab.
+    private var jtRowChromatic: [Bool] = []
+    private var jtRowApex: [Double] = []
+    private var jtHasChromatic = false
+    private var jtEvOfsArmed = false          // offsets ever pushed
     private var jtDwTargets: [Double] = []    // scratch: weights to push
     private var jtDwPushed: [Double] = []     // last pushed (skip no-ops)
     private var selPitches: [Double] = []     // scratch: gated pitches
@@ -219,20 +225,6 @@ public final class BowEngine {
     private var filters: [BowControlFilter] = []
     private var lastSerial: [UInt32] = []
     private var slotSilent: [Bool] = []
-    /// FRET LINGER display export (2026-08-18): one entry per sounding
-    /// linger-active touch slot, refreshed by the render thread after each
-    /// poly chunk's control fill (in-place writes into the preallocated
-    /// buffer — no audio-thread allocation) and copied out by
-    /// `lingerDisplay()` for the Mac→iPad LINGER_STATE feed.
-    public struct LingerTouchState: Sendable, Equatable {
-        public var id: UInt16 = 0
-        public var charge = 1.0
-        public var vib = 0.0
-        public var vibCeil = 0.0
-    }
-    private var lingerDisplayLock = os_unfair_lock()
-    private var lingerBuf: [LingerTouchState] = []
-    private var lingerCount = 0
     private var polySnap: BowControlMapper.PolySnapshot
 
     /// `rfir` = the 48 kHz radiation FIR taps (empty ⇒ flat), `eLp` = the
@@ -317,13 +309,11 @@ public final class BowEngine {
         for i in filters.indices { filters[i].seedDrift(UInt64(i)) }
         lastSerial = [UInt32](repeating: 0, count: nPoly)
         slotSilent = [Bool](repeating: false, count: nPoly)
-        lingerBuf = [LingerTouchState](repeating: LingerTouchState(),
-                                       count: nPoly)
         mapper.setSlotLimit(nPoly)
 
         let t = tables
         let s = t.scalars
-        precondition(s.count == 61, "bow tables: expected 61 scalars, got \(s.count)")
+        precondition(s.count == 66, "bow tables: expected 66 scalars, got \(s.count)")
         // Starting point for the live-parameter ramp (see applyPendingLive).
         liveScalarsCur = s
         liveScalarsTarget = s
@@ -348,7 +338,8 @@ public final class BowEngine {
             s[52], s[53],
             s[54], s[55],
             s[56], s[57],
-            s[58], s[59], s[60])
+            s[58], s[59], s[60],
+            s[61], s[62], s[63], s[64], s[65])
         // Drone-row excitation scalars (Tarabdaar drone buttons; not in
         // the artifact — bp defaults, overridable via `string.<key>`).
         droneLevel = bp.v("bow_drone_level", 0.026)
@@ -397,6 +388,9 @@ public final class BowEngine {
             selKinStrength = Self.recruitKin.map { pow($0.pq, -kinExp) }
             selRowFreqs = jt.rowFreqs
             jtTrackRowIdx = Int(jt.trackRow)
+            jtRowChromatic = jt.rowChromatic
+            jtRowApex = jt.rowApex
+            jtHasChromatic = jt.hasChromatic
             jtDwTargets = [Double](repeating: 1.0, count: jt.rowFreqs.count)
             jtDwPushed = [Double](repeating: 1.0, count: jt.rowFreqs.count)
             droneHeldMask = [Bool](repeating: false, count: jt.rowFreqs.count)
@@ -404,7 +398,7 @@ public final class BowEngine {
             if let pk = pkernel {
                 bow_poly_jt_load(pk, Int32(jt.M.count), jt.J, jt.M,
                                  jt.ca, jt.cb, jt.ca4, jt.cb4, jt.wd,
-                                 jt.phiO, jt.phiD, jt.phiU, jt.phiF,
+                                 jt.rowForceScale, jt.phiD, jt.phiU, jt.phiF,
                                  jt.b, jt.G, jt.G4, jt.gd, jt.gd4,
                                  jt.phys, jt.q0)
                 // pool spawn happens HERE (engine build) — never on
@@ -432,13 +426,29 @@ public final class BowEngine {
                 // reference for the 0…1 → meters map; a non-neutral
                 // resting value is pushed here so the slew (~40 ms)
                 // completes inside the settle pre-roll.
-                jtApexRef = bp.v("bow_jt_apex", 1.0e-5)
+                jtApexRef = jt.apexRef
                 let ev = min(max(bp.v("bow_jt_evolve", 0.5), 0.0), 1.0)
                 if ev != 0.5 {
                     bow_poly_jt_set_evolve(
                         pk, jtApexRef * (1.0 - pow(4.0, 1.0 - 2.0 * ev)))
                 }
                 jtEvolveApplied = ev   // dead-band reference (setJtEvolve)
+                // TWO BRIDGES (2026-09-02): the chromatic bridge's own
+                // contact law (per row) and its own evolve axis — both
+                // inert without chromatic rows.
+                pushJtRowContact(jt)
+                jtEvolveChromaticApplied = min(max(
+                    bp.v("bow_jtc_evolve",
+                         BowTables.chromaticBridgeDefaults["bow_jtc_evolve"] ?? 0.5),
+                    0.0), 1.0)
+                // EVOLUTION REGISTER TILT (2026-08-27): a resting bp
+                // value arms the per-row bone offsets at build (the
+                // audition/test `string.bow_jt_ev_reg` route; the app's
+                // live push arrives on top). 0 = byte-null. The chromatic
+                // bridge rides the same offsets (its own apex / evolve).
+                jtEvolveRegApplied =
+                    min(max(bp.v("bow_jt_ev_reg", 0.0), -1.0), 1.0)
+                pushJtEvolveOffsets()
                 // CHARGE GOVERNOR (2026-08-15): the graze target in
                 // apex units (`bow_jt_gov_ref`, bp scalar like the tilt
                 // range keys); a bp resting value arms it at build (the
@@ -718,6 +728,8 @@ public final class BowEngine {
     /// the old requested-pitch machinery (pitch-class-nearest match + the
     /// `droneCompCents` sounding-pitch compensation, which existed for the
     /// deleted dedicated drone rows) is gone.
+    /// Rows are ordered raga bridge first (2026-09-02), so a pitch on both
+    /// bridges resolves to its raga row — the drone anchors' bridge.
     public func droneRow(forExactHz hz: Double) -> Int? {
         jtRowFreqs.firstIndex(of: hz)
     }
@@ -774,14 +786,18 @@ public final class BowEngine {
     /// offline-only). Smoothed at chunk rate.
     public func setJtToneLp(hz: Double) {
         os_unfair_lock_lock(&tiltLock)
-        jtLpHzTarget = hz > 0
+        // ≥ 20 kHz = bypass, the builder's law and the registry's promise
+        // (`bow_jt_lp` default 20000 "bit-exact legacy") — the live setter
+        // used to arm a 20 kHz one-pole for the default, which
+        // ByteNullContractTests caught on 2026-09-03.
+        jtLpHzTarget = (hz > 0 && hz < 19999.0)
             ? min(max(hz, 40.0), tiltPureLpHiHz) : 0.0
         os_unfair_lock_unlock(&tiltLock)
     }
 
     /// RADIATED-JT TONE HP corner in Hz (base parameter `bow_jt_hp`):
     /// the jawari-formant voicing — quiets the taraf's fundamental band
-    /// under the high-harmonic cluster (pairs with `bow_jt_tap`).
+    /// under the high-harmonic cluster.
     /// <= 0 = bypass (byte-exact legacy). Smoothed at chunk rate.
     public func setJtToneHp(hz: Double) {
         os_unfair_lock_lock(&tiltLock)
@@ -845,12 +861,114 @@ public final class BowEngine {
         if abs(e - jtEvolveApplied) < 0.005 { return }
         jtEvolveApplied = e
         bow_poly_jt_set_evolve(pk, jtApexRef * (1.0 - pow(4.0, 1.0 - 2.0 * e)))
+        // a non-zero register tilt (or a chromatic bridge) rides the
+        // global axis: the per-row offsets are differences ON the margin
+        // map, so they move with e
+        pushJtEvolveOffsets()
     }
     /// Last evolve 0…1 actually forwarded to the kernel (dead-band ref).
     private var jtEvolveApplied = 0.5
+
+    /// THE CHROMATIC BRIDGE'S EVOLUTION 0…1 (`bow_jtc_evolve`, 2026-09-02):
+    /// the same margin map as `setJtEvolve`, evaluated on the chromatic
+    /// bridge's own apex for its rows only, delivered as per-row bone
+    /// offsets against the raga bridge's global lift (the kernel slews
+    /// them ~40 ms like the axis itself). Same cumulative dead-band. A
+    /// rig without chromatic rows ignores it (no row to offset).
+    public func setJtEvolveChromatic(_ e01: Double) {
+        let e = min(max(e01, 0.0), 1.0)
+        if abs(e - jtEvolveChromaticApplied) < 0.005 { return }
+        jtEvolveChromaticApplied = e
+        pushJtEvolveOffsets()
+    }
+    private var jtEvolveChromaticApplied = 0.5
+
+    /// TWO BRIDGES: push every row's contact law (alpha / hcB / deep
+    /// threshold) — only when a chromatic row exists; an all-raga rig
+    /// never calls the kernel (byte-null), and a chromatic bridge resting
+    /// at the raga bridge's values writes the identical constants.
+    private func pushJtRowContact(_ jt: JtTables) {
+        guard let pk = pkernel, jt.hasChromatic,
+              jt.rowAlpha.count == jt.M.count,
+              jt.rowHcB.count == jt.M.count,
+              jt.rowApex.count == jt.M.count else { return }
+        let deep = jt.rowApex.map { 2.5 * $0 }
+        jt.rowAlpha.withUnsafeBufferPointer { a in
+        jt.rowHcB.withUnsafeBufferPointer { h in
+        deep.withUnsafeBufferPointer { d in
+            bow_poly_jt_set_row_contact(pk, a.baseAddress, h.baseAddress,
+                                        d.baseAddress, Int32(jt.M.count))
+        }}}
+    }
     /// Graze-margin reference (`bow_jt_apex` at build) for the evolution
     /// map above.
     private var jtApexRef = 1.0e-5
+
+    /// EVOLUTION REGISTER TILT (base parameter `bow_jt_ev_reg`): evolve
+    /// units per OCTAVE from the tonic, applied per jt row as a SIGNED
+    /// bone offset ADDED to the global evolution lift (kernel-slewed
+    /// ~40 ms per row — the same glide as the evolve axis itself).
+    /// + = below-tonic rows open toward the grazing band (the low
+    /// Sa/Pa "sarod drone" bloom — the long-t60 anchor rows sit in the
+    /// cascading band for their whole ring) while above-tonic rows
+    /// press closed; − = reversed; 0 = the uniform bone, byte-null.
+    /// Cumulative dead-band like setJtEvolve — a bound tilt streaming
+    /// sensor jitter must not move bones (quiescence-gate lesson).
+    public func setJtEvolveRegister(_ reg: Double) {
+        let r = min(max(reg, -1.0), 1.0)
+        if abs(r - jtEvolveRegApplied) < 0.005 { return }
+        jtEvolveRegApplied = r
+        pushJtEvolveOffsets()
+    }
+    /// Last register tilt actually forwarded (dead-band ref).
+    private var jtEvolveRegApplied = 0.0
+
+    /// Recompute + push the per-row offsets for the current (evolve,
+    /// register) pair: each row evaluates the SHARED margin map at its
+    /// own register-shifted evolve, e_row = clamp(e + reg·log2(tonic /
+    /// f_row), 0, 1), and its offset is lift(e_row) − lift(e) with
+    /// lift(e) = apex·(1 − 4^(1−2e)) — so every row stays on the
+    /// calibrated margin span (×4 … ×¼) instead of scaling meters past
+    /// it. The follower row keeps its build-pitch offset (its retunes
+    /// are transient and it re-anchors on the next push).
+    /// TWO BRIDGES (2026-09-02): a chromatic row evaluates the map on ITS
+    /// bridge's apex at ITS bridge's evolve (`bow_jtc_evolve`), register
+    /// tilt included, and its offset is that lift minus the raga
+    /// bridge's global lift — so each bridge glides on its own calibrated
+    /// margin span. Nothing is pushed until some offset is non-zero (an
+    /// all-raga rig at reg 0, or a chromatic bridge resting at the raga
+    /// bridge's apex and evolve, never arms the kernel — byte-null);
+    /// once armed, every recompute is pushed (zeros included).
+    private func pushJtEvolveOffsets() {
+        guard let pk = pkernel, !selRowFreqs.isEmpty else { return }
+        let tonic = tonicHz
+        guard tonic > 0 else { return }
+        let e = jtEvolveApplied
+        let eC = jtEvolveChromaticApplied
+        let reg = jtEvolveRegApplied
+        func lift(_ x: Double, apex: Double) -> Double {
+            apex * (1.0 - pow(4.0, 1.0 - 2.0 * x))
+        }
+        let base = lift(e, apex: jtApexRef)
+        var ofs = [Double](repeating: 0.0, count: selRowFreqs.count)
+        var any = false
+        for i in 0..<selRowFreqs.count where selRowFreqs[i] > 0 {
+            let chrom = jtHasChromatic && i < jtRowChromatic.count
+                && jtRowChromatic[i]
+            if !chrom && reg == 0.0 { continue }     // exact legacy: 0
+            let e0 = chrom ? eC : e
+            let apex = (chrom && i < jtRowApex.count) ? jtRowApex[i] : jtApexRef
+            let er = min(max(e0 + reg * log2(tonic / selRowFreqs[i]),
+                             0.0), 1.0)
+            ofs[i] = lift(er, apex: apex) - base
+            if ofs[i] != 0.0 { any = true }
+        }
+        guard any || jtEvOfsArmed else { return }
+        jtEvOfsArmed = true
+        ofs.withUnsafeBufferPointer {
+            bow_poly_jt_set_evolve_ofs(pk, $0.baseAddress!, Int32($0.count))
+        }
+    }
 
     /// CHARGE GOVERNOR 0…1 (base parameter `bow_jt_gov`): per-row AGC on
     /// the bridge drive into the jt strings — a row ringing above the
@@ -884,6 +1002,302 @@ public final class BowEngine {
         var o = [Double](repeating: 0, count: 5)
         bow_poly_jt_gate_probe(pk, &o)
         return (Int(o[0]), Int(o[1]), o[2], o[3], o[4] > 0.5)
+    }
+
+    // MARK: - Scope telemetry (2026-09-01)
+
+    /// One modal-jawari taraf row as the Mac Scope tab reads it.
+    public struct ScopeRow: Sendable {
+        /// The row's CURRENT fundamental (the follower's live retune).
+        public var f0Hz: Double
+        /// Radiated peak envelope in display (output) units — voice-bus
+        /// units × the current output gain, so rows compare with the
+        /// played strings' bus meter.
+        public var level: Double
+        /// Frozen under the quiescence gate (reads silent).
+        public var asleep: Bool
+        public var isFollower: Bool
+        /// On the chromatic bridge (2026-09-02).
+        public var isChromatic: Bool
+        /// Per-mode MODAL velocity envelopes |p_k|, modes 1…`scopeModeCount`
+        /// (zero past the row's mode count) — the string's own energy per
+        /// mode (∝ p_k²); with the flat bridge-force radiation this is also
+        /// the row's radiated spectrum up to a constant.
+        public var modes: [Float]
+    }
+
+    /// One played-string slot as the Scope tab reads it (slot index =
+    /// the mapper's).
+    public struct ScopeSlot: Sendable {
+        public var f0Hz: Double
+        /// Bow down (gated) — released strings keep ringing (level > 0).
+        public var gated: Bool
+        /// The string's ring envelope (string units — relative; 0 =
+        /// the kernel skips it as silent).
+        public var level: Double
+        public var serial: UInt32
+    }
+
+    /// Per-mode envelopes kept per row by the kernel's scope meters.
+    public static let scopeModeCount = 16
+
+    /// SCOPE TELEMETRY (2026-09-01): arm/disarm the kernel's display-only
+    /// per-row meters (a fresh arm starts from cleared meters). Disarmed
+    /// = the exact legacy tick. Control thread.
+    public func setScopeArmed(_ on: Bool) {
+        guard let pk = pkernel else { return }
+        bow_poly_scope_arm(pk, on ? 1 : 0)
+    }
+
+    /// The taraf rows' scope read (kernel row order; empty unarmed or
+    /// without a jt block). Racy telemetry reads; poll at UI rate.
+    public func scopeRows() -> [ScopeRow] {
+        guard let pk = pkernel else { return [] }
+        let n = selRowFreqs.count
+        guard n > 0 else { return [] }
+        let K = Self.scopeModeCount
+        var f0 = [Double](repeating: 0, count: n)
+        var lv = [Double](repeating: 0, count: n)
+        var slp = [UInt8](repeating: 0, count: n)
+        var modes = [Float](repeating: 0, count: n * K)
+        let got = Int(bow_poly_scope_jt(pk, Int32(n), &f0, &lv, &slp,
+                                        &modes, Int32(K)))
+        guard got > 0 else { return [] }
+        let g = outGain
+        return (0..<min(n, got)).map { s in
+            ScopeRow(f0Hz: f0[s], level: lv[s] * g, asleep: slp[s] != 0,
+                     isFollower: s == jtTrackRowIdx,
+                     isChromatic: s < jtRowChromatic.count && jtRowChromatic[s],
+                     modes: Array(modes[(s * K)..<((s + 1) * K)]))
+        }
+    }
+
+    /// The played strings' scope read: every slot's target pitch + bow
+    /// gate (mapper) and ring envelope (kernel). Allocates (UI rate only).
+    public func scopeSlots() -> [ScopeSlot] {
+        guard let pk = pkernel else { return [] }
+        var lv = [Double](repeating: 0, count: maxPoly)
+        let nb = Int(bow_poly_scope_slots(pk, &lv, Int32(maxPoly)))
+        var snap = BowControlMapper.PolySnapshot(count: maxPoly)
+        mapper.snapshotPoly(into: &snap)
+        let m = min(maxPoly, nb, snap.slots.count)
+        return (0..<m).map { i in
+            ScopeSlot(f0Hz: snap.slots[i].f0Target,
+                      gated: snap.slots[i].gate > 0.5,
+                      level: lv[i], serial: snap.slots[i].serial)
+        }
+    }
+
+    // MARK: - Bus volume meter (2026-08-24)
+
+    /// BUS VOLUME METER: the VOICE and TARAF buses' levels, for the
+    /// iPad's volume readout. Armed, the render always takes the
+    /// split-bus path (`bow_poly_process3`) so the two levels exist
+    /// separately even with the FX inserts idle — the kernel documents
+    /// host-side `out + outJt` as BIT-EXACT against the fused path
+    /// (`BusMeterTests` pins it), so parity renders are untouched.
+    /// Levels are kernel-rate RMS × the current output gain (trim ×
+    /// `bow_gain`) — display units that track the master volume; the
+    /// radiation FIR/room after the merge are shared O(1) coloration.
+    /// INTEGRATE-AND-DUMP, deliberately NO smoothing (2026-08-24 second
+    /// rev — the first cut's fast-attack/250 ms-release envelope imposed
+    /// its OWN ~1.7 s/60 dB decay on the display: a staccato cut, a
+    /// choked taraf and the natural ring all fell at the meter's rate,
+    /// and the peak-hold read voice ≈ taraf): each `busLevels()` call
+    /// returns the EXACT RMS of the audio rendered since the previous
+    /// call and resets the accumulator, so the reading has the poller's
+    /// resolution and no memory — decay rates on the scope are the
+    /// buses' true rates. Default OFF = the exact legacy render path.
+    public func setBusMeter(_ on: Bool) {
+        os_unfair_lock_lock(&tiltLock)
+        meterArmed = on
+        if !on {
+            meterSumV = 0; meterSumT = 0; meterFrames = 0
+            meterLast = (0, 0)
+        }
+        os_unfair_lock_unlock(&tiltLock)
+    }
+
+    /// (voice, taraf) RMS of everything rendered since the previous call
+    /// — (0, 0) unarmed. If nothing rendered in between (poller faster
+    /// than the device callback), the previous reading is repeated.
+    /// Safe from any thread; poll at UI rate.
+    public func busLevels() -> (voice: Double, taraf: Double) {
+        os_unfair_lock_lock(&tiltLock)
+        defer { os_unfair_lock_unlock(&tiltLock) }
+        if meterFrames > 0 {
+            let n = Double(meterFrames)
+            meterLast = ((meterSumV / n).squareRoot(),
+                         (meterSumT / n).squareRoot())
+            meterSumV = 0; meterSumT = 0; meterFrames = 0
+        }
+        return meterLast
+    }
+
+    // All under tiltLock.
+    private var meterArmed = false
+    private var meterSumV = 0.0          // Σ (outGain·x)² since last read
+    private var meterSumT = 0.0
+    private var meterFrames = 0
+    private var meterLast = (0.0, 0.0)
+
+    /// Render thread: fold one split-bus chunk (kernel rate, mid streams)
+    /// into the interval accumulators. Called AFTER the bus FX inserts,
+    /// the taraf comp and the balance, and BEFORE
+    /// the buses merge, so the meter shows what each bus actually
+    /// contributes to the mix.
+    private func meterBuses(voice: UnsafePointer<Double>,
+                            taraf: UnsafePointer<Double>, nk: Int) {
+        var sv = 0.0, st = 0.0
+        for i in 0..<nk {
+            sv += voice[i] * voice[i]
+            st += taraf[i] * taraf[i]
+        }
+        let g2 = outGain * outGain
+        os_unfair_lock_lock(&tiltLock)
+        meterSumV += sv * g2
+        meterSumT += st * g2
+        meterFrames += nk
+        os_unfair_lock_unlock(&tiltLock)
+    }
+
+    // MARK: - Voice↔taraf balance + taraf compressor (2026-08-24)
+
+    /// VOICE↔TARAF BALANCE (`bow_bal`, .live): −1…+1, 0 = neutral
+    /// (bit-exact byte-null). A pure attenuator pair at the bus merge —
+    /// positive turns the VOICE down (gain 1−b), negative turns the
+    /// TARAF down (gain 1+b… mirrored), so neither side is ever boosted
+    /// past its calibrated level and no new headroom appears. Slewed
+    /// ~30 ms and interpolated across the chunk (an offline 4096-frame
+    /// chunk must not step). Needs the split-bus render — armed, the
+    /// chunk takes the `bow_poly_process3` path (bit-exact when the
+    /// balance is byte-null; the meter/FX already share it).
+    public func setBusBalance(_ b: Double) {
+        os_unfair_lock_lock(&tiltLock)
+        balTarget = min(max(b, -1.0), 1.0)
+        os_unfair_lock_unlock(&tiltLock)
+    }
+
+    /// TARAF COMPRESSOR (`bow_jt_comp_*`, .live): feed-forward dynamics
+    /// on the sympathetic jt bus ONLY — the played voice is untouched.
+    /// Threshold in CALIBRATED OUTPUT units (the bus × the build-time
+    /// trim, so it speaks the same ≈dBFS scale as the master limiter and
+    /// the iPad volume readout, and does NOT move with `bow_gain`);
+    /// 0 = off, bit-exact byte-null. Ratio 1 = off too (unity slope).
+    /// Instant-attack envelope with `relMs` release; the GAIN slews with
+    /// `atkMs` toward reduction and `relMs` back — atkMs > 0 lets a
+    /// strike's first milliseconds through before the ring is held.
+    /// Linked mid/side (one gain from the mid bus), so the stereo law's
+    /// fold-down stays consistent.
+    public func setJtComp(thresh: Double, ratio: Double,
+                          atkMs: Double, relMs: Double) {
+        os_unfair_lock_lock(&tiltLock)
+        compThresh = max(thresh, 0.0)
+        compInvRatioM1 = 1.0 / min(max(ratio, 1.0), 40.0) - 1.0
+        // Per-sample (kernel-rate) coefficients. Attack 0 = instant.
+        compAtkCoef = atkMs <= 0 ? 1.0
+            : 1.0 - exp(-1.0 / (srk * atkMs * 0.001))
+        let rel = min(max(relMs, 1.0), 5000.0)
+        compRelCoef = 1.0 - exp(-1.0 / (srk * rel * 0.001))
+        os_unfair_lock_unlock(&tiltLock)
+    }
+
+    /// PER-STRING VOICE-RELATIVE TARAF CAP (`bow_jt_cap*`, .live;
+    /// 2026-08-31 as a bus stage, PER STRING since 2026-09-01): every
+    /// sympathetic row's radiated output held AT OR BELOW the played
+    /// voice's own level — the runaway-bloom lever (high
+    /// `bow_jt_evolve` lets the web feed itself past the voice; the
+    /// fixed-threshold comp can't follow a phrase's dynamics, this cap
+    /// does). Side-chain: an instant-attack peak envelope of the VOICE
+    /// bus with a slow ~1.2 s-τ release — the ceiling a note leaves
+    /// behind decays ~7 dB/s, so a string may ring on after the note
+    /// (decay slower than the voice) but never PEAK above what the
+    /// voice reached. Ceiling = voice peak × `ratio` (1 = parity,
+    /// 0.5 = each string −6 dB under the voice…); `hard` 0…1 is the
+    /// knee: the applied reduction is `hard` × the full dB overshoot
+    /// — 0 = off (bit-exact byte-null), 1 = a hard relative limiter,
+    /// between = a soft proportional lean. Dimensionless ratio law, so
+    /// it rides `bow_gain`/expression untouched. Applied INSIDE the
+    /// kernel's jt tick, row by row (`bow_poly_jt_set_cap`): one
+    /// blooming anchor row is held on its own while its neighbours
+    /// stand — the summed-bus version ducked the whole web for one hot
+    /// string. With the voice silent from launch the ceiling is
+    /// ~zero: armed hard, the cap holds down anything charged by other
+    /// sources (drones, `tp_taraf`) until the voice first sounds —
+    /// that IS the contract; leave it off (default) to keep an
+    /// autonomous taraf. Fixed clocks (row env release 150 ms; gain
+    /// slew 3 ms toward reduction / 120 ms recovery). Pre-FX, pre-trim
+    /// (both buses share the trim, so the ratio is the same as at the
+    /// calibrated merge); the balance stays a manual mix move after it.
+    /// `bus` 0…1 (`bow_jt_cap_bus`, 2026-09-02) blends the SCOPE: 0 =
+    /// per string (above); 1 = per taraf — the rows stand and the
+    /// summed web is held against the same ceiling in the kernel's
+    /// hold walk (the 2026-08-31 bus limiter); between, the rows remove
+    /// hard·(1−bus) of their own overshoot and the sum removes hard·bus
+    /// of what remains. Plain kernel scalar write (the drone-setter
+    /// contract).
+    public func setJtCap(hard: Double, ratio: Double, bus: Double = 0) {
+        guard let pk = pkernel else { return }
+        bow_poly_jt_set_cap(pk, min(max(hard, 0.0), 1.0),
+                            min(max(ratio, 0.01), 4.0),
+                            min(max(bus, 0.0), 1.0))
+    }
+
+    // Staged under tiltLock (targets/coefs); *Cur/env/gain are render
+    // thread only.
+    private var balTarget = 0.0
+    private var balCur = 0.0
+    private var compThresh = 0.0          // 0 = off
+    private var compInvRatioM1 = -0.75    // 1/ratio − 1 (ratio 4)
+    private var compAtkCoef = 1.0         // per-sample gain slew, attack
+    private var compRelCoef = 0.000069    // per-sample, release (150 ms @ 96k)
+    private var compEnv = 0.0
+    private var compGain = 1.0
+
+    /// Render thread: compress the taraf bus in place (kernel rate).
+    /// One gain from the mid stream, applied to mid and side alike.
+    private func applyJtComp(taraf: UnsafeMutablePointer<Double>,
+                             tarafS: UnsafeMutablePointer<Double>?,
+                             nk: Int, thresh: Double, invRatioM1: Double,
+                             atkCoef: Double, relCoef: Double) {
+        let scale = trimBase              // calibrated-output units
+        var env = compEnv, gain = compGain
+        for i in 0..<nk {
+            let a = abs(taraf[i]) * scale
+            if a > env { env = a }                       // instant attack
+            else { env += relCoef * (a - env) }          // smooth release
+            let gT = env > thresh
+                ? pow(env / thresh, invRatioM1) : 1.0
+            if gT < gain { gain += atkCoef * (gT - gain) }
+            else { gain += relCoef * (gT - gain) }
+            taraf[i] *= gain
+            if let s = tarafS { s[i] *= gain }
+        }
+        compEnv = env
+        compGain = gain
+    }
+
+    /// Render thread: the balance attenuator pair, slewed across the
+    /// chunk (piecewise-linear per sample — no steps at any chunk size).
+    private func applyBusBalance(voice: UnsafeMutablePointer<Double>,
+                                 voiceS: UnsafeMutablePointer<Double>?,
+                                 taraf: UnsafeMutablePointer<Double>,
+                                 tarafS: UnsafeMutablePointer<Double>?,
+                                 nk: Int, target: Double) {
+        let bFrom = balCur
+        let dt = Double(nk) / srk
+        balCur += (1.0 - exp(-dt / 0.03)) * (target - balCur)
+        if target == 0.0, abs(balCur) < 1e-5 { balCur = 0.0 }
+        let db = (balCur - bFrom) / Double(max(nk, 1))
+        for i in 0..<nk {
+            let b = bFrom + db * Double(i)
+            let gV = min(1.0, 1.0 - b)
+            let gT = min(1.0, 1.0 + b)
+            voice[i] *= gV
+            taraf[i] *= gT
+            if let s = voiceS { s[i] *= gV }
+            if let s = tarafS { s[i] *= gT }
+        }
     }
 
     /// SITAR TWANG 0…1 (base parameter `bow_twang`): the played strings'
@@ -1278,19 +1692,9 @@ public final class BowEngine {
     /// The kernel refuses a reload whose shape moved, in which case the
     /// engine keeps its current tables — the caller must rebuild, and
     /// `ParamRegistry.inPlaceKeys` is what guarantees that never happens.
-    /// The current per-touch linger envelope state (display feed for the
-    /// LINGER_STATE frame). Thread-safe; allocation happens on the caller,
-    /// never the render thread.
-    public func lingerDisplay() -> [LingerTouchState] {
-        os_unfair_lock_lock(&lingerDisplayLock)
-        let out = Array(lingerBuf[0..<lingerCount])
-        os_unfair_lock_unlock(&lingerDisplayLock)
-        return out
-    }
-
     public func setLiveParams(bp: BowParams, scalars: [Double],
                               tables: BowKernelTables? = nil) {
-        guard scalars.count == 61 else { return }
+        guard scalars.count == 66 else { return }
         // Arm the RAMP only when a ramped quantity actually moved. The
         // ramp caps `render`'s chunk to 256 frames, and chunk size is NOT
         // neutral: it sets the control-interpolation grid and the jt
@@ -1354,7 +1758,7 @@ public final class BowEngine {
         jt.ca4.withUnsafeBufferPointer { ca4 in
         jt.cb4.withUnsafeBufferPointer { cb4 in
         jt.wd.withUnsafeBufferPointer { wd in
-        jt.phiO.withUnsafeBufferPointer { phiO in
+        jt.rowForceScale.withUnsafeBufferPointer { radScale in
         jt.phiD.withUnsafeBufferPointer { phiD in
         jt.phiU.withUnsafeBufferPointer { phiU in
         jt.phiF.withUnsafeBufferPointer { phiF in
@@ -1365,12 +1769,23 @@ public final class BowEngine {
         jt.gd4.withUnsafeBufferPointer { gd4 in
         jt.phys.withUnsafeBufferPointer { phys in
             let n = Int32(jt.M.count), J = jt.J
-            _ = bow_poly_jt_set_coeffs(st, n, J, M.baseAddress,
+            let ok = bow_poly_jt_set_coeffs(st, n, J, M.baseAddress,
                 ca.baseAddress, cb.baseAddress, ca4.baseAddress,
-                cb4.baseAddress, wd.baseAddress, phiO.baseAddress,
+                cb4.baseAddress, wd.baseAddress, radScale.baseAddress,
                 phiD.baseAddress, phiU.baseAddress, phiF.baseAddress,
                 b.baseAddress, G.baseAddress, G4.baseAddress,
                 gd.baseAddress, gd4.baseAddress, phys.baseAddress)
+            if ok == 1 {
+                // TWO BRIDGES: the per-row contact law and the per-bridge
+                // evolve map follow the reloaded tables (a `bow_jtc_*`
+                // or `bow_jt_apex` edit lands here)
+                jtRowChromatic = jt.rowChromatic
+                jtRowApex = jt.rowApex
+                jtHasChromatic = jt.hasChromatic
+                jtApexRef = jt.apexRef
+                pushJtRowContact(jt)
+                pushJtEvolveOffsets()
+            }
         }}}}}}}}}}}}}}}}
         // Melody follower: refresh the retune-law constants (t60 / fhf /
         // bst may have moved with the edit). Re-arming the SAME row keeps
@@ -1383,7 +1798,7 @@ public final class BowEngine {
     }
 
     /// Current / target kernel scalar vectors. The push is RAMPED rather
-    /// than applied in one step: several of the 61 scalars multiply the
+    /// than applied in one step: several of the 62 scalars multiply the
     /// signal (`bowW` drive weight, `c0` radiation floor, `tdirect` taraf
     /// tap), so an instantaneous change lands as a step in the waveform.
     /// Measured before this ramp existed: a +17 dB `bow_live_trim` jump
@@ -1734,16 +2149,17 @@ public final class BowEngine {
                                         continue
                                     }
                                     slotSilent[s] = false
+                                    // Per-slot expression scale (the strum
+                                    // chord, 2026-08-28): ×1.0 is an IEEE
+                                    // identity, so every non-strum path is
+                                    // bit-exact.
                                     let snap = BowControlMapper.Snapshot(
                                         f0Target: slot.f0Target, gate: slot.gate,
-                                        expr: polySnap.expr, press: polySnap.press,
+                                        expr: polySnap.expr * slot.exprScale,
+                                        press: polySnap.press,
                                         pos: polySnap.pos, tiltDb: polySnap.tiltDb,
                                         vib: polySnap.vib,
-                                        onVel: slot.onVel,
-                                        lingerOn: slot.lingerOn,
-                                        lingerFretY: slot.lingerFretY,
-                                        lingerTravel: slot.lingerTravel,
-                                        onEvt: slot.onEvt)
+                                        onVel: slot.onVel)
                                     let o = s * slotStride
                                     filters[s].fill(
                                         snapshot: snap, n: nk,
@@ -1760,23 +2176,6 @@ public final class BowEngine {
                 }
             }
         }
-        // Linger display export: the just-filled per-slot envelope state
-        // for every sounding linger-active touch. In-place writes into the
-        // preallocated buffer under a brief lock — no allocation here.
-        os_unfair_lock_lock(&lingerDisplayLock)
-        lingerCount = 0
-        for s in 0..<maxPoly {
-            let slot = polySnap.slots[s]
-            guard slot.lingerOn, slot.gate > 0.0,
-                  lingerCount < lingerBuf.count else { continue }
-            lingerBuf[lingerCount] = LingerTouchState(
-                id: slot.lingerId,
-                charge: filters[s].lingerCharge,
-                vib: filters[s].avibDepth,
-                vibCeil: filters[s].avibCeil)
-            lingerCount += 1
-        }
-        os_unfair_lock_unlock(&lingerDisplayLock)
         // FX rack: adopt staged settings + advance smoothers (chunk rate).
         // The voice/taraf inserts split the kernel's buses (bit-exact when
         // idle — each jt term lands exactly once, so bus + bus reproduces
@@ -1785,10 +2184,32 @@ public final class BowEngine {
         updateFX(nk: nk, n48: n)
         let vIdx = FXPoint.voice.rawValue, tIdx = FXPoint.taraf.rawValue
         let busFX = fxUnits[vIdx].isEngaged || fxUnits[tIdx].isEngaged
+        // Bus volume meter / balance / taraf comp: any of them armed,
+        // the split path runs even with the bus FX idle (host-side bus
+        // + bus is bit-exact — see setBusMeter; balance and comp are
+        // byte-null at their neutral defaults). The voice-relative cap
+        // lives inside the kernel per row since 2026-09-01 and needs
+        // no split.
+        os_unfair_lock_lock(&tiltLock)
+        let metering = meterArmed
+        let balT = balTarget
+        let compTh = compThresh
+        let compIR = compInvRatioM1
+        let compAtk = compAtkCoef
+        let compRel = compRelCoef
+        os_unfair_lock_unlock(&tiltLock)
+        let balOn = balT != 0.0 || balCur != 0.0
+        let compOn = compTh > 0.0 && compIR < 0.0
+        if !compOn, compGain != 1.0 || compEnv != 0.0 {
+            // disarmed: forget the held reduction so a re-arm starts clean
+            compEnv = 0.0
+            compGain = 1.0
+        }
+        let splitBus = busFX || metering || balOn || compOn
         if stereoOn {
             y96.withUnsafeMutableBufferPointer { yb in
                 y96S.withUnsafeMutableBufferPointer { sb in
-                    if busFX {
+                    if splitBus {
                         y96Jt.withUnsafeMutableBufferPointer { jb in
                             y96JtS.withUnsafeMutableBufferPointer { jsb in
                                 bow_poly_process3(
@@ -1800,6 +2221,27 @@ public final class BowEngine {
                                     yb.baseAddress!, sb.baseAddress!, nk)
                                 fxUnits[tIdx].processMidSide(
                                     jb.baseAddress!, jsb.baseAddress!, nk)
+                                if compOn {
+                                    applyJtComp(taraf: jb.baseAddress!,
+                                                tarafS: jsb.baseAddress!,
+                                                nk: nk, thresh: compTh,
+                                                invRatioM1: compIR,
+                                                atkCoef: compAtk,
+                                                relCoef: compRel)
+                                }
+                                if balOn {
+                                    applyBusBalance(
+                                        voice: yb.baseAddress!,
+                                        voiceS: sb.baseAddress!,
+                                        taraf: jb.baseAddress!,
+                                        tarafS: jsb.baseAddress!,
+                                        nk: nk, target: balT)
+                                }
+                                if metering {
+                                    meterBuses(voice: yb.baseAddress!,
+                                               taraf: jb.baseAddress!,
+                                               nk: nk)
+                                }
                                 for i in 0..<nk {
                                     yb[i] += jb[i]
                                     sb[i] += jsb[i]
@@ -1824,7 +2266,7 @@ public final class BowEngine {
             postChainStereo(n48: n, outL: outL, outR: outR)
         } else {
             y96.withUnsafeMutableBufferPointer { yb in
-                if busFX {
+                if splitBus {
                     y96Jt.withUnsafeMutableBufferPointer { jb in
                         bow_poly_process3(pk, Int32(nk), Int32(slotStride),
                                           cF0, cVb, cFb, cBeta, cGate, cXv,
@@ -1832,6 +2274,23 @@ public final class BowEngine {
                                           jb.baseAddress!, nil)
                         fxUnits[vIdx].processMono(yb.baseAddress!, nk)
                         fxUnits[tIdx].processMono(jb.baseAddress!, nk)
+                        if compOn {
+                            applyJtComp(taraf: jb.baseAddress!, tarafS: nil,
+                                        nk: nk, thresh: compTh,
+                                        invRatioM1: compIR,
+                                        atkCoef: compAtk, relCoef: compRel)
+                        }
+                        if balOn {
+                            applyBusBalance(voice: yb.baseAddress!,
+                                            voiceS: nil,
+                                            taraf: jb.baseAddress!,
+                                            tarafS: nil,
+                                            nk: nk, target: balT)
+                        }
+                        if metering {
+                            meterBuses(voice: yb.baseAddress!,
+                                       taraf: jb.baseAddress!, nk: nk)
+                        }
                         for i in 0..<nk { yb[i] += jb[i] }
                     }
                 } else {
@@ -1870,7 +2329,7 @@ public final class BowEngine {
         }
         // fingerprint mask rides the FULL mix post-reverb (offline order),
         // tracking the SOUNDING pitch (pre-correction — the knot correction
-        // cancels the friction pull, so the string sounds at lf0B)
+        // cancels the friction pull, so the string sounds at lf0)
         if fpMask != nil {
             y48.withUnsafeMutableBufferPointer { yb in
                 cF0Snd.withUnsafeBufferPointer { fb in

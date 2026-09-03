@@ -54,6 +54,8 @@ void tanpura_settle_fd(void *ctx, int slot, long n);
 void tanpura_pluck(void *ctx, int slot, double amp);
 void tanpura_damp(void *ctx, int slot);
 int tanpura_active_count(void *ctx);
+/* scope telemetry: a slot's output envelope (0 idle) — display only */
+double tanpura_slot_env(void *ctx, int slot);
 
 /* ---- live pitch bend + note-off release (Tarabdaar 2026-08-05, the
    main-instrument glide law) ---- bend: retune a mounted modal slot

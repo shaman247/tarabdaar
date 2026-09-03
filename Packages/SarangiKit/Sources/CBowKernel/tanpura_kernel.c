@@ -1432,6 +1432,18 @@ int tanpura_active_count(void *vc)
     return n;
 }
 
+/* SCOPE TELEMETRY (Tarabdaar 2026-09-01): one user slot's output
+   envelope (the auto-idle meter — block peak with a 2%/block decay,
+   output units post gain+FIR; 1.0 right at the pluck), 0 for an
+   unused/idle slot. Racy display read; any thread. */
+double tanpura_slot_env(void *vc, int slot)
+{
+    tp_ctx *c = (tp_ctx *)vc;
+    if (!c || slot < 0 || slot >= c->nslots) return 0.0;
+    const tp_slot *s = &c->s[slot];
+    return (s->used && s->active) ? s->idle_env : 0.0;
+}
+
 /* render one slot for n samples, ACCUMULATING into out.
    deep_ok gates the x4 substep (the sync path budgets it; the pool
    path always allows it). Returns 1 if the slot took the deep path. */

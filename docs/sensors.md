@@ -70,8 +70,8 @@ map both consumers call, so trace and tap can never disagree), drawn as
 a scrolling ~4 s trace on the 0–127 scale with the current value at the
 right and an amber tick holding the last onset's reading. The trace is
 **colored by what the player was doing at each moment** (2026-08-23):
-bright white at a note onset fading to cyan over the next second while
-the note sounds, faded gray while nothing plays — the surface reports
+pale yellow at a note onset fading to deep violet (the shared magma
+level ramp, 2026-09-02) over the next second while the note sounds, faded gray while nothing plays — the surface reports
 melody-note begins/ends into `MotionManager.noteBegan/noteEnded`
 (id-keyed, so drone presses and out-of-band touches never unbalance
 it) and the scope walks that timeline per bin. **The trace IS the envelope** (2026-08-23, final form): the scope draws
@@ -80,9 +80,9 @@ signal the `.strike`/`.acceleration` dimensions actually consume — and
 the live number reads it too. The RAW magnitude trace was retired: its
 rectified zero-crossings and the log-floor magnification made smooth
 playing read as spikes, while the envelope is the truth the bindings
-see. Coloring is playing state at each moment: bright white at a note
-onset fading to cyan over the blend window (full cyan = the note has
-fully handed over to Acceleration), DARK gray while nothing plays, and
+see. Coloring is playing state at each moment: pale yellow at a note
+onset fading down the magma ramp to violet over the blend window (the
+violet floor = the note has fully handed over to Acceleration), DARK gray while nothing plays, and
 note-active frames carry a lighter backdrop so phrases read as blocks
 at a glance. The trace's buckets are anchored to a
 TIME-QUANTIZED grid — bucketing against the moving `lastT − window`
@@ -104,8 +104,8 @@ ramping linearly 0→1 over the note window — **`ctl_strike_window`**
 (Parameters tab, "Strike blend" group, 0.25–8 s, default 2; a
 control-layer `.live` key intercepted in `applyParamToVoice`, so it
 rides presets like everything else and relays to the iPad over
-JOYCON_STATE's v7 `strikeWin` byte, where the scope's white→cyan onset
-fade tracks it — full cyan = the note has fully handed over to its
+JOYCON_STATE's v7 `strikeWin` byte, where the scope's yellow→violet onset
+fade tracks it — the violet floor = the note has fully handed over to its
 Acceleration bindings) — a side without a
 binding evaluates to the target's DEFAULT (registry default for a
 parameter, 0 = rest for a composite), so "expression [0, 1] on Strike,
@@ -127,6 +127,36 @@ effective 100 Hz and made the trace toggle between two phase states. It polls th
 history at 30 Hz (the raw-overlay pattern), so motion samples never
 re-render the toolbar.
 
+**The `.fingerAccel` dimension (2026-08-24)** — the strike pair's
+sibling for the FINGER instead of the wrist: the playing finger's pitch
+acceleration, the SIGNED second derivative of the newest sounding
+touch's pitch trajectory, soft-saturated to −1…+1
+(`FingerAccelTracker`: velocity = the pitch's per-sample delta through
+a ~25 ms SIGNED smoother — signed first, so frame jitter cancels
+instead of rectifying — acceleration = the smoothed velocity's delta
+through a second ~25 ms smoother, output a/(|a|+25 000 ¢/s²), the same
+half-saturation scale as the kernel slide noise's `bow_slide_acc`
+default, so the dimension and the noise agree about what a strong
+gesture is). **BIPOLAR like the tilts**: rest AND a constant-rate meend
+read 0 (curve centre); accelerating the pitch upward reads +, braking
+an upward slide or accelerating downward reads −. **No new wire
+traffic**: the Mac derives it from the pitch already in every
+PERF_STATE frame (`LinkIngest.onTouchPitch`/`onTouchGate` →
+`AppController.fingerEvaluate`, newest-sounding-touch rule, the local
+Mac pads and audition scores feeding the same tracker through the
+local-pump ingest, id-namespaced) plus a 30 Hz decay tick while bound —
+frames are change-gated, so a finger coming to rest would otherwise
+freeze the value. A tracked-finger change or a >2-semitone per-sample
+jump is a snap/steal and reseeds without driving. **The iPad's toolbar
+shows a matching FINGER-ACCEL SCOPE** beside the strike scope —
+bipolar, centerline = rest, green trace while a note sounds — drawn
+from the iPad's own display-only computation of the same law
+(`FingerAccelSampler`, 120 Hz off-main from `OutboundPlayState`; the
+strike-scope ownership pattern — the data's source side draws its own
+readout, and the Mac's binding evaluation stays the control truth).
+Guard: `FingerAccelTests` (constant-rate middle ≈ 0, signed kicks at
+start/stop, no-touch decay, snap/steal immunity).
+
 The estimate rides the touch's `velocity` byte in the PERF_STATE frame
 (it was always in the wire format; the Mac mapper discarded it until
 2026-08-19) and is inert until `bow_attack_vel` is armed on the Mac.
@@ -137,7 +167,7 @@ lookback window (slow motion delivery), that onset under-reads toward
 legato — a playable failure mode; widen `velocityLookback` (≤
 `accelBufferDuration`) before resorting to onset delays.
 
-## Calibration — ONE step, on the Mac, arm-only (2026-08-13)
+## Calibration — on the Mac: the ARM (2026-08-13) and, since 2026-09-02, the Joy-Con WRIST
 
 **The iPad performs no calibration.** The legacy 7-point iPad capture
 (1 rest + 2 endpoints per axis, `CalibrationData`, key
@@ -191,6 +221,34 @@ iPad's three raw axes pass straight through to control axes 0–2 —
 usable, but uncentered (rest sits wherever the iPad happens to rest,
 not at 0.5).
 
+**The Joy-Con WRIST calibration (2026-09-02)** is the same guided
+capture — rest + three sweeps (wrist up/down, inward/outward,
+clockwise/counterclockwise), PCA per sweep, joint least squares, robust
+rest merge, the same live verdicts and 3D cloud — run by a second
+instance of the now-shared `TiltCalibrator` (`Packages/TarabdaarCore`,
+extracted from `JoyConInput`'s arm code; `TiltCalibratorTests` pins the
+solve) over the **Joy-Con's fused attitude**: gravity pitch/roll from
+the complementary filter plus a RELATIVE yaw — the fused yaw's wrap-safe
+increments with the drift rate learned while quiescent and a 60 s leak
+toward zero, the iPad's tilt-3 law ported to the Mac — all at ±90° full
+scale, −1…+1. It produces the **Wrist ↕ / Wrist ↔ / Wrist ⟲**
+dimensions (the revived `tilt4` case + `wrist2`/`wrist3`, control axes
+8–10), rest = 0, sweep extremes ±1; without a calibration they stay
+silent (no raw passthrough — the fused attitude's rest is arbitrary).
+It is an INDEPENDENT capture on the Joy-Con's own stream, not the
+2026-08-12 joint R⁶ arm+wrist solve. Setup tab "Wrist calibration"
+panel (appears once the Joy-Con's motion fusion is live — Joy-Con 2
+over BLE, or a controller with GC motion); dpad-up/down step whichever
+capture is running, **ZL re-zeroes BOTH rest poses**. Persisted under
+`tarabdaar.wristCal.v1`. The iPad's toolbar wrist square mirrors the
+SOLVED wrist axes once calibrated (raw attitude before). **Joy-Con
+Accel** (`jcAccel`, axis 11) needs no calibration: the gravity-removed
+acceleration magnitude through the shared strike law (`StrikeLaw`:
+log-scale 0…1 across velocityMinG…velocityMaxG, fast-attack / 150 ms-
+decay envelope — the iPad strike tracker's law), UNIPOLAR like
+Acceleration (rest at the curve's x 0), every IMU packet, change-gated
+at 1/256, 0 on detach.
+
 ## Dimension System (Parameter Mapping)
 
 Parameters are driven by **dimensions** — configurable input sources. Each parameter can be mapped to any dimension via the **MAP** button which opens a configuration sheet. The mapping is persisted in `DimensionMapping` (stored in UserDefaults).
@@ -202,6 +260,11 @@ Parameters are driven by **dimensions** — configurable input sources. Each par
 | Arm ↕ | Global | arm calibration axis 1 (raw passthrough: iPad pitch) |
 | Arm ↔ | Global | arm calibration axis 2 (raw passthrough: iPad roll) |
 | Arm ⟲ | Global | arm calibration axis 3 (raw passthrough: iPad yaw) |
+| Stick X / Y | Global | the Joy-Con stick, per-axis gate + rescale |
+| Strike / Acceleration | Global | the iPad accelerometer strike envelope, blended per target by time since note onset (unipolar) |
+| Finger Accel | Global | the playing finger's signed pitch acceleration |
+| Wrist ↕ / ↔ / ⟲ | Global | Joy-Con wrist calibration axes 1–3 (silent until calibrated) |
+| Joy-Con Accel | Global | Joy-Con gravity-removed acceleration through the strike law's envelope (unipolar) |
 | Pressure | Per-note | Accelerometer pressure at note onset (same as velocity capture) |
 | Key Y | Per-note | Finger y-position on the key (0 = bottom, 1 = top), normalized to key height for black keys |
 | Slider 1 | Global | Horizontal slider in top-right panel (0 at right edge, 1 at left) |

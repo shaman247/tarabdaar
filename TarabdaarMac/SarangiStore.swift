@@ -61,15 +61,18 @@ final class SarangiStore: ObservableObject {
 
     /// Apply an edit to one string. THE POOL INVARIANT (2026-07-26): the
     /// table stays pitch-sorted and duplicate pitches are impossible — an
-    /// edit that would land this row on another row's pitch is REJECTED
-    /// (the picker snaps back) rather than silently deleting either row.
+    /// edit that would land this row on another row's pitch ON THE SAME
+    /// BRIDGE is REJECTED (the picker snaps back) rather than silently
+    /// deleting either row (the other bridge may hold the pitch — two
+    /// bridges, two pools, 2026-09-02).
     func mutateString(id: UUID, _ body: (inout StringSpec) -> Void) {
         guard let i = state.strings.firstIndex(where: { $0.id == id }) else { return }
         var edited = state.strings[i]
         body(&edited)
         let r = edited.ratio(in: state.scaleRatios)
         guard !state.strings.contains(where: {
-            $0.id != id && $0.ratio(in: state.scaleRatios) == r
+            $0.id != id && $0.set == edited.set
+                && $0.ratio(in: state.scaleRatios) == r
         }) else { return }
         state.strings[i] = edited
         state.normalizeStrings()              // re-sort into pitch order
@@ -84,15 +87,18 @@ final class SarangiStore: ObservableObject {
         )
     }
 
-    /// Add a string at the FIRST FREE PITCH (base octave first, then up,
-    /// then down — duplicates are impossible, so "add" can never mint a
-    /// second row at an occupied pitch). No-op when every slot in the
-    /// ±2-octave range is taken.
-    func addString() {
-        let taken = Set(state.strings.map { $0.ratio(in: state.scaleRatios) })
+    /// Add a string to one bridge at the FIRST FREE PITCH of that bridge
+    /// (base octave first, then up, then down — duplicates are impossible
+    /// per bridge, so "add" can never mint a second row at an occupied
+    /// pitch). Raga rows walk the scale's degrees, chromatic rows the 12
+    /// semitones. No-op when every slot in the ±2-octave range is taken.
+    func addString(to bridge: TarabSet = .raga) {
+        let taken = Set(state.strings(in: bridge).map { $0.ratio(in: state.scaleRatios) })
+        let degrees = bridge == .chromatic ? Array(0..<12) : Array(state.scaleRatios.indices)
         for octave in [0, 1, 2, -1, -2] {
-            for d in state.scaleRatios.indices {
-                let spec = StringSpec(degree: d, octave: octave, gain: 0.5, t60: 2.0)
+            for d in degrees {
+                let spec = StringSpec(degree: d, octave: octave, gain: 0.5, t60: 2.0,
+                                      set: bridge)
                 if !taken.contains(spec.ratio(in: state.scaleRatios)) {
                     state.strings.append(spec)
                     state.normalizeStrings()
@@ -117,12 +123,41 @@ final class SarangiStore: ObservableObject {
         audio.setDroneMappedFreqs(state.droneStringFreqs)
     }
 
-    /// Enable / disable every string at once (one rebuild).
-    func setAllEnabled(_ enabled: Bool) {
-        for i in state.strings.indices {
+    /// Edit the controller strum set (state-only: the strum plays MAIN-VOICE
+    /// staccato notes, resolved from `state.strumStringRatios` at press time
+    /// — nothing to push, no rebuild). Duplicate members are rejected (one
+    /// string, one note per sweep).
+    func setStrumMapping(index: Int, stringId: UUID) {
+        guard state.strumStringIds.indices.contains(index),
+              !state.strumStringIds.contains(stringId) else { return }
+        state.strumStringIds[index] = stringId
+    }
+
+    func addStrumString(_ stringId: UUID) {
+        guard !state.strumStringIds.contains(stringId) else { return }
+        state.strumStringIds.append(stringId)
+    }
+
+    func removeStrumString(at index: Int) {
+        guard state.strumStringIds.indices.contains(index) else { return }
+        state.strumStringIds.remove(at: index)
+    }
+
+    /// Enable / disable every string of one bridge at once (one rebuild);
+    /// nil = both bridges.
+    func setAllEnabled(_ enabled: Bool, in bridge: TarabSet? = nil) {
+        for i in state.strings.indices
+        where bridge == nil || state.strings[i].set == bridge {
             state.strings[i].enabled = enabled
         }
         scheduleRebuild()
+    }
+
+    /// Reset the CHROMATIC set to its default 15-semitone layout (the
+    /// Strings tab's "Reset chromatic set"); the raga set stands.
+    func regenerateChromatic() {
+        state.regenerateChromatic()
+        rebuildNow()
     }
 
     /// Edit the melody-follower string (gain / t60 / enabled) — a

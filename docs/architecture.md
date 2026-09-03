@@ -87,7 +87,8 @@ maps each to a pixel point in the pad's logical area and calls the shared
   full-resolution fractional-MIDI pitch (`tonicFractionalMidi +
   12·log2(ratio)`) — no channel, no note pinning, no bend split.
 - `glide(touchId:ratio:)`: update the touch's pitch (change-gated). The
-  pitch tracks the finger directly; continuity is the Mac smoother's job.
+  pitch tracks the finger directly; the Mac ramps to each update within
+  one render block (no meend smoother since 2026-08-24).
 - `noteOff(touchId:)`: remove the touch — its absence from the next frame
   IS the note-off.
 
@@ -105,7 +106,7 @@ the BLE-MIDI session otherwise. UI stalls can no longer delay the wire.
 ## Mac Pipeline
 
 ### Stage 1: Link input
-`MIDIInput` opens a CoreMIDI input port and connects to every visible source on launch and on hot-plug. Inbound SysEx is reassembled and handed to `TarabLink` (the TLP tunnel); `LinkIngest` diffs each `PERF_STATE` frame — removals → onsets/retriggers → glides, drone-mask edges, change-gated tilt — into `AudioEngine.touchOn/touchGlide/touchOff` (touch-id keyed, full-resolution pitch) and `setDronePressed`, on the link queue. Link drop or 1.5 s staleness runs the kill path (`touchesAllOff`). Channel-voice MIDI from external controllers still parses and forwards into `AudioEngine.sendHostedMIDI(...)` → `routeSarangiModelMIDI` → the mapper's `.midi` slot keys — the same slots, allocation and legato laws the touch path uses.
+`MIDIInput` opens a CoreMIDI input port and connects to every visible source on launch and on hot-plug. Inbound SysEx is reassembled and handed to `TarabLink` (the TLP tunnel); `LinkIngest` diffs each `PERF_STATE` frame — removals → onsets/retriggers → glides, drone-mask edges, change-gated tilt — into `AudioEngine.touchOn/touchGlide/touchOff` (touch-id keyed, full-resolution pitch) and `setDronePressed`, on the link queue. Link drop or 1.5 s staleness runs the kill path (`touchesAllOff`). Channel-voice MIDI from external controllers still parses and forwards into `AudioEngine.sendHostedMIDI(...)` → `routeSarangiModelMIDI` → the mapper's `.midi` slot keys — the same slots and allocation laws the touch path uses (every note-on a fresh string since 2026-08-24).
 
 ### Stage 2: AudioEngine
 The Mac signal graph:

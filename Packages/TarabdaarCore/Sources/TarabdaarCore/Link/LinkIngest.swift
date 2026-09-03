@@ -3,19 +3,28 @@ import Foundation
 /// What the Mac-side ingest drives. `AudioEngine` conforms; tests use a
 /// recording mock. All methods must be thread-safe — they are called on
 /// the link receive queue (the CoreMIDI thread's old role).
-/// `posY` is the touch's fret-band y (0…1 top→bottom) when the frame
-/// carried one, nil otherwise — the fret-linger recharge travel signal.
-/// `fretY` is the position within the touch's home fret's extent (0.5 ≈
-/// the fret's centre) — the auto-vibrato ceiling axis. Touches without
-/// them keep the corresponding legacy behavior.
 public protocol LinkPerformanceSink: AnyObject {
-    func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double,
-                 posY: Double?, fretY: Double?)
-    func touchGlide(_ id: UInt16, pitchSemis: Double, posY: Double?,
-                    fretY: Double?)
+    func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double)
+    func touchGlide(_ id: UInt16, pitchSemis: Double)
     func touchOff(_ id: UInt16)
     func touchesAllOff()
     func setDronePressed(_ index: Int, _ pressed: Bool)
+    /// Per-touch expression scale (2026-08-28, IN-PROCESS ONLY — wire
+    /// frames always decode 1.0): the Mac strum chord's live loudness.
+    /// Delivered BEFORE `touchOn` for a fresh touch whose scale ≠ 1 (so
+    /// onset consumers — the tanpura pluck level — see it), and on any
+    /// change while the touch is held. Default implementation is a no-op.
+    func touchExpr(_ id: UInt16, exprScale: Double)
+    /// GLIDE-QUEUE exemption mark (2026-08-31, IN-PROCESS ONLY — wire
+    /// frames always decode false): the Mac strum chord's touches must
+    /// pass through the glide sequencer untouched. Delivered BEFORE the
+    /// flagged touch's `touchOn`. Default implementation is a no-op.
+    func touchGlideExempt(_ id: UInt16)
+}
+
+public extension LinkPerformanceSink {
+    func touchExpr(_ id: UInt16, exprScale: Double) {}
+    func touchGlideExempt(_ id: UInt16) {}
 }
 
 extension AudioEngine: LinkPerformanceSink {}
@@ -29,7 +38,8 @@ extension AudioEngine: LinkPerformanceSink {}
 /// that collapsed into one frame under latest-wins coalescing). Apply
 /// order per frame: removals → additions/retriggers → pitch updates —
 /// the same sequence a MIDI stream would have produced, so the mapper's
-/// legato/steal laws behave identically.
+/// allocation/steal laws behave identically (every note-on mounts a
+/// fresh string since 2026-08-24).
 ///
 /// NOT thread-safe — confine to the link receive queue. Sequence gating
 /// (drop-non-newer stateSeq) happens upstream in the link; `apply` assumes
@@ -56,6 +66,18 @@ public final class LinkIngest {
     /// (id, false) at release and on the drop path. Fires alongside the
     /// sink calls on the link receive queue.
     public var onTouchGate: ((UInt16, Bool) -> Void)?
+    /// Per-touch pitch delivery (2026-08-24): (id, fractional-MIDI pitch)
+    /// at every touch-on/retrigger AND every glide update — the raw feed
+    /// behind the `.fingerAccel` dimension (`FingerAccelTracker` in
+    /// AppController). Fires alongside the sink calls on the link receive
+    /// queue; handler must be thread-safe.
+    public var onTouchPitch: ((UInt16, Double) -> Void)?
+    /// CHORD BAR selection delivery (TLP v12, 2026-08-28): the frame's
+    /// held chord selection, fired on CHANGE only (like the drone mask's
+    /// edges — heartbeat repeats are silent, so a Mac-local selection is
+    /// not clobbered by an idle iPad). nil = deselected. Handler must be
+    /// thread-safe.
+    public var onChordSelect: ((ChordSelection?) -> Void)?
 
     private var last: TLPPerfState?
     private var lastTilt: [Double] = [.nan, .nan, .nan]
@@ -85,23 +107,33 @@ public final class LinkIngest {
         for t in frame.touches {
             if let p = prevById[t.id] {
                 if p.onsetSeq != t.onsetSeq {
+                    // expr before the onset so the pluck level sees it
+                    if t.exprScale != 1.0 || p.exprScale != 1.0 {
+                        sink.touchExpr(t.id, exprScale: t.exprScale)
+                    }
+                    if t.glideExempt { sink.touchGlideExempt(t.id) }
                     sink.touchOn(t.id, pitchSemis: Double(t.pitch),
-                                 velocity: Double(t.velocity) / 255.0,
-                                 posY: t.posY01, fretY: t.fretY01)
+                                 velocity: Double(t.velocity) / 255.0)
                     onTouchGate?(t.id, true)
-                } else if p.pitch != t.pitch || p.posY != t.posY
-                            || p.fretY != t.fretY || p.flags != t.flags {
-                    // A y-only move (vertical travel along a fret) must
-                    // reach the sink — it recharges the linger envelopes
-                    // even though the pitch is unchanged.
-                    sink.touchGlide(t.id, pitchSemis: Double(t.pitch),
-                                    posY: t.posY01, fretY: t.fretY01)
+                    onTouchPitch?(t.id, Double(t.pitch))
+                } else {
+                    if p.exprScale != t.exprScale {
+                        sink.touchExpr(t.id, exprScale: t.exprScale)
+                    }
+                    if p.pitch != t.pitch {
+                        sink.touchGlide(t.id, pitchSemis: Double(t.pitch))
+                        onTouchPitch?(t.id, Double(t.pitch))
+                    }
                 }
             } else {
+                if t.exprScale != 1.0 {
+                    sink.touchExpr(t.id, exprScale: t.exprScale)
+                }
+                if t.glideExempt { sink.touchGlideExempt(t.id) }
                 sink.touchOn(t.id, pitchSemis: Double(t.pitch),
-                             velocity: Double(t.velocity) / 255.0,
-                             posY: t.posY01, fretY: t.fretY01)
+                             velocity: Double(t.velocity) / 255.0)
                 onTouchGate?(t.id, true)
+                onTouchPitch?(t.id, Double(t.pitch))
             }
         }
 
@@ -114,6 +146,12 @@ public final class LinkIngest {
                     sink.setDronePressed(i, frame.droneMask & bit != 0)
                 }
             }
+        }
+
+        // Chord bar selection: change-gated (a reconnect's first frame
+        // delivers a non-default selection — prev is nil then).
+        if frame.chordSelection != (prev?.chordSelection ?? nil) {
+            onChordSelect?(frame.chordSelection)
         }
 
         // Tilt: s16 −32767…32767 ↔ −1…+1, change-gated per axis.
