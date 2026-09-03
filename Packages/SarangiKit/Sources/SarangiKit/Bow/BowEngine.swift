@@ -173,10 +173,10 @@ public final class BowEngine {
         self.tables = tables
         self.mapper = mapper
         self.maxPoly = min(max(maxPoly, 1), BowControlMapper.maxSlots)
-        // scalars[44] = f0Open = the tuning tonic (register-force reference)
+        // scalars[38] = f0Open = the tuning tonic (register-force reference)
         filter = BowControlFilter(bp: bp, srk: srk,
-                                  tonic: tables.scalars.count > 44
-                                      ? tables.scalars[44] : 261.63)
+                                  tonic: tables.scalars.count > 38
+                                      ? tables.scalars[38] : 261.63)
         dec = HalfBandDecimator()
         if !rfir.isEmpty { radFIR = FIRFilter(taps: rfir) }
         // bow_rad_lp_ord < 2 selects a one-pole rolloff; absent → 2nd order
@@ -229,7 +229,7 @@ public final class BowEngine {
 
         let t = tables
         let s = t.scalars
-        precondition(s.count == 62, "bow tables: expected 62 scalars, got \(s.count)")
+        precondition(s.count == 52, "bow tables: expected 52 scalars, got \(s.count)")
         // Starting point for the live-parameter ramp (see applyPendingLive).
         liveScalarsCur = s
         liveScalarsTarget = s
@@ -241,16 +241,14 @@ public final class BowEngine {
             s[12], s[13], s[14],
             s[15], s[16], s[17], s[18], s[19], s[20], s[21],
             s[22], s[23], s[24], s[25],
-            s[26], s[27], s[28], s[29],
-            s[30], s[31], s[32],
-            s[33], s[34], s[35], s[36], s[37],
-            s[38], s[39], s[40],
-            s[41], s[42], s[43], s[44], s[45], s[46],
-            s[47], s[48], s[49],
-            s[50], s[51],
-            s[52], s[53],
-            s[54], s[55], s[56],
-            s[57], s[58], s[59], s[60], s[61])
+            s[26], s[27],
+            s[28], s[29], s[30], s[31], s[32],
+            s[33], s[34],
+            s[35], s[36], s[37], s[38], s[39],
+            s[40], s[41], s[42],
+            s[43], s[44],
+            s[45], s[46],
+            s[47], s[48], s[49], s[50], s[51])
         // drone-row excitation scalars (bp defaults, overridable via string.*)
         droneLevel = bp.v("bow_drone_level", 0.026)
         droneOnset = bp.v("bow_drone_onset", 0.052)
@@ -357,8 +355,8 @@ public final class BowEngine {
                     bow_poly_jt_track_config(pk, jt.trackRow,
                                              jt.rowFreqs[row], jt.trackT60,
                                              jt.trackFhf, jt.trackBst)
-                    let tonic = tables.scalars.count > 44
-                        ? tables.scalars[44] : 261.63
+                    let tonic = tables.scalars.count > 38
+                        ? tables.scalars[38] : 261.63
                     bow_poly_jt_track_target(pk, tonic)
                     trackHzPushed = tonic
                     trackArmed = true
@@ -439,9 +437,9 @@ public final class BowEngine {
     /// The jt row fundamentals (Hz) in kernel order — empty without a jt block.
     public var jtRowFreqs: [Double] { tables.jt?.rowFreqs ?? [] }
 
-    /// The tuning tonic (scalars[44] = f0Open — the open-string reference).
+    /// The tuning tonic (scalars[38] = f0Open — the open-string reference).
     public var tonicHz: Double {
-        tables.scalars.count > 44 ? tables.scalars[44] : 261.63
+        tables.scalars.count > 38 ? tables.scalars[38] : 261.63
     }
 
     /// Drone excitation scalars (set at build, applied per press). The drive
@@ -1130,7 +1128,7 @@ public final class BowEngine {
     // MARK: - Live parameters
 
     /// A parameter edit staged by the control thread, applied at the next
-    /// chunk boundary on the render thread: the 62 kernel scalars, `bp` for
+    /// chunk boundary on the render thread: the 52 kernel scalars, `bp` for
     /// the Swift-side constants and output/radiation/room. Under `tiltLock`.
     private var pendingLive: (bp: BowParams, scalars: [Double],
                               tables: BowKernelTables?)?
@@ -1174,7 +1172,7 @@ public final class BowEngine {
     /// bank + jawari coefficients in place; a shape change is refused.
     public func setLiveParams(bp: BowParams, scalars: [Double],
                               tables: BowKernelTables? = nil) {
-        guard scalars.count == 62 else { return }
+        guard scalars.count == 52 else { return }
         // Arm the RAMP only when a ramped quantity moved: the ramp caps the
         // render chunk to 256 frames, and chunk size perturbs the chaotic
         // friction loop, so a no-op push must not arm it. Coefficient

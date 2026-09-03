@@ -97,7 +97,7 @@ final class BowedStringEngineTests: XCTestCase {
     func testOpenStringTablesShape() {
         let bp = Self.stringBP()
         let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp)
-        XCTAssertEqual(t.scalars.count, 62)
+        XCTAssertEqual(t.scalars.count, 52)
         XCTAssertEqual(t.ba1.count, 12, "formula body must arm 12 modes")
         XCTAssertEqual(t.scalars[0], 0.08)           // yinf: bridge mobility
         XCTAssertEqual(t.scalars[1], 0.3)            // c0: direct radiation
@@ -108,7 +108,7 @@ final class BowedStringEngineTests: XCTestCase {
         // The cap scan reads the BODY bank only, so deleting the web left
         // this value untouched.
         XCTAssertEqual(t.scalars[6], 0.16046955218688852, accuracy: 1e-11)
-        XCTAssertEqual(t.scalars[44], 261.63)        // f0Open = tonic
+        XCTAssertEqual(t.scalars[38], 261.63)        // f0Open = tonic
         // LOCKSTEP with gutstring.formula_body (python reference values at
         // sr 96000 / tonic 261.63; regenerate via the one-liner in the doc
         // comment if the recipe changes)

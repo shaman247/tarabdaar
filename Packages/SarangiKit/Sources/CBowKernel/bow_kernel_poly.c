@@ -5,10 +5,10 @@
    solves V, and every string takes the same bridge velocity back
    through its gated kret return.
 
-   STABILITY LAW: in the passive-junction topology the strings' loading is
-   folded into the DELAY-FREE junction solve
-       V = (Vstate + jy0*F0) / (1 + jy0*nProc*zZb)
-   — passive at any polyphony (a delayed load crosses unity at nb=4).
+   Each string's bridge loading enters as the ONE-SAMPLE term
+   -zload*bowW*Z*Vprev (the previous sample's bridge velocity); the
+   delay-free passive-junction solve it once shared the topology with went
+   with the comb bank it existed for.
    Silent strings are skipped whole (exact: their state is zero). */
 
 #include <math.h>
@@ -72,15 +72,12 @@ typedef struct {
     double kdisp, bowWidth, bowCont, Z, Zt;
     double mu_s, mu_d, v0f, nutA, brA;
     double thLeak, thA, thD, thFloor;
-    double bowDisp, jq, jq2, zload;
-    double tdirect, tshape, tmix;
-    double nA, nT, nPow, nzHi, nzLo, nDir, nzHiD, passive;
+    double bowDisp, zload;
+    double nA, nT, nPow, nzHi, nzLo, nDir, nzHiD;
     double gutG, dispN, nailK, f0Open, gutA2;
     double torsRatio, torsG, torsC;
     double v0Pow, v0Ref;
     double hairHz, hairRef;
-    double jawRho;
-    double jawRoll, jawRollAmp;
     double lossReg;   /* register damping: loop-corner scaling below f0Open */
     double slideRate, slideDull;         /* slide dulling */
     double slideNoise, slideAcc;         /* accel-driven finger noise */
@@ -281,14 +278,13 @@ typedef struct {
     double jtMixG;                    /* live web fade-in (~0.7 s, async only)
                                          over the fresh engine's chime */
     /* ---- STEREO SIDE OUTPUT: a SIDE stream of the DIRECT radiation only
-       (taraf direct tap, the jawari rows' own radiation, bow noise at the
-       played string); everything reaching the listener VIA THE BRIDGE stays
+       (the jawari rows' own radiation, bow noise at the played string);
+       everything reaching the listener VIA THE BRIDGE stays
        mid-only. Host: L = mid + side, R = mid - side, fold-down bit-identical
        to mono. Armed by bow_poly_set_stereo; outS = NULL = mono path. */
     int stOn;
     double *stSlotPan;                /* nb: played-string (noise) pans */
     double *stJtPan;                  /* njt: modal-jawari row pans */
-    double tsx1[96], tsx2[96], tsy1[96], tsy2[96];   /* side tdir bank */
     double jtLpYS;                    /* side twin of the jt tone LP */
     double jtHpYS;                    /* side twin of the jt tone HP */
     double jtHoldS, jtOutHoldS;       /* side jt hold walk / async hold */
@@ -306,11 +302,9 @@ typedef struct {
     int sdN;
     double sdA1[16], sdA2[16], sdN0[16], sdG[16];
     double sdX1[2][16], sdX2[2][16], sdY1[2][16], sdY2[2][16];
-    double hpG, jy0;
-    int psv;
+    double hpG;
     /* --- shared cross-sample state --- */
     double bx1[96], bx2[96], by1[96], by2[96];
-    double tx1[96], tx2[96], ty1[96], ty2[96];
     double hpY, hpX1;
     double pLp;
     double disp;           /* leaky bridge displacement (integral of V) */
@@ -357,23 +351,19 @@ void *bow_poly_init(int nb, double sr,
                     double Z, double Zt,
                     double mu_s, double mu_d, double v0f, double nutA,
                     double brA, double thLeak, double thA, double thD,
-                    double thFloor, double bowDisp, double jq, double jq2,
-                    double zload, double tdirect, double tshape, double tmix,
+                    double thFloor, double bowDisp,
+                    double zload,
                     double nA, double nT, double nPow, double nzHi,
-                    double nzLo, double nDir, double nzHiD, double passive,
+                    double nzLo, double nDir, double nzHiD,
                     double gutG, double dispN, double nailK, double f0Open,
-                    double gutA2, double tdirUni,
+                    double gutA2,
                     double torsRatio, double torsG, double torsC,
                     double v0Powp, double v0Refp,
                     double hairHzp, double hairRefp,
-                    double jawRhop, double jawRollp, double jawRollAmpp,
                     double lossRegp, double slideRatep, double slideDullp,
                     double slideNoisep, double slideAccp)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)calloc(1, sizeof(bow_poly_state_t));
-    /* tdirUni (scalar 46) drove the deleted comb bank's direct-tap duck; the
-       slot stays so the scalar vector's indices do not move. */
-    (void)tdirUni;
     st->sr = sr;
     st->nb = nb < 1 ? 1 : (nb > 64 ? 64 : nb);   /* chunk scratch is [64] */
     st->K = K > 96 ? 96 : K;
@@ -390,30 +380,21 @@ void *bow_poly_init(int nb, double sr,
     st->nutA = nutA; st->brA = brA;
     st->thLeak = thLeak; st->thA = thA; st->thD = thD;
     st->thFloor = thFloor;
-    st->bowDisp = bowDisp; st->jq = jq; st->jq2 = jq2; st->zload = zload;
-    st->tdirect = tdirect; st->tshape = tshape; st->tmix = tmix;
+    st->bowDisp = bowDisp; st->zload = zload;
     st->nA = nA; st->nT = nT; st->nPow = nPow;
     st->nzHi = nzHi; st->nzLo = nzLo; st->nDir = nDir; st->nzHiD = nzHiD;
-    st->passive = passive;
     st->gutG = gutG; st->dispN = dispN; st->nailK = nailK;
     st->f0Open = f0Open; st->gutA2 = gutA2;
     st->torsRatio = torsRatio; st->torsG = torsG; st->torsC = torsC;
     st->v0Pow = v0Powp; st->v0Ref = v0Refp;
     st->hairHz = hairHzp;
     st->hairRef = (hairRefp > 1e-6 ? hairRefp : 1.0);
-    st->jawRho = jawRhop;
-    st->jawRoll = jawRollp;
-    st->jawRollAmp = (jawRollAmpp > 1e-9 ? jawRollAmpp : 1e-9);
     st->lossReg = lossRegp;
     st->slideRate = (slideRatep > 1.0 ? slideRatep : 900.0);
     st->slideDull = slideDullp;
     st->slideNoise = slideNoisep;
     st->slideAcc = (slideAccp > 1.0 ? slideAccp : 25000.0);
     st->hpG = 0.5 * (1.0 + dcRho);
-    st->psv = passive > 0.5;
-    double jy0 = yinf * st->hpG;
-    for (int k = 0; k < K; k++) jy0 += bA[k] * bn0[k];
-    st->jy0 = jy0;
     st->lcg = 0x9E3779B97F4A7C15ULL;
     st->strs = (bow_pstring_t *)calloc(st->nb, sizeof(bow_pstring_t));
     for (int b = 0; b < st->nb; b++) poly_mount_string(st, &st->strs[b]);
@@ -1783,10 +1764,6 @@ void bow_poly_set_stereo(void *vst,
         memcpy(st->stSlotPan, slotPan, sizeof(double) * (size_t)st->nb);
     if (jtPan && st->njt > 0 && nJt == st->njt)
         memcpy(st->stJtPan, jtPan, sizeof(double) * (size_t)st->njt);
-    memset(st->tsx1, 0, sizeof(st->tsx1));
-    memset(st->tsx2, 0, sizeof(st->tsx2));
-    memset(st->tsy1, 0, sizeof(st->tsy1));
-    memset(st->tsy2, 0, sizeof(st->tsy2));
     st->jtLpYS = 0.0;
     st->jtHpYS = 0.0;
     memset(st->jbsx1, 0, sizeof(st->jbsx1));
@@ -2186,13 +2163,13 @@ int bow_poly_scope_slots(void *vst, double *level, int n)
     return st->nb;
 }
 
-/* LIVE PARAMETERS: replace the scalar vector on a live state (same order
+/* LIVE PARAMETERS: replace the 52 scalars on a live state (same order
    and derivations as bow_poly_init); tables and all running state are left
    alone. Plain scalar writes. Order MUST stay in lockstep with init. */
 void bow_poly_set_scalars(void *vst, const double *s, int n)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
-    if (!st || !s || n < 57) return;
+    if (!st || !s || n < 47) return;
     st->yinf = s[0]; st->c0 = s[1]; st->dcRho = s[2];
     st->pgain = s[3]; st->pA = s[4]; st->bowW = s[5]; st->kret = s[6];
     st->retA = s[7]; st->retMode = s[8]; st->rb0 = s[9];
@@ -2203,28 +2180,22 @@ void bow_poly_set_scalars(void *vst, const double *s, int n)
     st->nutA = s[20]; st->brA = s[21];
     st->thLeak = s[22]; st->thA = s[23]; st->thD = s[24];
     st->thFloor = s[25];
-    st->bowDisp = s[26]; st->jq = s[27]; st->jq2 = s[28];
-    st->zload = s[29];
-    st->tdirect = s[30]; st->tshape = s[31]; st->tmix = s[32];
-    st->nA = s[33]; st->nT = s[34]; st->nPow = s[35];
-    st->nzHi = s[36]; st->nzLo = s[37]; st->nDir = s[38];
-    st->nzHiD = s[39];
-    st->passive = s[40];
-    st->gutG = s[41]; st->dispN = s[42]; st->nailK = s[43];
-    st->f0Open = s[44]; st->gutA2 = s[45];
-    st->torsRatio = s[47]; st->torsG = s[48]; st->torsC = s[49];
-    st->v0Pow = s[50]; st->v0Ref = s[51];
-    st->hairHz = s[52]; st->hairRef = (s[53] > 1e-6 ? s[53] : 1.0);
-    st->jawRho = s[54];
-    st->jawRoll = s[55];
-    st->jawRollAmp = (s[56] > 1e-9 ? s[56] : 1e-9);
-    /* scalars 58-62: register damping, slide dulling, finger noise — absent =
+    st->bowDisp = s[26]; st->zload = s[27];
+    st->nA = s[28]; st->nT = s[29]; st->nPow = s[30];
+    st->nzHi = s[31]; st->nzLo = s[32]; st->nDir = s[33];
+    st->nzHiD = s[34];
+    st->gutG = s[35]; st->dispN = s[36]; st->nailK = s[37];
+    st->f0Open = s[38]; st->gutA2 = s[39];
+    st->torsRatio = s[40]; st->torsG = s[41]; st->torsC = s[42];
+    st->v0Pow = s[43]; st->v0Ref = s[44];
+    st->hairHz = s[45]; st->hairRef = (s[46] > 1e-6 ? s[46] : 1.0);
+    /* scalars 47-51: register damping, slide dulling, finger noise — absent =
        inert */
-    st->lossReg = (n >= 58) ? s[57] : 0.0;
-    st->slideRate = (n >= 59 && s[58] > 1.0) ? s[58] : 900.0;
-    st->slideDull = (n >= 60) ? s[59] : 0.0;
-    st->slideNoise = (n >= 61) ? s[60] : 0.0;
-    st->slideAcc = (n >= 62 && s[61] > 1.0) ? s[61] : 25000.0;
+    st->lossReg = (n >= 48) ? s[47] : 0.0;
+    st->slideRate = (n >= 49 && s[48] > 1.0) ? s[48] : 900.0;
+    st->slideDull = (n >= 50) ? s[49] : 0.0;
+    st->slideNoise = (n >= 51) ? s[50] : 0.0;
+    st->slideAcc = (n >= 52 && s[51] > 1.0) ? s[51] : 25000.0;
 }
 
 /* Overwrite the BODY modal bank's coefficients on a live state; the
@@ -2667,9 +2638,7 @@ void bow_poly_process3(void *vst, int n, int stride,
     const double yinf = st->yinf, c0 = st->c0, dcRho = st->dcRho;
     const double pgain = st->pgain, pA = st->pA, bowW = st->bowW;
     const double Z = st->Z, zload = st->zload;
-    const double tdirect = st->tdirect, tshape = st->tshape, tmix = st->tmix;
-    const double hpG = st->hpG, jy0 = st->jy0;
-    const int psv = st->psv;
+    const double hpG = st->hpG;
     const int bowOn = bowW > 1e-9;
 
     /* per-chunk processed-string set: bowed this chunk, or still ringing */
@@ -2689,14 +2658,6 @@ void bow_poly_process3(void *vst, int n, int stride,
             S->active = 0;
         }
     }
-    /* delay-free string loading of the junction: constant over the chunk, so
-       the solve denominator is one precomputed scalar */
-    double zsumB = 0.0;
-    if (psv && bowOn && zload > 1e-9)
-        zsumB = (double)nProc * (zload * bowW * Z);
-    const double zsumT = zsumB;
-    const double jden = 1.0 + jy0 * zsumT;
-
     double pkArr[64], rdmpArr[64], gkArr[64];
     for (int i = 0; i < nProc; i++) pkArr[i] = 0.0;
 
@@ -2732,10 +2693,9 @@ void bow_poly_process3(void *vst, int n, int stride,
 
     for (int t = 0; t < n; t++) {
         double F = 0.0;
-        double tdir = 0.0;
         double noiseDir = 0.0;
-        /* stereo side accumulators — DIRECT radiation only (dead when !stOn) */
-        double tdirS = 0.0, noiseDirS = 0.0;
+        /* stereo side accumulator — DIRECT radiation only (dead when !stOn) */
+        double noiseDirS = 0.0;
         for (int i = 0; i < nProc; i++) {
             int b = st->proc[i];
             bow_pstring_t *S = &st->strs[b];
@@ -2748,25 +2708,13 @@ void bow_poly_process3(void *vst, int n, int stride,
                bridge force radiates from the one body and stays mid-only */
             if (stOn) noiseDirS += stSp[b] * (noiseDir - nd0);
             if (fabs(S->brLp) > pkArr[i]) pkArr[i] = fabs(S->brLp);
-            /* non-passive topology: the one-sample -Z*V load (V == 0 for a
-               rigid bridge) */
-            if (!psv && bowOn && zload > 1e-9)
+            /* the one-sample -Z*V bridge load (V == 0 for a rigid bridge) */
+            if (bowOn && zload > 1e-9)
                 F -= zload * bowW * Z * st->Vprev;
         }
         /* ---- additive voice force (shared path, zeros live) ---- */
         st->pLp = (1.0 - pA) * xv[t] + pA * st->pLp;
         F += pgain * st->pLp;
-        /* ---- PASSIVE WAVE JUNCTION, PASS 1: the comb bank is gone (no
-           builder ever fills it), so only the strings' delay-free loading —
-           carried in zsumT/jden — reaches the solve. ---- */
-        if (psv) {
-            double Vst = yinf * (dcRho * st->hpY - hpG * st->hpX1);
-            for (int k = 0; k < K; k++)
-                Vst += bA[k] * (ba1[k] * st->by1[k] + ba2[k] * st->by2[k]
-                                - bn0[k] * st->bx2[k]);
-            double Vs = (Vst + jy0 * F) / jden;
-            F -= zsumT * Vs;
-        }
         /* ---- body: admittance V + radiation ---- */
         st->hpY = hpG * (F - st->hpX1) + dcRho * st->hpY;
         st->hpX1 = F;
@@ -2788,20 +2736,7 @@ void bow_poly_process3(void *vst, int n, int stride,
         }
         st->disp = 0.99967 * st->disp + V;
         st->Vprev = V;
-        double trad = tdir;
-        if (tshape > 0.5) {
-            trad = c0 * tdir;
-            #pragma clang loop vectorize(disable)
-            for (int k = 0; k < K; k++) {
-                double y = bn0[k] * (tdir - st->tx2[k]) + ba1[k] * st->ty1[k]
-                    + ba2[k] * st->ty2[k];
-                st->tx2[k] = st->tx1[k]; st->tx1[k] = tdir;
-                st->ty2[k] = st->ty1[k]; st->ty1[k] = y;
-                trad += bC[k] * y;
-            }
-            trad = tmix * trad + (1.0 - tmix) * tdir;
-        }
-        out[t] = rad + tdirect * trad + noiseDir;
+        out[t] = rad + noiseDir;
         /* ---- INSTRUMENT WIDTH on the voice bus (the jt wash gets its own bank
            instance in the post-pass); antisymmetric side, byte-null unarmed
            ---- */
@@ -2811,24 +2746,8 @@ void bow_poly_process3(void *vst, int n, int stride,
                 * (st->stWidthTgt - st->stWidthCur);
             radS = st->stWidthCur * poly_width_bank(st, 0, out[t]);
         }
-        /* ---- STEREO SIDE: the pan-weighted taraf direct tap (own copy of the
-           tdir shaping bank) + the bow noise at its string + the width side.
-           ---- */
-        if (stOn) {
-            double tradS = tdirS;
-            if (tshape > 0.5) {
-                tradS = c0 * tdirS;
-                for (int k = 0; k < K; k++) {
-                    double yS = bn0[k] * (tdirS - st->tsx2[k])
-                        + ba1[k] * st->tsy1[k] + ba2[k] * st->tsy2[k];
-                    st->tsx2[k] = st->tsx1[k]; st->tsx1[k] = tdirS;
-                    st->tsy2[k] = st->tsy1[k]; st->tsy1[k] = yS;
-                    tradS += bC[k] * yS;
-                }
-                tradS = tmix * tradS + (1.0 - tmix) * tdirS;
-            }
-            outS[t] = radS + tdirect * tradS + noiseDirS;
-        }
+        /* ---- STEREO SIDE: the bow noise at its string + the width side ---- */
+        if (stOn) outS[t] = radS + noiseDirS;
         /* ---- modal-jawari drive RECORD: the web is one-way, deferred to the
            post-pass ---- */
         if (jtFr) jtFr[t] = F;

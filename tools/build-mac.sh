@@ -26,14 +26,15 @@ swift run -c release --package-path Packages/TarabdaarCore paramdoc \
 echo "→ regenerating docs/html"
 python3 tools/gen_docs_html.py
 
+# `|| EXIT=$?` keeps `set -e` from aborting before the errors are printed
+# (a failing xcodebuild used to exit the script silently with its code).
+EXIT=0
 OUTPUT=$(xcodebuild \
     -project Tarabdaar/Tarabdaar.xcodeproj \
     -scheme TarabdaarMac \
     -destination 'platform=macOS,arch=arm64' \
     -derivedDataPath build/mac-ci \
-    -quiet build 2>&1)
-
-EXIT=$?
+    -quiet build 2>&1) || EXIT=$?
 echo "$OUTPUT" | grep -E "error:|warning:" | grep -v "appintents\|never used\|consider replacing" || true
 
 if [ $EXIT -ne 0 ]; then

@@ -69,14 +69,22 @@ run_phase() {
     return "$rc"
 }
 
+# Both phases always run: a phase-1 failure must not hide a phase-2 one
+# (the settle pre-roll regression once sat unseen behind two phase-1
+# failures). The exit code reports either.
+RC1=0; RC2=0
 echo "== phase 1/2: parallel (all suites except wall-clock guards) =="
 run_phase swift test --parallel \
   --skip RealtimePerformanceTests \
-  --skip RebuildCostTests
+  --skip RebuildCostTests || RC1=$?
 
 echo "== phase 2/2: serial wall-clock guards =="
 run_phase swift test \
   --filter RealtimePerformanceTests \
-  --filter RebuildCostTests
+  --filter RebuildCostTests || RC2=$?
 
+if [ "$RC1" -ne 0 ] || [ "$RC2" -ne 0 ]; then
+    echo "== full guard run FAILED (phase 1 rc=$RC1, phase 2 rc=$RC2) ==" >&2
+    exit 1
+fi
 echo "== full guard run passed =="

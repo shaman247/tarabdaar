@@ -4,12 +4,13 @@
 /* The bow-friction physics kernel (bow_kernel_poly.c).
  *
  * `nb` independent bowed gut strings on ONE shared bridge: per sample the
- * string forces sum into the bridge force F, and each string's
- * -zload*bowW*Z*V loading is folded DELAY-FREE into the junction solve, so
- * stability is structural at any polyphony. All cross-sample state lives in
- * an opaque state object; bow_poly_init deep-copies every table (the caller
- * may free its arrays) and bow_poly_process runs one chunk, with controls
- * CHUNK-relative. Concatenated chunk outputs equal one long call.
+ * string forces sum into the bridge force F, each string taking the
+ * one-sample bridge load -zload*bowW*Z*Vprev, and the modal body then
+ * solves the bridge velocity V every string takes back. All cross-sample
+ * state lives in an opaque state object; bow_poly_init deep-copies every
+ * table (the caller may free its arrays) and bow_poly_process runs one
+ * chunk, with controls CHUNK-relative. Concatenated chunk outputs equal
+ * one long call.
  *
  * Controls are SLOT-MAJOR with an explicit stride: f0[b*stride + t] for
  * string b; xv/out are plain length-n arrays.
@@ -20,9 +21,23 @@
  * allocate or spawn threads: call them OFF the audio thread. Every optional
  * block is byte-null while unarmed (never loaded / 0 / NULL).
  *
- * Body: K modal sections. Then the 62 per-sample scalars.
+ * Body: K modal sections. Then the 52 per-sample scalars, in THIS order —
+ * the one layout, shared by bow_poly_init's arguments, the indices
+ * bow_poly_set_scalars reads and BowTables.buildOpenString's array:
+ *
+ *    0 yinf        1 c0        2 dcRho      3 pgain      4 pA
+ *    5 bowW        6 kret      7 retA       8 retMode    9 rb0
+ *   10 ra1        11 ra2      12 kdisp     13 bowWidth  14 bowCont
+ *   15 Z          16 Zt       17 mu_s      18 mu_d      19 v0f
+ *   20 nutA       21 brA      22 thLeak    23 thA       24 thD
+ *   25 thFloor    26 bowDisp  27 zload     28 nA        29 nT
+ *   30 nPow       31 nzHi     32 nzLo      33 nDir      34 nzHiD
+ *   35 gutG       36 dispN    37 nailK     38 f0Open    39 gutA2
+ *   40 torsRatio  41 torsG    42 torsC     43 v0Pow     44 v0Ref
+ *   45 hairHz     46 hairRef  47 lossReg   48 slideRate 49 slideDull
+ *   50 slideNoise 51 slideAcc
  */
-void *bow_poly_init(int nb, double sr, /* body */ int K, const double *ba1, const double *ba2, const double *bn0, const double *bA, const double *bC, double yinf, double c0, double dcRho, /* voice-force path + bow */ double pgain, double pA, double bowW, double kret, double retA, double retMode, double rb0, double ra1, double ra2, double kdisp, double bowWidth, double bowCont, double Z, double Zt, double mu_s, double mu_d, double v0f, double nutA, double brA, double thLeak, double thA, double thD, double thFloor, double bowDisp, double jq, double jq2, double zload, double tdirect, double tshape, double tmix, double nA, double nT, double nPow, double nzHi, double nzLo, double nDir, double nzHiD, double passive, double gutG, double dispN, double nailK, double f0Open, double gutA2, double tdirUni, double torsRatio, double torsG, double torsC, double v0Powp, double v0Refp, double hairHzp, double hairRefp, double jawRhop, double jawRollp, double jawRollAmpp, double lossRegp, double slideRatep, double slideDullp, double slideNoisep, double slideAccp);
+void *bow_poly_init(int nb, double sr, /* body */ int K, const double *ba1, const double *ba2, const double *bn0, const double *bA, const double *bC, double yinf, double c0, double dcRho, /* voice-force path + bow */ double pgain, double pA, double bowW, double kret, double retA, double retMode, double rb0, double ra1, double ra2, double kdisp, double bowWidth, double bowCont, double Z, double Zt, double mu_s, double mu_d, double v0f, double nutA, double brA, double thLeak, double thA, double thD, double thFloor, double bowDisp, double zload, double nA, double nT, double nPow, double nzHi, double nzLo, double nDir, double nzHiD, double gutG, double dispN, double nailK, double f0Open, double gutA2, double torsRatio, double torsG, double torsC, double v0Powp, double v0Refp, double hairHzp, double hairRefp, double lossRegp, double slideRatep, double slideDullp, double slideNoisep, double slideAccp);
 
 void bow_poly_process(void *vst, int n, int stride, const double *f0, const double *vb, const double *fb, const double *beta, const double *gate, const double *xv, double *out);
 
@@ -159,8 +174,8 @@ void bow_poly_jt_drive_weights(void *vst, const double *w, int n);
    [0, 4]; 1 / never calling = byte-null. Drone-setter contract. */
 void bow_poly_jt_set_gain_mul(void *vst, double m);
 
-/* LIVE PARAMETERS, no rebuild. set_scalars replaces the 62 scalars
-   (bow_poly_init order; a shorter block zeroes the tail), tables and
+/* LIVE PARAMETERS, no rebuild. set_scalars replaces the 52 scalars
+   (bow_poly_init order; a shorter block leaves the tail inert), tables and
    running state untouched. set_body / jt_set_coeffs replace coefficient
    ARRAYS keeping every history; return 1 on success, 0 when the shape
    moved (caller rebuilds). */

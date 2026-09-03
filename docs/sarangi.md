@@ -21,7 +21,7 @@ Development history lives in `docs/history/`, not here. Files: `Bow/`
 ## Signal path
 
 ```
-touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (delay‑free junction)
+touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (one‑sample −Z·V load)
               ► formula body (modal resonators) ► voice bus ─┐
               ► modal‑jawari rows (raga bridge + chromatic bridge, async pool)
                   ► bridge‑force radiation ► per‑row cap ► [body mix] ► tone LP/HP ► taraf bus ─┤
@@ -63,6 +63,11 @@ touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (d
 - **In‑place push.** A `.live`/`.hybrid` edit recomputes the kernel's scalar
   vector and hands it to `BowEngine.setLiveParams` — no reset, no pre‑roll,
   no crossfade (`inPlaceKeys`; see [Sound Design](sound-design.md)).
+- **The scalar vector** is 52 doubles in ONE order, documented once in the
+  `bow_poly_init` comment in `bow_kernel.h`. `BowTables.buildOpenString`
+  writes it; `bow_poly_init` and `bow_poly_set_scalars` read it in lockstep,
+  and `BowEngine` preconditions the count. Renumbering means editing all
+  four together.
 - **Overrides.** The bundled artifact is read‑only; Parameters‑tab edits
   persist as an override dict (`tarabdaar.stringOverrides.v1`,
   `StringParamStore`) applied over `bowed_string.json` at build time; one that
@@ -418,7 +423,7 @@ Improvements proposed for the modal‑jawari rows, in the order worth doing.
    through a fixed 0.90 L tap (φD), so modes 10/20 are never charged; the end
    slope (∝ k·(−1)^k) has no null. Option first, then re‑fit recruitment.
 3. **Two‑way coupling among the rows.** Feed the rows' summed bridge force
-   back into the junction so the web blooms physically. Keep the one‑sample
+   back into the bridge so the web blooms physically. Keep the one‑sample
    lag the drive uses — stability is the risk.
 4. **Bone profile.** A real jawari is an asymmetric arc with a gentler slope
    toward the nut, lengthening the cascade rather than deepening it.

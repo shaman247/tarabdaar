@@ -1,16 +1,14 @@
 import Foundation
 
 /// The complete marshaled input set of the C bow kernel, in C-signature
-/// order: the 5 modal-body arrays and the 62 scalars. (The per-voice
-/// comb-string columns are gone with the kernel's comb bank — nothing ever
-/// built a voice.)
+/// order: the 5 modal-body arrays and the 52 scalars.
 public struct BowKernelTables: Sendable {
     public var sr: Double
     // body modal sections
     public var ba1: [Double] = [], ba2: [Double] = [], bn0: [Double] = []
     public var bA: [Double] = [], bC: [Double] = []
-    /// The 62 per-sample scalars, in the order of `bow_poly_init`'s
-    /// signature (bow_kernel.h).
+    /// The 52 per-sample scalars, in the order of `bow_poly_init`'s
+    /// signature — the layout table in bow_kernel.h.
     public var scalars: [Double] = []
     /// Modal-jawari table block — nil = no taraf (byte-null, never loaded).
     public var jt: JtTables? = nil
@@ -434,13 +432,7 @@ public enum BowTables {
             bp.v("bow_th_drate", 0.0),
             bp.v("bow_th_floor", 0.15),
             bp.v("bow_disp", 0.0),
-            1e-3, 0.02,                                // jq/jq2 (jawari thr)
             bp.v("bow_zload", 1.0),
-            // no free-ring radiation tap: tdirect/tshape 0 (the kernel never
-            // enters the tap path; tmix is then inert)
-            0.0,                                       // tdirect
-            0.0,                                       // tshape
-            1.0,                                       // tmix (inert)
             bp.v("bow_noise", 0.0),
             bp.v("bow_tnoise", 0.0),
             bp.v("bow_noise_pow", 1.0),
@@ -448,15 +440,12 @@ public enum BowTables {
             1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_lo", 402.0) / sr),
             bp.v("bow_noise_dir", 0.0),
             1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_dir_hi", 6000.0) / sr),
-            0.0,                                       // RETIRED: passive junction
-                                                       // (no comb voices are built)
             bp.v("bow_gut_g", 1.0),
             bp.v("bow_disp_n", 1.0),
             bp.v("bow_nail_k", 0.0),
             tonic,                                     // f0Open
             bp.v("bow_gut_fc2", 0.0) > 0.0
                 ? exp(-2.0 * Double.pi * bp.v("bow_gut_fc2", 0.0) / sr) : 0.0,
-            1.0,                                       // driven tap duck: off
             bp.v("bow_tors_ratio", 5.2),               // torsional loop
             bp.v("bow_tors_g", 0.85),
             bp.v("bow_tors_c", 0.0),                   // 0 = bit-null
@@ -464,9 +453,6 @@ public enum BowTables {
             bp.v("bow_v0_fref", 1.0),
             bp.v("bow_hair_hz", 0.0),                  // hair compliance
             bp.v("bow_hair_ref", 1.0),
-            bp.v("bow_jaw_rho", 0.0),                  // jawari collision
-            bp.v("bow_jaw_roll", 0.0),                 // rolling contact
-            bp.v("bow_jaw_roll_amp", 0.005),
             bp.v("bow_loss_reg", 0.0),                 // register damping (0 = bit-null)
             bp.v("bow_slide_rate", 900.0),             // slide dulling
             bp.v("bow_slide_dull", 0.0),               // (dull 0 = bit-null)
