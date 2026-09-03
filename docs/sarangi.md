@@ -225,6 +225,77 @@ which multiplied every mode above the first by ≈ 1.4·k and simply added level
 Neither normalisation lands on the fitted loudness — see roadmap item 2 for
 both measurements and why the knob still rests at 0.
 
+### Two‑way coupling (`bow_jt_couple`)
+
+The drive is ONE‑WAY: the played string's bridge force charges every row and
+never feels one back. On the instrument the rows sit on the SAME bridge, so
+their own bridge forces load it too — energy returns to the played string,
+and the rows feel each other through the shared termination.
+
+`bow_jt_couple` (0…0.15, `.live`, **0 = byte‑exact**) closes that loop. Each
+row already computes its whole bridge load in the tick: `radScale`·fsum
+(contact) + `pinScale`·Σ(−1)^k·k·q_k (termination) — the pair it radiates.
+Both halves carry the SAME force→radiated factor gout·π/(mu·L·wd1), so ONE
+per‑row reciprocal, `JtTables.rowCplScale` = mu·L·wd1/(gout·π) (load ABI
+`cplScale`), turns that un‑DC‑blocked sum back into NEWTONS — a gain of 1 is
+the row's actual physical load at the calibrated level. The rows' summed
+force joins the played strings' bridge force `F` **before** the body solve,
+so it (a) moves the bridge every played string takes back through its kret
+return, (b) radiates through the body, and (c) lands in the drive record,
+which is what charges every row on the NEXT tick — that last part is the
+row‑to‑row exchange: the web feeds itself through the bridge.
+
+**The lag.** The web is a DEFERRED post‑pass (the worker pool, the async
+dispatcher and the block‑level drive‑FX / sitar‑inject hooks all need the
+whole block's drive before a row ticks), so the return cannot be a single
+sample: the post‑pass holds its summed force per jt tick, emits it per output
+sample into a FIFO, and the NEXT render block pops it into `F`. Same
+no‑algebraic‑loop rule the drive's `jtFprev` follows, one post‑pass block
+out. A dry FIFO fades the held force out rather than parking a DC load on the
+bridge; a fresh arm starts from the writer, never a stale backlog. The gain
+slews ~40 ms in the render loop on `radScaleCur`'s law.
+
+**The range is a MEASURED stability bound.** A 4 s ring after a 1 s bowed
+tonic at CC11 **127** (shipped Pilu bank, serial jt), taraf bus, dB relative
+to the moment of release: 0 → −10 / −16 / −23 / −31 at +1/2/3/4 s; **0.20** →
+−2 / −3 / −1 / −2 (finite, still decaying); **0.22** → −1 / +1 / +4 / +5;
+**0.25** → +3 / +5 / +9 / +11; 0.5 and above overflow to NaN inside 4 s. So
+the loop turns divergent between 0.20 and 0.22, and the registry stops at
+**0.15**. `bow_jt_evolve` 1 (the hot bone) does not move it — 0.15 there
+reads −3.1 / −2.8 / −3.4 / −3.2 dB.
+
+**What it does**, shipped Pilu bank, serial jt, a bowed note at CC11 32 /
+press 0.56 for 0.6 s after a 1.5 s settle, then a 3 s ring (per‑row figures
+from the 0.8 s ring, where the uncoupled rows are still above the scope
+floor):
+
+- **The voice bus stops decaying.** Its level at +0.5 / 1 / 2 s after release,
+  against +0.1 s: Sa **−7.4 / −15.9 / −32.1 dB** at 0 → **−0.7 / −0.8 / −0.9**
+  at 0.02 → **−0.1 / −0.1 / +0.0** at 0.05; a non‑kin note −10.0 / −22.0 /
+  −45.6 → −0.8 / −0.9 / −0.9 → ~0.0. Ring RMS **+14.5 dB** (Sa) / +15.8
+  (non‑kin) at 0.02. Read it honestly: at 0.02 the TARAF bus is unchanged
+  (−0.1 / +0.8 dB), so what fills the voice bus is the web's own bridge force
+  radiating through the body — the physical route `bow_jt_body` fakes. It is
+  not the gut string's own ring lengthening; the two cannot be separated on
+  that bus.
+- **The taraf bus** needs more than 0.02 to move: **−0.1 / +0.8 dB** there,
+  **+18.5 / +17.9 dB** at 0.05, **+20.0 / +19.6 dB** at 0.15.
+- **Per‑row spread** is a REDISTRIBUTION at the bottom and a lift above it:
+  0.02 → **−3.0 … +6.4 dB** (median +0.1) on Sa, −4.4 … +5.4 (median +2.3)
+  non‑kin; 0.05 → +4.1 … +45.0 (median +23.1) / −7.9 … +48.8 (median +19.1);
+  0.15 → +25.7 … +68.8 (median +44.7) / +7.7 … +71.5 (median +47.1), n = 34.
+- **The web bloom is real and it starts between 0.02 and 0.05.** A NON‑KIN
+  note's taraf bus, last ring window against just after release: **−49.7 dB**
+  at 0 (a decaying haze) → −29.1 at 0.02 → **+7.8 dB at 0.05** — the web
+  GROWS through the ring on a note none of its rows are tuned to, which is
+  what row‑to‑row exchange through the bridge is for. Sa reads −40.6 → −29.5
+  → +5.5 dB.
+
+Not baked, deliberately: this is a sound‑design lever and it is judged by
+ear. Above ~0.05 the peak sample runs into the safety limiter (0.37 → 0.89 at
+0.05, → 1.00 at 0.15), so the top of the range is a very long ring, not a
+free setting — pull `bow_jt_gain` / `bow_bal` / `bow_jt_cap` with it.
+
 ### Evolution and register
 
 - **`bow_jt_evolve`** (0…1, `.live`, 0.5 = bit‑exact): the tanpura/sitar
@@ -475,9 +546,15 @@ Improvements proposed for the modal‑jawari rows, in the order worth doing.
    shape is right and the LEVEL is not, under either law: taking it means
    re‑fitting recruitment (`bow_jt_gain` / `bow_jt_norm` / `bow_jt_sel`)
    around it, not flipping the default. A/B it with the knob first.
-3. **Two‑way coupling among the rows.** Feed the rows' summed bridge force
-   back into the bridge so the web blooms physically. Keep the one‑sample
-   lag the drive uses — stability is the risk.
+3. **Two‑way coupling among the rows — shipped as a KNOB, default off.**
+   `bow_jt_couple` (above) feeds the rows' summed bridge force back into `F`
+   one post‑pass block out (the deferred web forbids a literal one‑sample
+   return). Stability WAS the risk: the loop diverges between 0.20 and 0.22
+   at full expression, so the range stops at 0.15. The bloom is real from
+   ~0.05 up — a non‑kin note's taraf GROWS +7.8 dB through a 3 s ring where
+   the uncoupled web falls 49.7 — but so is the level, and the voice bus
+   stops decaying because the web now radiates through the body. Not baked:
+   taking it means re‑fitting levels around it, exactly as with item 2.
 4. **Bone profile.** A real jawari is an asymmetric arc with a gentler slope
    toward the nut, lengthening the cascade rather than deepening it.
    Build‑time table, cheap to try.

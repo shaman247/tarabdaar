@@ -55,6 +55,12 @@ public struct JtTables: Sendable {
     /// tick adds Σ_k (−1)^k·k·q_k straight into the radiated sample. Load-ABI
     /// `pinScale`, beside `radScale`.
     public var rowPinScale: [Double] = []
+    /// TWO-WAY COUPLING unit match, mu·L·wd1/(gout·π): the reciprocal of the
+    /// force→radiated factor `rowForceScale` and `rowPinScale` SHARE, so the
+    /// tick's un-DC-blocked radiated sum converts back to the row's physical
+    /// bridge force in NEWTONS. Load-ABI `cplScale`; a silent row (gout 0)
+    /// gets 0. Only `bow_jt_couple` reads it.
+    public var rowCplScale: [Double] = []
     /// One-pole tone-LP coefficient on the radiated jt sum (`bow_jt_lp`;
     /// 0 = bypass). Applied via bow_jt_set_lp — not part of the load ABI.
     public var lpA: Double = 0
@@ -291,6 +297,13 @@ public enum BowTables {
             // gout·π/(mu·L·wd1) (the same law without the density spacing
             // wj) it collapses to gout·amp2·wd1 per row.
             T.rowPinScale.append(gout * amp2 * wd[0])
+            // TWO-WAY COUPLING: undo the shared force→radiated factor
+            // gout·π/(mu·L·wd1) so the kernel's summed radiated force reads
+            // back in newtons — a couple gain of 1 is then the row's own
+            // physical load on the bridge at the calibrated level.
+            T.rowCplScale.append(gout > 1e-12
+                                 ? mu * L * wd[0] / (gout * Double.pi)
+                                 : 0.0)
             // static wrap q0 (fixed-point, 300 iterations)
             var q0 = [Double](repeating: 0, count: M)
             for _ in 0..<300 {

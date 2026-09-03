@@ -21,6 +21,10 @@
 #endif
 
 #define MAXBOW 4096
+/* async jt ring sizes (also the two-way-coupling FIFO's) */
+#define JT_ABLK 4096
+#define JT_ARING 8
+#define JT_WEBN 32768
 
 static double pfrac_read(const double *buf, int n, int w, double delay) {
     double rp = (double)w - delay;
@@ -179,6 +183,26 @@ typedef struct {
        scale zippers, `ZipperTests`' fast flick). Constant scale: cur ==
        target exactly, bit-null. */
     double *jtRadPinScale, *jtRadPinScaleCur;
+    /* TWO-WAY BRIDGE COUPLING (`bow_jt_couple`): the rows load the SAME
+       bridge the played strings do, so their summed bridge force returns
+       into F. jtCplScale[s] undoes the per-row force->radiated unit match
+       (mu*L*wd1/(gout*pi) — the shared factor of BOTH radScale and pinScale),
+       so the summed, un-DC-blocked radiated sum comes back in NEWTONS and a
+       gain of 1 is the physical load. The web is a DEFERRED post-pass, so
+       the return rides a FIFO: the post-pass holds the force per jt tick and
+       emits it per output sample; the NEXT block's render loop adds
+       jtCplCur * it to F, ahead of the body solve and of the drive record —
+       so the rows also feel each other through the bridge on the next tick,
+       exactly the lag law the drive's jtFprev uses, one post-pass block out.
+       jtCplG 0 with a rested cur = the exact uncoupled render, byte-null. */
+    double *jtCplScale;               /* per-row radiated-sum -> newtons */
+    double jtCplG, jtCplCur, jtCplA;  /* target / slewed (~40 ms) / coef */
+    int jtCplOn;                      /* target or cur non-zero */
+    double jtCplHold;                 /* post-pass: force held per jt tick */
+    double *jtCplRing;                /* FIFO, post-pass -> render thread */
+    long long jtCplW, jtCplR;
+    double jtCplOut;                  /* render-side last value (dry fade) */
+    double *jtHpC;                    /* pool partial sums, coupling */
     /* QUIESCENCE GATE (bow_jt_gate): the idle-CPU gate. Armed (jtGateRef > 0 =
        floor DISPLACEMENT in meters): a row whose peak LOW-MODE momentum stays
        below jtGateRef·wd1 for jtGateHold ticks with no bridge or drone drive
@@ -824,7 +848,8 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
                  const double *ca, const double *cb,
                  const double *ca4, const double *cb4,
                  const double *wd, const double *radScale,
-                 const double *pinScale, const double *phiD,
+                 const double *pinScale, const double *cplScale,
+                 const double *phiD,
                  const double *phiDT,
                  const double *phiU, const double *phiF,
                  const double *b, const double *G, const double *G4,
@@ -909,6 +934,16 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     /* termination (pin) force: the builder's per-row unit match, permanent */
     st->jtRadPinScale = pdup_d(pinScale, njt);
     st->jtRadPinScaleCur = pdup_d(pinScale, njt);
+    /* two-way bridge coupling: the per-row reciprocal of the SHARED
+       force->radiated factor of radScale/pinScale, so the tick's un-blocked
+       sum reads in newtons. Off (byte-null) until bow_poly_jt_set_couple. */
+    st->jtCplScale = pdup_d(cplScale, njt);
+    st->jtCplG = 0.0; st->jtCplCur = 0.0; st->jtCplOn = 0;
+    st->jtCplHold = 0.0; st->jtCplOut = 0.0;
+    st->jtCplW = 0; st->jtCplR = 0;
+    st->jtCplA = 1.0 - exp(-1.0 / (0.040 * st->sr));
+    if (!st->jtCplRing)
+        st->jtCplRing = (double *)calloc(JT_WEBN, sizeof(double));
     /* quiescence gate: off (byte-null until bow_poly_jt_set_gate) */
     st->jtGateFdEps = (double *)calloc(njt, sizeof(double));
     st->jtGateCnt = (int *)calloc(njt, sizeof(int));
@@ -1316,7 +1351,8 @@ static inline double cap_gain_step(const bow_poly_state_t *st, double cap,
    + shared read-only tables; penmax accumulates locally). cap = this
    tick's row ceiling (jt_cap_ceiling), < 0 = off, cap state untouched. */
 static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
-                             double ev, double cap, double *penmax)
+                             double ev, double cap, double *penmax,
+                             double *cplOut)
 {
     const int J = st->jtJ;
     const double dtj = (double)st->jtDiv / st->sr;
@@ -1546,6 +1582,10 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             }
             fr += ps * sp;
         }
+        /* TWO-WAY COUPLING pickup: the row's own bridge force in newtons,
+           BEFORE the DC blocker and before the output cap (both are
+           radiation-side, not physics). */
+        if (cplOut) *cplOut += st->jtCplScale[s] * fr;
         double lp = st->jtRadLp[s];
         if (st->jtRadPrime[s]) { lp = fr; st->jtRadPrime[s] = 0; }
         lp += st->jtRadA * (fr - lp);
@@ -1597,23 +1637,26 @@ static inline double jt_cap_ceiling(const bow_poly_state_t *st, double venv)
 /* sideOut (nullable): accumulates the pan-weighted row sum for the stereo side
    path */
 static double jt_tick(bow_poly_state_t *st, double Fd, double ev,
-                      double cap, double *sideOut)
+                      double cap, double *sideOut, double *cplOut)
 {
     double jrad = 0.0;
     double pen = st->jtPenMax;
+    double cpl = 0.0;
+    double *cp = cplOut ? &cpl : NULL;
     if (sideOut && st->stJtPan) {
         double side = 0.0;
         for (int s = 0; s < st->njt; s++) {
-            double y = jt_tick_string(st, s, Fd, ev, cap, &pen);
+            double y = jt_tick_string(st, s, Fd, ev, cap, &pen, cp);
             jrad += y;
             side += st->stJtPan[s] * y;
         }
         *sideOut = side;
     } else {
         for (int s = 0; s < st->njt; s++)
-            jrad += jt_tick_string(st, s, Fd, ev, cap, &pen);
+            jrad += jt_tick_string(st, s, Fd, ev, cap, &pen, cp);
         if (sideOut) *sideOut = 0.0;
     }
+    if (cplOut) *cplOut = cpl;
     st->jtPenMax = pen;
     return jrad;
 }
@@ -1650,11 +1693,15 @@ static void *jt_pool_run(void *va)
         /* stereo: pan-weighted side partials ride a second accumulator row */
         double *hpS = (st->stOn && st->jtHpS && st->stJtPan)
             ? st->jtHpS + (size_t)idx * JT_POOL_CH : NULL;
+        /* two-way coupling: a second partial-sum row, in newtons */
+        double *hpC = (st->jtCplOn && st->jtHpC)
+            ? st->jtHpC + (size_t)idx * JT_POOL_CH : NULL;
         for (int s = s0; s < s1; s++) {
             const double pn = hpS ? st->stJtPan[s] : 0.0;
             for (int k = 0; k < nT; k++) {
                 double y = jt_tick_string(st, s, fd[k], evv[k],
-                                          capv[k], &pen);
+                                          capv[k], &pen,
+                                          hpC ? hpC + k : NULL);
                 hp[k] += y;
                 if (hpS) hpS[k] += pn * y;
             }
@@ -1712,6 +1759,7 @@ void bow_poly_jt_set_threads(void *vst, int nth)
         st->jtTkv = (int *)malloc(sizeof(int) * JT_POOL_CH);
         st->jtHp = (double *)malloc(sizeof(double) * 16 * JT_POOL_CH);
         st->jtHpS = (double *)malloc(sizeof(double) * 16 * JT_POOL_CH);
+        st->jtHpC = (double *)malloc(sizeof(double) * 16 * JT_POOL_CH);
         st->jtWebScr = (double *)malloc(sizeof(double) * JT_POOL_CH);
         st->jtWebScrS = (double *)malloc(sizeof(double) * JT_POOL_CH);
     }
@@ -1726,9 +1774,6 @@ void bow_poly_jt_set_threads(void *vst, int nth)
 }
 
 /* ---- async one-block-late jt (LIVE): dispatcher machinery ---- */
-#define JT_ABLK 4096
-#define JT_ARING 8
-#define JT_WEBN 32768
 
 /* Install the jt-drive FX hook OFF the audio thread; NULL fn = byte-null.
    Context is stored first so a non-NULL fn never sees a stale ctx. */
@@ -1810,6 +1855,19 @@ void bow_poly_jt_set_drive_term(void *vst, double w)
 
 /* jt BODY radiation mix 0..1 — plain scalar store, any thread, slewed
    ~30 ms at the kernel rate; never calling it is byte-null. */
+/* TWO-WAY BRIDGE COUPLING gain (`bow_jt_couple`): how much of the rows'
+   own summed bridge force (newtons) returns into the played strings' F.
+   Control-thread scalar; the render loop slews it ~40 ms and reads the
+   post-pass FIFO one block back. 0 with a rested slew = byte-null. */
+void bow_poly_jt_set_couple(void *vst, double g)
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (!st) return;
+    if (g < 0.0) g = 0.0;
+    if (g > 4.0) g = 4.0;
+    st->jtCplG = g;
+}
+
 void bow_poly_jt_set_body(void *vst, double mix)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
@@ -2309,6 +2367,7 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
               const double *ca, const double *cb,
               const double *ca4, const double *cb4, const double *wd,
               const double *radScale, const double *pinScale,
+              const double *cplScale,
               const double *phiD, const double *phiDT,
               const double *phiU, const double *phiF,
               const double *b, const double *G, const double *G4,
@@ -2317,6 +2376,7 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     if (!st || njt != st->njt || J != st->jtJ || njt <= 0) return 0;
     if (!M || !ca || !cb || !ca4 || !cb4 || !wd || !radScale || !pinScale
+        || !cplScale
         || !phiD || !phiDT || !phiU || !phiF || !b || !G || !G4 || !gd || !gd4
         || !phys) return 0;
     int mtot = 0, ztot = 0;
@@ -2336,6 +2396,7 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
     for (int s = 0; s < njt; s++) {
         st->jtRadScale[s] = radScale[s];
         st->jtRadPinScale[s] = pinScale[s];
+        st->jtCplScale[s] = cplScale[s];
     }
     for (int i = 0; i < ztot; i++) {
         st->jtPhiU[i] = (float)phiU[i];
@@ -2362,6 +2423,14 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
         st->jtTrkTick = 1;
     }
     return 1;
+}
+
+/* TWO-WAY COUPLING FIFO: the post-pass emits ONE bridge-force sample (N)
+   per output sample; the next render block pops them into F. Armed only —
+   an unarmed web never touches the ring. */
+static inline void jt_cpl_put(bow_poly_state_t *st, long long *w, double v)
+{
+    if (st->jtCplRing) st->jtCplRing[(*w)++ & (JT_WEBN - 1)] = v;
 }
 
 /* run one drive job to a web-signal buffer: schedule + pool (blocking is
@@ -2394,23 +2463,31 @@ static void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
         if (-F > st->jtFmax) st->jtFmax = -F;
     }
     if (nT == 0) {
+        long long cw = st->jtCplW;
         for (int t = 0; t < n; t++) {
             const double g = jt_gain_step(st);
             web[t] = g * jt_lp_step(st, st->jtHold);
             if (webS)
                 webS[t] = g * jt_lp_stepS(st, st->jtHoldS);
+            if (st->jtCplOn) jt_cpl_put(st, &cw, st->jtCplHold);
         }
+        if (st->jtCplOn)
+            __atomic_store_n(&st->jtCplW, cw, __ATOMIC_RELEASE);
         return;
     }
     const int nth = st->jtPoolN;
     if (nth >= 2) {
         double *hp = st->jtHp;
         double *hpS = webS ? st->jtHpS : NULL;
+        double *hpC = (st->jtCplOn && st->jtHpC) ? st->jtHpC : NULL;
         for (int th = 0; th < nth; th++) {
             memset(hp + (size_t)th * JT_POOL_CH, 0,
                    sizeof(double) * (size_t)nT);
             if (hpS)
                 memset(hpS + (size_t)th * JT_POOL_CH, 0,
+                       sizeof(double) * (size_t)nT);
+            if (hpC)
+                memset(hpC + (size_t)th * JT_POOL_CH, 0,
                        sizeof(double) * (size_t)nT);
             st->jtWPen[th] = st->jtPenMax;
         }
@@ -2427,44 +2504,61 @@ static void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
             if (st->jtWPen[th] > st->jtPenMax)
                 st->jtPenMax = st->jtWPen[th];
         double hold = st->jtHold, holdS = st->jtHoldS;
+        double holdC = st->jtCplHold;
+        long long cw = st->jtCplW;
         int ki = 0;
         for (int t = 0; t < n; t++) {
             if (ki < nT && t == tkv[ki]) {
-                double H = 0.0, HS = 0.0;
+                double H = 0.0, HS = 0.0, HC = 0.0;
                 for (int th = 0; th < nth; th++) {
                     H += hp[(size_t)th * JT_POOL_CH + ki];
                     if (hpS)
                         HS += hpS[(size_t)th * JT_POOL_CH + ki];
+                    if (hpC)
+                        HC += hpC[(size_t)th * JT_POOL_CH + ki];
                 }
                 hold = H;
                 holdS = HS;
+                if (hpC) holdC = HC;
                 ki++;
             }
             const double g = jt_gain_step(st);
             web[t] = g * jt_lp_step(st, hold);
             if (webS)
                 webS[t] = g * jt_lp_stepS(st, holdS);
+            if (st->jtCplOn) jt_cpl_put(st, &cw, holdC);
         }
         st->jtHold = hold;
         st->jtHoldS = holdS;
+        st->jtCplHold = holdC;
+        if (st->jtCplOn)
+            __atomic_store_n(&st->jtCplW, cw, __ATOMIC_RELEASE);
     } else {
         double hold = st->jtHold, holdS = st->jtHoldS;
+        double holdC = st->jtCplHold;
+        long long cw = st->jtCplW;
         int ki = 0;
         for (int t = 0; t < n; t++) {
             if (ki < nT && t == tkv[ki]) {
-                double sacc = 0.0;
+                double sacc = 0.0, cacc = 0.0;
                 hold = jt_tick(st, fdv[ki], evv[ki], capv[ki],
-                               webS ? &sacc : NULL);
+                               webS ? &sacc : NULL,
+                               st->jtCplOn ? &cacc : NULL);
                 if (webS) holdS = sacc;
+                if (st->jtCplOn) holdC = cacc;
                 ki++;
             }
             const double g = jt_gain_step(st);
             web[t] = g * jt_lp_step(st, hold);
             if (webS)
                 webS[t] = g * jt_lp_stepS(st, holdS);
+            if (st->jtCplOn) jt_cpl_put(st, &cw, holdC);
         }
         st->jtHold = hold;
         st->jtHoldS = holdS;
+        st->jtCplHold = holdC;
+        if (st->jtCplOn)
+            __atomic_store_n(&st->jtCplW, cw, __ATOMIC_RELEASE);
     }
 }
 
@@ -2753,6 +2847,39 @@ void bow_poly_process3(void *vst, int n, int stride,
     double pkArr[64], rdmpArr[64], gkArr[64];
     for (int i = 0; i < nProc; i++) pkArr[i] = 0.0;
 
+    /* ---- TWO-WAY BRIDGE COUPLING: pop the previous post-pass block's
+       summed row bridge force. Arm/disarm on the target plus the resting
+       slew, so a rested 0 never touches F or the FIFO. ---- */
+    const double *cplRing = NULL;
+    long long cplRR = 0;
+    int cplTake = 0;
+    if (st->jtCplG != 0.0 || st->jtCplCur != 0.0) {
+        if (!st->jtCplOn) {
+            /* fresh arm: start from the writer, never from a stale backlog */
+            st->jtCplR = __atomic_load_n(&st->jtCplW, __ATOMIC_ACQUIRE);
+            st->jtCplOut = 0.0;
+            st->jtCplOn = 1;
+        }
+        if (st->jtCplRing) {
+            long long ww = __atomic_load_n(&st->jtCplW, __ATOMIC_ACQUIRE);
+            cplRR = st->jtCplR;
+            long long avail = ww - cplRR;
+            if (avail > JT_WEBN / 2) {      /* gross backlog: realign */
+                cplRR = ww - n;
+                avail = n;
+            }
+            if (avail < 0) avail = 0;
+            cplTake = avail < (long long)n ? (int)avail : n;
+            cplRing = st->jtCplRing;
+        }
+    } else if (st->jtCplOn) {
+        st->jtCplOn = 0;
+        st->jtCplCur = 0.0;
+        st->jtCplOut = 0.0;
+        st->jtCplHold = 0.0;
+    }
+    const int cplOn = st->jtCplOn;
+
     /* drive record for the deferred jt post-pass: async mode records into a
        dispatcher ring slot; sync mode uses the preallocated buffer or
        mallocs */
@@ -2807,6 +2934,26 @@ void bow_poly_process3(void *vst, int n, int stride,
         /* ---- additive voice force (shared path, zeros live) ---- */
         st->pLp = (1.0 - pA) * xv[t] + pA * st->pLp;
         F += pgain * st->pLp;
+        /* ---- TWO-WAY COUPLING return: the rows' own bridge force joins F
+           BEFORE the body solve (so it moves the bridge the played strings
+           take back through kret) and before the drive record (so the rows
+           feel each other through the bridge next tick). ---- */
+        if (cplOn) {
+            double c;
+            if (t < cplTake) {
+                c = cplRing[(cplRR + t) & (JT_WEBN - 1)];
+            } else {
+                /* FIFO dry (async behind, or the web not running): fade the
+                   held force out rather than park a DC load on the bridge */
+                c = st->jtCplOut * 0.9995;
+            }
+            st->jtCplOut = c;
+            double gc = st->jtCplCur
+                + st->jtCplA * (st->jtCplG - st->jtCplCur);
+            if (st->jtCplG == 0.0 && gc < 1e-12 && gc > -1e-12) gc = 0.0;
+            st->jtCplCur = gc;
+            F += gc * c;
+        }
         /* ---- body: admittance V + radiation ---- */
         st->hpY = hpG * (F - st->hpX1) + dcRho * st->hpY;
         st->hpX1 = F;
@@ -2852,6 +2999,7 @@ void bow_poly_process3(void *vst, int n, int stride,
             jtCv[t] = e;
         }
     }
+    if (cplOn) st->jtCplR = cplRR + cplTake;
     /* ring envelopes → next chunk's skip decision */
     for (int i = 0; i < nProc; i++) {
         bow_pstring_t *S = &st->strs[st->proc[i]];
@@ -2937,6 +3085,7 @@ void bow_poly_process3(void *vst, int n, int stride,
                branch — that one scans the whole job before it walks the
                output, so every jt_cap_ceiling would read jtGMulCur from
                before the block's jt_lp_step slews it. */
+            long long cw = st->jtCplW;
             for (int t = 0; t < n; t++) {
                 double F = jtFr[t];
                 st->jtFdc += 2e-4 * (F - st->jtFdc);
@@ -2944,14 +3093,17 @@ void bow_poly_process3(void *vst, int n, int stride,
                 if (++st->jtPhase >= st->jtDiv) {
                     double Fd = st->jtFacc / st->jtDiv;
                     st->jtFacc = 0.0; st->jtPhase = 0;
-                    double sacc = 0.0;
+                    double sacc = 0.0, cacc = 0.0;
                     const double cap = jt_cap_ceiling(st, jtCv[t]);
                     st->jtHold = jt_tick(st, st->jtFprev * st->jtDrv,
                                          jt_ev_step(st), cap,
-                                         stOn ? &sacc : NULL);
+                                         stOn ? &sacc : NULL,
+                                         st->jtCplOn ? &cacc : NULL);
                     if (stOn) st->jtHoldS = sacc;
+                    if (st->jtCplOn) st->jtCplHold = cacc;
                     st->jtFprev = Fd;
                 }
+                if (st->jtCplOn) jt_cpl_put(st, &cw, st->jtCplHold);
                 const double g = jt_gain_step(st);
                 double jv = g * jt_lp_step(st, st->jtHold);
                 jo[t] += jv;
@@ -2964,6 +3116,8 @@ void bow_poly_process3(void *vst, int n, int stride,
                 if (F > st->jtFmax) st->jtFmax = F;
                 if (-F > st->jtFmax) st->jtFmax = -F;
             }
+            if (st->jtCplOn)
+                __atomic_store_n(&st->jtCplW, cw, __ATOMIC_RELEASE);
         } else {
             /* pooled: the dispatcher's own job runner, one JT_POOL_CH chunk
                at a time into the web scratch, then the shared output walk */
@@ -3024,7 +3178,7 @@ void bow_poly_free(void *vst)
         }
         free(st->jtFrBuf); free(st->jtFdv); free(st->jtTkv);
         free(st->jtEvV);
-        free(st->jtHp); free(st->jtHpS);
+        free(st->jtHp); free(st->jtHpS); free(st->jtHpC);
         free(st->jtWebScr); free(st->jtWebScrS);
         free(st->sjRing);
         free(st->jtDrvRing); free(st->jtWebRing);
@@ -3044,6 +3198,7 @@ void bow_poly_free(void *vst)
         free(st->scopeEnv); free(st->scopeMode); free(st->scopeCnt);
         free(st->jtRadScale); free(st->jtRadScaleCur); free(st->jtRadLp);
         free(st->jtRadPinScale); free(st->jtRadPinScaleCur);
+        free(st->jtCplScale); free(st->jtCplRing);
         free(st->jtRadPrime);
         free(st->jtGateFdEps); free(st->jtGateCnt); free(st->jtGateSlp);
         free(st->jtDwTgt); free(st->jtDwCur);

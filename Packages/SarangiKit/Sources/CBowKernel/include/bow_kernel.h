@@ -62,6 +62,10 @@ int bow_poly_active(const void *vst, int b);
      radScale[njt]   per-row contact force → radiated velocity
      pinScale[njt]   per-row TERMINATION (pin) force → the same units
                      (radiated beside the contact force, always)
+     cplScale[njt]   TWO-WAY COUPLING unit match: the reciprocal of the
+                     factor radScale and pinScale SHARE, mu·L·wd1/(gout·π),
+                     so the row's un-DC-blocked radiated sum reads back in
+                     NEWTONS for jt_set_couple
      phiD            ΣM    bridge-force drive tap per mode (÷mu, ×drive)
      phiDT           ΣM    the TERMINATION drive shape (∝ (−1)^k·k,
                      ENERGY-matched per row to the tap: Σ phiDT² == Σ phiD²),
@@ -72,7 +76,7 @@ int bow_poly_active(const void *vst, int b);
      gd gd4          ΣJ    its diagonals
      phys[7]         kc, alpha, hcB, deep, gain, drive, div
      q0              ΣM    static-wrap modal displacement at rest */
-void bow_poly_jt_load(void *vst, int njt, int J, const int *M, const double *ca, const double *cb, const double *ca4, const double *cb4, const double *wd, const double *radScale, const double *pinScale, const double *phiD, const double *phiDT, const double *phiU, const double *phiF, const double *b, const double *G, const double *G4, const double *gd, const double *gd4, const double *phys, const double *q0);
+void bow_poly_jt_load(void *vst, int njt, int J, const int *M, const double *ca, const double *cb, const double *ca4, const double *cb4, const double *wd, const double *radScale, const double *pinScale, const double *cplScale, const double *phiD, const double *phiDT, const double *phiU, const double *phiF, const double *b, const double *G, const double *G4, const double *gd, const double *gd4, const double *phys, const double *q0);
 
 /* Persistent jt worker pool for the deferred post-pass (off the audio
    thread); nth < 2 = serial. */
@@ -148,6 +152,18 @@ void bow_poly_jt_set_hp(void *vst, double a);
    Drone-setter contract, slewed ~30 ms; never calling it is byte-null. */
 void bow_poly_jt_set_body(void *vst, double mix);
 
+/* TWO-WAY BRIDGE COUPLING gain (`bow_jt_couple`, 0 = byte-null): the rows
+   load the SAME bridge the played strings do, so their summed bridge force
+   (contact + termination, un-DC-blocked, converted to newtons by cplScale)
+   is added back into the played strings' bridge force F — which drives the
+   body, returns to every played string through kret, AND is what the next
+   jt tick's drive is taken from, so the rows also exchange energy with each
+   other through the bridge. The web is a deferred post-pass, so the return
+   rides a FIFO one post-pass block back — the drive's own one-tick lag law
+   at block granularity; there is no algebraic loop either way. Slewed
+   ~40 ms in the render loop. Control-thread scalar. */
+void bow_poly_jt_set_couple(void *vst, double g);
+
 /* TERMINATION DRIVE morph 0..1 (`bow_jt_drive_term`): where the played
    string's bridge force enters each row — 0 = the fitted 0.90 L tap (phiD,
    which carries a |sin(kπ·0.9)| comb: modes 10/20 never charge), 1 = the
@@ -201,6 +217,7 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
                            const double *ca4, const double *cb4,
                            const double *wd, const double *radScale,
                            const double *pinScale,
+                           const double *cplScale,
                            const double *phiD, const double *phiDT,
                            const double *phiU,
                            const double *phiF, const double *b,
