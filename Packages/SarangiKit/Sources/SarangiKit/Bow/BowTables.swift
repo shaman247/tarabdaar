@@ -1,33 +1,22 @@
 import Foundation
 
 /// The complete marshaled input set of the C bow kernel, in C-signature
-/// order: the per-voice comb-string columns (the bridge-coupling web; empty
-/// when `bow_cpl_z` is 0), the 5 modal-body arrays and the 66 scalars.
+/// order: the 5 modal-body arrays and the 62 scalars. (The per-voice
+/// comb-string columns are gone with the kernel's comb bank — nothing ever
+/// built a voice.)
 public struct BowKernelTables: Sendable {
     public var sr: Double
-    public var L: [Int32]
-    // per-voice columns (order of the C call): cs cp w0..w4 g lpA wout kap
-    // alphaw jw jl jn chg zdrv zi twt
-    public var cs: [Double] = [], cp: [Double] = []
-    public var w0: [Double] = [], w1: [Double] = [], w2: [Double] = []
-    public var w3: [Double] = [], w4: [Double] = []
-    public var g: [Double] = [], lpA: [Double] = [], wout: [Double] = []
-    public var kap: [Double] = [], alphaw: [Double] = []
-    public var jw: [Double] = [], jl: [Double] = [], jn: [Double] = []
-    public var chg: [Double] = [], zdrv: [Double] = [], zi: [Double] = []
-    public var twt: [Double] = []
     // body modal sections
     public var ba1: [Double] = [], ba2: [Double] = [], bn0: [Double] = []
     public var bA: [Double] = [], bC: [Double] = []
-    /// The 66 per-sample scalars, in the order of `bow_poly_init`'s
+    /// The 62 per-sample scalars, in the order of `bow_poly_init`'s
     /// signature (bow_kernel.h).
     public var scalars: [Double] = []
     /// Modal-jawari table block — nil = no taraf (byte-null, never loaded).
     public var jt: JtTables? = nil
 
-    public init(sr: Double, L: [Int32] = []) {
+    public init(sr: Double) {
         self.sr = sr
-        self.L = L
     }
 }
 
@@ -110,16 +99,13 @@ public enum BowTables {
     }
 
     /// The chromatic bridge's resting values (used when no `bow_jtc_*` key
-    /// is set) — the raga bridge's shipped numbers, so at rest both bridges
-    /// are the same jawari. The registry's `bow_jtc_*` defaults MUST equal
-    /// these (`TarabSetTests`): the artifact never carries the keys.
+    /// is set). Only the three knobs that genuinely differ per bank exist —
+    /// level, level norm and evolution; the contact GEOMETRY is derived from
+    /// the raga bridge's `bow_jt_*` values, so at rest both bridges are the
+    /// same jawari. The registry's `bow_jtc_*` defaults MUST equal these
+    /// (`TarabSetTests`): the artifact never carries the keys.
     public static let chromaticBridgeDefaults: [String: Double] = [
-        "bow_jtc_gain": 0.3, "bow_jtc_drive": 0.03,
-        "bow_jtc_apex": 1.0e-5, "bow_jtc_zone": 0.006,
-        "bow_jtc_radius": 0.3,
-        "bow_jtc_alpha": 1.3, "bow_jtc_hcb": 8.0,
-        "bow_jtc_norm": 0.0, "bow_jtc_fhf": 4000.0,
-        "bow_jtc_bst": 2.0e-4, "bow_jtc_evolve": 0.5,
+        "bow_jtc_gain": 0.3, "bow_jtc_norm": 0.0, "bow_jtc_evolve": 0.5,
     ]
 
     /// MODAL-JAWARI tables for the taraf rows. Keep every literal and the
@@ -130,9 +116,10 @@ public enum BowTables {
     /// kernel only TRIMS the active count as the pitch rises.
     ///
     /// `chromatic` (index-aligned with `rows`; nil = all raga): flagged rows
-    /// are built with the CHROMATIC bridge's geometry, damping and contact
-    /// law (`bow_jtc_*`), their level/drive baked into the row taps as
-    /// ratios against the raga bridge's global `phys` gain/drive.
+    /// share the raga bridge's geometry, damping and contact law and carry
+    /// their own level (`bow_jtc_gain`) and t60 normalization
+    /// (`bow_jtc_norm`), the level baked into the row taps as a ratio
+    /// against the raga bridge's global `phys` gain.
     public static func buildJawariTables(
         rows: [(f: Double, gain: Double, t60: Double)],
         srk: Double, bp: BowParams,
@@ -158,17 +145,15 @@ public enum BowTables {
         let div = max(1, Int(bp.v("bow_jt_div", 1.0) + 0.5))
         let normR = bp.v("bow_jt_norm", 0.0)
         let bstR = bp.v("bow_jt_bst", 2.0e-4)
-        // the chromatic bridge's own values (see chromaticBridgeDefaults)
+        // the chromatic bridge's own values (see chromaticBridgeDefaults);
+        // its contact geometry is DERIVED from the raga bridge's
         func cv(_ k: String) -> Double { bp.v(k, chromaticBridgeDefaults[k] ?? 0.0) }
         let hasChrom = chromatic?.contains(true) ?? false
-        let zoneWC = cv("bow_jtc_zone"), radiusC = cv("bow_jtc_radius")
-        let apexC = cv("bow_jtc_apex"), alphaC = cv("bow_jtc_alpha")
-        let hcBC = cv("bow_jtc_hcb"), fHfC = cv("bow_jtc_fhf")
-        let normC = cv("bow_jtc_norm"), bstC = cv("bow_jtc_bst")
-        // chromatic level/drive as ratios against the global (raga) phys
-        // scalars — a silenced raga bridge silences the chromatic set too
+        let normC = cv("bow_jtc_norm")
+        // chromatic level as a ratio against the global (raga) phys gain —
+        // a silenced raga bridge silences the chromatic set too
         let gainMulC = gain > 1e-12 ? cv("bow_jtc_gain") / gain : 0.0
-        let driveMulC = drive > 1e-12 ? cv("bow_jtc_drive") / drive : 0.0
+        let driveMulC = 1.0
         let rW = 2.0e-4
         let mu = Double.pi * rW * rW * 7850.0
         let dt = Double(div) / srk
@@ -179,22 +164,22 @@ public enum BowTables {
         T.apexRef = apexR
         for (ri, row) in rows.enumerated() {
             let chrom = chromatic.map { $0.indices.contains(ri) && $0[ri] } ?? false
-            let zoneW = chrom ? zoneWC : zoneWR
-            let radius = chrom ? radiusC : radiusR
-            let apex = chrom ? apexC : apexR
-            let alpha = chrom ? alphaC : alphaR
-            let fHf = chrom ? fHfC : fHfR
+            let zoneW = zoneWR
+            let radius = radiusR
+            let apex = apexR
+            let alpha = alphaR
+            let fHf = fHfR
             let norm = chrom ? normC : normR
             T.rowChromatic.append(chrom)
             T.rowApex.append(apex)
             T.rowAlpha.append(alpha)
-            T.rowHcB.append(chrom ? hcBC : hcBR)
+            T.rowHcB.append(hcBR)
             let f0s = row.f
             T.rowFreqs.append(f0s)
             let L = min(0.30, max(0.08, 0.25 * 296.0 / f0s))
             let fx = min(fmax, 0.42 * srk / Double(div))
             let M = max(16, min(mcap, Int(fx / f0s)))
-            let bst = chrom ? bstC : bstR
+            let bst = bstR
             var w0 = [Double](repeating: 0, count: M)
             var wd = [Double](repeating: 0, count: M)
             for k in 0..<M {
@@ -305,30 +290,6 @@ public enum BowTables {
         return T
     }
 
-    // Bridge-coupling comb-string loop law (used by buildOpenString).
-    static let dampFRef = 110.0            // damping reference frequency (Hz)
-
-    /// (L, eta, c, s, g, D) of a comb string loop at the KERNEL rate.
-    static func webLoopCoeffs(f0: Double, t60: Double, sr: Double,
-                              inharm: Double, damp: Double)
-        -> (L: Int, eta: Double, c: Double, s: Double, g: Double, D: Double) {
-        let c = -min(max(inharm, 0.0), 0.6)
-        let q = min(0.2499999, 0.25 * min(max(damp, 0.0), 1.0) * dampFRef / f0)
-        let s = 0.5 * (1.0 - (1.0 - 4.0 * q).squareRoot())
-        let D = sr / f0 - (1.0 - c) / (1.0 + c) - 2.0 * s
-        let L = max(2, Int(floor(D - 0.5)))
-        let d = D - Double(L)
-        let eta = (1.0 - d) / (1.0 + d)
-        var g = min(0.99985, pow(10.0, -3.0 * D / (max(t60, 0.05) * sr)))
-        if s > 0.0 {
-            let w0 = 2.0 * Double.pi * f0 / sr
-            let fMag = (1.0 - s) * (1.0 - s) + s * s
-                + 2.0 * s * (1.0 - s) * cos(w0)
-            g = min(0.99985, min(g / fMag, pow(10.0, -3.0 * D / (32.0 * sr))))
-        }
-        return (L, eta, c, s, g, D)
-    }
-
     /// THE PLAYED STRING's kernel tables: the friction waveguide + a FORMULA
     /// MODAL BODY (K analytic modes: air resonance at bow_body_air_ratio ×
     /// the open string, plate modes above with constant-per-Hz density +
@@ -338,61 +299,9 @@ public enum BowTables {
     /// order and the decimal literals — the render hash depends on them.
     /// The sympathetic strings are built by `buildJawariTables`.
     public static func buildOpenString(sr: Double, tonic: Double,
-                                       bp: BowParams,
-                                       taraf: [(f: Double, gain: Double,
-                                                t60: Double)] = [])
+                                       bp: BowParams)
         -> BowKernelTables {
         var t = BowKernelTables(sr: sr)
-        // ---- TARAF BRIDGE-COUPLING web (`bow_cpl_*`): one silent linear
-        // comb per enabled tarab row on the PASSIVE wave junction — a
-        // two-way bridge load (a kin note drains into the row, the stored
-        // energy returns through the junction and radiates through the
-        // BODY). No buzz terms, no direct tap; passive by construction
-        // (g < 1, zi > 0). The jt row is the same string's radiated ring.
-        // `bow_cpl_z` 0 builds nothing — nv 0, passive 0, byte-null.
-        let zC = bp.v("bow_cpl_z", 0.0)
-        let cplRows = taraf.filter { $0.gain > 1e-9 }
-        if !cplRows.isEmpty, zC > 1e-9 {
-            let gMean = cplRows.map(\.gain).reduce(0, +)
-                / Double(cplRows.count)
-            let t60s = bp.v("bow_cpl_t60", 1.0)
-            let inh = bp.v("bow_cpl_inharm", 0.1)
-            let dmp = bp.v("bow_cpl_damp", 0.019)
-            let fcC = min(1400.0 + bp.v("bow_cpl_bright", 0.8) * 6000.0,
-                          0.45 * sr)
-            let lpAC = exp(-2.0 * Double.pi * fcC / sr)
-            for r in cplRows {
-                let t60 = min(max(r.t60, 0.05) * t60s, 8.0)
-                let (L, eta, c, sD, g, _) = webLoopCoeffs(
-                    f0: r.f, t60: t60, sr: sr, inharm: inh, damp: dmp)
-                let c0w = (1.0 - sD) * (1.0 - sD)
-                let c1w = 2.0 * sD * (1.0 - sD)
-                let c2w = sD * sD
-                let p = eta * c
-                let ssum = eta + c
-                t.L.append(Int32(L))
-                t.cs.append(ssum)
-                t.cp.append(p)
-                t.w0.append(p * c0w)
-                t.w1.append(p * c1w + ssum * c0w)
-                t.w2.append(p * c2w + ssum * c1w + c0w)
-                t.w3.append(ssum * c2w + c1w)
-                t.w4.append(c2w)
-                t.g.append(g)
-                t.lpA.append(lpAC)
-                t.wout.append(0.0)         // no direct radiation tap
-                t.kap.append(0.0)          // passive junction: no κ drive
-                t.alphaw.append(0.0)       // no played string in the web
-                let zi = zC * (r.gain / max(gMean, 1e-9))
-                t.zi.append(zi)
-                t.zdrv.append(2.0 * zi / (1.0 - g))
-                t.jw.append(0.0)           // buzz lives in the jt block
-                t.jl.append(0.0)
-                t.jn.append(0.0)
-                t.twt.append(0.0)          // tap weight: silent as a source
-                t.chg.append(0.0)          // cold start
-            }
-        }
         let Z = bp.v("bow_Z", 1.0)
         let dc = exp(-2.0 * Double.pi * 25.0 / sr)     // 25 Hz DC block
         let GOLD = 0.6180339887498949                  // 1/φ jitter sequence
@@ -539,8 +448,8 @@ public enum BowTables {
             1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_lo", 402.0) / sr),
             bp.v("bow_noise_dir", 0.0),
             1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_dir_hi", 6000.0) / sr),
-            t.L.isEmpty ? 0.0 : 1.0,                   // passive junction: armed
-                                                       // only with coupling voices
+            0.0,                                       // RETIRED: passive junction
+                                                       // (no comb voices are built)
             bp.v("bow_gut_g", 1.0),
             bp.v("bow_disp_n", 1.0),
             bp.v("bow_nail_k", 0.0),
@@ -551,14 +460,10 @@ public enum BowTables {
             bp.v("bow_tors_ratio", 5.2),               // torsional loop
             bp.v("bow_tors_g", 0.85),
             bp.v("bow_tors_c", 0.0),                   // 0 = bit-null
-            bp.v("bow_age_a", 0.0),                    // contact aging (0 = bit-null)
-            bp.v("bow_age_ms", 1.5),
             bp.v("bow_v0_fpow", 0.0),                  // Cremer corner rounding
             bp.v("bow_v0_fref", 1.0),
             bp.v("bow_hair_hz", 0.0),                  // hair compliance
             bp.v("bow_hair_ref", 1.0),
-            bp.v("bow_cr_w", 0.0),                     // continuum contact
-            bp.v("bow_cr_ms", 0.0),                    // (0 = bit-null)
             bp.v("bow_jaw_rho", 0.0),                  // jawari collision
             bp.v("bow_jaw_roll", 0.0),                 // rolling contact
             bp.v("bow_jaw_roll_amp", 0.005),

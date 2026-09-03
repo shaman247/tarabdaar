@@ -97,7 +97,7 @@ final class BowedStringEngineTests: XCTestCase {
     func testOpenStringTablesShape() {
         let bp = Self.stringBP()
         let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp)
-        XCTAssertEqual(t.scalars.count, 66)
+        XCTAssertEqual(t.scalars.count, 62)
         XCTAssertEqual(t.ba1.count, 12, "formula body must arm 12 modes")
         XCTAssertEqual(t.scalars[0], 0.08)           // yinf: bridge mobility
         XCTAssertEqual(t.scalars[1], 0.3)            // c0: direct radiation

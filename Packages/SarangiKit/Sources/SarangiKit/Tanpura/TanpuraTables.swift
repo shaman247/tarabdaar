@@ -182,15 +182,11 @@ public enum TanpuraTables {
     }
 
     /// Build one note's tables at the DESIRED `f0Sounding` (the wrap-pull
-    /// `cents` is applied here). `shaping` adjusts modes 3+ before every
-    /// derived table, so rotations, the w bank and the SAV tables agree
-    /// (nil = byte-identical to the exporter). `threadHMul` scales the
-    /// jiva thread height (baked into `b`, so a lift shifts the wrap
-    /// slightly); `hfT60Mul` stretches `t60hf`; 1 = bit-exact for both.
+    /// `cents` is applied here). `threadHMul` scales the jiva thread height
+    /// (baked into `b`, so a lift shifts the wrap slightly); `hfT60Mul`
+    /// stretches `t60hf`; 1 = bit-exact for both.
     public static func buildNote(f0Sounding: Double, cents: Double,
                                  p: TanpuraParams,
-                                 shaping: TanpuraShaping? = nil,
-                                 slotSeed: UInt64 = 0,
                                  threadHMul: Double = 1.0,
                                  hfT60Mul: Double = 1.0) -> TanpuraNoteTables {
         let r = role(for: f0Sounding, in: p)
@@ -232,25 +228,6 @@ public enum TanpuraTables {
             t60[k - 1] = 1.0 / (1.0 / t600
                 + (fk / fhfEff) * (fk / fhfEff)
                     * (1.0 / (t60hfEff * hfT60Mul)))
-        }
-        // per-mode radiated-gain multipliers from `quiet` (nil = all 1)
-        var shapeOutMul: [Double]? = nil
-        if let sh = shaping, sh.isActive, M > 2 {
-            // modes 1–2 pin pitch: shape 3+ only. w0 is at the MOUNT
-            // pitch; measure in SOUNDING space, apply the ratio to w0.
-            let toSounding = pow(2.0, cents / 1200.0)
-            var om = [Double](repeating: 1.0, count: M)
-            var omActive = false
-            for i in 2..<M {
-                let fk = w0[i] / (2.0 * Double.pi) * toSounding
-                let (ratio, t60Mul, outMul) = sh.modeAdjust(
-                    fSounding: fk, mode: i + 1, slotSeed: slotSeed)
-                w0[i] *= ratio
-                t60[i] *= t60Mul
-                om[i] = outMul
-                if outMul != 1.0 { omActive = true }
-            }
-            if omActive { shapeOutMul = om }
         }
         let sig = t60.map { 6.91 / $0 }
         // contact zone
@@ -313,10 +290,6 @@ public enum TanpuraTables {
         for k in 0..<M {
             phiO[k] = (2.0 / L).squareRoot()
                 * sin(Double(k + 1) * Double.pi * xO / L)
-        }
-        // `quiet`: readout-only cut — the modes keep their contact role
-        if let om = shapeOutMul {
-            for k in 0..<M { phiO[k] *= om[k] }
         }
         // Ladder roles radiate only the `p.mF` band — modes above it
         // (mounted for the energy budget) stay silent at the readout.

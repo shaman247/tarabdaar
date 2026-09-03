@@ -21,8 +21,7 @@ fitting history: not present — see `docs/history/`.)
   (roles → per-note modal tables); `TanpuraEngineTests.testTablesLockstepGolden`
   pins it at 1e-9 rel against `Goldens/tanpura_live_golden.json`.
 - `SarangiKit/Tanpura/TanpuraEngine.swift` — slot mounting, pluck / bend /
-  release, the history bank, rendering. `TanpuraShaping.swift` — the
-  scale-shaped overtones.
+  release, the history bank, rendering.
 - `SarangiKit/Resources/tanpura_live.json` — the fitted artifact: roles,
   bridge geometry, polarization, per-note `pitchCents`, the 1025-tap body
   FIR, the room. Output chain: body FIR → `tp_gain` → calibration room
@@ -219,46 +218,12 @@ artifact's thread/bone geometry. If `tanpura_live.json` regenerates with
 different constants, re-measure the graze window per pitch and refresh the
 table in `registerCompThreadMul`.
 
-## Scale-shaped overtones — `tp_shape_*`
-
-The electronic tanpura can bend its overtone cascade toward the raga.
-`TanpuraShaping` applies per mode at table build, inside
-`TanpuraTables.buildNote` between the modal-frequency law and everything
-derived from it (rotations, horizontal bank, SAV response tables all see the
-shaped frequencies):
-
-- **`tp_shape_align`** — retunes each partial toward the nearest scale
-  pitch class (octave-circular, log space): full pull inside an **80 ¢
-  capture window**, smoothstepped to zero by 160 ¢ — harmonic 5 lands on
-  komal ga (~71 ¢), harmonic 7 on n where the scale has one; a partial in a
-  pentatonic gap stays harmonic.
-- **`tp_shape_focus`** — scales each mode's t60 by its **post-retune**
-  proximity to the scale (30 ¢ gaussian, 5% floor). The jawari keeps
-  re-pumping every mode, so the cascade *evolves toward the scale* over the
-  note — not a static EQ.
-- **`tp_shape_quiet`** — scales misaligned partials' output projection
-  `phiO` toward silence (same kernel; 1 = inaudible). **No dynamics
-  change**: the mode still rings and trades energy through the contact
-  (`phi_o` is readout-only). A fader, where focus is a damper.
-- **`tp_shape_spread`** — deterministic per-string/per-mode jitter of the
-  pull fraction (seeded by slot frequency). 0 = identical correction
-  (shared partials lock to 0-beat — can go organ-static); 1 = pulls vary
-  0–100%, restoring slow shimmer. Inert unless align > 0.
-
-**Modes 1–2 are never touched** — they pin the pitch and the `pitchCents`
-calibration. All four default to 0 = byte-identical tables (the lockstep
-golden runs the nil path). An edit schedules the **debounced (750 ms) full
-rebuild** (generation-guarded, held drones re-pluck; the startup push and
-spread-alone edits schedule nothing). Bends transpose a shaped mount rigidly
-(`tanpura_bend` is one ratio across modes), so alignment strictly holds at
-the mount pitch — the feature's home is the drone.
-
 ## Parameters and presets
 
 The **"Tanpura" registry group** — all registry-`.live`
 (`AudioEngine.setTanpuraParam` via the `tp_` branch of
 `setStringControlParam`); [parameters.md](parameters.md)'s Timing column
-marks the table-build ones (`tp_jiva_comp`, `tp_cascade`, `tp_shape_*`) that
+marks the table-build ones (`tp_jiva_comp`, `tp_cascade`) that
 ride the debounced rebuild. `tp_gain`'s 0.02 default **is** the artifact's
 fitted `gain` — keep them in step when the artifact regenerates (the unified
 apply pushes every live default at startup; a drifted default would silently

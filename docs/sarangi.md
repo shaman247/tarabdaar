@@ -36,7 +36,7 @@ touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (d
   linearly to the latest wire target each render block, so all meend is the
   finger's own movement at wire rate — no glide shaping, no vibrato LFO.
 - **Two buses.** `bow_poly_process3` renders voice and taraf as separate
-  mid/side streams; FX rack, balance, taraf compressor and bus meter act on
+  mid/side streams; FX rack, balance and bus meter act on
   the split, and the sum is bit‑identical to a single‑bus render.
 - **Rates.** Kernel 96 kHz → 48 kHz; `StringVoiceSource` is an
   `AVAudioSourceNode` at 48 kHz, converted by the mixer input to
@@ -108,19 +108,6 @@ touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (d
   (`bow_body_tail_*`, 280–6500 Hz); slide dulling follows finger slew, slide
   noise is acceleration‑driven (scrapes at gesture starts/stops, quiet at
   constant rate); steady notes stay byte‑exact.
-- **Sitar twang** (`bow_twang`, 0…1, `.live`, 0 = byte‑null): a grazing
-  jawari wrap on the PLAYED strings' bridge termination (distinct from the
-  taraf's bones). While a bridge‑reflected excursion tip presses past the
-  graze knee, the speaking length shortens by a smoothed rolling‑contact
-  offset (`bow_poly_set_twang`) — an energy‑conserving per‑cycle phase
-  modulation that pumps the harmonic cascade — and the terminations morph
-  toward sitar hardware (brightened corners, eased finger‑release damping).
-  The graze rides per‑side peak envelopes (knee ≈ 0.55 × the side's own
-  peak), so it twangs at any strike level. Pitch is locked open‑loop (a ~30 ms
-  mean‑shortening tracker, the analytic loop‑phase restore, the fitted
-  residual n(P) = 0.335 − 66.2/P) to ~±5 ¢; the residual wanders with the
-  chaotic ring, so chasing it further is noise‑fitting. Sitar reference match
-  ≈ 0.75. `bow_poly_set_twang_shape` is the offline re‑fit hook.
 
 ## The modal‑jawari taraf
 
@@ -144,19 +131,21 @@ is worker‑owned, resets lazy.
 
 Every `StringSpec` carries a `set`: **raga** strings (scale‑degree pitches on
 the `bow_jt_*` bridge — "Jawari taraf (modal contact)") and the **chromatic
-set** (15 semitone strings, low Ga … tivra Ma, on the `bow_jtc_*` bridge —
+set** (15 semitone strings, low Ga … tivra Ma, on its own bridge —
 "Chromatic bridge (jawari taraf)"; gain 0.6 / t60 3.0, above the selection's
 `bow_jt_gmin` so they sound). A chromatic `degree` is a semitone (0…11) into
 the fixed JI chromatic grid (`RagaTuning.chromaticRatio`) off the same tonic —
-retuned by a tonic move, deliberately NOT by a scale edit. Each bridge has its
-own level, drive, graze depth, contact zone / bone radius, contact law, level
-norm, contact damping, damping corner, inharmonicity and evolution axis; the
-web‑wide controls (tone LP/HP, body, governor, damping, comp, cap,
-recruitment, register tilt) are shared. Bone geometry is per‑row kernel data:
-`BowTables.buildJawariTables(rows:…:chromatic:)` bakes chromatic rows with the
-`bow_jtc_*` profile, and the contact law goes per row via
-`bow_poly_jt_set_row_contact` (never called for an all‑raga rig = byte‑null).
-The chromatic bridge's resting values equal the raga bridge's
+retuned by a tonic move, deliberately NOT by a scale edit. The chromatic
+bridge carries exactly the three knobs that genuinely differ per bank —
+**level** (`bow_jtc_gain`), **level norm** (`bow_jtc_norm`) and its own
+**evolution axis** (`bow_jtc_evolve`). The contact GEOMETRY (drive, graze
+depth, contact zone / bone radius, contact law, contact damping, damping
+corner, inharmonicity) is DERIVED from the raga bridge's `bow_jt_*` values,
+so the two bridges are one jawari shape; the web‑wide controls (tone LP/HP,
+body, damping, cap, recruitment, register tilt) are shared as before.
+`BowTables.buildJawariTables(rows:…:chromatic:)` bakes the chromatic level
+and norm per row. The chromatic bridge's resting values equal the raga
+bridge's
 (`BowTables.chromaticBridgeDefaults` == the registry defaults, `TarabSetTests`;
 the artifact never carries the keys — DEFAULT = ENGINE TRUTH), so the split
 adds strings, not a new sound. Kernel row order: raga selection, chromatic
@@ -223,7 +212,8 @@ present — see `docs/history/`.
   closed, so the bloom comes without web‑wide buzz; negative reverses it.
   Evolve × register is a 2‑D jawari surface, both tilt‑bindable.
   `bow_jtc_evolve` rides the same path, each chromatic row evaluating the map
-  on its own apex minus the raga bridge's lift (`BowEngine.pushJtEvolveOffsets`).
+  on the shared apex minus the raga bridge's lift
+  (`BowEngine.pushJtEvolveOffsets`).
 - **Body mix** `bow_jt_body` (0…1, `.live`, 0 = byte‑exact) blends the
   radiated jt sum through the SAME formula‑body radiation bank the played
   strings use, before the tone LP/HP (`bow_poly_jt_set_body`, slewed ~30 ms)
@@ -253,24 +243,6 @@ pumped or ducked); chords combine soft‑OR; with no gated note the last weights
 hold. With the chromatic set mounted every semitone has a unison row, so
 kin‑only still rings it. The **Taraf purity** composite sweeps 0.5 → 0 (1
 would park the instrument on the note‑independent flat wash).
-
-### The charge governor (`bow_jt_gov`)
-
-The long‑t60 anchor rows (Sa 7 s, low Sa 9 s, low Pa 8 s — consonant with
-everything by design) accumulate a whole phrase: high Sa lands +8…+12 dB
-hotter after four notes than struck cold, re‑excitation phase makes it a
-lottery, and at high expression the pile‑up crosses the contact knee into
-hard buzz. `bow_jt_norm` cannot reach this (it trims radiation; drive scales
-with raw row gain). The governor (0…1, `.live`, 0 = byte‑null,
-`bow_poly_jt_set_gov`) is a per‑row AGC at the cause: a ~60 ms peak envelope
-of the row's contact‑zone velocity, and drive into a row ringing above the
-graze target (`bow_jt_gov_ref` 48 × apex → a velocity bound via the mode‑1
-rate) is shed by ref/env, so the ring saturates at its single‑strike level.
-Applied before the drone‑noise add (held drones never ducked). **Ref 48 is
-the knee:** a resting‑level solo strike renders bit‑identically at gov 1, the
-hot pile‑up sheds 14–16 dB and its buzz share falls to ~1.5 %. **Trap:** ref
-~96 parks the ring AT the buzz‑maximal graze band and buzzes continuously —
-worse than ungoverned; 12–24 over‑govern. Re‑sweep after any bone/apex refit.
 
 ### The quiescence gate (`bow_jt_gate`)
 
@@ -304,23 +276,21 @@ above the voice). It runs **per string inside the jt tick**
 (`bow_poly_jt_set_cap`): the voice envelope is recorded beside the jt drive,
 each row runs its own 150 ms peak envelope + gain (3 ms attack, 120 ms
 recovery) on its radiated output, and the strings sum after the cap — one
-blooming anchor is held without ducking its neighbours. `bow_jt_cap_bus`
-blends the scope, 0 = per string … 1 = per taraf (the summed web held against
-the same ceiling). A pure output gain — physics, governor and gate untouched.
+blooming anchor is held without ducking its neighbours. A pure output gain —
+physics and gate untouched.
 **Threading law:** per‑row envelope state is worker‑owned and reset lazily by
 generation — **never zero row arrays from the control thread** while the pool
 may be ticking.
 
-### Damping, compressor, balance, norm
+### Damping, balance, norm
 
 - **Taraf decay** (`bow_jt_damp`, `bow_poly_jt_set_damp_t60`): per‑tick
   momentum damping (static wrap untouched), t60 log‑interpolated
   `bow_tilt_damp_max_t60` 20 s → `bow_tilt_damp_min_t60` 0.25 s (0 = off). A
   bound Taraf Decay tilt overrides the slider.
-- **`bow_jt_comp_*`**: a taraf‑bus compressor at the split‑bus merge (0 = off);
-  the voice bus is untouched. **`bow_bal`**: voice↔taraf balance as a pure
-  attenuator pair (−1 … +1, 0 = byte‑null). **`bow_jt_norm`** evens kin‑note
-  hot spots at the cause (long‑ring anchors charge hotter; 0.6 ≈ even).
+- **`bow_bal`**: voice↔taraf balance as a pure attenuator pair (−1 … +1,
+  0 = byte‑null). **`bow_jt_norm`** evens kin‑note hot spots at the cause
+  (long‑ring anchors charge hotter; 0.6 ≈ even).
 
 ### The melody follower
 
@@ -354,20 +324,6 @@ every regeneration): per slot the highest‑gain enabled raga string within
 `tp_taraf`; byte‑null when unused) — see [Sitar](sitar-voice.md).
 `DroneStringTests` pins that builds and live reloads pick the same rows.
 
-### Bridge coupling (`bow_cpl_*`, "Taraf coupling (bridge load)")
-
-One SILENT linear comb per enabled tarab row on the passive wave junction —
-no buzz, no radiation; a row's only output is the junction. The played strings
-FEEL the taraf as a load: a kin note drains into its rows, the rows store the
-energy and return it through the body (the release bloom a one‑way drive
-cannot make), and the return also re‑drives the jt rows. Passive by
-construction (g < 1, zi > 0; builder `webLoopCoeffs`): the comb carries the
-string's bridge load, the jt row its buzz and ring. Default `bow_cpl_z` 0 =
-byte‑null. **z is per row and the bank multiplies it** (load ≈ rows × z): the
-single‑row optimum ≈ 0.05 drags held notes ~5 dB on the full bank; the
-full‑bank fit is 0.0141 (≈ −2.5 dB, release bloom audible). Damp/bright/inharm
-default to the fitted web values (0.019 / 0.80 / 0.1).
-
 ## Runtime axes and composites
 
 The shipped composites (Controls tab) reproduce three playing axes; their
@@ -397,7 +353,8 @@ range keys are bp scalars (`string.<key>`). Path: binding →
   cancel in L+R, so the **mono fold‑down is bit‑identical to the mono render**
   (`BowStereoTests`). At 0.2 the melody's interaural coherence is ≈ 0.99
   below 1 kHz → ~0.9 at 4–8 kHz, the bare wash ~0.3–0.4; 0.6 is very wide.
-  `bow_st_spread` / `bow_st_played` are legacy per‑source pans, disarmed at 0.
+  It is the WHOLE stereo law — every source stays centred; the legacy
+  per‑source pans are gone.
 - **Master gain** `bow_gain` (1 = bit‑exact) multiplies `bow_live_trim` as the
   performance volume of the whole radiated instrument. **Limiter**: a
   linked‑stereo safety limiter (`bow_lim_thresh` 0.8, `bow_lim_rel_ms`) at
@@ -406,7 +363,8 @@ range keys are bp scalars (`string.<key>`). Path: binding →
   `TLPVolume` bytes for the iPad toolbar scope), bit‑exact.
 - **Levels** are calibrated in the artifact / overrides (`bow_live_trim`,
   `bow_rev_*`) with the pads' flat CC11 = 32; kin notes (hard‑struck Sa/Pa)
-  are the hot spots — `bow_jt_norm` at the cause, cap and comp on the bus.
+  are the hot spots — `bow_jt_norm` at the cause, the per‑string cap on the
+  taraf.
 
 ## The Strings tab (⌘2) and the tarab model
 
@@ -490,8 +448,8 @@ The guard set is deliberately small; the sound is judged by ear.
   rendered phrase pins the whole shipped signal path. Bless deliberately.
 - **`ByteNullContractTests`** (SarangiKit) — every optional path armed at its
   resting value renders bit‑identically: scope meters, bus meter, FX rack,
-  cap, comp, balance, governor, twang, inject, damp, tilt, body, register,
-  master gain, tone LP bypass. Add a case per new "0 = off" knob.
+  cap, balance, inject, damp, tilt, body, register, master gain, tone LP
+  bypass. Add a case per new "0 = off" knob.
 - **Kernel lockstep** (SarangiKit) — `BowedStringEngineTests` (formula body,
   table shapes, the shared `stringBP()`/`testTaraf` scaffold), `BowPolyTests`
   (a chord stays bounded), `BowStereoTests` (fold‑down invariance),

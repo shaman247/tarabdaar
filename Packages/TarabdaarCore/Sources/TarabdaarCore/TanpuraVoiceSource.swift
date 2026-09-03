@@ -292,19 +292,15 @@ public final class TanpuraVoiceSource {
 
     /// Build the engine for a tonic + scale — seconds of CPU: call OFF the
     /// main/audio thread, publish via `setEngine`; nil if the artifact is
-    /// missing. `shape*` = scale-shaped overtones; `registerComp`
-    /// (`tp_jiva_comp`) / `cascade` (`tp_cascade`) = per-slot thread
-    /// calibration; all 0 = the fitted instrument, byte-identical.
+    /// missing. `registerComp` (`tp_jiva_comp`) / `cascade` (`tp_cascade`)
+    /// = per-slot thread calibration; both 0 = the fitted instrument,
+    /// byte-identical.
     /// `artifact` selects the tanpura or the SITAR (a second source).
     public enum Artifact { case tanpura, sitar }
 
     public static func buildEngine(tonicHz: Double,
                                    scaleRatios: [Double],
                                    artifact: Artifact = .tanpura,
-                                   shapeAlign: Double = 0,
-                                   shapeFocus: Double = 0,
-                                   shapeSpread: Double = 0,
-                                   shapeQuiet: Double = 0,
                                    registerComp: Double = 0,
                                    cascade: Double = 0,
                                    workers: Int = 8,
@@ -320,12 +316,6 @@ public final class TanpuraVoiceSource {
             freqs = freqs.filter { $0 <= 1500.0 }
         }
         guard !freqs.isEmpty else { return nil }
-        let shaping: TanpuraShaping? =
-            (shapeAlign > 0 || shapeFocus > 0 || shapeQuiet > 0)
-            ? TanpuraShaping(tonicHz: tonicHz, scaleRatios: scaleRatios,
-                             align: shapeAlign, focus: shapeFocus,
-                             spread: shapeSpread, quiet: shapeQuiet)
-            : nil
         let comp = min(max(registerComp, 0.0), 1.0)
         let casc = min(max(cascade, 0.0), 1.0)
         let threadHMul: ((Double) -> Double)? = (comp > 0 || casc > 0)
@@ -338,7 +328,6 @@ public final class TanpuraVoiceSource {
             } : nil
         let engine = TanpuraEngine(params: params, frequencies: freqs,
                                    workers: workers,
-                                   shaping: shaping,
                                    threadHMul: threadHMul,
                                    hfT60Mul: casc > 0 ? { f0 in
                                        TanpuraTables.cascadeHFT60Mul(
@@ -346,5 +335,91 @@ public final class TanpuraVoiceSource {
                                    } : nil)
         engine?.setPolyphony(polyphony)
         return engine
+    }
+}
+
+/// ONE plucked-voice mount. The tanpura and the sitar are the same machinery
+/// on different fitted artifacts — a `TanpuraVoiceSource` on the graph plus
+/// its `<prefix>_*` live trims — so `AudioEngine` holds two of these and
+/// drives them through one parameterized enable / rebuild / parameter path.
+/// The genuinely asymmetric parts stay in `AudioEngine` as explicit hooks:
+/// the tanpura's drone buttons and its debounced table-shaping rebuild, and
+/// the sitar's "clear the slot map only while it is the main instrument".
+///
+/// Threading follows the fields it replaced: the trims are guarded by
+/// `AudioEngine.lock`; `gainOverride`, `attached`, `connected` and
+/// `buildGen` are main-thread config.
+final class PluckedVoice {
+    /// Registry key prefix — `tp_` / `st_`.
+    let prefix: String
+    /// Which fitted artifact the engine mounts.
+    let artifact: TanpuraVoiceSource.Artifact
+    /// Log noun and the artifact's file name (the missing-file diagnostic).
+    let name: String
+    let artifactFile: String
+
+    var source: TanpuraVoiceSource?
+    var attached = false
+    var connected = false
+    var buildGen = 0
+
+    // `<prefix>_*` live trims; the initial values ARE the registry defaults.
+    var gainOverride: Double?
+    var pluckLevel = 1.0
+    var releaseT60: Double
+    /// `<prefix>_pluck_touch`: pre-pluck state blended toward the settled
+    /// wrap (1 = identical plucks).
+    var pluckTouch: Double
+    /// `<prefix>_pluck_drive`: drive into the jawari at the calibrated level.
+    var pluckDrive = 1.0
+    /// `<prefix>_taraf`: per-source gain at this voice's jt inject tap (the
+    /// kernel-side gain is the shared arm).
+    var tarafDrive = 4.0
+    /// `<prefix>_poly`: previous plucks kept as full jawari simulations
+    /// before dropping to the ghost tier.
+    var poly: Double
+    /// Table-build shaping (`tp_jiva_comp` / `tp_cascade`); the sitar has no
+    /// such keys and holds both at 0 = the fitted instrument, byte-identical.
+    var registerComp: Double
+    var cascade: Double
+
+    private init(prefix: String, artifact: TanpuraVoiceSource.Artifact,
+                 name: String, artifactFile: String,
+                 releaseT60: Double, pluckTouch: Double, poly: Double,
+                 registerComp: Double, cascade: Double) {
+        self.prefix = prefix
+        self.artifact = artifact
+        self.name = name
+        self.artifactFile = artifactFile
+        self.releaseT60 = releaseT60
+        self.pluckTouch = pluckTouch
+        self.poly = poly
+        self.registerComp = registerComp
+        self.cascade = cascade
+    }
+
+    static func tanpura() -> PluckedVoice {
+        PluckedVoice(prefix: "tp_", artifact: .tanpura, name: "tanpura",
+                     artifactFile: "tanpura_live.json",
+                     releaseT60: 0.4, pluckTouch: 0.0, poly: 6.0,
+                     registerComp: 1.0, cascade: 1.0)
+    }
+
+    static func sitar() -> PluckedVoice {
+        PluckedVoice(prefix: "st_", artifact: .sitar, name: "sitar",
+                     artifactFile: "sitar_live.json",
+                     releaseT60: 0.15, pluckTouch: 1.0, poly: 4.0,
+                     registerComp: 0, cascade: 0)
+    }
+
+    /// Is the fitted artifact present in the SarangiKit bundle?
+    var artifactLoads: Bool {
+        artifact == .sitar ? Presets.sitarParams() != nil
+                           : Presets.tanpuraParams() != nil
+    }
+
+    /// The pluck trims one `pluckMain` needs. Caller holds `AudioEngine.lock`.
+    var pluckTrims: (level: Double, touch: Double, drive: Double, relT60: Double) {
+        (pluckLevel, pluckTouch, pluckDrive, releaseT60)
     }
 }

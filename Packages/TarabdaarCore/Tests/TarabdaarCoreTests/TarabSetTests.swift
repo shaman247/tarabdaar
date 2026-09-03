@@ -2,7 +2,9 @@ import XCTest
 import SarangiKit
 @testable import TarabdaarCore
 
-/// Two bridges: chromatic knobs bake only chromatic rows, and the chromatic registry defaults are the engine truth.
+/// Two bridges: the chromatic knobs (level / level norm / evolution) bake
+/// only chromatic rows, and the chromatic registry defaults are the engine
+/// truth. The contact GEOMETRY is shared — derived from `bow_jt_*`.
 final class TarabSetTests: XCTestCase {
 
     private func bp() throws -> BowParams {
@@ -19,7 +21,9 @@ final class TarabSetTests: XCTestCase {
     /// A chromatic-bridge knob moves ONLY the chromatic rows' tables (the
     /// raga rows are byte-identical), and at rest the two bridges bake the
     /// same jawari: a chromatic row at the raga bridge's values is
-    /// identical to the same row built as a raga row.
+    /// identical to the same row built as a raga row. Since the geometry
+    /// folded into `bow_jt_*`, the level and the level norm are the only
+    /// per-bank bakes (evolution is a live kernel push).
     func testChromaticKnobsBakeOnlyChromaticRows() throws {
         var bp = try bp()
         let srk = 96000.0
@@ -43,24 +47,23 @@ final class TarabSetTests: XCTestCase {
         XCTAssertEqual(base.ca, allRaga.ca)
         XCTAssertEqual(base.rowApex, [Double](repeating: bp.v("bow_jt_apex", 1e-5), count: 3))
 
-        bp.num["bow_jtc_apex"] = 2.0e-5
         bp.num["bow_jtc_gain"] = 0.6
-        bp.num["bow_jtc_alpha"] = 1.5
+        bp.num["bow_jtc_norm"] = 0.8
         let moved = try XCTUnwrap(BowTables.buildJawariTables(
             rows: rows, srk: srk, bp: bp, chromatic: flags))
         let J = Int(base.J)
+        // the bone geometry is SHARED now — every row's bone is untouched
+        XCTAssertEqual(moved.b, base.b)
         // raga row 0: untouched
-        XCTAssertEqual(Array(moved.b[0..<J]), Array(base.b[0..<J]))
         XCTAssertEqual(moved.rowForceScale[0], base.rowForceScale[0])
-        // chromatic rows: bone + level moved
-        XCTAssertNotEqual(Array(moved.b[J..<(2 * J)]), Array(base.b[J..<(2 * J)]))
+        // chromatic rows: level + level norm moved
         for r in 1...2 {
-            XCTAssertEqual(moved.rowForceScale[r], base.rowForceScale[r] * 2.0,
-                           accuracy: 1e-15 * abs(base.rowForceScale[r]),
-                           "level rides the radiation scale as a ratio (0.6 / 0.3)")
+            XCTAssertNotEqual(moved.rowForceScale[r], base.rowForceScale[r])
         }
-        XCTAssertEqual(moved.rowApex, [1e-5, 2e-5, 2e-5])
-        XCTAssertEqual(moved.rowAlpha, [bp.v("bow_jt_alpha", 1.3), 1.5, 1.5])
+        XCTAssertEqual(moved.rowApex,
+                       [Double](repeating: bp.v("bow_jt_apex", 1e-5), count: 3))
+        XCTAssertEqual(moved.rowAlpha,
+                       [Double](repeating: bp.v("bow_jt_alpha", 1.3), count: 3))
         // the global phys vector is the RAGA bridge's — never the chromatic's
         XCTAssertEqual(moved.phys, base.phys)
     }
@@ -70,9 +73,10 @@ final class TarabSetTests: XCTestCase {
     /// DEFAULT = ENGINE TRUTH: the artifact never carries `bow_jtc_*`, so
     /// the registry default is exactly what the builder plays — and it is
     /// the raga bridge's shipped value (the split alone adds no new
-    /// sound). Every chromatic key is the twin of a raga key, lands in
-    /// place (or live for evolve), and is prefixed so the in-place path's
-    /// `bow_jt` prefix test catches it.
+    /// sound). The three surviving chromatic keys — level, level norm,
+    /// evolution — are twins of raga keys, land in place (or live for
+    /// evolve), and are prefixed so the in-place path's `bow_jt` prefix
+    /// test catches them.
     func testChromaticBridgeDefaultsAreTheEngineTruth() throws {
         let bp = try bp()
         let specs = ParamRegistry.all.filter { $0.key.hasPrefix("bow_jtc_") }

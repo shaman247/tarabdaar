@@ -4,18 +4,12 @@ import XCTest
 /// Stereo side path: L ≠ R, and the L+R fold-down equals the mono render.
 final class BowStereoTests: XCTestCase {
 
-    private func makeEngine(stereo: Bool, widthOnly: Bool = false) -> BowEngine {
+    private func makeEngine(stereo: Bool) -> BowEngine {
         var bp = BowedStringEngineTests.stringBP()
         bp.num["bow_jt_gain"] = 1.0
         if stereo {
-            // the LEGACY pan staging (disarmed by default since the
-            // width unification) — still armable explicitly
-            bp.num["bow_st_spread"] = 0.7
-            bp.num["bow_st_played"] = 0.15
-        }
-        if widthOnly {
-            // the instrument-width bank ALONE : pans all
-            // zero — the side stream carries only the second
+            // the width law is the WHOLE stereo law: every source stays
+            // centred and the side stream carries only the second
             // observation point (voice bus + jt-wash bus instances)
             bp.num["bow_st_width"] = 0.6
         }

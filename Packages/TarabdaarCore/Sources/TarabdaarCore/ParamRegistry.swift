@@ -256,9 +256,6 @@ public enum ParamRegistry {
             ParamSpec("bow_loss_reg", "register damping", group: "Bow & string",
                       0.0, 1.5, 0.7,
                       help: "Register-tracking string loss: below the tonic the nut/bridge/gut loss corners scale down with pitch — fc × (f0/tonic)^this — so a low note's Helmholtz corner rounds in proportion to its period, keeping the low register warm instead of brassy, and glides darken smoothly on the way down. At and above the tonic the corners are untouched. 0 = fixed corners; 0.7 (default) = moderate warmth; 1 = full period-proportional tracking."),
-            ParamSpec("bow_twang", "sitar twang", group: "Bow & string",
-                      0.0, 1.0, 0.0, apply: .live,
-                      help: "Grazing jawari wrap on the PLAYED strings' bridge — the sitar's flat-bridge contact on the melody string (the taraf's bones are separate). 0 = the plain bridge, bit-exact. Rising: while an excursion tip presses the bone the speaking length shortens a hair (an energy-conserving per-cycle phase modulation that pumps the harmonic cascade) and the terminations morph toward sitar hardware (brighter bridge/nut, eased release damping), so a staccato note keeps a sustained buzzy 2.5–6 kHz cluster through its ring. ~0.75 is a classic sitar buzz; the last quarter opens the wrap and brightness further for a hotter, more present buzz. The graze knee rides each string's own envelope, so the twang engages at any strike level, and pitch-lock terms hold the twanged ring on the plain ring's pitch (±5 ¢ at the extremes). Applies live, slewed in-kernel."),
             ParamSpec("bow_noise", "contact noise", group: "Bow & string",
                       0.0, 0.4, 0.1,
                       help: "Hair-scatter noise recirculated into the friction loop."),
@@ -274,18 +271,6 @@ public enum ParamRegistry {
             ParamSpec("bow_tors_ratio", "torsion speed ×", group: "Bow & string",
                       3.5, 8.0, 5.2,
                       help: "Torsional/transverse wave-speed ratio (gut ≈ 5)."),
-            ParamSpec("bow_age_a", "contact aging", group: "Bow & string",
-                      0.0, 0.9, 0.0,
-                      help: "Rate-and-state friction: static grip grows with stick time — a freshly-slipped contact is weak, so slips collect at one phase per period (cleaner, more locked slip pattern). 0 = off."),
-            ParamSpec("bow_age_ms", "aging time (ms)", group: "Bow & string",
-                      0.2, 5.0, 1.5,
-                      help: "Contact re-adhesion timescale (fraction of a period = strongest phase discipline)."),
-            ParamSpec("bow_cr_w", "contact spread", group: "Bow & string",
-                      0.0, 0.5, 0.0,
-                      help: "Continuum contact: grip-limit spread across the hair band — partial release near the boundary (adds bow-surface flutter texture; darkens quiet mids). 0 = off."),
-            ParamSpec("bow_cr_ms", "release time (ms)", group: "Bow & string",
-                      0.0, 0.15, 0.0,
-                      help: "Continuum contact: release-front crossing time (release-only; capture snaps). Large values distort the quiet duty cycle. 0 = off."),
         ]),
 
         ("Playing ranges", [
@@ -360,39 +345,18 @@ public enum ParamRegistry {
             ParamSpec("bow_jt_body", "body radiation", group: "Jawari taraf (modal contact)",
                       0.0, 1.0, 0.0, apply: .live,
                       help: "Blend of the radiated jawari sum through the same formula-body radiation bank the played strings radiate through — the coherence lever: at 0 the taraf radiates raw (beside the instrument), at 1 it rings from the instrument's body with the voice's own formants. Shared coefficients (a body edit re-voices both), own filter state. 0 = bypass, bit-exact. Applies live."),
-            ParamSpec("bow_jt_gov", "charge governor", group: "Jawari taraf (modal contact)",
-                      0.0, 1.0, 0.0, apply: .live,
-                      help: "Per-string governor on how much of a phrase the taraf remembers. The long-ring anchor rows (Sa/Pa) accumulate every note and glide, so a note landing after a phrase can ring far hotter than the same note struck cold, and a hot pile-up can cross the contact knee into loud buzz. This sheds bridge drive into any row already ringing above its graze target (its contact-zone envelope, kernel-side), so rows saturate at their single-strike ring instead of piling up. At 1 a resting-level solo strike is untouched bit-exactly and the moderate sympathetic swell through a phrase survives — only the hot pile-up is shed. 0 = raw physics, bit-exact. Held drones are never ducked. Applies live."),
             ParamSpec("bow_jt_damp", "extra damping", group: "Jawari taraf (modal contact)",
                       0, 1, 0.0, apply: .live,
                       help: "Runtime damping of these modal rows: 0 = the natural long ring, 1 = choked within a second. Applies live — this is what the Taraf Decay composite sweeps."),
-            // Taraf-bus compressor: dynamics on the radiated jt bus ONLY,
-            // at the split-bus merge — the played voice is untouched.
-            // Threshold 0 = off = bit-exact.
-            ParamSpec("bow_jt_comp_thresh", "comp threshold", group: "Jawari taraf (modal contact)",
-                      0.0, 0.3, 0.0, apply: .live,
-                      help: "Taraf compressor threshold, in the CALIBRATED output units the master limiter and the iPad volume readout speak (≈ linear dBFS at master gain 1 — it does not move with bow_gain). The stock taraf rides ~0.01–0.1 (−40…−20 dBFS), so ~0.02–0.05 starts holding the ring's swells while single strikes pass. 0 = off, bit-exact. Applies live."),
-            ParamSpec("bow_jt_comp_ratio", "comp ratio", group: "Jawari taraf (modal contact)",
-                      1.0, 20.0, 4.0, apply: .live,
-                      help: "Compression slope above the threshold: 1 = off (unity), 4 = classic leveling, 20 ≈ a taraf limiter — the sympathetic wash sits at a near-constant level however hard the phrase charges it. Applies live."),
-            ParamSpec("bow_jt_comp_atk_ms", "comp attack (ms)", group: "Jawari taraf (modal contact)",
-                      0.0, 100.0, 5.0, apply: .live,
-                      help: "Gain-reduction attack: how much of a strike's first milliseconds passes before the compressor holds the ring. 0 = instant (clamps the transient too); longer keeps the jawari sparkle and compresses only the sustained wash. Applies live."),
-            ParamSpec("bow_jt_comp_rel_ms", "comp release (ms)", group: "Jawari taraf (modal contact)",
-                      20.0, 1000.0, 150.0, apply: .live,
-                      help: "Gain recovery after the taraf level falls back under the threshold. Short pumps audibly on a ringing wash; long ducks the tail after every hot phrase. Applies live."),
             // Voice-relative taraf cap: holds each sympathetic string
             // against the played voice's OWN level, row by row inside the
             // kernel's jt tick. Hardness 0 = off = bit-exact.
             ParamSpec("bow_jt_cap", "voice cap", group: "Jawari taraf (modal contact)",
                       0.0, 1.0, 0.0, apply: .live,
-                      help: "How hard each sympathetic string is held at or below the played voice's own level — the runaway-bloom lever: with high evolve the web can feed itself past the voice, and a fixed-threshold comp can't follow a phrase's dynamics. The ceiling is the voice bus's instant-attack peak envelope decaying ~7 dB/s, times bow_jt_cap_ratio — a string may ring on after a note but never peak above what the voice reached. Applied per string inside the kernel (see bow_jt_cap_bus), so one blooming anchor row is held while the rest of the web stands. 0 = off, bit-exact; 1 = a hard relative limiter; between = a soft proportional lean. A dimensionless ratio law, so it rides bow_gain and expression untouched. Armed hard with the voice silent, drones and the tanpura's taraf charge are held down until the voice first sounds. Applies live."),
+                      help: "How hard each sympathetic string is held at or below the played voice's own level — the runaway-bloom lever: with high evolve the web can feed itself past the voice, and a fixed threshold can't follow a phrase's dynamics. The ceiling is the voice bus's instant-attack peak envelope decaying ~7 dB/s, times bow_jt_cap_ratio — a string may ring on after a note but never peak above what the voice reached. Applied per string inside the kernel's jt tick, so one blooming anchor row is held while the rest of the web stands. 0 = off, bit-exact; 1 = a hard relative limiter; between = a soft proportional lean. A dimensionless ratio law, so it rides bow_gain and expression untouched. Armed hard with the voice silent, drones and the tanpura's taraf charge are held down until the voice first sounds. Applies live."),
             ParamSpec("bow_jt_cap_ratio", "voice cap ratio", group: "Jawari taraf (modal contact)",
                       0.1, 2.0, 1.0, apply: .live,
-                      help: "The level each sympathetic string (or, toward `bow_jt_cap_bus` 1, the whole taraf) is allowed relative to the voice's peak, when `bow_jt_cap` is armed: 1 = parity (may match but not exceed the voice), 0.5 = held ~6 dB under, 2 = allowed 6 dB over (a loose leash — still stops the extreme bloom). Per string, the strings sum after the cap, so the whole web can still stand above a single string's ceiling. Applies live."),
-            ParamSpec("bow_jt_cap_bus", "voice cap scope", group: "Jawari taraf (modal contact)",
-                      0.0, 1.0, 0.0, apply: .live,
-                      help: "What the cap holds against the voice's ceiling: 0 = each sympathetic string on its own (one blooming anchor is held, its neighbours stand, the web may sum above the ceiling); 1 = the whole taraf as one bus (the strings stand, the summed web never peaks above the ceiling — one hot string ducks all of them). Between, both stages share the hardness: each string removes that fraction less of its own overshoot and the sum removes the rest of what remains. Applies live."),
+                      help: "The level each sympathetic string is allowed relative to the voice's peak, when `bow_jt_cap` is armed: 1 = parity (may match but not exceed the voice), 0.5 = held ~6 dB under, 2 = allowed 6 dB over (a loose leash — still stops the extreme bloom). Per string, the strings sum after the cap, so the whole web can still stand above a single string's ceiling. Applies live."),
             ParamSpec("bow_jt_sel", "recruitment", group: "Jawari taraf (modal contact)",
                       0, 1, 0.5, apply: .live,
                       help: "Which strings contribute to the taraf — the contribution profile, at held loudness. 0.5 = the fitted natural response: unison rows dominate, octaves a few dB down, fifths faint, unrelated rows only haze. Below it rows lose bridge drive by harmonic distance from the played notes until at 0 only kin rows ring (chords recruit additively). Above it the profile flattens — resonant rows are cut toward the common haze level until at 1 every string contributes equally and the taraf no longer depends on what the voice plays. Loudness holds throughout via the radiated jt gain (incoherent power model); held drones and the melody follower count as fully ringing, and rings already sounding are never ducked. Lattice width/kin exponent are bp scalars (bow_jt_sel_width 30 ¢, bow_jt_sel_kin 0.7). Applies live — the Taraf Purity composite's recruitment member (purity up = kin-only)."),
@@ -400,10 +364,14 @@ public enum ParamRegistry {
 
         // TWO BRIDGES: the CHROMATIC sympathetic set (the Strings tab's
         // second table — 15 semitone strings on the fixed JI grid) sits on
-        // its own bridge with its own jawari. Every knob here is the
-        // chromatic twin of a `bow_jt_*` knob and lands the same way; the
-        // web-wide taraf controls (tone, body, gov, damp, comp, cap,
-        // recruitment) stay shared above. Defaults MUST equal
+        // its own bridge with its own jawari. Only the three knobs that
+        // genuinely differ per bank survive — level, level norm and
+        // evolution; the contact geometry (drive, graze depth, zone,
+        // radius, contact law, damping, damping corner, inharmonicity) is
+        // DERIVED from the raga bridge's `bow_jt_*` values in
+        // `BowTables.buildJawariTables`, so the two bridges share one
+        // jawari shape. The web-wide taraf controls (tone, body, damp,
+        // cap, recruitment) stay shared above. Defaults MUST equal
         // `BowTables.chromaticBridgeDefaults` — the artifact never carries
         // these keys, so the registry default IS what the engine plays
         // (`TarabSetTests` pins it).
@@ -411,54 +379,12 @@ public enum ParamRegistry {
             ParamSpec("bow_jtc_gain", "level", group: "Chromatic bridge (jawari taraf)",
                       0.0, 3.0, 0.3,
                       help: "Output mix of the chromatic set's rows (the raga set keeps `bow_jt_gain`). Baked into the rows' radiation taps as a ratio against the raga bridge's level, so silencing the raga bridge silences this too — trim with the row gains for finer balance."),
-            ParamSpec("bow_jtc_drive", "drive", group: "Chromatic bridge (jawari taraf)",
-                      0.001, 0.3, 0.03,
-                      help: "Bridge-force coupling INTO the chromatic strings — their graze operating point, independent of the raga bridge's. On the instrument the chromatic set passes through the main bridge, closest to the played strings: a touch more drive than the side bridges is the physical picture."),
-            ParamSpec("bow_jtc_apex", "graze depth", group: "Chromatic bridge (jawari taraf)",
-                      2e-6, 5e-5, 1e-5,
-                      help: "Bone protrusion of the chromatic bridge — its own grazing knee (the deep-substep threshold and the evolution map follow it per row)."),
             ParamSpec("bow_jtc_evolve", "evolution", group: "Chromatic bridge (jawari taraf)",
                       0.0, 1.0, 0.5, apply: .live,
                       help: "The chromatic bridge's harmonic-evolution axis — the twang of the chromatic set alone, the same graze-margin map (×4 … ×¼) on its own bone, kernel-slewed (~40 ms) so it is tilt-sweepable. 0.5 = its fitted geometry. Rides `bow_jt_ev_reg` like the raga rows (the register tilt is web-wide). Applies live."),
-            ParamSpec("bow_jtc_zone", "contact zone (m)", group: "Chromatic bridge (jawari taraf)",
-                      0.002, 0.02, 0.006,
-                      help: "Length of the chromatic bridge's bone the string can touch (the flat of its jawari), in metres — wider = a more open, diffuse buzz."),
-            ParamSpec("bow_jtc_radius", "bone radius (m)", group: "Chromatic bridge (jawari taraf)",
-                      0.05, 2.0, 0.3,
-                      help: "Curvature radius of the chromatic bridge's bone, in metres — large = nearly flat (the wide open jawari), small = rounded."),
-            ParamSpec("bow_jtc_alpha", "contact law", group: "Chromatic bridge (jawari taraf)",
-                      1.0, 2.0, 1.3,
-                      help: "Contact stiffness exponent of the chromatic bridge (per row in the kernel). 1.5 = Hertz (the fast sqrt path); the default 1.3 matches the fitted raga bridge."),
             ParamSpec("bow_jtc_norm", "level norm", group: "Chromatic bridge (jawari taraf)",
                       0.0, 1.5, 0.0,
                       help: "Per-string t60-response normalization for the chromatic rows; 0 = raw physics."),
-            ParamSpec("bow_jtc_hcb", "contact damping", group: "Chromatic bridge (jawari taraf)",
-                      1.0, 40.0, 8.0,
-                      help: "Hysteretic damping of the string–bone contact on the chromatic bridge (per row in the kernel). More = softer buzz transients."),
-            ParamSpec("bow_jtc_fhf", "damping corner (Hz)", group: "Chromatic bridge (jawari taraf)",
-                      800.0, 12000.0, 4000.0,
-                      help: "Corner of the chromatic strings' per-mode f² damping law — LOWER = warmer. Their own string material, independent of the raga set's."),
-            ParamSpec("bow_jtc_bst", "inharmonicity", group: "Chromatic bridge (jawari taraf)",
-                      0.0, 1.0e-3, 2.0e-4,
-                      help: "Stiffness stretch of the chromatic strings' upper partials (steel-wire dispersion); lower = more harmonic top."),
-        ]),
-
-        ("Taraf coupling (bridge load)", [
-            ParamSpec("bow_cpl_z", "coupling Z", group: "Taraf coupling (bridge load)",
-                      0.0, 0.1, 0.0,
-                      help: "Two-way sympathetic coupling: each enabled tarab row becomes a silent comb string on the passive bridge junction, so the played strings feel the taraf as a load — a note at a kin pitch drains into the row and the row returns the energy through the body (the bloom a one-way drive can't make). 0 = off, bit-exact. Per-row impedance (follows the row's gain), and the bank multiplies it: total bridge load ≈ rows × value, so a value one row tolerates over-damps a full bank (0.05 on one row blooms; on the default bank it drags held notes ~5 dB). Start near 0.014; ~0.03 is already a strong load. Needs a rebuild."),
-            ParamSpec("bow_cpl_t60", "ring scale", group: "Taraf coupling (bridge load)",
-                      0.2, 2.0, 1.0,
-                      help: "Scale on each row's own t60 for its coupling comb (capped 8 s): how long the bridge holds absorbed energy before it has all returned or dissipated. 1 = the row's tabled decay — the physical default (the comb IS the same string the jt row models)."),
-            ParamSpec("bow_cpl_damp", "HF damping", group: "Taraf coupling (bridge load)",
-                      0.0, 1.0, 0.019,
-                      help: "Frequency-dependent loop damping of the coupling combs — upper partials couple and die faster, matching real string damping. Default 0.019."),
-            ParamSpec("bow_cpl_bright", "bandwidth", group: "Taraf coupling (bridge load)",
-                      0.0, 1.0, 0.8,
-                      help: "Coupling bandwidth: loop low-pass corner 1.4–7.4 kHz; above it the taraf stops exchanging energy with the bridge. Default 0.8 ≈ 6.2 kHz."),
-            ParamSpec("bow_cpl_inharm", "inharmonicity", group: "Taraf coupling (bridge load)",
-                      0.0, 0.6, 0.1,
-                      help: "Stiffness dispersion of the coupling combs (steel-string upper partials run sharp), matching the jt rows' inharmonicity in spirit. Default 0.1."),
         ]),
 
         ("Articulation", [
@@ -655,7 +581,7 @@ public enum ParamRegistry {
                       help: "Final calibration level of the fitted instrument — the CALIBRATION half; use master gain for performance volume."),
             ParamSpec("bow_lim_thresh", "limiter ceiling", group: "Radiation & output",
                       0.1, 1.0, 0.8,
-                      help: "Output safety limiter: linked-stereo peak ceiling at the very end of the chain (after global FX). Below it samples pass bit-exact; above, instant-attack gain riding with the release below. Guards the coherent kin peaks (hard-struck Sa/Pa: voice + jt ring + coupling return add in phase) and the ±16 dB expression axis. To even the CAUSE, see bow_jt_norm — long-ring anchor rows charge hotter."),
+                      help: "Output safety limiter: linked-stereo peak ceiling at the very end of the chain (after global FX). Below it samples pass bit-exact; above, instant-attack gain riding with the release below. Guards the coherent kin peaks (hard-struck Sa/Pa: voice + jt ring add in phase) and the ±16 dB expression axis. To even the CAUSE, see bow_jt_norm — long-ring anchor rows charge hotter."),
             ParamSpec("bow_lim_rel_ms", "limiter release (ms)", group: "Radiation & output",
                       20.0, 500.0, 150.0,
                       help: "Release time of the output safety limiter's gain recovery. Shorter pumps on sustained hot material; longer ducks the wash noticeably after a peak."),
@@ -670,12 +596,6 @@ public enum ParamRegistry {
             ParamSpec("bow_st_width", "instrument width", group: "Radiation & output",
                       0.0, 1.0, 0.2,
                       help: "The width law: the whole instrument — played voice, taraf wash, drones, bow noise — heard from TWO observation points. A dense diffuse-field difference bank above the Schroeder crossover, so lows stay identical in L and R (one centred instrument) while the upper spectrum decorrelates the way a real instrument's does between two ears. At the 0.2 default: melody interaural coherence ~0.9 at 4–8 kHz, the bare wash ~0.3–0.4, balance within ±0.8 dB. Not a pan — zero net lean by construction; cancels in the mono fold-down. 0 = point radiator (mono-in-place)."),
-            ParamSpec("bow_st_spread", "taraf pan spread (legacy)", group: "Radiation & output",
-                      0.0, 1.0, 0.0,
-                      help: "Fixed per-row staging of the jawari rows around the tonic (spread·sin(2π·pitch class)) — an alternative placement to the instrument-width law, for A/B against bow_st_width. 0 = off (default). Mono fold-down invariant."),
-            ParamSpec("bow_st_played", "bow-noise pan spread (legacy)", group: "Radiation & output",
-                      0.0, 0.5, 0.0,
-                      help: "Per-voice placement of the bow noise (the played string's position on the bridge) — for A/B against bow_st_width. 0 = off (default). Mono fold-down invariant."),
             ParamSpec("bow_tone_tilt", "tone tilt (bass–treble)", group: "Radiation & output",
                       -1, 1, 0.0, apply: .live,
                       help: "Overall spectral tilt: −1 = bass-biased, 0 = flat, +1 = treble-biased. A complementary shelf pair on the whole voice before the room. Applies live — the Tone Tilt composite sweeps this."),
@@ -717,22 +637,6 @@ public enum ParamRegistry {
                       0.0, 1.0, 1.0, apply: .live,
                       timing: .rebuild,
                       help: "Slows the higher strings' harmonic cascade toward low Sa's unhurried pace. Even register-calibrated, higher pitches develop their overtone ladder faster in real time (the jawari converts on every graze pass, and passes come at the string's frequency). This raises each higher string's jiva thread a touch further toward the fitted height (a gentler graze — the instant harmonic jump becomes a ~1 s bloom) and lets its upper partials ring longer to keep the buzz level, both graded by pitch and zero at and below the 104 Hz anchor. At 1 the octave-up ladder matches low Sa's character; at 0 only the base calibration applies. Edits schedule the debounced full tanpura rebuild, like tp_jiva_comp."),
-            ParamSpec("tp_shape_align", "scale-shape: overtone retune", group: "Tanpura",
-                      0.0, 1.0, 0.0, apply: .live,
-                      timing: .rebuild,
-                      help: "Scale-shaped overtones — the altered tanpura: retunes each partial (modes 3+; 1–2 pin the pitch) toward the nearest scale pitch class, by this fraction of the distance. Full pull inside an 80 ¢ capture window, tapering to nothing by 160 ¢ — so harmonic 5 lands on komal ga (~71 ¢) and harmonic 7 on n, while partials in a pentatonic gap stay harmonic. 0 = the physical string. Applies through a DEBOUNCED full tanpura rebuild (~seconds, 750 ms after the drag settles) — not instant."),
-            ParamSpec("tp_shape_focus", "scale-shape: sustain focus", group: "Tanpura",
-                      0.0, 1.0, 0.0, apply: .live,
-                      timing: .rebuild,
-                      help: "Tilts sustain toward scale-aligned partials: each mode's t60 is scaled by its post-retune proximity to the scale (a 30 ¢ gaussian kernel — aligned = full ring, a 71 ¢-off partial at focus 1 keeps ~6% of its t60, floored at 5% — thinned, never killed). Because the jawari keeps re-pumping every mode, the cascade EVOLVES toward the scale over the note's life rather than being statically EQ'd. Debounced rebuild like tp_shape_align."),
-            ParamSpec("tp_shape_quiet", "scale-shape: misaligned quiet", group: "Tanpura",
-                      0.0, 1.0, 0.0, apply: .live,
-                      timing: .rebuild,
-                      help: "Turns down the RADIATED level of partials that don't align with the scale (post-retune, same 30 ¢ proximity kernel as tp_shape_focus): each mode's output projection is scaled toward silence — at 1 an off-scale partial is inaudible. Unlike tp_shape_focus this changes NO dynamics: the mode still rings at full energy and keeps trading energy through the jawari contact, it is simply heard less — a per-partial fader, where focus is a per-partial damper. Debounced rebuild like tp_shape_align."),
-            ParamSpec("tp_shape_spread", "scale-shape: retune spread", group: "Tanpura",
-                      0.0, 1.0, 0.0, apply: .live,
-                      timing: .rebuild,
-                      help: "Decorrelates the retune per string: a deterministic per-string/per-mode jitter scales the pull fraction (0 = every string corrected identically — shared partials lock to exact 0-beat, which can go organ-static; 1 = pulls vary 0–100%, restoring slow shimmer between strings). Inert unless tp_shape_align > 0. Debounced rebuild like tp_shape_align."),
         ]),
         ("Sitar", [
             ParamSpec("st_gain", "output gain", group: "Sitar",
@@ -844,8 +748,8 @@ public enum ParamRegistry {
     /// See docs/sound-design.md.
     public static let inPlaceKeys: Set<String> = [
         // --- kernel scalars ---
-        "bow_Zt", "bow_age_a", "bow_age_ms", "bow_body_c0", "bow_br_fc",
-        "bow_cr_ms", "bow_cr_w", "bow_gut_fc2", "bow_gut_g", "bow_loss_reg",
+        "bow_Zt", "bow_body_c0", "bow_br_fc",
+        "bow_gut_fc2", "bow_gut_g", "bow_loss_reg",
         "bow_mu_d",
         "bow_mu_s", "bow_noise", "bow_noise_dir", "bow_nut_fc",
         "bow_tors_c", "bow_tors_g",
@@ -879,11 +783,9 @@ public enum ParamRegistry {
         "bow_jt_alpha", "bow_jt_apex", "bow_jt_bst", "bow_jt_drive",
         "bow_jt_fhf", "bow_jt_gain", "bow_jt_hcb", "bow_jt_norm",
         "bow_jt_zone", "bow_jt_radius",
-        // The chromatic bridge: the same per-row table bake plus the
-        // kernel's per-row contact law, re-pushed after every jt reload.
-        "bow_jtc_alpha", "bow_jtc_apex", "bow_jtc_bst", "bow_jtc_drive",
-        "bow_jtc_fhf", "bow_jtc_gain", "bow_jtc_hcb", "bow_jtc_norm",
-        "bow_jtc_zone", "bow_jtc_radius",
+        // The chromatic bridge: the same per-row table bake, re-pushed
+        // after every jt reload.
+        "bow_jtc_gain", "bow_jtc_norm",
     ]
 
     /// True when a change to `key` can be pushed onto the running engine.

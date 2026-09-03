@@ -8,8 +8,7 @@ release path and the string bank), with the String voice's modal-jawari web
 (`bow_jt_*`, the Strings-tab rows) as its sympathetic strings.
 Main-instrument only (Live tab → Instrument → Sitar; the **String bowed
 voice stays the default**); the drone buttons keep their tanpura/sympathetic
-choice. (Unrelated to `bow_twang`, the String voice's sitar-morph bridge
-fold. Earlier fits and prototypes: not present — see `docs/history/`.)
+choice. (Earlier fits and prototypes: not present — see `docs/history/`.)
 
 ## The physics: a geometrically scaled string
 
@@ -98,13 +97,19 @@ nominal); numpy-on-Accelerate emits benign matmul FP warnings on every
 
 ## Wiring
 
-`AudioEngine.MainInstrument.sitar`; `sitarSource` is a second
-`TanpuraVoiceSource` built with `artifact: .sitar` (`Presets.sitarParams()`),
-third node into `symGain`, armed lazily on first switch. The whole tanpura
-main-instrument path is shared (exact-pitch wire plucks, the MIDI pending
-pluck, live bends, `tanpura_release` note-offs) via `pluckSourceLocked(inst)`
-/ `pluckTrimsLocked(inst)`; slot maps are shared (one main instrument at a
-time, cleared on switch). Scale/tonic changes rebuild the sitar's JI grid on
+`AudioEngine.MainInstrument.sitar`; `sitarVoice` is a second `PluckedVoice`
+— the SAME mount as the tanpura, parameterized by key prefix (`st_`/`tp_`)
+and artifact — holding a `TanpuraVoiceSource` built with `artifact: .sitar`
+(`Presets.sitarParams()`), third node into `symGain`, armed lazily on first
+switch. One path serves both voices (`setPluckedVoiceEnabled` /
+`rebuildPlucked` / `setPluckedParam`); the asymmetric parts are explicit
+hooks — the tanpura's drone buttons and its debounced table-shaping rebuild
+(`tp_jiva_comp` / `tp_cascade`), and the sitar's "clear the slot map only
+while it IS the main instrument" (`pluckedEnginePublished`). The whole
+tanpura main-instrument path is shared (exact-pitch wire plucks, the MIDI
+pending pluck, live bends, `tanpura_release` note-offs) via
+`pluckSourceLocked(inst)` / `pluckTrimsLocked(inst)`; slot maps are shared
+(one main instrument at a time, cleared on switch). Scale/tonic changes rebuild the sitar's JI grid on
 the tanpura's queue and debounce (`rebuildSitar` from
 `AppController.syncTanpuraFromScale`). `TanpuraTables.buildNote` carries
 per-note contact stiffness and transverse curvature
@@ -117,8 +122,8 @@ globals.
 ring the sitar node's render callback fills with its mono output
 (`TanpuraVoiceSource.setInjectSink` → `StringVoiceSource.jtInjectWrite`),
 mixed into the **recorded jt drive** right before the drive-FX hook — the
-voice→taraf insert and everything downstream (recruitment, governor, gate,
-jt tone/body/stereo) apply to the sitar's drive exactly as to the bow's. The
+voice→taraf insert and everything downstream (recruitment, gate, jt
+tone/body/stereo) apply to the sitar's drive exactly as to the bow's. The
 String voice stays armed and silent under sitar play, so the web is always
 there to ring. The consumer drains the ring on dropped-drive blocks and
 realigns after a gross backlog.

@@ -21,7 +21,7 @@ This file describes the instrument as it is. Its development history (every dele
 
 **Three voices.** The sarangi **String voice** (`SarangiKit.BowEngine` + the `CBowKernel` C friction kernel) is the default played voice. The **Tanpura** (`TanpuraEngine` + `tanpura_kernel.c`) is the default drone voice and an optional main instrument; the **Sitar** is a second `TanpuraEngine` mounted from `sitar_live.json` (the scale-model role ladder), main-instrument only. Both plucked voices charge the String kernel's sympathetic web through its inject ring.
 
-**The taraf.** The sympathetic strings are modal-jawari rows inside the String kernel (`bow_jt_*`): scale-degree strings on the raga bridge plus a chromatic set on its own jawari (`bow_jtc_*`). Each row radiates the DC-blocked contact force it exerts on its bone, unit-matched per row (`JtTables.rowForceScale`). A melody-follower row can live-retune to the played pitch. The Strings tab (⌘2) edits the rows; drone buttons and the Joy-Con strum pluck them.
+**The taraf.** The sympathetic strings are modal-jawari rows inside the String kernel (`bow_jt_*`): scale-degree strings on the raga bridge plus a chromatic set with its own level, level norm and evolution (`bow_jtc_gain`/`_norm`/`_evolve`) over the same jawari geometry. Each row radiates the DC-blocked contact force it exerts on its bone, unit-matched per row (`JtTables.rowForceScale`). A melody-follower row can live-retune to the played pitch. The Strings tab (⌘2) edits the rows; drone buttons and the Joy-Con strum pluck them.
 
 **Mac tabs:** Live ⌘1 · Strings ⌘2 · Fret Pad ⌘3 · Controls ⌘4 · Parameters ⌘5 · FX ⌘6 · Setup ⌘7 · Scope ⌘8 · Taraf ⌘9.
 
@@ -55,7 +55,7 @@ The iOS target builds with `xcodebuild -scheme Tarabdaar` against an iPad simula
 
 ## Sound design
 
-The physics ship fitted in `bowed_string.json`; Tarabdaar edits values, it does not re-fit. Parameters tab (⌘5) for every knob; Strings tab for the taraf rows; Controls tab for tilt bindings and composites; FX tab for the four-insert rack (off = byte-null). **Levels:** calibration lives in the preset (`bow_live_trim`, `bow_rev_*`), `bow_gain` is the performance master volume, the Mac pads hold CC11 = 32 (the fitted expression median), a linked-stereo limiter rides the end of the chain, and `bow_jt_norm` / `bow_bal` / `bow_jt_comp_*` / `bow_jt_cap*` shape the taraf against the voice. Presets are one `TarabdaarPreset` document covering the whole rig, saved by name into the app-managed library. To change the shipping default, edit `bowed_string.json` or the tarab builders and re-bless the parity hash deliberately.
+The physics ship fitted in `bowed_string.json`; Tarabdaar edits values, it does not re-fit. Parameters tab (⌘5) for every knob; Strings tab for the taraf rows; Controls tab for tilt bindings and composites; FX tab for the four-insert rack (off = byte-null). **Levels:** calibration lives in the preset (`bow_live_trim`, `bow_rev_*`), `bow_gain` is the performance master volume, the Mac pads hold CC11 = 32 (the fitted expression median), a linked-stereo limiter rides the end of the chain, and `bow_jt_norm` / `bow_bal` / `bow_jt_cap*` shape the taraf against the voice. Presets are one `TarabdaarPreset` document covering the whole rig, saved by name into the app-managed library. To change the shipping default, edit `bowed_string.json` or the tarab builders and re-bless the parity hash deliberately.
 
 ## Updating documentation
 

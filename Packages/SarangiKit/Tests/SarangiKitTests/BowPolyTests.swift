@@ -35,21 +35,15 @@ final class BowPolyTests: XCTestCase {
     }
 
     /// Overlays swept by the rigid-bridge mount checks.
-    /// DEFAULT-VALUE LAW : the shipped artifacts null both of
-    /// these, and the poly kernel shipped a round mounting its strings in
-    /// the WRONG friction state (full static grip instead of fresh contact)
-    /// because parity had only ever been measured at `bow_age_a` 0. Any
-    /// param introduced as "0 = BIT-NULL" belongs in this sweep.
+    /// DEFAULT-VALUE LAW : the shipped artifacts null these, and the poly
+    /// kernel once shipped a round mounting its strings in the WRONG
+    /// friction state because parity had only ever been measured at the
+    /// resting value. Any param introduced as "0 = BIT-NULL" belongs in
+    /// this sweep.
     private static let nullSweep: [(name: String, over: [String: Double])] = [
         ("bit-null defaults", [:]),
-        ("bow_age_a 0.5", ["bow_age_a": 0.5]),      // measured operating point
-        ("bow_age_a 1.0", ["bow_age_a": 1.0]),
         ("bow_tors_c 0.35", ["bow_tors_c": 0.35]),  // round-10 fitted value
-        ("age 0.5 + tors 0.35", ["bow_age_a": 0.5, "bow_tors_c": 0.35]),
-        // continuum-release contact (hand-ported to poly)
-        ("bow_cr_w 0.15", ["bow_cr_w": 0.15]),
-        ("cr_w .15 + cr_ms .06 + age .5",
-         ["bow_cr_w": 0.15, "bow_cr_ms": 0.06, "bow_age_a": 0.5]),
+        ("bow_tors_c 0.6", ["bow_tors_c": 0.6]),
     ]
 
     private typealias Drive = (f0: [Double], vb: [Double], fb: [Double],
@@ -73,9 +67,6 @@ final class BowPolyTests: XCTestCase {
         let s = t.scalars
         return bow_poly_init(
             Int32(nb), t.sr,
-            Int32(t.L.count), t.L,
-            t.cs, t.cp, t.w0, t.w1, t.w2, t.w3, t.w4, t.g, t.lpA, t.wout,
-            t.kap, t.alphaw, t.jw, t.jl, t.jn, t.chg, t.zdrv, t.zi, t.twt,
             Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC,
             s[0], s[1], s[2],
             s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11],
@@ -88,8 +79,7 @@ final class BowPolyTests: XCTestCase {
             s[38], s[39], s[40],
             s[41], s[42], s[43], s[44], s[45], s[46],
             s[47], s[48], s[49], s[50], s[51], s[52], s[53], s[54], s[55],
-            s[56], s[57], s[58], s[59], s[60], s[61], s[62], s[63],
-            s[64], s[65])!
+            s[56], s[57], s[58], s[59], s[60], s[61])!
     }
 
     /// Render `d` on slot 0 of an `nb`-slot poly kernel. With `prelude`, the

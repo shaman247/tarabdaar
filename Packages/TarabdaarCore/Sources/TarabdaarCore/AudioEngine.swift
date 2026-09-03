@@ -63,14 +63,17 @@ public class AudioEngine: ObservableObject {
         case string, tanpura, sitar
     }
 
-    /// Second source on the graph. Kept attached; engine (re)built off-main per tonic + scale.
-    private var tanpuraSource: TanpuraVoiceSource?
-    private var tanpuraAttached = false
-    private var tanpuraConnected = false
+    /// The two plucked voices — the SAME mount driven twice (`PluckedVoice`):
+    /// the tanpura (second source on the graph, armed at startup as the
+    /// default drone voice) and the sitar (third source, armed lazily on the
+    /// first `.sitar` switch and kept armed; its tap feeds the jt inject ring).
+    private let tanpuraVoice = PluckedVoice.tanpura()
+    private let sitarVoice = PluckedVoice.sitar()
+
     /// Guarded by `lock`.
     private var droneVoiceModeStorage: DroneVoiceMode = .tanpura
     private var mainInstrumentStorage: MainInstrument = .string
-    /// Last structural scale push, retained for (re)builds. Guarded by `lock`.
+    /// Last structural scale push, retained for BOTH plucked (re)builds. Guarded by `lock`.
     private var lastTanpuraTonic: Double = 261.63
     private var lastTanpuraRatios: [Double] = []
     /// MIDI path: a main-instrument pluck waits for the pitch bend that
@@ -84,77 +87,36 @@ public class AudioEngine: ObservableObject {
     /// Per-button generation token for the hold re-pluck cycle. Guarded by `lock`.
     private var droneCycleGen = [Int](repeating: 0,
                                       count: FretArrangement.droneCount)
-    /// Live tanpura trims (`tp_*`). Guarded by `lock` except
-    /// `tanpuraGainOverride` (main-thread config).
+    /// The drone-button trims (`tp_drone_*`) — tanpura-only, so they stay
+    /// here rather than on `PluckedVoice`. Guarded by `lock`.
     private var tanpuraDroneLevel = 1.0
     private var tanpuraDroneCycleSec = 2.5
-    private var tanpuraPluckLevel = 1.0
-    private var tanpuraReleaseT60 = 0.4
-    /// `tp_pluck_touch`: pre-pluck state blended toward the settled wrap
-    /// (1 = identical plucks); `tp_pluck_drive`: drive into the jawari at
-    /// the calibrated level. Passed per pluck. Guarded by `lock`.
-    private var tanpuraPluckTouch = 0.0
-    private var tanpuraPluckDrive = 1.0
-    /// `tp_taraf`: per-source gain at the tanpura's jt inject tap (the
-    /// kernel-side gain is the shared arm). Guarded by `lock`; default = registry.
-    private var tanpuraTarafDrive = 4.0
-    /// `tp_poly`: previous plucks kept as full jawari simulations before
-    /// dropping to the ghost tier. Guarded by `lock`; default = registry.
-    private var tanpuraPoly = 6.0
-    private var tanpuraGainOverride: Double?
-    /// `tp_shape_*`: table-build params — an edit schedules a debounced full
-    /// tanpura rebuild (seconds of CPU). Guarded by `lock`.
-    private var tanpuraShapeAlign = 0.0
-    private var tanpuraShapeFocus = 0.0
-    private var tanpuraShapeSpread = 0.0
-    private var tanpuraShapeQuiet = 0.0
-    /// `tp_jiva_comp`: 1 = every slot keeps the low-Sa graze regime, 0 = the
-    /// fitted geometry. Table-build param. Guarded by `lock`; default = registry.
-    private var tanpuraJivaComp = 1.0
-    /// `tp_cascade`: slows the higher slots' cascade toward low Sa's pace. Table-build param.
-    private var tanpuraCascade = 1.0
-    /// Pending debounced shape rebuild (main-thread mutate only).
-    private var tanpuraShapeRebuildWork: DispatchWorkItem?
+    /// Pending debounced table rebuild (main-thread mutate only).
+    private var tanpuraTableRebuildWork: DispatchWorkItem?
 
-    // MARK: - Sitar voice
-
-    /// Third source: a `TanpuraVoiceSource` on the sitar artifact. Armed lazily
-    /// on the first `.sitar` switch and kept armed; its tap feeds the jt inject ring.
-    private var sitarSource: TanpuraVoiceSource?
-    private var sitarAttached = false
-    private var sitarConnected = false
-    private var sitarBuildGen = 0
-    /// Live sitar trims (`st_*`). Guarded by `lock` except
-    /// `sitarGainOverride`; defaults = registry.
-    private var sitarPluckLevel = 1.0
-    private var sitarReleaseT60 = 0.15
-    private var sitarPluckTouch = 1.0
-    private var sitarPluckDrive = 1.0
-    private var sitarPoly = 4.0
-    /// `st_taraf`: per-source gain at the sitar's jt inject tap. Guarded by `lock`.
-    private var sitarTarafDrive = 4.0
-    private var sitarGainOverride: Double?
+    /// The plucked voice a main instrument routes to (nil = String). Callers hold `lock`.
+    private func pluckVoiceLocked(_ inst: MainInstrument) -> PluckedVoice? {
+        switch inst {
+        case .string: return nil
+        case .tanpura: return tanpuraVoice
+        case .sitar: return sitarVoice
+        }
+    }
 
     /// The plucked source a main instrument routes to (nil = String). Callers hold `lock`.
     private func pluckSourceLocked(_ inst: MainInstrument) -> TanpuraVoiceSource? {
-        switch inst {
-        case .string: return nil
-        case .tanpura: return tanpuraSource
-        case .sitar: return sitarSource
-        }
+        pluckVoiceLocked(inst)?.source
     }
 
     /// Per-instrument pluck trims. Callers hold `lock`.
     private func pluckTrimsLocked(_ inst: MainInstrument)
         -> (level: Double, touch: Double, drive: Double, relT60: Double) {
-        inst == .sitar
-            ? (sitarPluckLevel, sitarPluckTouch, sitarPluckDrive, sitarReleaseT60)
-            : (tanpuraPluckLevel, tanpuraPluckTouch, tanpuraPluckDrive, tanpuraReleaseT60)
+        (pluckVoiceLocked(inst) ?? tanpuraVoice).pluckTrims
     }
-    /// The tanpura build is seconds of CPU — its own utility-QoS serial queue.
+
+    /// A plucked build is seconds of CPU — one shared utility-QoS serial queue.
     private let tanpuraBuildQueue = DispatchQueue(label: "tarabdaar.tanpura.build",
                                                   qos: .utility)
-    private var tanpuraBuildGen = 0
 
     @Published public var isRunning = false
 
@@ -637,8 +599,8 @@ public class AudioEngine: ObservableObject {
         let bus = stringVoiceSource?.busLevels() ?? (voice: 0, taraf: 0)
         lock.lock()
         let inst = mainInstrumentStorage
-        let tp = tanpuraSource
-        let st = sitarSource
+        let tp = tanpuraVoice.source
+        let st = sitarVoice.source
         lock.unlock()
         var voiceSq = bus.voice * bus.voice
         switch inst {
@@ -1045,47 +1007,49 @@ public class AudioEngine: ObservableObject {
         return useSarangiModelVoice
     }
 
-    // MARK: - Tanpura voice bridge
+    // MARK: - Plucked voice bridge (tanpura + sitar, one path)
 
-    /// Enable the tanpura source (node + off-main engine build on first
-    /// enable). Armed once at startup — the default drone voice.
+    /// Enable one plucked voice: mount the source on first enable (artifact
+    /// check, out-gain override, the voice→taraf tap at its own drive),
+    /// attach/connect the node, then (re)build it on the retained scale.
+    /// False only when the fitted artifact is missing.
     @discardableResult
-    public func setTanpuraVoiceEnabled(_ on: Bool) -> Bool {
-        if on && tanpuraSource == nil {
-            guard Presets.tanpuraParams() != nil else {
-                NSLog("Tarabdaar: tanpura_live.json missing from the SarangiKit bundle")
+    private func setPluckedVoiceEnabled(_ v: PluckedVoice, _ on: Bool) -> Bool {
+        if on && v.source == nil {
+            guard v.artifactLoads else {
+                NSLog("Tarabdaar: \(v.artifactFile) missing from the SarangiKit bundle")
                 return false
             }
             let src = TanpuraVoiceSource()
-            if let g = tanpuraGainOverride { src.setOutGain(g) }
-            // tanpura→taraf tap; the String voice exists by now (enabled first)
+            if let g = v.gainOverride { src.setOutGain(g) }
+            // voice→taraf tap; the String voice exists by now (enabled first)
             if let strSrc = stringVoiceSource {
                 src.setInjectSink { strSrc.jtInjectWrite($0, $1) }
             }
             lock.lock()
-            let drive = tanpuraTarafDrive
+            let drive = v.tarafDrive
             lock.unlock()
             src.setInjectGain(drive)
-            tanpuraSource = src
+            v.source = src
             updateJtInjectArm()
         }
-        if let src = tanpuraSource, on != tanpuraConnected {
+        if let src = v.source, on != v.connected {
             let wasRunning = engine.isRunning
             if wasRunning { engine.pause() }
             if on {
-                if !tanpuraAttached {
+                if !v.attached {
                     engine.attach(src.node)
-                    tanpuraAttached = true
+                    v.attached = true
                 }
                 let fmt = AVAudioFormat(standardFormatWithSampleRate: src.modelSR, channels: 2)!
                 engine.connect(src.node, to: symGain, format: fmt)
             } else {
                 engine.disconnectNodeOutput(src.node)
             }
-            tanpuraConnected = on
+            v.connected = on
             if wasRunning {
                 do { try engine.start() } catch {
-                    print("AudioEngine restart after tanpura switch failed: \(error)")
+                    print("AudioEngine restart after \(v.name) switch failed: \(error)")
                     isRunning = false
                 }
             }
@@ -1094,173 +1058,87 @@ public class AudioEngine: ObservableObject {
         let tonic = lastTanpuraTonic
         let ratios = lastTanpuraRatios
         lock.unlock()
-        if on, !ratios.isEmpty { rebuildTanpura(tonic: tonic, scaleRatios: ratios) }
+        if on, !ratios.isEmpty {
+            rebuildPlucked(v, tonic: tonic, scaleRatios: ratios)
+        }
         return true
     }
 
-    /// True once a tanpura engine is mounted and renderable.
-    public var isTanpuraArmed: Bool { tanpuraSource?.isArmed ?? false }
-
-    /// Tanpura async-pool telemetry (underruns / resets / ringing strings); nil unarmed.
-    public func tanpuraStats() -> (underruns: Int, resets: Int, active: Int)? {
-        guard let e = tanpuraSource?.currentEngine() else { return nil }
-        return (e.underruns, e.resetCount, e.activeStrings)
-    }
-
-    /// (Re)build the tanpura's JI slot grid off-main (seconds of CPU). A
-    /// newer build supersedes; held drone buttons re-pluck onto the fresh engine.
-    public func rebuildTanpura(tonic: Double, scaleRatios: [Double]) {
+    /// (Re)build one plucked voice's JI slot grid off-main (seconds of CPU).
+    /// A newer build supersedes; `published` runs on main right after the
+    /// swap (the per-voice hooks: the slot map and the tanpura's drones).
+    private func rebuildPlucked(_ v: PluckedVoice, tonic: Double,
+                                scaleRatios: [Double]) {
         lock.lock()
-        lastTanpuraTonic = tonic
-        lastTanpuraRatios = scaleRatios
-        let src = tanpuraSource
-        let shapeAlign = tanpuraShapeAlign
-        let shapeFocus = tanpuraShapeFocus
-        let shapeSpread = tanpuraShapeSpread
-        let shapeQuiet = tanpuraShapeQuiet
-        let jivaComp = tanpuraJivaComp
-        let cascade = tanpuraCascade
-        let poly = Int(tanpuraPoly.rounded())
+        let armed = v.source != nil
+        let artifact = v.artifact
+        let registerComp = v.registerComp
+        let cascade = v.cascade
+        let poly = Int(v.poly.rounded())
         lock.unlock()
-        guard src != nil else { return }
-        tanpuraBuildGen += 1
-        let gen = tanpuraBuildGen
-        tanpuraBuildQueue.async { [weak self] in
-            let engine = TanpuraVoiceSource.buildEngine(tonicHz: tonic,
-                                                       scaleRatios: scaleRatios,
-                                                       shapeAlign: shapeAlign,
-                                                       shapeFocus: shapeFocus,
-                                                       shapeSpread: shapeSpread,
-                                                       shapeQuiet: shapeQuiet,
-                                                       registerComp: jivaComp,
-                                                       cascade: cascade,
-                                                       polyphony: poly)
-            DispatchQueue.main.async {
-                guard let self, gen == self.tanpuraBuildGen else { return }
-                if engine == nil {
-                    NSLog("Tarabdaar: tanpura engine build failed (tanpura_live.json missing?)")
-                }
-                self.tanpuraSource?.setEngine(engine)
-                // the fresh engine's slots differ — held notes lose their binding
-                self.lock.lock()
-                self.tanpuraChannelSlot.removeAll(keepingCapacity: true)
-                self.tanpuraTouchSlot.removeAll(keepingCapacity: true)
-                self.lock.unlock()
-                self.reapplyHeldTanpuraDrones()
-            }
-        }
-    }
-
-    /// Enable the sitar voice (mirrors the tanpura path). Its render tap
-    /// feeds the jt inject ring (`st_taraf`); the String voice stays armed
-    /// and silent so the web can ring. False if `sitar_live.json` is missing.
-    @discardableResult
-    public func setSitarVoiceEnabled(_ on: Bool) -> Bool {
-        if on && sitarSource == nil {
-            guard Presets.sitarParams() != nil else {
-                NSLog("Tarabdaar: sitar_live.json missing from the SarangiKit bundle")
-                return false
-            }
-            let src = TanpuraVoiceSource()
-            if let g = sitarGainOverride { src.setOutGain(g) }
-            if let strSrc = stringVoiceSource {
-                src.setInjectSink { strSrc.jtInjectWrite($0, $1) }
-            }
-            lock.lock()
-            let drive = sitarTarafDrive
-            lock.unlock()
-            src.setInjectGain(drive)
-            sitarSource = src
-            updateJtInjectArm()
-        }
-        if let src = sitarSource, on != sitarConnected {
-            let wasRunning = engine.isRunning
-            if wasRunning { engine.pause() }
-            if on {
-                if !sitarAttached {
-                    engine.attach(src.node)
-                    sitarAttached = true
-                }
-                let fmt = AVAudioFormat(standardFormatWithSampleRate: src.modelSR, channels: 2)!
-                engine.connect(src.node, to: symGain, format: fmt)
-            } else {
-                engine.disconnectNodeOutput(src.node)
-            }
-            sitarConnected = on
-            if wasRunning {
-                do { try engine.start() } catch {
-                    print("AudioEngine restart after sitar switch failed: \(error)")
-                    isRunning = false
-                }
-            }
-        }
-        lock.lock()
-        let tonic = lastTanpuraTonic
-        let ratios = lastTanpuraRatios
-        lock.unlock()
-        if on, !ratios.isEmpty { rebuildSitar(tonic: tonic, scaleRatios: ratios) }
-        return true
-    }
-
-    /// True once a sitar engine is mounted and renderable.
-    public var isSitarArmed: Bool { sitarSource?.isArmed ?? false }
-
-    /// (Re)build the sitar's JI slot grid — same discipline as `rebuildTanpura`, no shaping layers.
-    public func rebuildSitar(tonic: Double, scaleRatios: [Double]) {
-        lock.lock()
-        let src = sitarSource
-        let poly = Int(sitarPoly.rounded())
-        lock.unlock()
-        guard src != nil else { return }
-        sitarBuildGen += 1
-        let gen = sitarBuildGen
+        guard armed else { return }
+        v.buildGen += 1
+        let gen = v.buildGen
         tanpuraBuildQueue.async { [weak self] in
             let engine = TanpuraVoiceSource.buildEngine(tonicHz: tonic,
                                                         scaleRatios: scaleRatios,
-                                                        artifact: .sitar,
+                                                        artifact: artifact,
+                                                        registerComp: registerComp,
+                                                        cascade: cascade,
                                                         polyphony: poly)
             DispatchQueue.main.async {
-                guard let self, gen == self.sitarBuildGen else { return }
+                guard let self, gen == v.buildGen else { return }
                 if engine == nil {
-                    NSLog("Tarabdaar: sitar engine build failed (sitar_live.json missing?)")
+                    NSLog("Tarabdaar: \(v.name) engine build failed (\(v.artifactFile) missing?)")
                 }
-                self.sitarSource?.setEngine(engine)
-                self.lock.lock()
-                if self.mainInstrumentStorage == .sitar {
-                    self.tanpuraChannelSlot.removeAll(keepingCapacity: true)
-                    self.tanpuraTouchSlot.removeAll(keepingCapacity: true)
-                }
-                self.lock.unlock()
+                v.source?.setEngine(engine)
+                self.pluckedEnginePublished(v)
             }
         }
     }
 
-    /// Apply one `st_*` live registry parameter (same contract as `setTanpuraParam`).
+    /// The per-voice hook after a fresh engine is published (main thread):
+    /// the fresh slots differ, so held notes lose their binding — the sitar
+    /// only owns that map while it IS the main instrument, and the tanpura
+    /// re-strikes its held drone buttons onto the silent new engine.
+    private func pluckedEnginePublished(_ v: PluckedVoice) {
+        lock.lock()
+        if v !== sitarVoice || mainInstrumentStorage == .sitar {
+            tanpuraChannelSlot.removeAll(keepingCapacity: true)
+            tanpuraTouchSlot.removeAll(keepingCapacity: true)
+        }
+        lock.unlock()
+        if v === tanpuraVoice { reapplyHeldTanpuraDrones() }
+    }
+
+    /// The `<prefix>_*` trims BOTH plucked voices carry. False for a key
+    /// outside the shared set (the caller handles its own extras).
     @discardableResult
-    public func setSitarParam(_ key: String, _ value: Double) -> Bool {
-        switch key {
-        case "st_gain":
-            sitarGainOverride = value
-            sitarSource?.setOutGain(value)
-        case "st_pluck_level":
-            lock.lock(); sitarPluckLevel = value; lock.unlock()
-        case "st_rel_t60":
-            lock.lock(); sitarReleaseT60 = value; lock.unlock()
-        case "st_pluck_touch":
-            lock.lock(); sitarPluckTouch = value; lock.unlock()
-        case "st_pluck_drive":
-            lock.lock(); sitarPluckDrive = value; lock.unlock()
-        case "st_poly":
+    private func setPluckedParam(_ v: PluckedVoice, _ key: String,
+                                 _ value: Double) -> Bool {
+        switch key.hasPrefix(v.prefix) ? String(key.dropFirst(v.prefix.count)) : "" {
+        case "gain":
+            v.gainOverride = value
+            v.source?.setOutGain(value)
+        case "pluck_level":
+            lock.lock(); v.pluckLevel = value; lock.unlock()
+        case "rel_t60":
+            lock.lock(); v.releaseT60 = value; lock.unlock()
+        case "pluck_touch":
+            lock.lock(); v.pluckTouch = value; lock.unlock()
+        case "pluck_drive":
+            lock.lock(); v.pluckDrive = value; lock.unlock()
+        case "poly":
             lock.lock()
-            sitarPoly = value
-            let src = sitarSource
+            v.poly = value
+            let src = v.source
             lock.unlock()
             src?.currentEngine()?.setPolyphony(Int(value.rounded()))
-        case "st_taraf":
+        case "taraf":
             // per-source tap gain; the kernel-side gain is the shared arm
             lock.lock()
-            sitarTarafDrive = value
-            let src = sitarSource
+            v.tarafDrive = value
+            let src = v.source
             lock.unlock()
             src?.setInjectGain(value)
             updateJtInjectArm()
@@ -1270,12 +1148,61 @@ public class AudioEngine: ObservableObject {
         return true
     }
 
+    /// Enable the tanpura source (node + off-main engine build on first
+    /// enable). Armed once at startup — the default drone voice.
+    @discardableResult
+    public func setTanpuraVoiceEnabled(_ on: Bool) -> Bool {
+        setPluckedVoiceEnabled(tanpuraVoice, on)
+    }
+
+    /// True once a tanpura engine is mounted and renderable.
+    public var isTanpuraArmed: Bool { tanpuraVoice.source?.isArmed ?? false }
+
+    /// Tanpura async-pool telemetry (underruns / resets / ringing strings); nil unarmed.
+    public func tanpuraStats() -> (underruns: Int, resets: Int, active: Int)? {
+        guard let e = tanpuraVoice.source?.currentEngine() else { return nil }
+        return (e.underruns, e.resetCount, e.activeStrings)
+    }
+
+    /// (Re)build the tanpura's JI slot grid. The tonic + scale are RETAINED
+    /// here for both plucked voices (the sitar rebuilds off the same push).
+    public func rebuildTanpura(tonic: Double, scaleRatios: [Double]) {
+        lock.lock()
+        lastTanpuraTonic = tonic
+        lastTanpuraRatios = scaleRatios
+        lock.unlock()
+        rebuildPlucked(tanpuraVoice, tonic: tonic, scaleRatios: scaleRatios)
+    }
+
+    /// Enable the sitar voice (the same mount as the tanpura). Its render
+    /// tap feeds the jt inject ring (`st_taraf`); the String voice stays
+    /// armed and silent so the web can ring. False if `sitar_live.json` is missing.
+    @discardableResult
+    public func setSitarVoiceEnabled(_ on: Bool) -> Bool {
+        setPluckedVoiceEnabled(sitarVoice, on)
+    }
+
+    /// True once a sitar engine is mounted and renderable.
+    public var isSitarArmed: Bool { sitarVoice.source?.isArmed ?? false }
+
+    /// (Re)build the sitar's JI slot grid — same discipline as `rebuildTanpura`,
+    /// no shaping layers.
+    public func rebuildSitar(tonic: Double, scaleRatios: [Double]) {
+        rebuildPlucked(sitarVoice, tonic: tonic, scaleRatios: scaleRatios)
+    }
+
+    /// Apply one `st_*` live registry parameter (same contract as `setTanpuraParam`).
+    @discardableResult
+    public func setSitarParam(_ key: String, _ value: Double) -> Bool {
+        setPluckedParam(sitarVoice, key, value)
+    }
+
     /// (Re)publish the String kernel's inject-ring arm: 1 while any foreign
     /// voice drives the taraf (`st_taraf` / `tp_taraf` > 0), else 0. Levels
     /// live at the taps; both zero keeps the ring unwritten (byte-null).
     private func updateJtInjectArm() {
         lock.lock()
-        let armed = sitarTarafDrive > 0 || tanpuraTarafDrive > 0
+        let armed = sitarVoice.tarafDrive > 0 || tanpuraVoice.tarafDrive > 0
         lock.unlock()
         stringVoiceSource?.setJtInjectGain(armed ? 1.0 : 0.0)
     }
@@ -1293,7 +1220,7 @@ public class AudioEngine: ObservableObject {
         for i in droneHeld.indices { droneHeld[i] = false }
         for i in droneCycleGen.indices { droneCycleGen[i] += 1 }
         let strSrc = stringVoiceSource
-        let tpSrc = tanpuraSource
+        let tpSrc = tanpuraVoice.source
         lock.unlock()
         if oldMode == .sympathetic, let engine = strSrc?.currentEngine() {
             for hz in heldOld {
@@ -1334,87 +1261,41 @@ public class AudioEngine: ObservableObject {
         return mainInstrumentStorage
     }
 
-    /// Apply one `tp_*` live registry parameter (thread-safe, persists across rebuilds).
+    /// Apply one `tp_*` live registry parameter (thread-safe, persists across
+    /// rebuilds): the shared plucked trims plus the tanpura's own extras —
+    /// the drone-button trims and the two table-build shaping knobs.
     @discardableResult
     public func setTanpuraParam(_ key: String, _ value: Double) -> Bool {
         switch key {
-        case "tp_gain":
-            tanpuraGainOverride = value
-            tanpuraSource?.setOutGain(value)
         case "tp_drone_level":
             lock.lock(); tanpuraDroneLevel = value; lock.unlock()
         case "tp_drone_cycle":
             lock.lock(); tanpuraDroneCycleSec = value; lock.unlock()
-        case "tp_pluck_level":
-            lock.lock(); tanpuraPluckLevel = value; lock.unlock()
-        case "tp_rel_t60":
-            lock.lock(); tanpuraReleaseT60 = value; lock.unlock()
-        case "tp_pluck_touch":
-            lock.lock(); tanpuraPluckTouch = value; lock.unlock()
-        case "tp_pluck_drive":
-            lock.lock(); tanpuraPluckDrive = value; lock.unlock()
-        case "tp_taraf":
-            lock.lock()
-            tanpuraTarafDrive = value
-            let src = tanpuraSource
-            lock.unlock()
-            src?.setInjectGain(value)
-            updateJtInjectArm()
-        case "tp_poly":
-            lock.lock()
-            tanpuraPoly = value
-            let src = tanpuraSource
-            lock.unlock()
-            src?.currentEngine()?.setPolyphony(Int(value.rounded()))
         case "tp_jiva_comp":
             lock.lock()
-            let old = tanpuraJivaComp
-            tanpuraJivaComp = value
+            let old = tanpuraVoice.registerComp
+            tanpuraVoice.registerComp = value
             lock.unlock()
             // only a real change burns a seconds-long rebuild
-            if value != old { scheduleTanpuraShapeRebuild() }
+            if value != old { scheduleTanpuraTableRebuild() }
         case "tp_cascade":
             lock.lock()
-            let oldC = tanpuraCascade
-            tanpuraCascade = value
+            let oldC = tanpuraVoice.cascade
+            tanpuraVoice.cascade = value
             lock.unlock()
-            if value != oldC { scheduleTanpuraShapeRebuild() }
-        case "tp_shape_align", "tp_shape_focus", "tp_shape_spread",
-             "tp_shape_quiet":
-            lock.lock()
-            let wasActive = tanpuraShapeAlign > 0 || tanpuraShapeFocus > 0
-                || tanpuraShapeQuiet > 0
-            let old: Double
-            switch key {
-            case "tp_shape_align":
-                old = tanpuraShapeAlign; tanpuraShapeAlign = value
-            case "tp_shape_focus":
-                old = tanpuraShapeFocus; tanpuraShapeFocus = value
-            case "tp_shape_quiet":
-                old = tanpuraShapeQuiet; tanpuraShapeQuiet = value
-            default:
-                old = tanpuraShapeSpread; tanpuraShapeSpread = value
-            }
-            let isActive = tanpuraShapeAlign > 0 || tanpuraShapeFocus > 0
-                || tanpuraShapeQuiet > 0
-            lock.unlock()
-            // rebuild only when a value moved AND shaping is (or was) in
-            // effect — spread alone is inert; the startup push must not build
-            if value != old, wasActive || isActive {
-                scheduleTanpuraShapeRebuild()
-            }
+            if value != oldC { scheduleTanpuraTableRebuild() }
         default:
-            return false
+            return setPluckedParam(tanpuraVoice, key, value)
         }
         return true
     }
 
     /// Debounced table-build rebuild: a slider drag settles (750 ms) before
     /// one seconds-long build runs; the generation guard supersedes in-flight ones.
-    private func scheduleTanpuraShapeRebuild() {
+    private func scheduleTanpuraTableRebuild() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.tanpuraShapeRebuildWork?.cancel()
+            self.tanpuraTableRebuildWork?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 self.lock.lock()
@@ -1424,7 +1305,7 @@ public class AudioEngine: ObservableObject {
                 guard !ratios.isEmpty else { return }
                 self.rebuildTanpura(tonic: tonic, scaleRatios: ratios)
             }
-            self.tanpuraShapeRebuildWork = work
+            self.tanpuraTableRebuildWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.75,
                                           execute: work)
         }
@@ -1436,9 +1317,9 @@ public class AudioEngine: ObservableObject {
         lock.lock()
         let hz = droneFreqs.indices.contains(index) ? droneFreqs[index] : nil
         let level = tanpuraDroneLevel
-        let touch = tanpuraPluckTouch
-        let drive = tanpuraPluckDrive
-        let src = tanpuraSource
+        let touch = tanpuraVoice.pluckTouch
+        let drive = tanpuraVoice.pluckDrive
+        let src = tanpuraVoice.source
         lock.unlock()
         guard let hz, let engine = src?.currentEngine(),
               let slot = engine.nearestSlot(toHz: hz, toleranceCents: 50)
@@ -1496,42 +1377,6 @@ public class AudioEngine: ObservableObject {
         lock.lock()
         tanpuraChannelSlot[channel] = slot
         lock.unlock()
-    }
-
-    /// The String voice's `.live` runtime parameters (no rebuild; persist
-    /// across rebuilds). Thread-safe.
-    public func setStringJtToneLp(hz: Double) {
-        stringVoiceSource?.setJtToneLp(hz: hz)
-    }
-    public func setStringJtToneHp(hz: Double) {
-        stringVoiceSource?.setJtToneHp(hz: hz)
-    }
-    public func setStringJtBody(_ mix01: Double) {
-        stringVoiceSource?.setJtBody(mix01)
-    }
-    public func setStringJtGov(_ amt01: Double) {
-        stringVoiceSource?.setJtGov(amt01)
-    }
-    public func setStringTarafDamp(_ amt01: Double) {
-        stringVoiceSource?.setTarafDamp(amt01)
-    }
-    public func setStringToneTilt(_ t: Double) {
-        stringVoiceSource?.setToneTilt(t)
-    }
-    public func setStringTarafSelectivity(_ s01: Double) {
-        stringVoiceSource?.setTarafSelectivity(s01)
-    }
-    public func setStringJtEvolve(_ e01: Double) {
-        stringVoiceSource?.setJtEvolve(e01)
-    }
-    public func setStringJtEvolveReg(_ reg: Double) {
-        stringVoiceSource?.setJtEvolveReg(reg)
-    }
-    public func setStringJtEvolveChromatic(_ e01: Double) {
-        stringVoiceSource?.setJtEvolveChromatic(e01)
-    }
-    public func setStringTwang(_ amt01: Double) {
-        stringVoiceSource?.setTwang(amt01)
     }
 
     /// Jawari-web overload telemetry (see `StringVoiceSource.jtStats`); nil without a voice.
@@ -1643,40 +1488,18 @@ public class AudioEngine: ObservableObject {
     @discardableResult
     public func setStringControlParam(_ key: String, _ value: Double) -> Bool {
         switch key {
+        // the bow-control axes: the mapper, not the engine
         case "bow_expr":      setSarangiModelVoiceAxis(cc: 11, value01: value)
         case "bow_press":     setSarangiModelVoiceAxis(cc: 1, value01: value)
         case "bow_pos":       setSarangiModelVoiceAxis(cc: 74, value01: value)
         case "bow_tilt":      setSarangiModelVoiceAxis(cc: 75, value01: value)
-        // top of range = bypass: hand the engine 0 so it restores the exact
-        // build-time coefficient (byte-null) — this one rests at 20 kHz
-        case "bow_jt_lp":     setStringJtToneLp(hz: value >= 20000 ? 0 : value)
-        case "bow_jt_hp":     setStringJtToneHp(hz: value)
-        case "bow_jt_body":   setStringJtBody(value)
-        case "bow_jt_gov":    setStringJtGov(value)
-        case "bow_jt_damp":   setStringTarafDamp(value)
-        case "bow_gain":      stringVoiceSource?.setMasterGain(value)
-        case "bow_bal":       stringVoiceSource?.setBusBalance(value)
-        case "bow_jt_comp_thresh":
-            stringVoiceSource?.setJtCompParam(.thresh, value)
-        case "bow_jt_comp_ratio":
-            stringVoiceSource?.setJtCompParam(.ratio, value)
-        case "bow_jt_comp_atk_ms":
-            stringVoiceSource?.setJtCompParam(.atkMs, value)
-        case "bow_jt_comp_rel_ms":
-            stringVoiceSource?.setJtCompParam(.relMs, value)
-        case "bow_jt_cap":
-            stringVoiceSource?.setJtCapParam(.hard, value)
-        case "bow_jt_cap_ratio":
-            stringVoiceSource?.setJtCapParam(.ratio, value)
-        case "bow_jt_cap_bus":
-            stringVoiceSource?.setJtCapParam(.bus, value)
-        case "bow_jt_sel":    setStringTarafSelectivity(value)
-        case "bow_jt_evolve": setStringJtEvolve(value)
-        case "bow_jt_ev_reg": setStringJtEvolveReg(value)
-        case "bow_jtc_evolve": setStringJtEvolveChromatic(value)
-        case "bow_twang":     setStringTwang(value)
-        case "bow_tone_tilt": setStringToneTilt(value)
         default:
+            // the knob plumbing table (clamp + cache + push, and re-applied
+            // across a rebuild); it owns the key even with no voice armed yet
+            if StringVoiceSource.handlesControl(key) {
+                stringVoiceSource?.setControl(key, value)
+                return true
+            }
             // FX rack: `fx_<point>_<field>` keys route to the source's cached settings
             if key.hasPrefix("fx_") {
                 return stringVoiceSource?.setFXParam(key, value) ?? false

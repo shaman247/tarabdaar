@@ -1,13 +1,13 @@
 /* POLYPHONIC bow kernel: nb bowed gut strings on ONE bridge. Per sample
    every active string runs the bow-string section (friction contacts,
    thermal rosin, contact noise, terminations, gut loss/dispersion) on its
-   OWN delay lines; the forces sum into the bridge force F, the taraf web +
-   modal body solve V, and every string takes the same bridge velocity back
+   OWN delay lines; the forces sum into the bridge force F, the modal body
+   solves V, and every string takes the same bridge velocity back
    through its gated kret return.
 
    STABILITY LAW: in the passive-junction topology the strings' loading is
    folded into the DELAY-FREE junction solve
-       V = (Vstate + jy0*F0) / (1 + jy0*(jzsum + nProc*zZb))
+       V = (Vstate + jy0*F0) / (1 + jy0*nProc*zZb)
    — passive at any polyphony (a delayed load crosses unity at nb=4).
    Silent strings are skipped whole (exact: their state is zero). */
 
@@ -50,18 +50,7 @@ typedef struct {
     /* torsional wave loop */
     double bufT[MAXBOW];
     int wti;
-    /* rate-and-state contact aging: strength deficit, ageA at slip / unloaded,
-       decays by ageDk per stick sample. ageA = 0 is bit-null. */
-    double ageDef, ageDef3[3];
     double hairLp, hairLp3[3];
-    /* continuum-release contact: stuck fraction per contact site relaxing
-       toward s_eq(|demand|/grip), release-only tau. crW = crMs = 0 is
-       bit-null. */
-    double crS, crSB, crS3[3];
-    /* SITAR TWANG: per-side peak envelopes of the reflected wave (the graze
-       knee references); twD = smoothed wrap shortening (samples), twDb its
-       slow mean (the read applies twD - twDb). All rest at 0 while disarmed. */
-    double twEnvP, twEnvN, twD, twDb;
     /* SLIDE TRACKER: slF = previous f0, slD/slEnv = signed slew smoother +
        0..1 dulling envelope, slA/slEnvA = signed accel smoother + 0..1 noise
        envelope, slLp = finger-noise one-pole, slRng = per-slot xorshift64.
@@ -75,10 +64,7 @@ typedef struct {
 typedef struct {
     /* --- static config (deep copies; C owns the memory) --- */
     double sr;
-    int nb, nv;
-    int *L;
-    double *cs, *cp, *w0, *w1, *w2, *w3, *w4, *g, *lpA, *wout, *kap;
-    double *alphaw, *jw, *jl, *jn, *zdrv, *zi, *twt;
+    int nb;
     int K;
     double *ba1, *ba2, *bn0, *bA, *bC;
     double yinf, c0, dcRho;
@@ -91,23 +77,13 @@ typedef struct {
     double nA, nT, nPow, nzHi, nzLo, nDir, nzHiD, passive;
     double gutG, dispN, nailK, f0Open, gutA2;
     double torsRatio, torsG, torsC;
-    double ageA, ageDk;
     double v0Pow, v0Ref;
     double hairHz, hairRef;
-    double crW, crAt;
     double jawRho;
     double jawRoll, jawRollAmp;
     double lossReg;   /* register damping: loop-corner scaling below f0Open */
     double slideRate, slideDull;         /* slide dulling */
     double slideNoise, slideAcc;         /* accel-driven finger noise */
-    /* runtime web-jawari BUZZ scale (scales jn/jw; the jl LOSS stays full) */
-    double jawG;
-    double *rollD, *rollE, *rollAv;
-    /* DRIVEN-UNISON TAP DUCK (tuw 1.0 = off/bit-null): while any bowing slot
-       sits within ~30 c of a voice's partial coincidence, that voice's
-       direct-tap weight ducks toward tuw. */
-    double tuw;
-    double *fv, *dwt, *dtg;
     /* --- derived constants --- */
     /* ---- MODAL-JAWARI sympathetic strings: per row a modal-exact stiff
        string (precomputed rotation tables ca/cb + wd, quarter-step ca4/cb4)
@@ -145,13 +121,6 @@ typedef struct {
        jtLiftRef = load-time max penetration), jtDampMul = momentum
        multiplier. */
     double jtLift, jtLiftRef, jtDampMul;
-    /* CHARGE GOVERNOR (bow_jt_gov): per-row AGC on the bridge drive so the
-       long-t60 anchor rows saturate at their single-strike level. jtGovEnv =
-       peak zone velocity (~60 ms release); a row above jtGovRef·wd1 (jtGovRef
-       = zone DISPLACEMENT in meters) sheds drive by ref/env × jtGovAmt. Drone
-       drive adds after the shed. jtGovAmt 0 = byte-null. */
-    double jtGovAmt, jtGovRef, jtGovRel;
-    double *jtGovEnv;
     /* PER-STRING VOICE-RELATIVE CAP (bow_jt_cap): each row's RADIATED output is
        held at or below ratio × the voice bus's decaying peak (the runaway-bloom
        lever, per string so one anchor row never ducks its neighbours). The
@@ -163,11 +132,6 @@ typedef struct {
        edge bumps jtCapGen and each row resets itself on its next tick (never
        write the per-row arrays from the control thread). hard 0 = byte-null. */
     double jtCapHard, jtCapRatio;
-    /* SCOPE blend (bow_jt_cap_bus): 0 = per string, 1 = per taraf (the
-       summed web capped in the hold walk), between = rows hard·(1−bus), sum
-       hard·bus. */
-    double jtCapMode;
-    double jtCapBEnv, jtCapBGain; int jtCapBGen;
     double jtCapVEnv, jtCapVRel;      /* voice peak env + per-sample release */
     double jtCapTRel, jtCapAtk, jtCapRel;   /* per-jt-tick clocks */
     double *jtCapEnv, *jtCapGain;     /* per-row (worker-owned) */
@@ -322,7 +286,6 @@ typedef struct {
        mid-only. Host: L = mid + side, R = mid - side, fold-down bit-identical
        to mono. Armed by bow_poly_set_stereo; outS = NULL = mono path. */
     int stOn;
-    double *stWebPan;                 /* nv: taraf web pans */
     double *stSlotPan;                /* nb: played-string (noise) pans */
     double *stJtPan;                  /* njt: modal-jawari row pans */
     double tsx1[96], tsx2[96], tsy1[96], tsy2[96];   /* side tdir bank */
@@ -340,41 +303,12 @@ typedef struct {
     int stWidthOn;
     double stWidthTgt, stWidthCur;    /* slewed width scalar */
     double stWidthSl;                 /* ~30 ms one-pole slew coeff */
-    /* ---- SITAR TWANG: a grazing jawari fold on the PLAYED string's bridge
-       termination (poly_string_return) whose knee RIDES the string's own peak
-       envelope, so the graze engages at the same relative depth at any strike
-       level; the one-sided fold builds the even-harmonic cascade over round
-       trips. Passive (amt·depth ≤ 1). Armed by bow_poly_set_twang; never armed
-       = byte-null; self-disarms once the slewed amount dies. */
-    int twOn;
-    double twTgt, twCur;              /* slewed 0..1 amount */
-    double twSl;                      /* ~30 ms per-sample slew coeff */
-    double twKneeR;                   /* knee as fraction of the side env */
-    double twDepth;                   /* contact-loss fold depth at amt 1 */
-    double twRel;                     /* side-env per-sample release mul */
-    double twRollSmp;                 /* wrap length shortening at amt 1 */
-    double twAv;                      /* twD smoothing coeff (~0.5 ms) */
-    double twDcA;                     /* twDb mean-tracker coeff */
-    /* sitar-morph half: amount also brightens the terminations (pow exponent
-       on the one-pole coeffs) and eases release damping — steel over bone
-       sustains the bloom that gut terminations reabsorb. tw*C = chunk
-       values. */
-    double twBright, twRing, twGut;
-    double twXpC, twBrAC, twNutAC, twGutA2C, twGutC, twRingC;
-    /* pitch lock: brightened one-poles lose loop phase delay (a/(1-a) samples
-       each); twTrimC restores it on the bridge-segment read. */
-    double twTrimC;
     int sdN;
     double sdA1[16], sdA2[16], sdN0[16], sdG[16];
     double sdX1[2][16], sdX2[2][16], sdY1[2][16], sdY2[2][16];
-    double hpG, jy0, jzsum;
+    double hpG, jy0;
     int psv;
     /* --- shared cross-sample state --- */
-    int *off;              /* taraf voice ring arena */
-    double *arena;
-    int *widx;
-    double *vx1, *vx2, *vlp, *jdc, *jenv, *sv;
-    double venv;
     double bx1[96], bx2[96], by1[96], by2[96];
     double tx1[96], tx2[96], ty1[96], ty2[96];
     double hpY, hpX1;
@@ -398,20 +332,13 @@ typedef struct {
     double sjGain;                    /* plain scalar store */
 } bow_poly_state_t;
 
-/* Mount a string in the FRESH-CONTACT friction state: the aging deficit
-   starts at ageA (weak grip). A bare memset would start it at full static
-   grip, and only the unloaded branch would ever correct it. */
+/* Mount a fresh string. */
 static void poly_mount_string(bow_poly_state_t *st, bow_pstring_t *S)
 {
     memset(S, 0, sizeof(*S));
     /* finger-noise RNG: deterministic per slot (renders reproduce) */
     S->slRng = 0x9E3779B97F4A7C15ULL
         ^ ((unsigned long long)(S - st->strs) + 1ULL) * 0xBF58476D1CE4E5B9ULL;
-    S->ageDef = st->ageA;
-    S->ageDef3[0] = S->ageDef3[1] = S->ageDef3[2] = st->ageA;
-    /* a freshly-placed bow lands STUCK */
-    S->crS = 1.0; S->crSB = 1.0;
-    S->crS3[0] = S->crS3[1] = S->crS3[2] = 1.0;
 }
 
 static double *pdup_d(const double *a, int n) {
@@ -420,43 +347,7 @@ static double *pdup_d(const double *a, int n) {
     return b;
 }
 
-/* continuum contact: equilibrium stuck fraction at demand ratio x =
-   |stickF|/grip */
-static double cr_seq(double x, double w) {
-    if (w <= 1e-12) return x <= 1.0 ? 1.0 : 0.0;
-    if (x <= 1.0 - w) return 1.0;
-    if (x >= 1.0 + w) return 0.0;
-    double u = (1.0 + w - x) / (2.0 * w);
-    return u * u * (3.0 - 2.0 * u);
-}
-
-/* rolling-contact read */
-static double roll_read(const double *b, int wi, int len, int L,
-                        double w0, double w1, double w2,
-                        double w3, double w4, double rollD)
-{
-    int s0 = (int)rollD;
-    double fr = rollD - (double)s0;
-    int base = wi + len - L + s0;
-    double a = w0 * b[base % len] + w1 * b[(base - 1) % len]
-        + w2 * b[(base - 2) % len] + w3 * b[(base - 3) % len]
-        + w4 * b[(base - 4) % len];
-    if (fr < 1e-12) return a;
-    int b1 = base + 1;
-    double c = w0 * b[b1 % len] + w1 * b[(b1 - 1) % len]
-        + w2 * b[(b1 - 2) % len] + w3 * b[(b1 - 3) % len]
-        + w4 * b[(b1 - 4) % len];
-    return (1.0 - fr) * a + fr * c;
-}
-
 void *bow_poly_init(int nb, double sr,
-                    int nv, const int *L, const double *cs, const double *cp,
-                    const double *w0, const double *w1, const double *w2,
-                    const double *w3, const double *w4, const double *g,
-                    const double *lpA, const double *wout, const double *kap,
-                    const double *alphaw, const double *jw, const double *jl,
-                    const double *jn, const double *chg,
-                    const double *zdrv, const double *zi, const double *twt,
                     int K, const double *ba1, const double *ba2,
                     const double *bn0, const double *bA, const double *bC,
                     double yinf, double c0, double dcRho,
@@ -473,29 +364,19 @@ void *bow_poly_init(int nb, double sr,
                     double gutG, double dispN, double nailK, double f0Open,
                     double gutA2, double tdirUni,
                     double torsRatio, double torsG, double torsC,
-                    double ageAp, double ageMs,
                     double v0Powp, double v0Refp,
                     double hairHzp, double hairRefp,
-                    double crWp, double crMsp,
                     double jawRhop, double jawRollp, double jawRollAmpp,
                     double lossRegp, double slideRatep, double slideDullp,
                     double slideNoisep, double slideAccp)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)calloc(1, sizeof(bow_poly_state_t));
+    /* tdirUni (scalar 46) drove the deleted comb bank's direct-tap duck; the
+       slot stays so the scalar vector's indices do not move. */
+    (void)tdirUni;
     st->sr = sr;
     st->nb = nb < 1 ? 1 : (nb > 64 ? 64 : nb);   /* chunk scratch is [64] */
-    st->nv = nv; st->K = K > 96 ? 96 : K;
-    st->L = (int *)malloc(sizeof(int) * (nv > 0 ? nv : 1));
-    memcpy(st->L, L, sizeof(int) * (size_t)nv);
-    st->cs = pdup_d(cs, nv);    st->cp = pdup_d(cp, nv);
-    st->w0 = pdup_d(w0, nv);    st->w1 = pdup_d(w1, nv);
-    st->w2 = pdup_d(w2, nv);    st->w3 = pdup_d(w3, nv);
-    st->w4 = pdup_d(w4, nv);    st->g = pdup_d(g, nv);
-    st->lpA = pdup_d(lpA, nv);  st->wout = pdup_d(wout, nv);
-    st->kap = pdup_d(kap, nv);  st->alphaw = pdup_d(alphaw, nv);
-    st->jw = pdup_d(jw, nv);    st->jl = pdup_d(jl, nv);
-    st->jn = pdup_d(jn, nv);    st->zdrv = pdup_d(zdrv, nv);
-    st->zi = pdup_d(zi, nv);    st->twt = pdup_d(twt, nv);
+    st->K = K > 96 ? 96 : K;
     st->ba1 = pdup_d(ba1, K);   st->ba2 = pdup_d(ba2, K);
     st->bn0 = pdup_d(bn0, K);   st->bA = pdup_d(bA, K);
     st->bC = pdup_d(bC, K);
@@ -515,71 +396,24 @@ void *bow_poly_init(int nb, double sr,
     st->nzHi = nzHi; st->nzLo = nzLo; st->nDir = nDir; st->nzHiD = nzHiD;
     st->passive = passive;
     st->gutG = gutG; st->dispN = dispN; st->nailK = nailK;
-    st->f0Open = f0Open; st->gutA2 = gutA2; st->tuw = tdirUni;
+    st->f0Open = f0Open; st->gutA2 = gutA2;
     st->torsRatio = torsRatio; st->torsG = torsG; st->torsC = torsC;
-    st->ageA = ageAp;
-    st->ageDk = exp(-1.0 / ((ageMs > 0.01 ? ageMs : 0.01) * 1e-3 * sr));
     st->v0Pow = v0Powp; st->v0Ref = v0Refp;
     st->hairHz = hairHzp;
     st->hairRef = (hairRefp > 1e-6 ? hairRefp : 1.0);
-    st->crW = crWp;
-    st->crAt = crMsp > 1e-6
-        ? 1.0 - exp(-1.0 / (crMsp * 1e-3 * sr)) : 1.0;
     st->jawRho = jawRhop;
     st->jawRoll = jawRollp;
-    st->jawG = 1.0;    /* buzz scale: 1 = bit-exact */
     st->jawRollAmp = (jawRollAmpp > 1e-9 ? jawRollAmpp : 1e-9);
     st->lossReg = lossRegp;
     st->slideRate = (slideRatep > 1.0 ? slideRatep : 900.0);
     st->slideDull = slideDullp;
     st->slideNoise = slideNoisep;
     st->slideAcc = (slideAccp > 1.0 ? slideAccp : 25000.0);
-    st->fv = (double *)malloc(sizeof(double) * (nv > 0 ? nv : 1));
-    st->dwt = (double *)malloc(sizeof(double) * (nv > 0 ? nv : 1));
-    st->dtg = (double *)malloc(sizeof(double) * (nv > 0 ? nv : 1));
-    for (int i_ = 0; i_ < nv; i_++) {
-        st->fv[i_] = sr / (double)(L[i_] > 2 ? L[i_] : 2);
-        st->dwt[i_] = 1.0;
-        st->dtg[i_] = 1.0;
-    }
-    /* taraf voice ring arena + pre-charge */
-    st->off = (int *)malloc(sizeof(int) * (nv + 1));
-    int tot = 0;
-    for (int i = 0; i < nv; i++) { st->off[i] = tot; tot += L[i] + 8; }
-    st->off[nv] = tot;
-    st->arena = (double *)calloc(tot > 0 ? tot : 1, sizeof(double));
-    for (int i = 0; i < nv; i++) {
-        if (chg[i] > 1e-12) {
-            int len = L[i] + 8;
-            int W = len / 6 > 8 ? len / 6 : 8;
-            double *b = st->arena + st->off[i];
-            for (int k = 0; k < W && k < len; k++)
-                b[k] = chg[i] * 0.5 * (1.0 - cos(6.283185307179586 * k / W));
-        }
-    }
-    st->widx = (int *)calloc(nv > 0 ? nv : 1, sizeof(int));
-    st->vx1 = (double *)calloc(nv > 0 ? nv : 1, sizeof(double));
-    st->vx2 = (double *)calloc(nv > 0 ? nv : 1, sizeof(double));
-    st->vlp = (double *)calloc(nv > 0 ? nv : 1, sizeof(double));
-    st->jdc = (double *)calloc(nv > 0 ? nv : 1, sizeof(double));
-    st->jenv = (double *)calloc(nv > 0 ? nv : 1, sizeof(double));
-    st->sv = (double *)calloc(nv > 0 ? nv : 1, sizeof(double));
-    st->rollD = (double *)calloc(nv > 0 ? nv : 1, sizeof(double));
-    st->rollE = (double *)calloc(nv > 0 ? nv : 1, sizeof(double));
-    st->rollAv = (double *)malloc(sizeof(double) * (nv > 0 ? nv : 1));
-    for (int i_ = 0; i_ < nv; i_++) {
-        double tau = 0.15 * (double)(L[i_] > 2 ? L[i_] : 2);
-        st->rollAv[i_] = 1.0 - exp(-1.0 / (tau > 1.0 ? tau : 1.0));
-    }
-    st->venv = 1e-6;
     st->hpG = 0.5 * (1.0 + dcRho);
     st->psv = passive > 0.5;
     double jy0 = yinf * st->hpG;
-    double jzsum = 0.0;
     for (int k = 0; k < K; k++) jy0 += bA[k] * bn0[k];
-    for (int i = 0; i < nv; i++) jzsum += zi[i];
     st->jy0 = jy0;
-    st->jzsum = jzsum;
     st->lcg = 0x9E3779B97F4A7C15ULL;
     st->strs = (bow_pstring_t *)calloc(st->nb, sizeof(bow_pstring_t));
     for (int b = 0; b < st->nb; b++) poly_mount_string(st, &st->strs[b]);
@@ -611,11 +445,8 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
     const double f0Open = st->f0Open, gutA2 = st->gutA2;
     const double torsRatio = st->torsRatio, torsG = st->torsG;
     const double torsC = st->torsC;
-    const double ageA = st->ageA, ageDk = st->ageDk;
     const double v0Pow = st->v0Pow, v0Ref = st->v0Ref;
     const double hairHz = st->hairHz, hairRef = st->hairRef;
-    const double crW = st->crW, crAt = st->crAt;
-    const int crOn = (crW > 1e-12) || (crAt < 1.0 - 1e-12);
     const double nutFc0 = -log(nutA) * sr / 6.283185307179586;
     const double kg_atk = exp(-1.0 / (0.003 * sr));
     const double kg_rel = exp(-1.0 / (0.008 * sr));
@@ -628,13 +459,9 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
     S->kGate = (1.0 - kga) * bowForce + kga * S->kGate;
     double gk = S->kGate >= 0.10 ? 1.0 : S->kGate * 10.0;
     double rdmp = 1.0 - (0.69 / fmax(f0t, 40.0)) * (1.0 - gk);
-    /* SITAR TWANG morph: brighter terminations, eased release damping;
-       bit-exact while disarmed */
-    const int twOn = st->twOn;
-    double brAe = twOn ? st->twBrAC : brA;
-    const double gutGe = twOn ? st->twGutC : gutG;
-    double gutA2e = twOn ? st->twGutA2C : gutA2;
-    if (twOn) rdmp = 1.0 - (1.0 - rdmp) * st->twRingC;
+    double brAe = brA;
+    const double gutGe = gutG;
+    double gutA2e = gutA2;
     *rdmpOut = rdmp;
     *gkOut = gk;
     if (bowOn) {
@@ -647,16 +474,13 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
             if (fcn > 0.45 * sr) fcn = 0.45 * sr;
             if (fcn < 200.0) fcn = 200.0;
             nutAf = exp(-6.283185307179586 * fcn / sr);
-            if (twOn) nutAf = pow(nutAf, st->twXpC);
-        } else if (twOn) {
-            nutAf = st->twNutAC;
         }
         /* REGISTER DAMPING (bow_loss_reg): the fitted corners are absolute
            frequencies, so below the tonic they would stay as sharp per second
            as
            the fitted register's (brassy low register). Scale all three by
            (f0/f0Open)^lossReg below the tonic (fc·s == a^s). Composes after the
-           nail law and the twang morph; continuous at f0Open; 0 = bit-exact. */
+           nail law; continuous at f0Open; 0 = bit-exact. */
         /* SLIDE TRACKER (bow_slide_*): a moving finger absorbs more HF
            (DULLING,
            driven by the slew) and scrapes where it starts, stops or turns
@@ -724,19 +548,8 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                                fmax(2.0, L1 * 2.0 - bowWidth));
         double dl = kdisp * st->disp;
         if (dl > 0.02) dl = 0.02; else if (dl < -0.02) dl = -0.02;
-        /* SITAR TWANG: the wrap shortens the bridge segment by twD - twDb;
-           twTrimC
-           + the twWt curve hold the twanged ring on the plain pitch. 0
-           disarmed. */
-        double twWt = 0.0;
-        if (twOn && st->twCur > 0.0) {
-            double Pn = sr / fmax(f0t, 40.0);
-            twWt = st->twTrimC
-                + st->twCur * st->twRollSmp * (0.335 - 66.2 / Pn);
-        }
         double h2 = pfrac_read(S->buf2, MAXBOW, S->w2i,
-                               fmax(2.0, (L2 * 2.0 - bowWidth) * (1.0 + dl)
-                                    - S->twD + S->twDb + twWt));
+                               fmax(2.0, (L2 * 2.0 - bowWidth) * (1.0 + dl)));
         double hBA = 0, hAB = 0;
         if (bowCont >= 2.5 && bowWidth >= 2.0) {
             /* three hair-group contacts, own friction solve per group */
@@ -758,10 +571,6 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 if (soft < thFloor) soft = thFloor;
                 double mDg = mu_d * (1.0 - thD * (1.0 - soft));
                 double mSg = mDg + (mu_s - mu_d) * soft;
-                if (ageA > 1e-12) {
-                    if (FbT <= 1e-6) S->ageDef3[g] = ageA;
-                    else mSg = mDg + (mSg - mDg) * (1.0 - S->ageDef3[g]);
-                }
                 double v0g = v0f * (0.85 + 0.15 * g);
                 if (v0Pow > 1e-12)
                     v0g *= pow(v0Ref / fmax(FbT * 3.0, 0.05), v0Pow);
@@ -769,12 +578,9 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 if (FbT > 1e-6) {
                     double dv0 = vhg - vbt;
                     double stickF = -2.0 * Zeff * dv0;
-                    if (!crOn) {
                     if (fabs(stickF) <= mSg * FbT) {
                         Ffg = stickF;
-                        if (ageA > 1e-12) S->ageDef3[g] *= ageDk;
                     } else {
-                        if (ageA > 1e-12) S->ageDef3[g] = ageA;
                         double sg = dv0 > 0 ? 1.0 : -1.0;
                         Ffg = -sg * mDg * FbT;
                         for (int it = 0; it < 8; it++) {
@@ -792,49 +598,10 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                                          : (dg > 0 ? 0.1 : -0.1));
                         }
                     }
-                    } else {
-                        double xqg = fabs(stickF)
-                            / fmax(mSg * FbT, 1e-30);
-                        double seg = cr_seq(xqg, crW);
-                        if (seg < S->crS3[g])
-                            S->crS3[g] += crAt * (seg - S->crS3[g]);
-                        else S->crS3[g] = seg;
-                        if (S->crS3[g] > 1.0) S->crS3[g] = 1.0;
-                        else if (S->crS3[g] < 0.0) S->crS3[g] = 0.0;
-                        if (S->crS3[g] >= 1.0 - 1e-12) {
-                            Ffg = stickF;
-                        } else {
-                            double sg = dv0 > 0 ? 1.0 : -1.0;
-                            double Fsg = -sg * mDg * FbT;
-                            for (int it = 0; it < 8; it++) {
-                                double dv = dv0 + Fsg / (2.0 * Zeff);
-                                double adv = fabs(dv);
-                                double mu = mDg + (mSg - mDg)
-                                    / (1.0 + adv / v0g);
-                                double gg = Fsg + sg * mu * FbT;
-                                double dmu = -(mSg - mDg) /
-                                    (v0g * (1.0 + adv / v0g)
-                                     * (1.0 + adv / v0g));
-                                double dg = 1.0 + sg * FbT * dmu *
-                                    (dv > 0 ? 1.0 : -1.0)
-                                    / (2.0 * Zeff);
-                                Fsg -= gg / (fabs(dg) > 0.1 ? dg
-                                             : (dg > 0 ? 0.1 : -0.1));
-                            }
-                            Ffg = S->crS3[g] * stickF
-                                + (1.0 - S->crS3[g]) * Fsg;
-                        }
-                        if (ageA > 1e-12)
-                            S->ageDef3[g] = S->crS3[g]
-                                * (S->ageDef3[g] * ageDk)
-                                + (1.0 - S->crS3[g]) * ageA;
-                    }
                     double dvh = (vhg - vbt) + Ffg / (2.0 * Zeff);
                     double lk = pow(thLeak, hl2[g]);
                     S->Tr3[g] = lk * S->Tr3[g]
                         + (1.0 - lk) * fabs(Ffg * dvh);
-                } else if (crOn) {
-                    S->crS3[g] = 1.0;
                 }
                 if (hairHz > 1e-6) {
                     double fcH = hairHz * fmax(FbT * 3.0, 0.02) / hairRef;
@@ -884,10 +651,6 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 muD += mD / 3.0;
                 muS += (mD + (mu_s - mu_d) * soft) / 3.0;
             }
-            if (ageA > 1e-12) {
-                if (Fb <= 1e-6) S->ageDef = ageA;
-                else muS = muD + (muS - muD) * (1.0 - S->ageDef);
-            }
             double v0e = v0f;
             if (v0Pow > 1e-12 && Fb > 1e-6)
                 v0e = v0f * pow(v0Ref / fmax(Fb * 2.0, 0.05), v0Pow);
@@ -895,12 +658,9 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 double Zeff = Z / (1.0 + Z / Zt);
                 double dv0 = vh - vbt;
                 double stickF = -2.0 * Zeff * dv0;
-                if (!crOn) {
                 if (fabs(stickF) <= muS * Fb) {
                     Ff = stickF;
-                    if (ageA > 1e-12) S->ageDef *= ageDk;
                 } else {
-                    if (ageA > 1e-12) S->ageDef = ageA;
                     double s = dv0 > 0 ? 1.0 : -1.0;
                     Ff = -s * muD * Fb;
                     for (int it = 0; it < 8; it++) {
@@ -915,40 +675,6 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                         Ff -= gg / (fabs(dg) > 0.1 ? dg : (dg > 0 ? 0.1 : -0.1));
                     }
                 }
-                } else {
-                    /* continuum contact: stuck-fraction blend, release-only
-                       tau, snap capture */
-                    double xq = fabs(stickF) / fmax(muS * Fb, 1e-30);
-                    double se = cr_seq(xq, crW);
-                    if (se < S->crS) S->crS += crAt * (se - S->crS);
-                    else S->crS = se;
-                    if (S->crS > 1.0) S->crS = 1.0;
-                    else if (S->crS < 0.0) S->crS = 0.0;
-                    if (S->crS >= 1.0 - 1e-12) {
-                        Ff = stickF;
-                    } else {
-                        double s = dv0 > 0 ? 1.0 : -1.0;
-                        double Fs = -s * muD * Fb;
-                        for (int it = 0; it < 8; it++) {
-                            double dv = dv0 + Fs / (2.0 * Zeff);
-                            double adv = fabs(dv);
-                            double mu = muD + (muS - muD) / (1.0 + adv / v0e);
-                            double gg = Fs + s * mu * Fb;
-                            double dmu = -(muS - muD) /
-                                (v0e * (1.0 + adv / v0e) * (1.0 + adv / v0e));
-                            double dg = 1.0 + s * Fb * dmu *
-                                (dv > 0 ? 1.0 : -1.0) / (2.0 * Zeff);
-                            Fs -= gg / (fabs(dg) > 0.1 ? dg
-                                        : (dg > 0 ? 0.1 : -0.1));
-                        }
-                        Ff = S->crS * stickF + (1.0 - S->crS) * Fs;
-                    }
-                    if (ageA > 1e-12)
-                        S->ageDef = S->crS * (S->ageDef * ageDk)
-                            + (1.0 - S->crS) * ageA;
-                }
-            } else if (crOn) {
-                S->crS = 1.0;
             }
             if (hairHz > 1e-6) {
                 double fcH = hairHz * fmax(Fb, 0.02) / hairRef;
@@ -1009,7 +735,6 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                     double ZeffB = Z / (1.0 + Z / Zt);
                     double dv0B = vhB - vbt;
                     double stickB = -2.0 * ZeffB * dv0B;
-                    if (!crOn) {
                     if (fabs(stickB) <= mSB * Fb) {
                         FfB = stickB;
                     } else {
@@ -1028,41 +753,9 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                                           : (dgB > 0 ? 0.1 : -0.1));
                         }
                     }
-                    } else {
-                        double xqB = fabs(stickB) / fmax(mSB * Fb, 1e-30);
-                        double seB = cr_seq(xqB, crW);
-                        if (seB < S->crSB)
-                            S->crSB += crAt * (seB - S->crSB);
-                        else S->crSB = seB;
-                        if (S->crSB > 1.0) S->crSB = 1.0;
-                        else if (S->crSB < 0.0) S->crSB = 0.0;
-                        if (S->crSB >= 1.0 - 1e-12) {
-                            FfB = stickB;
-                        } else {
-                            double sB = dv0B > 0 ? 1.0 : -1.0;
-                            double FsB = -sB * mDB * Fb;
-                            for (int it = 0; it < 8; it++) {
-                                double dvB = dv0B + FsB / (2.0 * ZeffB);
-                                double advB = fabs(dvB);
-                                double muB = mDB + (mSB - mDB)
-                                    / (1.0 + advB / v0f);
-                                double ggB = FsB + sB * muB * Fb;
-                                double dmuB = -(mSB - mDB) /
-                                    (v0f * (1.0 + advB / v0f)
-                                     * (1.0 + advB / v0f));
-                                double dgB = 1.0 + sB * Fb * dmuB *
-                                    (dvB > 0 ? 1.0 : -1.0) / (2.0 * ZeffB);
-                                FsB -= ggB / (fabs(dgB) > 0.1 ? dgB
-                                              : (dgB > 0 ? 0.1 : -0.1));
-                            }
-                            FfB = S->crSB * stickB + (1.0 - S->crSB) * FsB;
-                        }
-                    }
                     double dvhB = (vhB - vbt) + FfB / (2.0 * (Z / (1.0 + Z / Zt)));
                     S->Tr3[1] = thLeak * S->Tr3[1]
                         + (1.0 - thLeak) * fabs(FfB * dvhB);
-                } else if (crOn) {
-                    S->crSB = 1.0;
                 }
                 double injB = FfB / (2.0 * Z);
                 o2 = hAB + injB;
@@ -1106,45 +799,11 @@ static void poly_string_return(bow_poly_state_t *st, bow_pstring_t *S,
     int dispNi = (int)(st->dispN + 0.5);
     if (dispNi < 1) dispNi = 1; if (dispNi > 4) dispNi = 4;
     double apy = -S->brLp + vr;
-    /* SITAR TWANG: the graze fold on the bridge reflection, before the
-       dispersion chain (the bone sits on the string side of the bridge).
-       twOn 0 skips everything. */
-    if (st->twOn) {
-        /* per-side peak envelopes, instant attack / slow release: the knee sits
-           just under each side's recent peak */
-        double eP0 = S->twEnvP * st->twRel;
-        S->twEnvP = apy > eP0 ? apy : eP0;
-        double eN0 = S->twEnvN * st->twRel;
-        S->twEnvN = -apy > eN0 ? -apy : eN0;
-        double amt = st->twCur;
-        if (amt > 0.0) {
-            double eP = apy - st->twKneeR * S->twEnvP;
-            double eN = -apy - st->twKneeR * S->twEnvN;
-            int gP = eP > 0.0 && S->twEnvP > 1e-12;
-            int gN = eN > 0.0 && S->twEnvN > 1e-12;
-            /* the WRAP: the bridge read slides closer by twD samples while a
-               tip
-               presses the bone — lossless phase modulation that pumps the
-               cascade */
-            double tgt = (gP || gN) ? amt * st->twRollSmp : 0.0;
-            S->twD += st->twAv * (tgt - S->twD);
-            /* twDb = twD's mean: removes the wrap's DC pitch shift */
-            S->twDb += st->twDcA * (S->twD - S->twDb);
-            /* light hysteretic contact loss at the graze */
-            double d = amt * st->twDepth;
-            if (gP) apy -= d * eP;
-            else if (gN) apy += d * eN;
-        } else {
-            S->twD *= 0.999;
-            S->twDb *= 0.999;
-        }
-    }
     for (int kd = 0; kd < dispNi; kd++) {
         double ay = st->bowDisp * apy + S->apXs[kd] - st->bowDisp * S->apYs[kd];
         S->apXs[kd] = apy; S->apYs[kd] = ay; apy = ay;
     }
-    S->buf2[S->w2i] = apy * rdmp
-        * (st->twOn ? st->twGutC : st->gutG);
+    S->buf2[S->w2i] = apy * rdmp * st->gutG;
     S->w2i = (S->w2i + 1) % MAXBOW;
 }
 
@@ -1209,9 +868,6 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     st->jtDnLp2 = (double *)calloc(njt, sizeof(double));
     st->jtDnPh = (double *)calloc(njt, sizeof(double));
     /* charge governor: off (byte-null until bow_poly_jt_set_gov) */
-    st->jtGovEnv = (double *)calloc(njt, sizeof(double));
-    st->jtGovAmt = 0.0;
-    st->jtGovRef = 0.0;
     /* per-string cap: off (byte-null until bow_poly_jt_set_cap) */
     st->jtCapEnv = (double *)calloc(njt, sizeof(double));
     st->jtCapGain = (double *)malloc(sizeof(double) * (size_t)njt);
@@ -1219,10 +875,6 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     for (int s = 0; s < njt; s++) st->jtCapGain[s] = 1.0;
     st->jtCapHard = 0.0;
     st->jtCapRatio = 1.0;
-    st->jtCapMode = 0.0;
-    st->jtCapBEnv = 0.0;
-    st->jtCapBGain = 1.0;
-    st->jtCapBGen = 0;
     st->jtCapVEnv = 0.0;
     st->jtCapGen = 0;
     /* scope telemetry: off */
@@ -1261,7 +913,6 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
         double dtj = (double)st->jtDiv / st->sr;
         /* envelope/tone defaults — BowEngine's bow_drone_* values overwrite
            these at build */
-        st->jtGovRel = exp(-dtj / 0.060);
         st->jtCapTRel = 1.0 - exp(-dtj / 0.150);
         st->jtCapAtk = 1.0 - exp(-dtj / 0.003);
         st->jtCapRel = 1.0 - exp(-dtj / 0.120);
@@ -1698,15 +1349,6 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             st->jtEvOfsCur[s] = c;
             evs += c;
         }
-        /* CHARGE GOVERNOR shed (previous-tick envelope): a row ringing above
-           its
-           graze target takes ref/env of the drive. Before the drone branch. */
-        if (st->jtGovAmt > 0.0 && st->jtGovRef > 0.0) {
-            const double refv = st->jtGovRef * st->jtWd[mo];
-            const double env = st->jtGovEnv[s];
-            if (env > refv)
-                Fd *= 1.0 - st->jtGovAmt * (1.0 - refv / env);
-        }
         /* DRONE row: a slewed band-passed drive (hold + decaying onset boost),
            no
            impulse. Whole branch guarded: all-zero = the unarmed tick,
@@ -1795,17 +1437,6 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         }
         float u[JT_MAXJ], ud[JT_MAXJ];
         jt_zone(Ms, J, phiU, q, p, u, ud);
-        /* governor envelope: peak |zone velocity|, ~60 ms release (touched only
-           while armed) */
-        if (st->jtGovAmt > 0.0) {
-            float am = 0.0f;
-            for (int j = 0; j < J; j++) {
-                float t = fabsf(ud[j]);
-                if (t > am) am = t;
-            }
-            double e = st->jtGovEnv[s] * st->jtGovRel;
-            st->jtGovEnv[s] = (double)am > e ? (double)am : e;
-        }
         float pen = -1e30f;
         for (int j = 0; j < J; j++) {
             float d = bc_[j] - u[j];
@@ -1887,7 +1518,7 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         /* PER-STRING CAP: pure output gain after the physics; a fresh arm
            (generation bump) resets the row here, on its own worker. */
         if (cap >= 0.0) {
-            const double h = st->jtCapHard * (1.0 - st->jtCapMode);
+            const double h = st->jtCapHard;
             yjt *= cap_gain_step(st, cap, fabs(yjt), h,
                                  &st->jtCapRowGen[s], &st->jtCapEnv[s],
                                  &st->jtCapGain[s]);
@@ -1925,21 +1556,6 @@ static inline double jt_cap_ceiling(const bow_poly_state_t *st, double venv)
     if (st->jtGMulOn) g *= fabs(st->jtGMulCur);
     if (g < 1e-12) g = 1e-12;
     return venv * st->jtCapRatio / g;
-}
-
-/* The per-TARAF half of the cap: the summed web (after the rows' stage)
-   against the same ceiling, exponent hard·bus, one gain on mono and side.
-   Called from every hold walk on its owning thread; cap < 0 = off. */
-static inline void jt_cap_bus(bow_poly_state_t *st, double cap,
-                              double *hold, double *holdS)
-{
-    if (cap < 0.0) return;
-    const double h = st->jtCapHard * st->jtCapMode;
-    const double g = cap_gain_step(st, cap, fabs(*hold), h,
-                                   &st->jtCapBGen, &st->jtCapBEnv,
-                                   &st->jtCapBGain);
-    *hold *= g;
-    *holdS *= g;
 }
 
 /* sideOut (nullable): accumulates the pan-weighted row sum for the stereo side
@@ -2151,22 +1767,18 @@ void bow_poly_jt_set_body(void *vst, double mix)
     st->jtBodyOn = 1;
 }
 
-/* Arm the side path with per-source pans (webPan[nv], jtPan[njt] after
+/* Arm the side path with per-source pans (jtPan[njt] after
    jt_load, slotPan[nb]; NULL = centred). Engine build, off the audio thread. */
-void bow_poly_set_stereo(void *vst, const double *webPan, int nWeb,
+void bow_poly_set_stereo(void *vst,
                          const double *jtPan, int nJt,
                          const double *slotPan, int nSlot)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     if (!st) return;
-    free(st->stWebPan); free(st->stSlotPan); free(st->stJtPan);
-    st->stWebPan = (double *)calloc(st->nv > 0 ? st->nv : 1,
-                                    sizeof(double));
+    free(st->stSlotPan); free(st->stJtPan);
     st->stSlotPan = (double *)calloc(st->nb, sizeof(double));
     st->stJtPan = (double *)calloc(st->njt > 0 ? st->njt : 1,
                                    sizeof(double));
-    if (webPan && nWeb == st->nv)
-        memcpy(st->stWebPan, webPan, sizeof(double) * (size_t)st->nv);
     if (slotPan && nSlot == st->nb)
         memcpy(st->stSlotPan, slotPan, sizeof(double) * (size_t)st->nb);
     if (jtPan && st->njt > 0 && nJt == st->njt)
@@ -2254,97 +1866,6 @@ void bow_poly_set_stereo_width(void *vst, double width)
     if (!st->stWidthOn && width <= 1e-9) return;   /* stay byte-null */
     poly_width_derive(st);
     st->stWidthOn = 1;         /* arm last — the render gates on it */
-}
-
-/* SITAR TWANG shape defaults, derived once on first arm. The contact-loss
-   fold ships at 0 — the wrap PM is the whole cascade; set_twang_shape keeps
-   depth for experiments. */
-static void poly_twang_defaults(bow_poly_state_t *st)
-{
-    if (st->twSl > 0.0) return;                    /* already derived */
-    st->twSl = 1.0 - exp(-1.0 / (0.030 * st->sr));
-    st->twKneeR = 0.5;
-    st->twDepth = 0.0;
-    st->twRel = exp(-1.0 / (0.040 * st->sr));
-    /* ring/gut exceed their derive caps so they saturate by ~0.75 of the throw
-       and the last quarter spends its travel on wrap + brightness */
-    st->twRollSmp = 5.5;
-    st->twAv = 1.0 - exp(-1.0 / (0.0005 * st->sr));
-    st->twDcA = 1.0 - exp(-1.0 / (0.030 * st->sr));
-    st->twBright = 3.33;
-    st->twRing = 1.27;
-    st->twGut = 1.07;
-    st->twXpC = 1.0;
-    st->twBrAC = st->brA;
-    st->twNutAC = st->nutA;
-    st->twGutA2C = st->gutA2;
-    st->twGutC = st->gutG;
-    st->twRingC = 1.0;
-}
-
-/* chunk-rate derivation of the sitar-morph terminations from the slewed
-   amount */
-static void poly_twang_derive(bow_poly_state_t *st)
-{
-    double a = st->twCur;
-    if (a < 0.0) a = 0.0;
-    if (a > 1.0) a = 1.0;
-    double xp = 1.0 + st->twBright * a;
-    st->twXpC = xp;
-    st->twBrAC = pow(st->brA, xp);
-    st->twNutAC = pow(st->nutA, xp);
-    st->twGutA2C = st->gutA2 > 0.0 ? pow(st->gutA2, xp) : st->gutA2;
-    /* ring/gut ease saturate (the caps keep the loop lossy enough to stay
-       stable) */
-    double gutE = st->twGut * a;
-    if (gutE > 0.9) gutE = 0.9;
-    st->twGutC = 1.0 - (1.0 - st->gutG) * (1.0 - gutE);
-    double ringE = st->twRing * a;
-    if (ringE > 0.98) ringE = 0.98;
-    st->twRingC = 1.0 - ringE;
-    /* pitch lock: the loop delay the brightened one-poles lose (a/(1-a) per
-       pole, low-f form), added back on the bridge read */
-    double dBr = st->brA / (1.0 - st->brA)
-        - st->twBrAC / (1.0 - st->twBrAC);
-    double dNut = st->nutA / (1.0 - st->nutA)
-        - st->twNutAC / (1.0 - st->twNutAC);
-    st->twTrimC = dBr + dNut;
-    if (st->twTrimC < 0.0) st->twTrimC = 0.0;
-}
-
-/* Arm / retarget the twang amount 0..1 (bow_twang). Plain scalar store,
-   any thread; slews ~30 ms. Never calling is byte-null; a live 0 self-
-   disarms once slewed. */
-void bow_poly_set_twang(void *vst, double amt)
-{
-    bow_poly_state_t *st = (bow_poly_state_t *)vst;
-    if (!st) return;
-    if (amt < 0.0) amt = 0.0;
-    if (amt > 1.0) amt = 1.0;
-    st->twTgt = amt;
-    if (!st->twOn && amt <= 1e-9) return;          /* stay byte-null */
-    poly_twang_defaults(st);
-    st->twOn = 1;
-}
-
-/* Fitting hook (no registry parameter): kneeR = knee fraction of the side
-   envelope, depth = fold slope, relMs = envelope release, rollSmp = wrap
-   shortening (samples). Non-positive = keep. Off the audio thread. */
-void bow_poly_set_twang_shape(void *vst, double kneeR, double depth,
-                              double relMs, double rollSmp,
-                              double bright, double ring, double gut)
-{
-    bow_poly_state_t *st = (bow_poly_state_t *)vst;
-    if (!st) return;
-    poly_twang_defaults(st);
-    if (kneeR > 0.0) st->twKneeR = kneeR < 0.99 ? kneeR : 0.99;
-    if (depth > 0.0) st->twDepth = depth < 2.0 ? depth : 2.0;
-    if (relMs > 0.0)
-        st->twRel = exp(-1.0 / (relMs * 1e-3 * st->sr));
-    if (rollSmp > 0.0) st->twRollSmp = rollSmp < 24.0 ? rollSmp : 24.0;
-    if (bright > 0.0) st->twBright = bright < 4.0 ? bright : 4.0;
-    if (ring > 0.0) st->twRing = ring < 1.5 ? ring : 1.5;
-    if (gut > 0.0) st->twGut = gut < 1.2 ? gut : 1.2;
 }
 
 /* the slewed jt output gain, stepped ONCE per kernel output sample (call
@@ -2522,32 +2043,16 @@ void bow_poly_jt_set_damp_t60(void *vst, double t60)
     }
 }
 
-/* CHARGE GOVERNOR: amt 0..1 = strength (0 = byte-null), refDisp = target
-   ring DISPLACEMENT in meters (× wd1 per row = the velocity bound).
-   Drone-setter contract. */
-void bow_poly_jt_set_gov(void *vst, double amt, double refDisp)
-{
-    bow_poly_state_t *st = (bow_poly_state_t *)vst;
-    if (!st || st->njt <= 0) return;
-    if (amt > 0.0 && refDisp > 0.0) {
-        st->jtGovRef = refDisp;
-        st->jtGovAmt = amt < 1.0 ? amt : 1.0;
-    } else {
-        st->jtGovAmt = 0.0;
-    }
-}
-
-/* PER-STRING CAP: hard 0..1 (0 = byte-null), ratio vs the voice peak, bus
-   = scope blend. An arm edge bumps the generation — rows reset on their
-   own workers, no array writes here. Armed flag written last. */
-void bow_poly_jt_set_cap(void *vst, double hard, double ratio, double bus)
+/* PER-STRING CAP: hard 0..1 (0 = byte-null), ratio vs the voice peak. An
+   arm edge bumps the generation — rows reset on their own workers, no array
+   writes here. Armed flag written last. */
+void bow_poly_jt_set_cap(void *vst, double hard, double ratio)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     if (!st || st->njt <= 0) return;
     if (hard > 0.0) {
         if (st->jtCapHard <= 0.0) st->jtCapGen++;
         st->jtCapRatio = ratio > 0.01 ? ratio : 0.01;
-        st->jtCapMode = bus < 0.0 ? 0.0 : (bus > 1.0 ? 1.0 : bus);
         st->jtCapHard = hard < 1.0 ? hard : 1.0;
     } else {
         st->jtCapHard = 0.0;
@@ -2687,8 +2192,7 @@ int bow_poly_scope_slots(void *vst, double *level, int n)
 void bow_poly_set_scalars(void *vst, const double *s, int n)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
-    if (!st || !s || n < 61) return;
-    const double sr = st->sr;
+    if (!st || !s || n < 57) return;
     st->yinf = s[0]; st->c0 = s[1]; st->dcRho = s[2];
     st->pgain = s[3]; st->pA = s[4]; st->bowW = s[5]; st->kret = s[6];
     st->retA = s[7]; st->retMode = s[8]; st->rb0 = s[9];
@@ -2707,25 +2211,20 @@ void bow_poly_set_scalars(void *vst, const double *s, int n)
     st->nzHiD = s[39];
     st->passive = s[40];
     st->gutG = s[41]; st->dispN = s[42]; st->nailK = s[43];
-    st->f0Open = s[44]; st->gutA2 = s[45]; st->tuw = s[46];
+    st->f0Open = s[44]; st->gutA2 = s[45];
     st->torsRatio = s[47]; st->torsG = s[48]; st->torsC = s[49];
-    st->ageA = s[50];
-    st->ageDk = exp(-1.0 / ((s[51] > 0.01 ? s[51] : 0.01) * 1e-3 * sr));
-    st->v0Pow = s[52]; st->v0Ref = s[53];
-    st->hairHz = s[54]; st->hairRef = (s[55] > 1e-6 ? s[55] : 1.0);
-    st->crW = s[56];
-    st->crAt = s[57] > 1e-6
-        ? 1.0 - exp(-1.0 / (s[57] * 1e-3 * sr)) : 1.0;
-    st->jawRho = s[58];
-    st->jawRoll = s[59];
-    st->jawRollAmp = (s[60] > 1e-9 ? s[60] : 1e-9);
-    /* scalars 62-66: register damping, slide dulling, finger noise — absent =
+    st->v0Pow = s[50]; st->v0Ref = s[51];
+    st->hairHz = s[52]; st->hairRef = (s[53] > 1e-6 ? s[53] : 1.0);
+    st->jawRho = s[54];
+    st->jawRoll = s[55];
+    st->jawRollAmp = (s[56] > 1e-9 ? s[56] : 1e-9);
+    /* scalars 58-62: register damping, slide dulling, finger noise — absent =
        inert */
-    st->lossReg = (n >= 62) ? s[61] : 0.0;
-    st->slideRate = (n >= 63 && s[62] > 1.0) ? s[62] : 900.0;
-    st->slideDull = (n >= 64) ? s[63] : 0.0;
-    st->slideNoise = (n >= 65) ? s[64] : 0.0;
-    st->slideAcc = (n >= 66 && s[65] > 1.0) ? s[65] : 25000.0;
+    st->lossReg = (n >= 58) ? s[57] : 0.0;
+    st->slideRate = (n >= 59 && s[58] > 1.0) ? s[58] : 900.0;
+    st->slideDull = (n >= 60) ? s[59] : 0.0;
+    st->slideNoise = (n >= 61) ? s[60] : 0.0;
+    st->slideAcc = (n >= 62 && s[61] > 1.0) ? s[61] : 25000.0;
 }
 
 /* Overwrite the BODY modal bank's coefficients on a live state; the
@@ -2876,7 +2375,6 @@ static void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
                 }
                 hold = H;
                 holdS = HS;
-                jt_cap_bus(st, capv[ki], &hold, &holdS);
                 ki++;
             }
             const double g = jt_gain_step(st);
@@ -2895,7 +2393,6 @@ static void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
                 hold = jt_tick(st, fdv[ki], evv[ki], capv[ki],
                                webS ? &sacc : NULL);
                 if (webS) holdS = sacc;
-                jt_cap_bus(st, capv[ki], &hold, &holdS);
                 ki++;
             }
             const double g = jt_gain_step(st);
@@ -3119,94 +2616,6 @@ void bow_poly_process3(void *vst, int n, int stride,
                        const double *xv, double *out, double *outS,
                        double *outJt, double *outJtS);
 
-/* ---- one web comb, the two halves shared by the non-passive comb and the
-   passive junction's two passes ---- */
-
-/* The delay-line read: the two most recent taps for the tuning allpass pair
-   (through the y1/y2 outputs) plus the 5-tap series read at the loop delay, which the
-   roll law swaps for its modulated read. */
-static inline double comb_delay_read(const bow_poly_state_t *st, int i,
-                                     const double *b, int wi, int len,
-                                     double *y1, double *y2)
-{
-    const int Li = st->L[i];
-    const double *w0 = st->w0, *w1 = st->w1, *w2 = st->w2;
-    const double *w3 = st->w3, *w4 = st->w4;
-    *y1 = b[(wi + len - 1) % len];
-    *y2 = b[(wi + len - 2) % len];
-    double yL0 = b[(wi + len - Li) % len];
-    double yL1 = b[(wi + len - Li - 1) % len];
-    double yL2 = b[(wi + len - Li - 2) % len];
-    double yL3 = b[(wi + len - Li - 3) % len];
-    double yL4 = b[(wi + len - Li - 4) % len];
-    double ySer = w0[i] * yL0 + w1[i] * yL1 + w2[i] * yL2
-        + w3[i] * yL3 + w4[i] * yL4;
-    if (st->jawRoll > 1e-12 && st->rollD[i] > 1e-12)
-        ySer = roll_read(b, wi, len, Li, w0[i], w1[i],
-                         w2[i], w3[i], w4[i], st->rollD[i]);
-    return ySer;
-}
-
-/* The jawari nonlinearity and the write-back: the brief-contact roll law or
-   the collision/soft fold, the jl loss envelope, the delay write and index
-   advance, the jw DC-blocked buzz term, the output LP and the duck-weighted
-   direct tap. Returns the comb's filtered output (vlp) so the non-passive
-   caller can feed the junction force. */
-static inline double comb_jaw_write(bow_poly_state_t *st, int i,
-                                    double y, double x,
-                                    double *b, int wi, int len,
-                                    double aDuck, int stOn,
-                                    double *tdir, double *tdirS)
-{
-    const double *jn = st->jn, *jl = st->jl, *jw = st->jw;
-    const double jq = st->jq, jq2 = st->jq2;
-    double wv = y;
-    if (st->jawRoll > 1e-12) {
-        /* brief-contact roll law: engage only near the positive
-           displacement extreme */
-        st->rollE[i] = fmax(0.99999 * st->rollE[i], fabs(y));
-        double tgt = (jn[i] > 1e-9
-                      && y > st->jawRollAmp * st->rollE[i])
-            ? st->jawRoll * st->jawG * jn[i] : 0.0;
-        st->rollD[i] += st->rollAv[i] * (tgt - st->rollD[i]);
-        if (st->rollD[i] > 3.0) st->rollD[i] = 3.0;
-    } else if (jn[i] > 1e-9 && y > 0.0) {
-        if (st->jawRho > 1e-12) {
-            /* collision fold */
-            double e2 = y - jq2;
-            if (e2 > 0.0)
-                wv = y - st->jawG * jn[i] * (1.0 + st->jawRho) * e2;
-        } else {
-            double sf = y / (y + jq2 + 1e-30);
-            wv = y * (1.0 - st->jawG * jn[i] * sf);
-        }
-    }
-    if (jl[i] > 1e-9) {
-        double e = 0.9995 * st->jenv[i] + 0.0005 * fabs(y);
-        st->jenv[i] = e;
-        double hot = e / (e + jq + 1e-30);
-        wv = wv * (1.0 - jl[i] * hot);
-    }
-    b[wi] = wv;
-    st->widx[i] = (wi + 1) % len;
-    st->vx2[i] = st->vx1[i];
-    st->vx1[i] = x;
-    double yo = y;
-    if (jw[i] > 1e-9) {
-        double r = fabs(y);
-        st->jdc[i] = 0.99947 * st->jdc[i] + 0.00053 * r;
-        yo = y + st->jawG * jw[i] * (r - st->jdc[i]);
-    }
-    const double v = (1.0 - st->lpA[i]) * yo + st->lpA[i] * st->vlp[i];
-    st->vlp[i] = v;
-    st->dwt[i] += (1.0 - aDuck) * (st->dtg[i] - st->dwt[i]);
-    *tdir += st->dwt[i] * st->twt[i] * st->wout[i] * v;
-    if (stOn)
-        *tdirS += st->stWebPan[i] * st->dwt[i] * st->twt[i]
-            * st->wout[i] * v;
-    return v;
-}
-
 /* Mono entry — the bit-exact parity path. */
 void bow_poly_process(void *vst, int n, int stride,
                       const double *f0, const double *vb, const double *fb,
@@ -3252,28 +2661,16 @@ void bow_poly_process3(void *vst, int n, int stride,
         if (outJt) joS = outJtS;
     }
     const double *stSp = st->stSlotPan;
-    const int nv = st->nv;
     const int K = st->K;
-    const int *L = st->L;
-    const int *off = st->off;
-    const double *cs = st->cs, *cp = st->cp, *g = st->g;
-    const double *wout = st->wout, *kap = st->kap;
-    const double *alphaw = st->alphaw, *zdrv = st->zdrv;
     const double *ba1 = st->ba1, *ba2 = st->ba2, *bn0 = st->bn0;
     const double *bA = st->bA, *bC = st->bC;
     const double yinf = st->yinf, c0 = st->c0, dcRho = st->dcRho;
     const double pgain = st->pgain, pA = st->pA, bowW = st->bowW;
     const double Z = st->Z, zload = st->zload;
     const double tdirect = st->tdirect, tshape = st->tshape, tmix = st->tmix;
-    const double tuw = st->tuw;
-    double *fv = st->fv, *dtg = st->dtg;
-    const double aDuck = exp(-1.0 / (0.010 * st->sr));
-    const double hpG = st->hpG, jy0 = st->jy0, jzsum = st->jzsum;
+    const double hpG = st->hpG, jy0 = st->jy0;
     const int psv = st->psv;
     const int bowOn = bowW > 1e-9;
-    double *arena = st->arena;
-    int *widx = st->widx;
-    double *vx1 = st->vx1, *vx2 = st->vx2, *sv = st->sv;
 
     /* per-chunk processed-string set: bowed this chunk, or still ringing */
     int nProc = 0;
@@ -3297,7 +2694,7 @@ void bow_poly_process3(void *vst, int n, int stride,
     double zsumB = 0.0;
     if (psv && bowOn && zload > 1e-9)
         zsumB = (double)nProc * (zload * bowW * Z);
-    const double zsumT = jzsum + zsumB;
+    const double zsumT = zsumB;
     const double jden = 1.0 + jy0 * zsumT;
 
     double pkArr[64], rdmpArr[64], gkArr[64];
@@ -3333,44 +2730,12 @@ void bow_poly_process3(void *vst, int n, int stride,
         }
     }
 
-    /* SITAR TWANG: self-disarm once a live 0 finished slewing, else derive the
-       chunk's morph terminations from the slewed amount */
-    if (st->twOn && st->twTgt <= 1e-9 && st->twCur < 1e-7) {
-        st->twOn = 0;
-        st->twCur = 0.0;
-    }
-    if (st->twOn)
-        poly_twang_derive(st);
     for (int t = 0; t < n; t++) {
         double F = 0.0;
         double tdir = 0.0;
         double noiseDir = 0.0;
-        /* SITAR TWANG: ~30 ms amount slew (dead branch while disarmed) */
-        if (st->twOn)
-            st->twCur += st->twSl * (st->twTgt - st->twCur);
         /* stereo side accumulators — DIRECT radiation only (dead when !stOn) */
         double tdirS = 0.0, noiseDirS = 0.0;
-        /* driven-unison duck targets, block-rate (tuw = 1 -> inert) */
-        if (tuw < 0.999 && (t & 63) == 0) {
-            static const double rat[11] = {0.25, 0.333333333, 0.5,
-                                           0.666666667, 0.75, 1.0,
-                                           1.333333333, 1.5, 2.0, 3.0, 4.0};
-            for (int i = 0; i < nv; i++) {
-                double best = 1e9;
-                for (int si = 0; si < nProc; si++) {
-                    int b = st->proc[si];
-                    size_t o = (size_t)b * stride + t;
-                    if (gate[o] <= 0.5) continue;
-                    double fb0 = f0[o] > 40.0 ? f0[o] : 40.0;
-                    double r = fb0 / fv[i];
-                    for (int u = 0; u < 11; u++) {
-                        double d = fabs(log(r / rat[u]));
-                        if (d < best) best = d;
-                    }
-                }
-                dtg[i] = (best < 0.0173) ? tuw : 1.0;
-            }
-        }
         for (int i = 0; i < nProc; i++) {
             int b = st->proc[i];
             bow_pstring_t *S = &st->strs[b];
@@ -3391,36 +2756,10 @@ void bow_poly_process3(void *vst, int n, int stride,
         /* ---- additive voice force (shared path, zeros live) ---- */
         st->pLp = (1.0 - pA) * xv[t] + pA * st->pLp;
         F += pgain * st->pLp;
-        /* ---- taraf/played web combs ---- */
-        if (!psv) {
-            for (int i = 0; i < nv; i++) {
-                double x = kap[i] * st->Vprev + alphaw[i] * xv[t];
-                int len = L[i] + 8;
-                double *b = arena + off[i];
-                int wi = widx[i];
-                double y1, y2;
-                double ySer = comb_delay_read(st, i, b, wi, len, &y1, &y2);
-                double y = (1.0 - g[i]) * (x + cs[i] * vx1[i] + cp[i] * vx2[i])
-                    - cs[i] * y1 - cp[i] * y2
-                    + g[i] * ySer;
-                F += wout[i] * comb_jaw_write(st, i, y, x, b, wi, len,
-                                              aDuck, stOn, &tdir, &tdirS);
-            }
-        } else {
-            /* PASSIVE WAVE JUNCTION, PASS 1 (the strings' delay-free loading
-               rides in zsumT/jden) */
-            for (int i = 0; i < nv; i++) {
-                int len = L[i] + 8;
-                double *b = arena + off[i];
-                int wi = widx[i];
-                double y1, y2;
-                double ySer = comb_delay_read(st, i, b, wi, len, &y1, &y2);
-                double S = (1.0 - g[i]) * (cs[i] * vx1[i] + cp[i] * vx2[i])
-                    - cs[i] * y1 - cp[i] * y2
-                    + g[i] * ySer;
-                sv[i] = S;
-                F += (1.0 - g[i]) * alphaw[i] * xv[t] + S;
-            }
+        /* ---- PASSIVE WAVE JUNCTION, PASS 1: the comb bank is gone (no
+           builder ever fills it), so only the strings' delay-free loading —
+           carried in zsumT/jden — reaches the solve. ---- */
+        if (psv) {
             double Vst = yinf * (dcRho * st->hpY - hpG * st->hpX1);
             for (int k = 0; k < K; k++)
                 Vst += bA[k] * (ba1[k] * st->by1[k] + ba2[k] * st->by2[k]
@@ -3441,25 +2780,12 @@ void bow_poly_process3(void *vst, int n, int stride,
             V += bA[k] * y;
             rad += bC[k] * y;
         }
-        if (psv) {
-            /* PASSIVE JUNCTION, PASS 2 */
-            for (int i = 0; i < nv; i++) {
-                double x = alphaw[i] * xv[t] - zdrv[i] * V;
-                double y = (1.0 - g[i]) * x + sv[i];
-                int len = L[i] + 8;
-                double *b = arena + off[i];
-                int wi = widx[i];
-                comb_jaw_write(st, i, y, x, b, wi, len,
-                               aDuck, stOn, &tdir, &tdirS);
-            }
-        }
         if (bowOn) {
             for (int i = 0; i < nProc; i++) {
                 bow_pstring_t *S = &st->strs[st->proc[i]];
                 poly_string_return(st, S, V, rdmpArr[i], gkArr[i]);
             }
         }
-        st->venv = 0.9995 * st->venv + 0.0005 * fabs(V);
         st->disp = 0.99967 * st->disp + V;
         st->Vprev = V;
         double trad = tdir;
@@ -3613,7 +2939,6 @@ void bow_poly_process3(void *vst, int n, int stride,
                                          jt_ev_step(st), cap,
                                          stOn ? &sacc : NULL);
                     if (stOn) st->jtHoldS = sacc;
-                    jt_cap_bus(st, cap, &st->jtHold, &st->jtHoldS);
                     st->jtFprev = Fd;
                 }
                 const double g = jt_gain_step(st);
@@ -3703,7 +3028,6 @@ void bow_poly_free(void *vst)
         free(st->jtDnTgt); free(st->jtDnEnv); free(st->jtDnBoost);
         free(st->jtDnLp); free(st->jtDnLp2); free(st->jtDnRng);
         free(st->jtDnPh);
-        free(st->jtGovEnv);
         free(st->jtCapEnv); free(st->jtCapGain); free(st->jtCapRowGen);
         free(st->jtCapV); free(st->jtCapBuf); free(st->jtCapRing);
         free(st->scopeEnv); free(st->scopeMode); free(st->scopeCnt);
@@ -3714,20 +3038,8 @@ void bow_poly_free(void *vst)
         free(st->jtEvOfsTgt); free(st->jtEvOfsCur);
         free(st->jtRowAlpha); free(st->jtRowHcB); free(st->jtRowDeep);
     }
-    free(st->L);
-    free(st->cs); free(st->cp); free(st->w0); free(st->w1); free(st->w2);
-    free(st->w3); free(st->w4); free(st->g); free(st->lpA); free(st->wout);
-    free(st->kap); free(st->alphaw); free(st->jw); free(st->jl);
-    free(st->jn); free(st->zdrv); free(st->zi); free(st->twt);
     free(st->ba1); free(st->ba2); free(st->bn0); free(st->bA); free(st->bC);
-    free(st->fv); free(st->dwt); free(st->dtg);
-    free(st->stWebPan); free(st->stSlotPan); free(st->stJtPan);
-    free(st->off); free(st->arena); free(st->widx); free(st->vx1);
-    free(st->vx2); free(st->vlp); free(st->jdc); free(st->jenv);
-    free(st->sv);
-    free(st->rollD);
-    free(st->rollE);
-    free(st->rollAv);
+    free(st->stSlotPan); free(st->stJtPan);
     free(st->strs); free(st->proc);
     free(st);
 }

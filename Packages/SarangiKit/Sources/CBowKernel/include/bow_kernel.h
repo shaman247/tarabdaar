@@ -20,17 +20,15 @@
  * allocate or spawn threads: call them OFF the audio thread. Every optional
  * block is byte-null while unarmed (never loaded / 0 / NULL).
  *
- * Voice columns (nv each): one linear comb string per entry on the passive
- * wave junction. Body: K modal sections. Then the 66 per-sample scalars.
+ * Body: K modal sections. Then the 62 per-sample scalars.
  */
-void *bow_poly_init(int nb, double sr, /* voices */ int nv, const int *L, const double *cs, const double *cp, const double *w0, const double *w1, const double *w2, const double *w3, const double *w4, const double *g, const double *lpA, const double *wout, const double *kap, const double *alphaw, const double *jw, const double *jl, const double *jn, const double *chg, const double *zdrv, const double *zi, const double *twt, /* body */ int K, const double *ba1, const double *ba2, const double *bn0, const double *bA, const double *bC, double yinf, double c0, double dcRho, /* voice-force path + bow */ double pgain, double pA, double bowW, double kret, double retA, double retMode, double rb0, double ra1, double ra2, double kdisp, double bowWidth, double bowCont, double Z, double Zt, double mu_s, double mu_d, double v0f, double nutA, double brA, double thLeak, double thA, double thD, double thFloor, double bowDisp, double jq, double jq2, double zload, double tdirect, double tshape, double tmix, double nA, double nT, double nPow, double nzHi, double nzLo, double nDir, double nzHiD, double passive, double gutG, double dispN, double nailK, double f0Open, double gutA2, double tdirUni, double torsRatio, double torsG, double torsC, double ageAp, double ageMs, double v0Powp, double v0Refp, double hairHzp, double hairRefp, double crWp, double crMsp, double jawRhop, double jawRollp, double jawRollAmpp, double lossRegp, double slideRatep, double slideDullp, double slideNoisep, double slideAccp);
+void *bow_poly_init(int nb, double sr, /* body */ int K, const double *ba1, const double *ba2, const double *bn0, const double *bA, const double *bC, double yinf, double c0, double dcRho, /* voice-force path + bow */ double pgain, double pA, double bowW, double kret, double retA, double retMode, double rb0, double ra1, double ra2, double kdisp, double bowWidth, double bowCont, double Z, double Zt, double mu_s, double mu_d, double v0f, double nutA, double brA, double thLeak, double thA, double thD, double thFloor, double bowDisp, double jq, double jq2, double zload, double tdirect, double tshape, double tmix, double nA, double nT, double nPow, double nzHi, double nzLo, double nDir, double nzHiD, double passive, double gutG, double dispN, double nailK, double f0Open, double gutA2, double tdirUni, double torsRatio, double torsG, double torsC, double v0Powp, double v0Refp, double hairHzp, double hairRefp, double jawRhop, double jawRollp, double jawRollAmpp, double lossRegp, double slideRatep, double slideDullp, double slideNoisep, double slideAccp);
 
 void bow_poly_process(void *vst, int n, int stride, const double *f0, const double *vb, const double *fb, const double *beta, const double *gate, const double *xv, double *out);
 
 void bow_poly_free(void *vst);
 
-/* Mount a fresh gut string on slot b. NOT a memset: the contact-aging
-   deficit starts at ageA (a fresh contact grips weakly; zero = full grip). */
+/* Mount a fresh gut string on slot b. */
 void bow_poly_reset_string(void *vst, int b);
 
 /* 1 while string b is ringing or bowed; 0 once silent (the host may skip
@@ -92,20 +90,12 @@ void bow_poly_jt_track_target(void *vst, double hz);
 void bow_poly_jt_set_lp(void *vst, double a);
 void bow_poly_jt_set_damp_t60(void *vst, double t60);
 
-/* CHARGE GOVERNOR (`bow_jt_gov`): per-row AGC on the bridge drive — a row
-   ringing above the target sheds drive by ref/env. amt 0..1 (0 =
-   byte-null); refDisp = target zone displacement (m, apex scale) →
-   velocity bound refDisp·wd1 on a ~60 ms peak envelope. Drone drive is
-   added after the shed. Drone-setter contract. */
-void bow_poly_jt_set_gov(void *vst, double amt, double refDisp);
-
 /* VOICE-RELATIVE CAP (`bow_jt_cap*`): each row's RADIATED output held at
    or below ratio × the voice bus's peak (instant attack, ~1.2 s-τ
    release); per-row 150 ms envelope + gain (3 ms down, 120 ms recovery).
    hard 0..1 = fraction of the dB overshoot removed (0 = byte-null); a pure
-   output gain. bus 0..1: 0 = per string, 1 = the summed web; between, rows
-   remove hard·(1−bus) and the sum hard·bus of the rest. Drone-setter. */
-void bow_poly_jt_set_cap(void *vst, double hard, double ratio, double bus);
+   output gain, applied per string. Drone-setter. */
+void bow_poly_jt_set_cap(void *vst, double hard, double ratio);
 
 /* QUIESCENCE GATE (`bow_jt_gate`): a row whose peak LOW-MODE momentum
    stays below refDisp·wd1 for ~30 ms with no bridge or drone drive freezes
@@ -169,7 +159,7 @@ void bow_poly_jt_drive_weights(void *vst, const double *w, int n);
    [0, 4]; 1 / never calling = byte-null. Drone-setter contract. */
 void bow_poly_jt_set_gain_mul(void *vst, double m);
 
-/* LIVE PARAMETERS, no rebuild. set_scalars replaces the 66 scalars
+/* LIVE PARAMETERS, no rebuild. set_scalars replaces the 62 scalars
    (bow_poly_init order; a shorter block zeroes the tail), tables and
    running state untouched. set_body / jt_set_coeffs replace coefficient
    ARRAYS keeping every history; return 1 on success, 0 when the shape
@@ -193,22 +183,7 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
    set_stereo arms it with pre-scaled pan arrays (AFTER jt_load, off the
    audio thread); NULL / wrong length leaves that family centred. process2
    with outS = NULL, or never arming, is the mono path. */
-void bow_poly_set_stereo(void *vst, const double *webPan, int nWeb, const double *jtPan, int nJt, const double *slotPan, int nSlot);
-
-/* SITAR TWANG: a grazing jawari WRAP on the PLAYED strings' bridge
-   termination. While an excursion tip presses past the graze knee
-   (per-side peak envelopes — engages at any level), the bridge segment
-   SHORTENS by a smoothed rolling-contact offset (energy-conserving phase
-   modulation) plus a light hysteretic contact-loss fold. set_twang: live
-   0..1 (drone-setter contract; slewed ~30 ms; 0 = byte-null).
-   set_twang_shape: kneeR = knee as a fraction of the peak envelope, depth
-   = fold slope, relMs = envelope release, rollSmp = shortening in kernel
-   samples at amount 1, bright/ring/gut = termination brightening,
-   release-damping ease, gut-loss ease; non-positive keeps the defaults. */
-void bow_poly_set_twang(void *vst, double amt);
-void bow_poly_set_twang_shape(void *vst, double kneeR, double depth,
-                              double relMs, double rollSmp,
-                              double bright, double ring, double gut);
+void bow_poly_set_stereo(void *vst, const double *jtPan, int nJt, const double *slotPan, int nSlot);
 
 /* INSTRUMENT WIDTH: a random-sign diffuse-field difference bank
    (700 Hz - 6.5 kHz) on the radiated output, once per bus — coherence

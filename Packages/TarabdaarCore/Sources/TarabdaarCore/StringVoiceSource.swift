@@ -107,54 +107,149 @@ public final class StringVoiceSource {
     // strong refs keep swapped-out engines alive past any in-flight buffer
     private var recentEngines: [BowEngine] = []
 
-    // Runtime playing state (`.live` params), cached here so a rebuild
-    // republishes it onto the fresh engine. Defaults = the fitted sound.
-    private var jtLpHz = 0.0
-    private var jtHpHz = 0.0
-    private var jtBody = 0.0
-    private var jtGov = 0.0
-    private var tarafDamp = 0.0
-    private var toneTilt = 0.0
-    private var masterGain = 1.0  // bow_gain neutral = the calibrated level
-    private var tarafSel = 0.5    // bow_jt_sel neutral = the fitted profile
-    private var jtEvolve = 0.5    // bow_jt_evolve neutral = fitted bone
-    private var jtEvolveReg = 0.0 // bow_jt_ev_reg neutral = uniform bone
-    private var jtEvolveChrom = 0.5 // bow_jtc_evolve neutral = the chromatic bridge's fitted bone
-    private var twang = 0.0       // bow_twang 0 = plain bridge (byte-null)
-    private var jtInjectGain = 0.0  // inject-ring arm: 0 = no foreign drive (byte-null)
-    private var busMeterOn = false  // bus volume meter (voice/taraf readout)
-    private var scopeOn = false     // Scope tab telemetry (display only)
-    private var busBalance = 0.0    // bow_bal: 0 = neutral (byte-null)
-    // bow_jt_comp_*: taraf-bus compressor (thresh 0 = off, byte-null)
-    private var jtComp = (thresh: 0.0, ratio: 4.0, atkMs: 5.0, relMs: 150.0)
-    // bow_jt_cap*: voice-relative taraf cap (hard 0 = off, byte-null);
-    // bus 0 = per string … 1 = per taraf
-    private var jtCap = (hard: 0.0, ratio: 1.0, bus: 0.0)
+    // MARK: - Live control knobs (the plumbing table)
 
-    /// Radiated-jt tone LP corner (`bow_jt_lp`; Hz, <= 0 = build-time state). Control-thread safe.
-    public func setJtToneLp(hz: Double) {
-        jtLpHz = max(hz, 0.0)
-        currentEngine()?.setJtToneLp(hz: jtLpHz)
+    /// ONE live String-voice knob: clamp it, cache it, push it. `neutral` is
+    /// the value at which the engine sits in its build-time state, so
+    /// `setEngine` re-applies only the knobs that differ from it and a fresh
+    /// engine stays byte-null. `push` writes the cached value onto an engine;
+    /// the multi-field cap reads its siblings through `read`.
+    private struct ControlKnob {
+        /// Whether `setEngine` re-applies this knob itself.
+        enum Reapply {
+            /// Push when the cached value differs from `neutral`.
+            case whenChanged
+            /// Never — a sibling entry pushes this field (the cap pair).
+            case viaSibling
+        }
+        let key: String
+        let clamp: (Double) -> Double
+        let neutral: Double
+        let reapply: Reapply
+        let push: (BowEngine, Double, _ read: (String) -> Double) -> Void
+
+        /// Single-field knob.
+        init(_ key: String, neutral: Double = 0,
+             _ clamp: @escaping (Double) -> Double,
+             _ push: @escaping (BowEngine, Double) -> Void) {
+            self.key = key; self.neutral = neutral; self.clamp = clamp
+            self.reapply = .whenChanged
+            self.push = { engine, v, _ in push(engine, v) }
+        }
+        /// Multi-field knob: pushes the whole group from the cache.
+        init(_ key: String, neutral: Double, reapply: Reapply,
+             _ clamp: @escaping (Double) -> Double,
+             group: @escaping (BowEngine, _ read: (String) -> Double) -> Void) {
+            self.key = key; self.neutral = neutral; self.clamp = clamp
+            self.reapply = reapply
+            self.push = { engine, _, read in group(engine, read) }
+        }
     }
 
-    /// Radiated-jt tone HP corner (`bow_jt_hp`; Hz, <= 0 = bypass). Control-thread safe.
-    public func setJtToneHp(hz: Double) {
-        jtHpHz = max(hz, 0.0)
-        currentEngine()?.setJtToneHp(hz: jtHpHz)
+    private static func unit(_ x: Double) -> Double { min(max(x, 0.0), 1.0) }
+    private static func bipolar(_ x: Double) -> Double { min(max(x, -1.0), 1.0) }
+    private static func nonNegative(_ x: Double) -> Double { max(x, 0.0) }
+
+    /// The `.live` knobs the source owns, in the order `setEngine` republishes
+    /// them. `bow_jt_inject` is internal (the inject-ring arm has no registry
+    /// key); everything else is a `ParamRegistry` key.
+    private static let controlKnobs: [ControlKnob] = [
+        // top of range = bypass: hand the engine 0 so it restores the exact
+        // build-time coefficient (byte-null) — this one rests at 20 kHz
+        ControlKnob("bow_jt_lp", { $0 >= 20000 ? 0 : nonNegative($0) },
+                    { $0.setJtToneLp(hz: $1) }),
+        ControlKnob("bow_jt_hp", nonNegative, { $0.setJtToneHp(hz: $1) }),
+        ControlKnob("bow_jt_body", unit, { $0.setJtBody($1) }),
+        ControlKnob("bow_jt_damp", unit, { $0.setTarafDamp($1) }),
+        ControlKnob("bow_tone_tilt", bipolar, { $0.setToneTilt($1) }),
+        // neutral = the calibrated level
+        ControlKnob("bow_gain", neutral: 1.0, nonNegative,
+                    { $0.setMasterGain($1) }),
+        // neutral = the fitted recruitment profile
+        ControlKnob("bow_jt_sel", neutral: 0.5, unit,
+                    { $0.setTarafSelectivity($1) }),
+        // neutral = the fitted bone
+        ControlKnob("bow_jt_evolve", neutral: 0.5, unit,
+                    { $0.setJtEvolve($1) }),
+        // neutral = uniform bone across the register
+        ControlKnob("bow_jt_ev_reg", bipolar, { $0.setJtEvolveRegister($1) }),
+        // neutral = the chromatic bridge's fitted bone
+        ControlKnob("bow_jtc_evolve", neutral: 0.5, unit,
+                    { $0.setJtEvolveChromatic($1) }),
+        // inject-ring arm: 0 = no foreign drive (byte-null)
+        ControlKnob("bow_jt_inject", nonNegative, { $0.setJtInjectGain($1) }),
+        ControlKnob("bow_bal", bipolar, { $0.setBusBalance($1) }),
+        // the cap's two fields are pushed together; hard 0 = off (byte-null)
+        ControlKnob("bow_jt_cap", neutral: 0, reapply: .whenChanged, unit,
+                    group: pushJtCap),
+        ControlKnob("bow_jt_cap_ratio", neutral: 1.0, reapply: .viaSibling,
+                    { max($0, 0.01) }, group: pushJtCap),
+    ]
+
+    private static func pushJtCap(_ engine: BowEngine,
+                                  _ read: (String) -> Double) {
+        engine.setJtCap(hard: read("bow_jt_cap"),
+                        ratio: read("bow_jt_cap_ratio"))
     }
 
-    /// Taraf through the voice's body bank (`bow_jt_body`; 0 = bypass). Control-thread safe.
-    public func setJtBody(_ mix01: Double) {
-        jtBody = min(max(mix01, 0.0), 1.0)
-        currentEngine()?.setJtBody(jtBody)
+    private static let knobByKey: [String: ControlKnob] =
+        Dictionary(uniqueKeysWithValues: controlKnobs.map { ($0.key, $0) })
+
+    /// Runtime playing state (`.live` params), cached here so a rebuild
+    /// republishes it onto the fresh engine. Absent = the knob's neutral,
+    /// i.e. the fitted sound.
+    private var controlValues: [String: Double] = [:]
+
+    /// The cached (clamped) value of one knob, or its neutral.
+    private func controlValue(_ key: String) -> Double {
+        controlValues[key] ?? Self.knobByKey[key]?.neutral ?? 0
     }
 
-    /// Taraf charge governor 0..1 (`bow_jt_gov`): 0 = raw physics, 1 = each
-    /// row's ring saturates at its single-strike level. Control-thread safe.
-    public func setJtGov(_ amt01: Double) {
-        jtGov = min(max(amt01, 0.0), 1.0)
-        currentEngine()?.setJtGov(jtGov)
+    /// True when `setControl` owns `key` (the caller can report success even
+    /// with no voice armed yet).
+    public static func handlesControl(_ key: String) -> Bool {
+        knobByKey[key] != nil
     }
+
+    /// Apply one live knob: clamp, cache, push onto the running engine.
+    /// False for a key the table does not own. Control-thread safe.
+    @discardableResult
+    public func setControl(_ key: String, _ value: Double) -> Bool {
+        guard let knob = Self.knobByKey[key] else { return false }
+        let v = knob.clamp(value)
+        controlValues[key] = v
+        if let engine = currentEngine() {
+            knob.push(engine, v, controlValue)
+        }
+        return true
+    }
+
+    /// Re-publish every non-neutral knob onto a freshly built engine.
+    private func republishControls(to engine: BowEngine) {
+        for knob in Self.controlKnobs where knob.reapply == .whenChanged {
+            let v = controlValue(knob.key)
+            if v != knob.neutral { knob.push(engine, v, controlValue) }
+        }
+    }
+
+    // Named wrappers for the knobs other files drive directly.
+
+    /// Radiated-jt tone LP corner (`bow_jt_lp`; Hz, ≥ 20 kHz or ≤ 0 = the
+    /// build-time state). Control-thread safe.
+    public func setJtToneLp(hz: Double) { setControl("bow_jt_lp", hz) }
+
+    /// Taraf damping 0..1 (`bow_jt_damp`): 0 = natural ring, 1 = choked. Control-thread safe.
+    public func setTarafDamp(_ amt01: Double) { setControl("bow_jt_damp", amt01) }
+
+    /// Tone tilt -1..1 (`bow_tone_tilt`): bass … flat … treble. Control-thread safe.
+    public func setToneTilt(_ t: Double) { setControl("bow_tone_tilt", t) }
+
+    /// Voice→taraf inject-ring arm: 1 while any foreign voice drives the jt
+    /// web (levels scale at the taps), else 0. The ring allocates on the first
+    /// non-zero push; 0, or armed with nothing written, is byte-null.
+    public func setJtInjectGain(_ g: Double) { setControl("bow_jt_inject", g) }
+
+    // MARK: - Telemetry & meters (not knobs)
 
     /// Rows asleep under the quiescence gate (0 unarmed). Any thread.
     public func jtGateAsleep() -> Int {
@@ -166,6 +261,9 @@ public final class StringVoiceSource {
                                   driveR: Double, droneHot: Bool)? {
         currentEngine()?.jtGateProbe()
     }
+
+    private var busMeterOn = false  // bus volume meter (voice/taraf readout)
+    private var scopeOn = false     // Scope tab telemetry (display only)
 
     /// Arm the kernel's display-only meters (`BowEngine.setScopeArmed`). Control thread.
     public func setScopeArmed(_ on: Bool) {
@@ -181,108 +279,6 @@ public final class StringVoiceSource {
     /// The played strings' scope read (`BowEngine.scopeSlots`). Any thread.
     public func scopeSlots() -> [BowEngine.ScopeSlot] {
         currentEngine()?.scopeSlots() ?? []
-    }
-
-    /// Master gain (`bow_gain`): the performance volume of the whole radiated
-    /// instrument, ramped (~25 ms) over the fitted trim; 1 = calibrated. Control-thread safe.
-    public func setMasterGain(_ g: Double) {
-        masterGain = max(g, 0.0)
-        currentEngine()?.setMasterGain(masterGain)
-    }
-
-    /// Taraf damping 0..1 (`bow_jt_damp`): 0 = natural ring, 1 = choked. Control-thread safe.
-    public func setTarafDamp(_ amt01: Double) {
-        tarafDamp = min(max(amt01, 0.0), 1.0)
-        currentEngine()?.setTarafDamp(tarafDamp)
-    }
-
-    /// Tone tilt -1..1 (`bow_tone_tilt`): bass … flat … treble. Control-thread safe.
-    public func setToneTilt(_ t: Double) {
-        toneTilt = min(max(t, -1.0), 1.0)
-        currentEngine()?.setToneTilt(toneTilt)
-    }
-
-    /// Taraf recruitment 0..1 (`bow_jt_sel`): 0 = kin-only, 0.5 = fitted,
-    /// 1 = every row equal; loudness is compensated. Control-thread safe.
-    public func setTarafSelectivity(_ s01: Double) {
-        tarafSel = min(max(s01, 0.0), 1.0)
-        currentEngine()?.setTarafSelectivity(tarafSel)
-    }
-
-    /// Harmonic evolution 0…1 (`bow_jt_evolve`): a kernel-slewed bone offset. Control-thread safe.
-    public func setJtEvolve(_ e01: Double) {
-        jtEvolve = min(max(e01, 0.0), 1.0)
-        currentEngine()?.setJtEvolve(jtEvolve)
-    }
-
-    /// Evolution register tilt (`bow_jt_ev_reg`): per-row bone offsets by
-    /// octave from the tonic (+ blooms the low rows). Control-thread safe.
-    public func setJtEvolveReg(_ reg: Double) {
-        jtEvolveReg = min(max(reg, -1.0), 1.0)
-        currentEngine()?.setJtEvolveRegister(jtEvolveReg)
-    }
-
-    /// The chromatic bridge's harmonic evolution 0…1 (`bow_jtc_evolve`). Control-thread safe.
-    public func setJtEvolveChromatic(_ e01: Double) {
-        jtEvolveChrom = min(max(e01, 0.0), 1.0)
-        currentEngine()?.setJtEvolveChromatic(jtEvolveChrom)
-    }
-
-    /// Sitar twang 0…1 (`bow_twang`): the played strings' grazing bridge fold; 0 = byte-null.
-    public func setTwang(_ amt01: Double) {
-        twang = min(max(amt01, 0.0), 1.0)
-        currentEngine()?.setTwang(twang)
-    }
-
-    /// Voice→taraf inject-ring arm: 1 while any foreign voice drives the jt
-    /// web (levels scale at the taps), else 0. The ring allocates on the first
-    /// non-zero push; 0, or armed with nothing written, is byte-null.
-    public func setJtInjectGain(_ g: Double) {
-        jtInjectGain = max(g, 0.0)
-        currentEngine()?.setJtInjectGain(jtInjectGain)
-    }
-
-    /// Voice↔taraf balance (`bow_bal`): −1 voice only … 0 neutral (byte-null)
-    /// … +1 taraf only; an attenuator pair, never a boost.
-    public func setBusBalance(_ b: Double) {
-        busBalance = min(max(b, -1.0), 1.0)
-        currentEngine()?.setBusBalance(busBalance)
-    }
-
-    /// One field of the taraf-bus compressor (`bow_jt_comp_*`); the set is
-    /// pushed whole on every edit. Threshold 0 = off, byte-null.
-    public enum JtCompField { case thresh, ratio, atkMs, relMs }
-    public func setJtCompParam(_ field: JtCompField, _ value: Double) {
-        switch field {
-        case .thresh: jtComp.thresh = max(value, 0.0)
-        case .ratio:  jtComp.ratio = max(value, 1.0)
-        case .atkMs:  jtComp.atkMs = max(value, 0.0)
-        case .relMs:  jtComp.relMs = max(value, 1.0)
-        }
-        pushJtComp(to: currentEngine())
-    }
-
-    private func pushJtComp(to engine: BowEngine?) {
-        engine?.setJtComp(thresh: jtComp.thresh, ratio: jtComp.ratio,
-                          atkMs: jtComp.atkMs, relMs: jtComp.relMs)
-    }
-
-    /// One field of the voice-relative taraf cap (`bow_jt_cap*`): each row
-    /// held at or below `ratio` × the voice bus's decaying peak, per string
-    /// (`bus` 0) … per taraf (1). Pushed whole. Hard 0 = off, byte-null.
-    public enum JtCapField { case hard, ratio, bus }
-    public func setJtCapParam(_ field: JtCapField, _ value: Double) {
-        switch field {
-        case .hard:  jtCap.hard = min(max(value, 0.0), 1.0)
-        case .ratio: jtCap.ratio = max(value, 0.01)
-        case .bus:   jtCap.bus = min(max(value, 0.0), 1.0)
-        }
-        pushJtCap(to: currentEngine())
-    }
-
-    private func pushJtCap(to engine: BowEngine?) {
-        engine?.setJtCap(hard: jtCap.hard, ratio: jtCap.ratio,
-                         bus: jtCap.bus)
     }
 
     /// Arm the voice/taraf bus meter (the volume readout); the metered
@@ -404,24 +400,9 @@ public final class StringVoiceSource {
             recentEngines.append(engine)
             if recentEngines.count > 8 { recentEngines.removeFirst() }
             // re-apply the runtime playing state (a rebuild must not snap to defaults)
-            if jtLpHz > 0 { engine.setJtToneLp(hz: jtLpHz) }
-            if jtHpHz > 0 { engine.setJtToneHp(hz: jtHpHz) }
-            if jtBody > 0 { engine.setJtBody(jtBody) }
-            if jtGov > 0 { engine.setJtGov(jtGov) }
-            if tarafDamp != 0 { engine.setTarafDamp(tarafDamp) }
-            if toneTilt != 0 { engine.setToneTilt(toneTilt) }
-            if masterGain != 1.0 { engine.setMasterGain(masterGain) }
-            if tarafSel != 0.5 { engine.setTarafSelectivity(tarafSel) }
-            if jtEvolve != 0.5 { engine.setJtEvolve(jtEvolve) }
-            if jtEvolveReg != 0 { engine.setJtEvolveRegister(jtEvolveReg) }
-            if jtEvolveChrom != 0.5 { engine.setJtEvolveChromatic(jtEvolveChrom) }
-            if twang > 0 { engine.setTwang(twang) }
-            if jtInjectGain > 0 { engine.setJtInjectGain(jtInjectGain) }
+            republishControls(to: engine)
             if busMeterOn { engine.setBusMeter(true) }
             if scopeOn { engine.setScopeArmed(true) }
-            if busBalance != 0 { engine.setBusBalance(busBalance) }
-            if jtComp.thresh > 0 { pushJtComp(to: engine) }
-            if jtCap.hard > 0 { pushJtCap(to: engine) }
             for point in FXPoint.allCases
                 where fxSettings[point.rawValue] != FXSettings() {
                 engine.setFX(point, fxSettings[point.rawValue])
@@ -505,14 +486,9 @@ public final class StringVoiceSource {
             bp.num[k] = v
         }
         let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
-        let taraf = strings.filter(\.enabled)
-            .map { (f: $0.freq, gain: $0.gain, t60: $0.t60) }
-        // the same builder as the engine's. `taraf` MUST be passed: the
-        // coupling web derives a passive scalar from its row count, and a
-        // mismatched scalar vector must never reach the armed kernel
+        // the same builder as the engine's
         var tables = BowTables.buildOpenString(sr: modelSR * Double(osf),
-                                               tonic: tonicHz, bp: bp,
-                                               taraf: taraf)
+                                               tonic: tonicHz, bp: bp)
         // the jawari tables are the expensive part — only when a jt key moved
         if needsJawariTables {
             let plan = Self.jawariRowPlan(bp: bp, tonicHz: tonicHz,
@@ -632,13 +608,8 @@ public final class StringVoiceSource {
             bp.num[k] = v
         }
         let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
-        // taraf tuning rows: the modal-jawari block radiates them; with
-        // `bow_cpl_z` > 0 they also load the passive junction
-        let taraf = strings.filter(\.enabled)
-            .map { (f: $0.freq, gain: $0.gain, t60: $0.t60) }
         var tables = BowTables.buildOpenString(sr: sr * Double(osf),
-                                               tonic: tonicHz, bp: bp,
-                                               taraf: taraf)
+                                               tonic: tonicHz, bp: bp)
         // the shared row plan; the follower is the LAST row, marked for live retune
         let plan = jawariRowPlan(bp: bp, tonicHz: tonicHz, strings: strings,
                                  follower: follower)

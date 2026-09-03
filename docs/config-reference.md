@@ -14,7 +14,7 @@ System-level constants live in `Packages/TarabdaarCore/Sources/TarabdaarCore/Con
 | The playing scale | `PitchScale` via `ScaleStore`; the tonic is not persisted | Fret Pad tab ⌘3 |
 | The whole rig | one `TarabdaarPreset` document per `.tarabdaar` file in `Application Support/Tarabdaar/Presets/` | Parameters tab preset toolbar |
 
-Audition scores reach any parameter via `voiceParam` name `param.<key>` or `string.<key>` ([Simulator](simulator.md)). The registry groups are Bow stroke · Body (formula modes) · Bow & string · Playing ranges · Jawari taraf (modal contact) · Chromatic bridge (jawari taraf) · Taraf coupling (bridge load) · Liveness · Articulation · Radiation & output · Tanpura · Sitar · Glide · Controller · Strike blend · Fret pad · the four FX points. See [Sound Design](sound-design.md), [Sarangi](sarangi.md) and [FX](fx.md).
+Audition scores reach any parameter via `voiceParam` name `param.<key>` or `string.<key>` ([Simulator](simulator.md)). The registry groups are Bow stroke · Body (formula modes) · Bow & string · Playing ranges · Jawari taraf (modal contact) · Chromatic bridge (jawari taraf) · Liveness · Articulation · Radiation & output · Tanpura · Sitar · Glide · Controller · Strike blend · Fret pad · the four FX points. See [Sound Design](sound-design.md), [Sarangi](sarangi.md) and [FX](fx.md).
 
 ## Audio
 

@@ -6,7 +6,9 @@ import SwiftUI
 /// The **Strings** tab: the sympathetic-string bank, two sets on two bridges.
 /// The **raga set** (scale degree + octave of the centralized scale; pitches
 /// always follow it) rides the `bow_jt_*` bridge; the **chromatic set**
-/// (semitones of the fixed JI grid off the tonic) rides `bow_jtc_*`. The raga
+/// (semitones of the fixed JI grid off the tonic) carries its own level,
+/// level norm and evolution (`bow_jtc_gain`/`_norm`/`_evolve`) over the same
+/// jawari geometry. The raga
 /// layout regenerates when the scale's degree count changes or via
 /// "Regenerate from scale"; the chromatic set resets via its own button;
 /// hand edits otherwise stand. Backed by `controller.sarangi`.

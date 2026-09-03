@@ -52,11 +52,10 @@ public final class TanpuraEngine: @unchecked Sendable {
 
     /// Build + settle one slot per frequency and arm the ASYNC pool
     /// (workers > 1) so the callback never computes. CALL OFF the audio
-    /// thread (seconds of CPU). `shaping` = scale-shaped overtones (slot
-    /// seed = Hz in mHz, stable across rebuilds); `threadHMul` /
-    /// `hfT60Mul` = per-slot register calibration / cascade slowing.
+    /// thread (seconds of CPU). `threadHMul` / `hfT60Mul` = per-slot
+    /// register calibration / cascade slowing.
     public init?(params: TanpuraParams, frequencies: [Double],
-                 workers: Int = 8, shaping: TanpuraShaping? = nil,
+                 workers: Int = 8,
                  threadHMul: ((Double) -> Double)? = nil,
                  hfT60Mul: ((Double) -> Double)? = nil) {
         let freqs = frequencies.filter { $0 > 0 }
@@ -82,8 +81,6 @@ public final class TanpuraEngine: @unchecked Sendable {
             let cents = Self.centsCorrection(forHz: f0, params: params)
             let t = TanpuraTables.buildNote(
                 f0Sounding: f0, cents: cents, p: params,
-                shaping: shaping,
-                slotSeed: UInt64((f0 * 1000.0).rounded()),
                 threadHMul: threadHMul?(f0) ?? 1.0,
                 hfT60Mul: hfT60Mul?(f0) ?? 1.0)
             // the kernel deep-copies every table at mount

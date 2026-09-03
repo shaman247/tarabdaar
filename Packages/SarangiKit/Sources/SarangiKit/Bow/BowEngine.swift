@@ -229,15 +229,12 @@ public final class BowEngine {
 
         let t = tables
         let s = t.scalars
-        precondition(s.count == 66, "bow tables: expected 66 scalars, got \(s.count)")
+        precondition(s.count == 62, "bow tables: expected 62 scalars, got \(s.count)")
         // Starting point for the live-parameter ramp (see applyPendingLive).
         liveScalarsCur = s
         liveScalarsTarget = s
         pkernel = bow_poly_init(
             Int32(nPoly), t.sr,
-            Int32(t.L.count), t.L,
-            t.cs, t.cp, t.w0, t.w1, t.w2, t.w3, t.w4, t.g, t.lpA, t.wout,
-            t.kap, t.alphaw, t.jw, t.jl, t.jn, t.chg, t.zdrv, t.zi, t.twt,
             Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC,
             s[0], s[1], s[2],
             s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11],
@@ -252,10 +249,8 @@ public final class BowEngine {
             s[47], s[48], s[49],
             s[50], s[51],
             s[52], s[53],
-            s[54], s[55],
-            s[56], s[57],
-            s[58], s[59], s[60],
-            s[61], s[62], s[63], s[64], s[65])
+            s[54], s[55], s[56],
+            s[57], s[58], s[59], s[60], s[61])
         // drone-row excitation scalars (bp defaults, overridable via string.*)
         droneLevel = bp.v("bow_drone_level", 0.026)
         droneOnset = bp.v("bow_drone_onset", 0.052)
@@ -345,15 +340,6 @@ public final class BowEngine {
                 jtEvolveRegApplied =
                     min(max(bp.v("bow_jt_ev_reg", 0.0), -1.0), 1.0)
                 pushJtEvolveOffsets()
-                // CHARGE GOVERNOR: graze target in apex units (`bow_jt_gov_ref`
-                // bp scalar); a resting `bow_jt_gov` arms it, 0 = byte-null.
-                // TRAP: a ref near 96 parks the ring in the buzz-maximal band
-                // — retune only with a fresh sweep, never by interpolation.
-                jtGovRefDisp = jtApexRef * bp.v("bow_jt_gov_ref", 48.0)
-                let gov = bp.v("bow_jt_gov", 0.0)
-                if gov > 0 {
-                    bow_poly_jt_set_gov(pk, min(gov, 1.0), jtGovRefDisp)
-                }
                 // QUIESCENCE GATE: rows resting below this dB floor under the
                 // graze apex freeze in place and skip their tick (idle CPU).
                 // Always on; a bp scalar (tests may override), 0 = bit-exact
@@ -401,42 +387,15 @@ public final class BowEngine {
             jtLpHzCur = tiltPureLpHiHz
             jtLpHzPushed = tiltPureLpHiHz
         }
-        // STEREO per-source pans by PITCH CLASS around the tonic (pan =
-        // spread·sin(2π·pc): tonic centre, svaras symmetric). Must run AFTER
-        // the jt load (row pans need njt). Keys absent / 0 ⇒ mono path.
-        let stSpread = bp.v("bow_st_spread", 0.0)
-        let stPlayed = bp.v("bow_st_played", 0.0)
         // INSTRUMENT WIDTH (`bow_st_width`): the kernel's diffuse-field
         // difference bank on the whole radiated output; fold-down invariant.
+        // The per-source pans are gone — every source stays centred and the
+        // width bank is the whole stereo law. 0 ⇒ mono path.
         let stWidth = bp.v("bow_st_width", 0.0)
-        if let pk = pkernel,
-           stSpread > 1e-6 || stPlayed > 1e-6 || stWidth > 1e-6 {
-            let tonic = tables.scalars.count > 44 ? tables.scalars[44]
-                                                  : 261.63
-            func pcPans(_ freqs: [Double], spread: Double) -> [Double] {
-                freqs.map { f in
-                    guard f > 0, tonic > 0 else { return 0.0 }
-                    var pc = log2(f / tonic)
-                        .truncatingRemainder(dividingBy: 1.0)
-                    if pc < 0 { pc += 1.0 }
-                    return spread * sin(2.0 * Double.pi * pc)
-                }
-            }
-            // first pan family unused (nil) — that source stays centred
-            let jtPan = pcPans(t.jt?.rowFreqs ?? [], spread: stSpread)
-            // played strings: small symmetric per-slot spread
-            var slotPan = [Double](repeating: 0, count: nPoly)
-            if nPoly > 1 {
-                for s in 0..<nPoly {
-                    slotPan[s] = stPlayed
-                        * (2.0 * Double(s) / Double(nPoly - 1) - 1.0)
-                }
-            }
-            bow_poly_set_stereo(pk, nil, 0,
-                                jtPan.isEmpty ? nil : jtPan,
-                                Int32(jtPan.count),
-                                slotPan, Int32(nPoly))
-            if stWidth > 1e-6 { bow_poly_set_stereo_width(pk, stWidth) }
+        if let pk = pkernel, stWidth > 1e-6 {
+            // arm the kernel's stereo path with every pan at zero
+            bow_poly_set_stereo(pk, nil, 0, nil, 0)
+            bow_poly_set_stereo_width(pk, stWidth)
             // side twins of the radiation chain (same coefficients, own state)
             if !rfir.isEmpty { radFIRS = FIRFilter(taps: rfir) }
             if eLp > 0, eLp < 0.44 * sr {
@@ -457,12 +416,6 @@ public final class BowEngine {
                                           sr: sr)
             }
             stereoOn = true
-        }
-        // TWANG: a bp rest value arms the played strings' grazing bridge
-        // fold at build; the live push arrives on top. 0 = byte-null.
-        if let pk = pkernel {
-            let tw = min(max(bp.v("bow_twang", 0.0), 0.0), 1.0)
-            if tw > 1e-9 { bow_poly_set_twang(pk, tw) }
         }
         // voice→taraf drive FX hook, installed unconditionally (off the audio
         // thread); `isEngaged` keeps it byte-null. deinit frees the kernel
@@ -730,17 +683,6 @@ public final class BowEngine {
         }
     }
 
-    /// CHARGE GOVERNOR 0…1 (`bow_jt_gov`): per-row AGC on the bridge drive
-    /// into the jt strings — a row ringing above the graze target sheds
-    /// incoming drive, so anchor rows saturate at a single-strike ring
-    /// instead of accumulating a phrase. 0 = bypass (bit-exact).
-    public func setJtGov(_ amt01: Double) {
-        guard let pk = pkernel else { return }
-        bow_poly_jt_set_gov(pk, min(max(amt01, 0.0), 1.0), jtGovRefDisp)
-    }
-    /// Graze target (m) = `bow_jt_gov_ref` × apex, resolved at build.
-    private var jtGovRefDisp = 4.8e-4
-
     /// Rows currently asleep under the quiescence gate — telemetry/tests.
     public func jtGateAsleep() -> Int {
         guard let pk = pkernel else { return 0 }
@@ -876,7 +818,7 @@ public final class BowEngine {
     private var meterLast = (0.0, 0.0)
 
     /// Render thread: fold one split-bus chunk (kernel rate, mid streams)
-    /// into the interval accumulators — after the bus FX, comp and balance,
+    /// into the interval accumulators — after the bus FX and the balance,
     /// before the merge, so the meter shows each bus's actual contribution.
     private func meterBuses(voice: UnsafePointer<Double>,
                             taraf: UnsafePointer<Double>, nk: Int) {
@@ -893,7 +835,7 @@ public final class BowEngine {
         os_unfair_lock_unlock(&tiltLock)
     }
 
-    // MARK: - Voice↔taraf balance + taraf compressor
+    // MARK: - Voice↔taraf balance + the voice-relative taraf cap
 
     /// VOICE↔TARAF BALANCE (`bow_bal`, .live): −1…+1, 0 = neutral
     /// (byte-null). A pure attenuator pair at the bus merge — positive turns
@@ -902,24 +844,6 @@ public final class BowEngine {
     public func setBusBalance(_ b: Double) {
         os_unfair_lock_lock(&tiltLock)
         balTarget = min(max(b, -1.0), 1.0)
-        os_unfair_lock_unlock(&tiltLock)
-    }
-
-    /// TARAF COMPRESSOR (`bow_jt_comp_*`, .live): feed-forward dynamics on
-    /// the jt bus ONLY. Threshold in CALIBRATED OUTPUT units (bus × build
-    /// trim — independent of `bow_gain`); 0 = off, byte-null; ratio 1 = off.
-    /// Instant-attack envelope, `relMs` release; the GAIN slews `atkMs`
-    /// toward reduction and `relMs` back. Linked mid/side (one gain).
-    public func setJtComp(thresh: Double, ratio: Double,
-                          atkMs: Double, relMs: Double) {
-        os_unfair_lock_lock(&tiltLock)
-        compThresh = max(thresh, 0.0)
-        compInvRatioM1 = 1.0 / min(max(ratio, 1.0), 40.0) - 1.0
-        // Per-sample (kernel-rate) coefficients. Attack 0 = instant.
-        compAtkCoef = atkMs <= 0 ? 1.0
-            : 1.0 - exp(-1.0 / (srk * atkMs * 0.001))
-        let rel = min(max(relMs, 1.0), 5000.0)
-        compRelCoef = 1.0 - exp(-1.0 / (srk * rel * 0.001))
         os_unfair_lock_unlock(&tiltLock)
     }
 
@@ -935,47 +859,16 @@ public final class BowEngine {
     /// launch ⇒ ceiling ~0: armed hard, drone-/inject-charged rows are held
     /// until the voice first sounds — that IS the contract; off (default)
     /// keeps an autonomous taraf. Clocks: row env release 150 ms, gain slew
-    /// 3 ms down / 120 ms up. `bus` 0…1 (`bow_jt_cap_bus`): 0 = per string,
-    /// 1 = the summed web against the same ceiling; between, rows remove
-    /// hard·(1−bus) of their overshoot and the sum hard·bus of the rest.
-    public func setJtCap(hard: Double, ratio: Double, bus: Double = 0) {
+    /// 3 ms down / 120 ms up.
+    public func setJtCap(hard: Double, ratio: Double) {
         guard let pk = pkernel else { return }
         bow_poly_jt_set_cap(pk, min(max(hard, 0.0), 1.0),
-                            min(max(ratio, 0.01), 4.0),
-                            min(max(bus, 0.0), 1.0))
+                            min(max(ratio, 0.01), 4.0))
     }
 
-    // staged under tiltLock (targets/coefs); *Cur/env/gain render-thread only
+    // staged under tiltLock (target); balCur is render-thread only
     private var balTarget = 0.0
     private var balCur = 0.0
-    private var compThresh = 0.0          // 0 = off
-    private var compInvRatioM1 = -0.75    // 1/ratio − 1 (ratio 4)
-    private var compAtkCoef = 1.0         // per-sample gain slew, attack
-    private var compRelCoef = 0.000069    // per-sample, release (150 ms @ 96k)
-    private var compEnv = 0.0
-    private var compGain = 1.0
-
-    /// Render thread: compress the taraf bus in place; one gain (mid) for both.
-    private func applyJtComp(taraf: UnsafeMutablePointer<Double>,
-                             tarafS: UnsafeMutablePointer<Double>?,
-                             nk: Int, thresh: Double, invRatioM1: Double,
-                             atkCoef: Double, relCoef: Double) {
-        let scale = trimBase              // calibrated-output units
-        var env = compEnv, gain = compGain
-        for i in 0..<nk {
-            let a = abs(taraf[i]) * scale
-            if a > env { env = a }                       // instant attack
-            else { env += relCoef * (a - env) }          // smooth release
-            let gT = env > thresh
-                ? pow(env / thresh, invRatioM1) : 1.0
-            if gT < gain { gain += atkCoef * (gT - gain) }
-            else { gain += relCoef * (gT - gain) }
-            taraf[i] *= gain
-            if let s = tarafS { s[i] *= gain }
-        }
-        compEnv = env
-        compGain = gain
-    }
 
     /// Render thread: the balance attenuator pair, linear across the chunk.
     private func applyBusBalance(voice: UnsafeMutablePointer<Double>,
@@ -997,24 +890,6 @@ public final class BowEngine {
             if let s = voiceS { s[i] *= gV }
             if let s = tarafS { s[i] *= gT }
         }
-    }
-
-    /// TWANG 0…1 (`bow_twang`): the played strings' grazing bridge fold —
-    /// 0 = plain bridge (bit-exact), 1 = the fitted sitar-jawari wrap. The
-    /// knee rides each string's own peak envelope in-kernel; slewed ~30 ms.
-    public func setTwang(_ amt01: Double) {
-        guard let pk = pkernel else { return }
-        bow_poly_set_twang(pk, min(max(amt01, 0.0), 1.0))
-    }
-
-    /// Offline fitting hook for the twang fold's shape (tests/tools only).
-    /// Non-positive keeps the kernel's fitted default.
-    func setTwangShape(kneeR: Double, depth: Double, relMs: Double,
-                       rollSmp: Double, bright: Double = 0,
-                       ring: Double = 0, gut: Double = 0) {
-        guard let pk = pkernel else { return }
-        bow_poly_set_twang_shape(pk, kneeR, depth, relMs, rollSmp,
-                                 bright, ring, gut)
     }
 
     /// SETTLE DAMP: direct, unsmoothed taraf t60 override for the build-time
@@ -1255,7 +1130,7 @@ public final class BowEngine {
     // MARK: - Live parameters
 
     /// A parameter edit staged by the control thread, applied at the next
-    /// chunk boundary on the render thread: the 66 kernel scalars, `bp` for
+    /// chunk boundary on the render thread: the 62 kernel scalars, `bp` for
     /// the Swift-side constants and output/radiation/room. Under `tiltLock`.
     private var pendingLive: (bp: BowParams, scalars: [Double],
                               tables: BowKernelTables?)?
@@ -1299,7 +1174,7 @@ public final class BowEngine {
     /// bank + jawari coefficients in place; a shape change is refused.
     public func setLiveParams(bp: BowParams, scalars: [Double],
                               tables: BowKernelTables? = nil) {
-        guard scalars.count == 66 else { return }
+        guard scalars.count == 62 else { return }
         // Arm the RAMP only when a ramped quantity moved: the ramp caps the
         // render chunk to 256 frames, and chunk size perturbs the chaotic
         // friction loop, so a no-op push must not arm it. Coefficient
@@ -1369,7 +1244,7 @@ public final class BowEngine {
                 gd.baseAddress, gd4.baseAddress, phys.baseAddress)
             if ok == 1 {
                 // the per-row contact law and the per-bridge evolve map
-                // follow the reloaded tables (`bow_jtc_*` / `bow_jt_apex`)
+                // follow the reloaded tables (`bow_jt_apex`)
                 jtRowChromatic = jt.rowChromatic
                 jtRowApex = jt.rowApex
                 jtHasChromatic = jt.hasChromatic
@@ -1742,25 +1617,15 @@ public final class BowEngine {
         updateFX(nk: nk, n48: n)
         let vIdx = FXPoint.voice.rawValue, tIdx = FXPoint.taraf.rawValue
         let busFX = fxUnits[vIdx].isEngaged || fxUnits[tIdx].isEngaged
-        // Meter / balance / comp: any armed, the split path runs even with
-        // the bus FX idle (bus + bus is bit-exact; balance and comp are
-        // byte-null at neutral). The per-row cap lives in the kernel.
+        // Meter / balance: either armed, the split path runs even with the
+        // bus FX idle (bus + bus is bit-exact; balance is byte-null at
+        // neutral). The per-row cap lives in the kernel.
         os_unfair_lock_lock(&tiltLock)
         let metering = meterArmed
         let balT = balTarget
-        let compTh = compThresh
-        let compIR = compInvRatioM1
-        let compAtk = compAtkCoef
-        let compRel = compRelCoef
         os_unfair_lock_unlock(&tiltLock)
         let balOn = balT != 0.0 || balCur != 0.0
-        let compOn = compTh > 0.0 && compIR < 0.0
-        if !compOn, compGain != 1.0 || compEnv != 0.0 {
-            // disarmed: forget the held reduction so a re-arm starts clean
-            compEnv = 0.0
-            compGain = 1.0
-        }
-        let splitBus = busFX || metering || balOn || compOn
+        let splitBus = busFX || metering || balOn
         if stereoOn {
             y96.withUnsafeMutableBufferPointer { yb in
                 y96S.withUnsafeMutableBufferPointer { sb in
@@ -1776,14 +1641,6 @@ public final class BowEngine {
                                     yb.baseAddress!, sb.baseAddress!, nk)
                                 fxUnits[tIdx].processMidSide(
                                     jb.baseAddress!, jsb.baseAddress!, nk)
-                                if compOn {
-                                    applyJtComp(taraf: jb.baseAddress!,
-                                                tarafS: jsb.baseAddress!,
-                                                nk: nk, thresh: compTh,
-                                                invRatioM1: compIR,
-                                                atkCoef: compAtk,
-                                                relCoef: compRel)
-                                }
                                 if balOn {
                                     applyBusBalance(
                                         voice: yb.baseAddress!,
@@ -1829,12 +1686,6 @@ public final class BowEngine {
                                           jb.baseAddress!, nil)
                         fxUnits[vIdx].processMono(yb.baseAddress!, nk)
                         fxUnits[tIdx].processMono(jb.baseAddress!, nk)
-                        if compOn {
-                            applyJtComp(taraf: jb.baseAddress!, tarafS: nil,
-                                        nk: nk, thresh: compTh,
-                                        invRatioM1: compIR,
-                                        atkCoef: compAtk, relCoef: compRel)
-                        }
                         if balOn {
                             applyBusBalance(voice: yb.baseAddress!,
                                             voiceS: nil,
