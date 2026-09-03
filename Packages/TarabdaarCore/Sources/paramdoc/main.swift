@@ -121,19 +121,55 @@ out += "shipped instrument RESTS at — the fitted `bowed_string.json` value\n"
 out += "wherever the artifact carries the key, with the registry's authored\n"
 out += "default in parentheses when the two differ. A value loaded outside\n"
 out += "its range widens the slider rather than being clamped.\n\n"
+func paramRow(_ p: ParamSpec, key: String? = nil, label: String? = nil,
+              help: String? = nil) -> String {
+    let shipped = shippedDefault(p)
+    var def = num(shipped.value)
+    if p.apply == .hybrid, let rest = p.restFraction {
+        def = "\(num(shipped.value)) built · rests at \(num(rest))× the built value"
+    }
+    // the artifact wins; the authored value is shown for reference
+    if let a = shipped.authored { def += " (authored \(num(a)))" }
+    return "| `\(key ?? p.key)` | \(label ?? p.label) | \(num(p.lo)) … \(num(p.hi)) | \(def) | \(p.scope.label) | \(p.timing.label) | \(help ?? p.help) |\n"
+}
+
+let tableHead = "| Key | Name | Range | Default | Scope | Timing | Description |\n"
+    + "|---|---|---|---|---|---|---|\n"
+
 for (group, params) in ParamRegistry.groups {
     out += "### \(group)\n\n"
-    out += "| Key | Name | Range | Default | Scope | Timing | Description |\n"
-    out += "|---|---|---|---|---|---|---|\n"
-    for p in params {
-        let shipped = shippedDefault(p)
-        var def = num(shipped.value)
-        if p.apply == .hybrid, let rest = p.restFraction {
-            def = "\(num(shipped.value)) built · rests at \(num(rest))× the built value"
-        }
-        // the artifact wins; the authored value is shown for reference
-        if let a = shipped.authored { def += " (authored \(num(a)))" }
-        out += "| `\(p.key)` | \(p.label) | \(num(p.lo)) … \(num(p.hi)) | \(def) | \(p.scope.label) | \(p.timing.label) | \(p.help) |\n"
+    // A group built from an INSERT DEFINITION instantiated at several
+    // points (the FX rack) is documented the way it is defined: the points
+    // once, then the insert's knobs once — not N near-identical copies.
+    let split = ParamRegistry.insertSections(of: params)
+    if !split.flat.isEmpty || split.inserts.isEmpty {
+        out += tableHead
+        for p in split.flat { out += paramRow(p) }
+        out += "\n"
+    }
+    guard let template = split.inserts.first else { continue }
+    out += "The same insert is instantiated at **\(split.inserts.count) points**;\n"
+    out += "every key is the point's prefix plus a knob from the table below.\n\n"
+    out += "| Insert | Key prefix | What it processes |\n|---|---|---|\n"
+    for i in split.inserts {
+        out += "| **\(i.point.name)** | `\(i.point.keyPrefix)` | \(i.point.what) |\n"
+    }
+    out += "\n#### The insert (\(template.params.count) knobs × "
+    out += "\(split.inserts.count) points)\n\n"
+    out += "Keys below are written `<prefix>knob` — e.g. `fx_voice_eq_b3` is\n"
+    out += "the 125 Hz band of the Voice insert. Every knob has the same\n"
+    out += "range, default, scope and timing at every point — only the\n"
+    out += "\"what it processes\" clause of the two toggles differs.\n\n"
+    out += tableHead
+    for p in template.params {
+        let knob = p.insert?.knob ?? p.key
+        // the toggles' help embeds the point's own description; in the
+        // shared table it points at the table of points instead
+        let help = p.help.replacingOccurrences(
+            of: template.point.what,
+            with: "what this insert point processes (the table above)")
+        out += paramRow(p, key: "<prefix>\(knob)",
+                        label: p.insert?.knobLabel, help: help)
     }
     out += "\n"
 }

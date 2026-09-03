@@ -17,10 +17,31 @@ EQ on **Voice → Taraf** re-voices *which harmonics recruit the taraf* without 
 
 ## Parameters
 
-Every knob is an ordinary registry parameter (all `.live`, groups "FX — …" — see [Parameters](parameters.md)), so the Parameters tab lists them, presets capture them, tilt bindings and composites drive them, and auditions reach them via `param.fx_<point>_<field>`. Per point:
+**ONE INSERT, FOUR POINTS.** The rack is described once and instantiated
+per point: `ParamRegistry.fxTemplate` holds the 16 knobs (keyed by their
+FIELD SUFFIX — exactly what `FXSettings.apply(field:value:)` parses),
+`ParamRegistry.fxPoints` holds the four points (name, `keyPrefix`, what
+each processes), and the registry derives `fx_<point>_<knob>` from the
+two. Per point:
 
 - `eq_on`, `eq_b1`…`eq_b10` — octave bands 31.5 Hz…16 kHz, ±12 dB (RBJ peaking, Q ≈ 1.41).
 - `rev_on`, `rev_type` (0 = Bigverb, 1 = Room), `rev_mix` (wet level — the dry path always passes at unity, a send), `rev_size`, `rev_cut`.
+
+Every derived knob is an ordinary registry parameter (all `.live`,
+`.global`, group "FX rack"), so nothing downstream knows the difference:
+`ParamRegistry.all` answers all 64 keys, presets capture them under the
+SAME key strings older `.tarabdaar` files carry, tilt bindings and
+composites drive them, and auditions reach them via
+`param.fx_<point>_<field>`. What the derivation buys is presentation —
+each spec carries its `insert` (point + knob), and
+`ParamRegistry.insertSections(of:)` splits any group into flat rows plus
+insert sections, so the **Parameters tab shows four collapsible inserts**
+(a header row per point with its on/off + reverb summary; 40 of the 64
+knobs are EQ bands that are inert while that point's EQ is off) instead
+of 64 flat rows, and **docs/parameters.md renders the insert once** plus
+a table of the four points. The FX tab builds its panels from the same
+`fxPoints` list. To add or rename a knob, edit the template — all four
+points follow.
 
 **Click-free by construction**: toggles glide rather than switch — EQ off sweeps every band to 0 dB (~50 ms) before bypassing; reverb off sweeps the wet level to zero. Band moves redesign coefficients state-kept (`Biquad.copyCoefficients`); the wet level ramps across each chunk.
 
@@ -44,9 +65,9 @@ Settings flow: FX tab → `AppController.setParamValue` → `applyParamToVoice` 
 
 ## Traps
 
-- **Key sync**: `ParamRegistry`'s `fx_<point>_<field>` keys must parse via `FXPoint.parse` + `FXSettings.apply(field:)` — `AudioEngine` routes by prefix, so an unknown suffix would be a slider that silently does nothing. `FXRackTests.testEveryRegistryFXKeyReachesTheSettings` guards the sync; keep registry defaults equal to `FXSettings()` (also guarded) or the startup resting-push would arm the rack.
+- **Key sync**: the template's `knob` suffixes and `fxPoints`' prefixes must parse via `FXPoint.parse` + `FXSettings.apply(field:)` — `AudioEngine` routes by the `fx_` prefix, so an unknown suffix would be a slider that silently does nothing, and a renamed knob would orphan the key in every saved preset. `FXRackTests` guards all of it: the key surface pinned literally, the point list against `FXPoint.allCases`, every key through `FXSettings`, and every default equal to `FXSettings()` (a drifted default would arm the rack at the startup resting push and break the byte-null contract).
 - **Stereo fold-down**: a stereo reverb wet is decorrelated — with any FX reverb on, L+R no longer equals the mono render (the one deliberate exception to the app's fold-down invariant). EQ alone preserves it.
 - **Mono degenerate output**: `StringVoiceSource`'s render aliases `outR = outL` when the host hands one buffer; the global FX writes L then R like the rest of the chain — don't "optimize" the global point to process only one channel.
 - **`renderFixture`** (the parity/perf entry) never ticks the FX units, so FX stays disengaged there regardless of settings — parity tests can't be perturbed by a stray FX param.
 
-Tests: `FXRackTests` (wiring, Bigverb sanity, bypass bit-exactness), `TarafRemovalParityTests` (the byte-null guarantee). The earlier master-FX bus of the coupled network is not present — see `docs/history/`.
+Tests: `FXRackTests` (the insert definition, key sync, resting defaults, the insert split), `ByteNullContractTests` ("fx rack at rest"), `TarafRemovalParityTests` (the byte-null guarantee). The earlier master-FX bus of the coupled network is not present — see `docs/history/`.

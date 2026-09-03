@@ -32,6 +32,11 @@ struct ParametersView: View {
     /// Every group starts open — the tab is a reference surface, and hunting
     /// for a knob behind a collapsed header costs more than the scroll does.
     @State private var expanded: Set<String> = Set(ParamRegistry.groups.map(\.name))
+    /// Insert sections (the FX rack's four points) start CLOSED: the 16
+    /// knobs of an untouched insert are 16 zeros, and 40 of the rack's 64
+    /// EQ bands are inert while the point's EQ is off. The header row
+    /// carries the state worth seeing at a glance.
+    @State private var openInserts: Set<String> = []
 
     /// Groups filtered by the search box (empty groups drop out).
     private var groups: [(name: String, params: [ParamSpec])] {
@@ -80,14 +85,7 @@ struct ParametersView: View {
                             if on { expanded.insert(group.name) }
                             else { expanded.remove(group.name) }
                         })) {
-                        VStack(spacing: 2) {
-                            ForEach(group.params) { spec in
-                                ParamRow(controller: controller,
-                                         stringStore: stringStore,
-                                         spec: spec)
-                            }
-                        }
-                        .padding(.top, 2)
+                        groupBody(group.params)
                     } label: {
                         Text(group.name).font(.padSubheadline).bold()
                     }
@@ -98,7 +96,85 @@ struct ParametersView: View {
             .frame(maxWidth: .infinity)
         }
     }
+
+    /// A group's rows. A group built from an INSERT DEFINITION
+    /// instantiated at several points (the FX rack: one insert, four
+    /// points) renders as one collapsible section per point instead of
+    /// N × 16 flat rows — the registry marks the derived specs, so this
+    /// stays generic (`ParamRegistry.insertSections`).
+    @ViewBuilder
+    private func groupBody(_ params: [ParamSpec]) -> some View {
+        let split = ParamRegistry.insertSections(of: params)
+        VStack(spacing: 2) {
+            ForEach(split.flat) { spec in
+                ParamRow(controller: controller, stringStore: stringStore,
+                         spec: spec)
+            }
+            ForEach(split.inserts, id: \.point.id) { section in
+                insertSection(section.point, section.params)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    /// One insert point: a header row (name, what it processes, and what
+    /// it is currently doing) that opens onto the point's own knobs.
+    private func insertSection(_ point: FXInsertPoint,
+                               _ params: [ParamSpec]) -> some View {
+        DisclosureGroup(isExpanded: Binding(
+            get: { searching || openInserts.contains(point.keyPrefix) },
+            set: { on in
+                if on { openInserts.insert(point.keyPrefix) }
+                else { openInserts.remove(point.keyPrefix) }
+            })) {
+            VStack(spacing: 2) {
+                ForEach(params) { spec in
+                    // inside the point's own section the row drops the
+                    // point qualifier the menus need
+                    ParamRow(controller: controller, stringStore: stringStore,
+                             spec: spec, label: spec.insert?.knobLabel)
+                }
+            }
+            .padding(.top, 2)
+        } label: {
+            HStack(spacing: 8) {
+                Text(point.name).font(.padCaption).bold()
+                Text(insertState(point))
+                    .font(.padCaption2.monospacedDigit())
+                    .foregroundStyle(insertIsActive(point)
+                                     ? Color.accentColor : .secondary)
+                Text(point.blurb)
+                    .font(.padCaption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.leading, 4)
+    }
+
+    private func insertIsActive(_ point: FXInsertPoint) -> Bool {
+        controller.paramValue(point.key("eq_on")) >= 0.5
+            || controller.paramValue(point.key("rev_on")) >= 0.5
+    }
+
+    /// The header's one-line state: the two toggles, plus the reverb it
+    /// would run (the summary that makes the collapsed rows safe to hide).
+    private func insertState(_ point: FXInsertPoint) -> String {
+        var parts: [String] = []
+        if controller.paramValue(point.key("eq_on")) >= 0.5 {
+            parts.append("EQ on")
+        }
+        if controller.paramValue(point.key("rev_on")) >= 0.5 {
+            let room = controller.paramValue(point.key("rev_type")) >= 0.5
+            let mix = controller.paramValue(point.key("rev_mix"))
+            parts.append(String(format: "%@ %.0f%% wet",
+                                room ? "Room" : "Bigverb", 100 * mix))
+        }
+        return parts.isEmpty ? "off" : parts.joined(separator: " · ")
+    }
 }
+
 
 // MARK: - One parameter row
 
@@ -112,6 +188,9 @@ private struct ParamRow: View {
     /// store) redraw when the store changes.
     @ObservedObject var stringStore: StringParamStore
     let spec: ParamSpec
+    /// Row label override — an insert section names its own point, so the
+    /// rows inside it show the bare knob label (see `ParamInsert`).
+    var label: String? = nil
 
     /// Tooltips are unreliable, so a single click on the label expands the
     /// help text inline under the row instead.
@@ -176,7 +255,7 @@ private struct ParamRow: View {
 
     private var row: some View {
         HStack(spacing: 8) {
-            Text(spec.label)
+            Text(label ?? spec.label)
                 .font(.padCaption)
                 .foregroundStyle(showHelp ? Color.accentColor : Color.primary)
                 .frame(width: Typography.scaledWidth(150), alignment: .leading)

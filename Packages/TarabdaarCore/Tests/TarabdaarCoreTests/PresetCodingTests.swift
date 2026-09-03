@@ -43,6 +43,33 @@ final class PresetCodingTests: XCTestCase {
                         .controlPoints.last?.y, 1.1)
     }
 
+    /// FX KEYS ARE PRESET KEYS. The rack is now ONE insert definition
+    /// instantiated at four points, but the keys it derives
+    /// (`fx_<point>_<knob>`) are the same strings older `.tarabdaar` files
+    /// already carry — a preset written before the refactor must load
+    /// byte-for-byte, and every key must still resolve in the registry
+    /// (an unknown key would be dropped at apply time and the insert
+    /// would silently rest at its default).
+    func testFXRackValuesRoundTripAndStillResolve() throws {
+        let fx: [String: Double] = [
+            "fx_voice_eq_on": 1, "fx_voice_eq_b3": -4.5,
+            "fx_drive_rev_on": 1, "fx_drive_rev_type": 1,
+            "fx_taraf_rev_mix": 0.42, "fx_global_rev_cut": 6000,
+        ]
+        var p = TarabdaarPreset()
+        p.name = "FX rig"
+        p.paramValues = fx
+        let back = try TarabdaarPreset.decode(p.encoded())
+        XCTAssertEqual(back.paramValues, fx)
+        for (key, value) in fx {
+            let spec = try XCTUnwrap(ParamRegistry.spec(key),
+                                     "\(key) no longer exists in the registry")
+            XCTAssertNotNil(spec.insert, key)
+            XCTAssertTrue(value >= spec.lo && value <= spec.hi, key)
+        }
+        XCTAssertEqual(back.sections(), ["6 parameters"])
+    }
+
     /// A partial preset — say tilt bindings only — must load without
     /// disturbing anything else. `applyPreset` skips nil sections.
     func testPartialPresetCarriesOnlyWhatItHas() throws {

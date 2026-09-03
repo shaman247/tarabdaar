@@ -100,6 +100,65 @@ public enum ParamTiming: String {
     }
 }
 
+/// One INSERT POINT of a repeated parameter block — the FX rack's four
+/// points. `keyPrefix` matches `SarangiKit.FXPoint.keyPrefix`; a derived
+/// key is the prefix plus a template knob (`fx_voice_eq_b3`).
+public struct FXInsertPoint: Identifiable, Equatable, Sendable {
+    /// `SarangiKit.FXPoint` raw value — the signal order.
+    public let index: Int
+    /// Display name ("Voice → Taraf").
+    public let name: String
+    public let keyPrefix: String
+    /// What this point processes (the tail of the toggles' help text).
+    public let what: String
+    /// One-line caption for the surfaces that show the point (the FX tab
+    /// panel, the Parameters tab's insert header, the docs' point table).
+    public let blurb: String
+
+    public var id: Int { index }
+    public init(index: Int, name: String, keyPrefix: String,
+                what: String, blurb: String) {
+        self.index = index; self.name = name
+        self.keyPrefix = keyPrefix; self.what = what; self.blurb = blurb
+    }
+    /// The registry key of one template knob at this point.
+    public func key(_ knob: String) -> String { keyPrefix + knob }
+}
+
+/// ONE KNOB of an insert definition — described once, instantiated at
+/// every point. `knob` is the field suffix (what
+/// `SarangiKit.FXSettings.apply(field:value:)` parses).
+public struct FXKnob: Sendable {
+    public let knob: String, label: String
+    public let lo: Double, hi: Double, def: Double
+    public let step: Double?
+    public let help: String
+
+    public init(_ knob: String, _ label: String,
+                _ lo: Double, _ hi: Double, _ def: Double,
+                step: Double? = nil, help: String) {
+        self.knob = knob; self.label = label
+        self.lo = lo; self.hi = hi; self.def = def
+        self.step = step; self.help = help
+    }
+}
+
+/// Where a derived spec came from: which insert point, which knob.
+public struct ParamInsert: Equatable, Sendable {
+    public let point: FXInsertPoint
+    public let knob: String
+    /// The knob's own label, WITHOUT the point ("EQ 125 Hz (dB)"). The
+    /// spec's `label` qualifies it with the point, because it is read out
+    /// of context in the tilt/composite menus, where four identical "EQ
+    /// 125 Hz (dB)" rows would be unpickable; a surface that already
+    /// groups by point (the Parameters tab's insert sections, the docs'
+    /// insert table) shows this one instead.
+    public let knobLabel: String
+    public init(point: FXInsertPoint, knob: String, knobLabel: String) {
+        self.point = point; self.knob = knob; self.knobLabel = knobLabel
+    }
+}
+
 public struct ParamSpec: Identifiable {
     public let key: String
     public let label: String
@@ -117,6 +176,12 @@ public struct ParamSpec: Identifiable {
     public let restFraction: Double?
     /// Global vs per-note — see `ParamScope`.
     public let scope: ParamScope
+    /// Set on a spec DERIVED from an insert definition instantiated at
+    /// several points (the FX rack: one insert, four points) — which
+    /// point, and which template knob. nil for an ordinary parameter.
+    /// The UI and the docs group by it; the key itself is unchanged, so
+    /// presets and bindings never see the difference.
+    public let insert: ParamInsert?
     /// Explicit timing override for keys whose `.live` ROUTING hides a
     /// slow re-mount (the tanpura scale-shape family); nil = derive from
     /// the apply strategy + `inPlaceKeys` (see `timing`).
@@ -144,12 +209,13 @@ public struct ParamSpec: Identifiable {
                 step: Double? = nil, apply: ParamApply = .rebuild,
                 restFraction: Double? = nil, timing: ParamTiming? = nil,
                 scope: ParamScope = .global,
+                insert: ParamInsert? = nil,
                 help: String = "") {
         self.key = key; self.label = label; self.group = group
         self.lo = lo; self.hi = hi; self.def = def; self.step = step
         self.apply = apply; self.restFraction = restFraction
         self.timingOverride = timing
-        self.scope = scope; self.help = help
+        self.scope = scope; self.insert = insert; self.help = help
     }
 
     /// True when the value applies instantly (no engine rebuild) for at
@@ -662,54 +728,114 @@ public enum ParamRegistry {
                       0.0, 8.0, 4.0, apply: .live,
                       help: "How strongly the sitar's output drives the sarangi taraf (the modal-jawari web — the Strings tab's rows ARE the sitar's sympathetic strings). The rendered sitar signal feeds the web's bridge drive alongside the String voice's own (kernel inject ring, shaped by the voice→taraf FX insert like any drive). 0 = no halo (byte-exact String-voice parity). The web only rings while the String voice is armed — it always is."),
         ]),
-        fxGroup("FX — voice → taraf", "fx_drive_",
-                "the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched"),
-        fxGroup("FX — voice", "fx_voice_",
-                "the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain"),
-        fxGroup("FX — taraf", "fx_taraf_",
-                "the sympathetic web's own radiated output (drones included), before the shared radiation chain"),
-        fxGroup("FX — global", "fx_global_",
-                "the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level)"),
+        fxRackGroup(),
     ]
 
-    /// One FX insert point's parameter block: a 10-band graphic EQ and a
-    /// selectable additive reverb, all `.live` (they never touch the
-    /// physics tables) and all off by default — the untouched rack is
-    /// byte-null. `prefix` matches `SarangiKit.FXPoint.keyPrefix`; the
-    /// suffixes are what `FXSettings.apply(field:value:)` parses.
-    private static func fxGroup(_ name: String, _ prefix: String,
-                                _ what: String)
-        -> (name: String, params: [ParamSpec]) {
-        var p: [ParamSpec] = [
-            ParamSpec("\(prefix)eq_on", "EQ on", group: name,
-                      0, 1, 0, step: 1, apply: .live,
-                      help: "Enable the 10-band graphic EQ at this point — \(what). Toggling glides the bands to/from flat (click-free)."),
+    // MARK: - The FX rack: ONE insert, four points
+
+    /// THE FX RACK — one insert DEFINITION, instantiated at four points.
+    ///
+    /// The rack used to spell out 4 × 16 near-identical specs (more than a
+    /// third of the whole registry, 40 of them EQ bands that are inert
+    /// while the point's EQ is off). The insert is now described once
+    /// (`fxTemplate`) and instantiated for each point (`fxPoints`):
+    /// `ParamRegistry.all` still answers every `fx_<point>_<knob>` key, so
+    /// presets, tilt targets, composites, the FX tab and `param.` audition
+    /// routes are untouched — but each derived spec carries its `insert`,
+    /// so the Parameters tab shows FOUR collapsible inserts instead of 64
+    /// flat rows and docs/parameters.md renders the template once.
+    ///
+    /// `keyPrefix` must equal `SarangiKit.FXPoint.keyPrefix` and every
+    /// `knob` must be a field `FXSettings.apply(field:value:)` parses —
+    /// `FXRackTests` pins both, plus def == `FXSettings()` (a drifted
+    /// default would arm the rack at the startup resting push).
+    public static let fxPoints: [FXInsertPoint] = [
+        FXInsertPoint(
+            index: 0, name: "Voice → Taraf", keyPrefix: "fx_drive_",
+            what: "the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched",
+            blurb: "What the sympathetic strings hear — shapes only the taraf's excitation, not the radiated voice."),
+        FXInsertPoint(
+            index: 1, name: "Voice", keyPrefix: "fx_voice_",
+            what: "the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain",
+            blurb: "The main voice bus (bridge + bow noise) after the taraf tap."),
+        FXInsertPoint(
+            index: 2, name: "Taraf", keyPrefix: "fx_taraf_",
+            what: "the sympathetic web's own radiated output (drones included), before the shared radiation chain",
+            blurb: "The sympathetic web's own radiated output, drones included."),
+        FXInsertPoint(
+            index: 3, name: "Global", keyPrefix: "fx_global_",
+            what: "the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level)",
+            blurb: "The final stereo output, after the whole fitted chain."),
+    ]
+
+    /// The group every derived FX spec belongs to.
+    public static let fxGroupName = "FX rack"
+
+    /// THE INSERT, described once: a 10-band graphic EQ and a selectable
+    /// additive reverb, all `.live` (they never touch the physics tables)
+    /// and all off by default — the untouched rack is byte-null. `knob` is
+    /// the field suffix; `{what}` in the help expands to the point's own
+    /// description.
+    public static let fxTemplate: [FXKnob] = {
+        var t: [FXKnob] = [
+            FXKnob("eq_on", "EQ on", 0, 1, 0, step: 1,
+                   help: "Enable the 10-band graphic EQ at this point — {what}. Toggling glides the bands to/from flat (click-free)."),
         ]
         let bands = ["31.5 Hz", "63 Hz", "125 Hz", "250 Hz", "500 Hz",
                      "1 kHz", "2 kHz", "4 kHz", "8 kHz", "16 kHz"]
         for (i, b) in bands.enumerated() {
-            p.append(ParamSpec("\(prefix)eq_b\(i + 1)", "EQ \(b) (dB)",
-                               group: name, -12, 12, 0, apply: .live,
-                               help: "Octave peaking band at \(b), ±12 dB. Inert while the point's EQ is off."))
+            t.append(FXKnob("eq_b\(i + 1)", "EQ \(b) (dB)", -12, 12, 0,
+                            help: "Octave peaking band at \(b), ±12 dB. Inert while the point's EQ is off."))
         }
-        p += [
-            ParamSpec("\(prefix)rev_on", "reverb on", group: name,
-                      0, 1, 0, step: 1, apply: .live,
-                      help: "Enable the reverb at this point — \(what). Toggling glides the wet level (click-free)."),
-            ParamSpec("\(prefix)rev_type", "reverb type", group: name,
-                      0, 1, 0, step: 1, apply: .live,
-                      help: "0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level)."),
-            ParamSpec("\(prefix)rev_mix", "reverb mix", group: name,
-                      0, 1, 0.3, apply: .live,
-                      help: "Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off."),
-            ParamSpec("\(prefix)rev_size", "reverb size", group: name,
-                      0, 1, 0.93, apply: .live,
-                      help: "Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s."),
-            ParamSpec("\(prefix)rev_cut", "reverb cutoff (Hz)", group: name,
-                      500, 20000, 10000, apply: .live,
-                      help: "Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit."),
+        t += [
+            FXKnob("rev_on", "reverb on", 0, 1, 0, step: 1,
+                   help: "Enable the reverb at this point — {what}. Toggling glides the wet level (click-free)."),
+            FXKnob("rev_type", "reverb type", 0, 1, 0, step: 1,
+                   help: "0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level)."),
+            FXKnob("rev_mix", "reverb mix", 0, 1, 0.3,
+                   help: "Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off."),
+            FXKnob("rev_size", "reverb size", 0, 1, 0.93,
+                   help: "Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s."),
+            FXKnob("rev_cut", "reverb cutoff (Hz)", 500, 20000, 10000,
+                   help: "Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit."),
         ]
-        return (name, p)
+        return t
+    }()
+
+    /// The rack's specs: the template instantiated per point.
+    private static func fxRackGroup() -> (name: String, params: [ParamSpec]) {
+        (fxGroupName, fxPoints.flatMap { point in
+            fxTemplate.map { k in
+                ParamSpec(point.key(k.knob), "\(point.name): \(k.label)",
+                          group: fxGroupName,
+                          k.lo, k.hi, k.def, step: k.step, apply: .live,
+                          insert: ParamInsert(point: point, knob: k.knob,
+                                              knobLabel: k.label),
+                          help: k.help.replacingOccurrences(
+                              of: "{what}", with: point.what))
+            }
+        })
+    }
+
+    /// The rack as INSERT SECTIONS: each point with its own 16 knobs, in
+    /// registry order. The Parameters tab and paramdoc both render a group
+    /// this way, so neither needs to know the FX keys.
+    public static func insertSections(of params: [ParamSpec])
+        -> (flat: [ParamSpec], inserts: [(point: FXInsertPoint,
+                                          params: [ParamSpec])]) {
+        var flat: [ParamSpec] = []
+        var order: [Int] = []
+        var byPoint: [Int: (FXInsertPoint, [ParamSpec])] = [:]
+        for p in params {
+            guard let ins = p.insert else { flat.append(p); continue }
+            if byPoint[ins.point.index] == nil {
+                byPoint[ins.point.index] = (ins.point, [])
+                order.append(ins.point.index)
+            }
+            byPoint[ins.point.index]?.1.append(p)
+        }
+        return (flat, order.compactMap { byPoint[$0] }
+                            .map { (point: $0.0, params: $0.1) })
     }
 
     // MARK: - Lookup

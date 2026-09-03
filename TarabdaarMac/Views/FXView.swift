@@ -15,25 +15,15 @@ struct FXView: View {
         self.controller = controller
     }
 
-    /// The four insert points, in signal order. Prefixes must match
-    /// `SarangiKit.FXPoint.keyPrefix` (guarded by `FXRackTests`).
-    private static let points: [(prefix: String, title: String, sub: String)] = [
-        ("fx_drive_", "Voice → Taraf",
-         "What the sympathetic strings hear — shapes only the taraf's excitation, not the radiated voice."),
-        ("fx_voice_", "Voice",
-         "The main voice bus (bridge + bow noise) after the taraf tap."),
-        ("fx_taraf_", "Taraf",
-         "The sympathetic web's own radiated output, drones included."),
-        ("fx_global_", "Global",
-         "The final stereo output, after the whole fitted chain."),
-    ]
-
+    /// The four insert points come from the registry's ONE insert
+    /// definition (`ParamRegistry.fxPoints`) — the same points the
+    /// Parameters tab and the docs render, so their prefixes cannot drift
+    /// apart (`FXRackTests` pins them against `SarangiKit.FXPoint`).
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                ForEach(Self.points, id: \.prefix) { p in
-                    FXPointPanel(controller: controller,
-                                 prefix: p.prefix, title: p.title, sub: p.sub)
+                ForEach(ParamRegistry.fxPoints) { point in
+                    FXPointPanel(controller: controller, point: point)
                 }
             }
             .padding(16)
@@ -44,9 +34,11 @@ struct FXView: View {
 /// One insert point: an EQ strip and a reverb block, side by side.
 private struct FXPointPanel: View {
     @ObservedObject var controller: AppController
-    let prefix: String
-    let title: String
-    let sub: String
+    let point: FXInsertPoint
+
+    private var prefix: String { point.keyPrefix }
+    private var title: String { point.name }
+    private var sub: String { point.blurb }
 
     private func bind(_ suffix: String) -> Binding<Double> {
         let key = prefix + suffix
@@ -65,8 +57,11 @@ private struct FXPointPanel: View {
             || controller.paramValue(prefix + "rev_on") >= 0.5
     }
 
-    private static let bandLabels =
-        ["31", "63", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"]
+    /// One fader per EQ band of the insert definition.
+    private static let bands: [(knob: String, label: String)] =
+        zip(ParamRegistry.fxTemplate.filter { $0.knob.hasPrefix("eq_b") },
+            ["31", "63", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"])
+            .map { (knob: $0.knob, label: $1) }
 
     var body: some View {
         GroupBox {
@@ -100,9 +95,8 @@ private struct FXPointPanel: View {
                 .toggleStyle(.switch)
                 .controlSize(.small)
             HStack(alignment: .bottom, spacing: 6) {
-                ForEach(1...10, id: \.self) { b in
-                    EQFader(label: Self.bandLabels[b - 1],
-                            value: bind("eq_b\(b)"))
+                ForEach(Self.bands, id: \.knob) { b in
+                    EQFader(label: b.label, value: bind(b.knob))
                 }
             }
             .opacity(controller.paramValue(prefix + "eq_on") >= 0.5 ? 1 : 0.45)

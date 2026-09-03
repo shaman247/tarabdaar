@@ -83,241 +83,34 @@ final class AppController: ObservableObject {
     @Published var tiltMapping: DimensionMapping = DimensionMapping.load() {
         didSet {
             tiltMapping.save()
-            rebuildTiltEvalSnapshot()
+            axes.setMapping(tiltMapping)
         }
     }
 
-    /// Per axis: the bound targets (composite or parameter) + curves,
-    /// snapshotted under `compositeLock` for the link/CoreMIDI threads.
-    private var tiltEvalByAxis: [[(target: MapTarget,
-                                   binding: DimensionBinding)]] =
-        Array(repeating: [], count: ControlAxes.dims.count)
+    /// THE CONTROL-AXIS EVALUATOR: the per-axis binding snapshot, the
+    /// strike→acceleration blend (with its 30 Hz weight timer) and the
+    /// `.fingerAccel` touch registry all live in `ControlAxisEvaluator`.
+    /// This class only feeds it raw axes and applies what it emits.
+    let axes = ControlAxisEvaluator()
 
-    /// Last value per iPad wire axis (CoreMIDI thread only) — duplicate-drop
-    /// for the uncalibrated passthrough.
-    private var lastRawArmTilt: [Double?] = [nil, nil, nil]
-
-    /// THE STRIKE→ACCELERATION BLEND. `.strike` and `.acceleration` share
-    /// ONE measurement (the PERF_STATE strike byte) and are evaluated
-    /// JOINTLY in `evaluateStrikeBlend`: per target (1−w)·strike + w·accel,
-    /// w ramping 0→1 over the per-note window (`StrikeBlendWindow`). NEVER
-    /// fed through `applyTiltAxis` (double-apply). State under `strikeLock`.
-    static let strikeAxisIndex =
-        ControlAxes.dims.firstIndex(of: .strike) ?? 5
-    static let accelAxisIndex =
-        ControlAxes.dims.firstIndex(of: .acceleration) ?? 6
     /// The live `ctl_fret_warp` value, written only by the `applyParamToVoice`
     /// interception (main); read by the Mac pad, relayed over JOYCON_STATE.
     @Published private(set) var fretFieldWarp: Double = 0
 
-    private let strikeLock = NSLock()
-    private var strikeWindow = StrikeBlendWindow(windowS: 2.0)
-    private var strikeMeasure = 0.0        // last wire value 0…1
-    private var lastBlendOut: [MapTarget: Double] = [:]
-    /// 30 Hz re-evaluation while strike/accel bindings exist: the WEIGHT
-    /// moves through the note window even when the measurement is still.
-    private var strikeTimer: DispatchSourceTimer?
-
-    /// THE FINGER-ACCEL DIMENSION: the newest sounding finger's pitch
-    /// acceleration (−1…+1, `FingerAccelTracker`), fed from the ingest touch
-    /// taps (wire + local lanes) plus a 30 Hz decay tick while bound (frames
-    /// are change-gated). A plain bipolar axis via `applyTiltAxis`.
-    static let fingerAxisIndex =
-        ControlAxes.dims.firstIndex(of: .fingerAccel) ?? 7
-    /// THE JOY-CON WRIST + ACCELERATION AXES. Wrist ↕/↔/⟲ from
-    /// `JoyConInput.wristCal`, bipolar; Joy-Con Accel is UNIPOLAR 0…1,
-    /// mapped onto the axis as `2·level − 1` so the curve reads rest at x 0.
-    static let wristAxisIndices = (
-        ControlAxes.dims.firstIndex(of: .tilt4) ?? 8,
-        ControlAxes.dims.firstIndex(of: .wrist2) ?? 9,
-        ControlAxes.dims.firstIndex(of: .wrist3) ?? 10)
-    static let jcAccelAxisIndex =
-        ControlAxes.dims.firstIndex(of: .jcAccel) ?? 11
-    private let fingerLock = NSLock()
-    private var fingerTracker = FingerAccelTracker()
-    private var fingerOrder: [Int] = []          // sounding keys, old→new
-    private var fingerPitch: [Int: Double] = [:]
-    private var fingerLast = 0.0
-    private var fingerActive = false
-    private var fingerTimer: DispatchSourceTimer?
+    /// The Mac → iPad JOYCON_STATE mirror: the axes the pad only draws,
+    /// plus the four fields it acts on.
+    let joyConDisplay = JoyConDisplayRelay()
 
     /// Every touch currently DOWN with its latest finger pitch, oldest first
     /// — the finger's truth ABOVE the glide queue (parked fingers included).
     func currentTouches() -> [(id: Int, pitchSemis: Double)] {
-        fingerLock.lock()
-        defer { fingerLock.unlock() }
-        return fingerOrder.compactMap { k in fingerPitch[k].map { (k, $0) } }
-    }
-
-    private func fingerGate(_ source: Int, _ id: UInt16, _ on: Bool) {
-        let key = source << 16 | Int(id)
-        fingerLock.lock()
-        fingerOrder.removeAll { $0 == key }
-        if on { fingerOrder.append(key) } else { fingerPitch[key] = nil }
-        fingerLock.unlock()
-        fingerEvaluate()
-    }
-
-    private func fingerPitchUpdate(_ source: Int, _ id: UInt16,
-                                   _ pitch: Double) {
-        let key = source << 16 | Int(id)
-        fingerLock.lock()
-        fingerPitch[key] = pitch
-        let isNewest = fingerOrder.last == key
-        fingerLock.unlock()
-        if isNewest { fingerEvaluate() }
-    }
-
-    /// Sample the tracker and drive the axis on change. Re-feeding the
-    /// same pitch decays it, so the tick alone relaxes a rest finger to 0.
-    private func fingerEvaluate() {
-        fingerLock.lock()
-        guard fingerActive else { fingerLock.unlock(); return }
-        let newest = fingerOrder.last
-        let v = fingerTracker.sample(
-            id: newest, pitchSemis: newest.flatMap { fingerPitch[$0] },
-            at: ProcessInfo.processInfo.systemUptime)
-        let changed = abs(v - fingerLast) > 1e-3
-        if changed { fingerLast = v }
-        fingerLock.unlock()
-        if changed { applyTiltAxis(Self.fingerAxisIndex, v) }
-    }
-
-    private func updateFingerTimer(active: Bool) {
-        if active, fingerTimer == nil {
-            let t = DispatchSource.makeTimerSource(
-                queue: .global(qos: .userInitiated))
-            t.schedule(deadline: .now(), repeating: 1.0 / 30.0,
-                       leeway: .milliseconds(5))
-            t.setEventHandler { [weak self] in self?.fingerEvaluate() }
-            t.resume()
-            fingerTimer = t
-        } else if !active, let t = fingerTimer {
-            t.cancel()
-            fingerTimer = nil
-        }
-    }
-
-    private func rebuildTiltEvalSnapshot() {
-        var byAxis: [[(MapTarget, DimensionBinding)]] =
-            Array(repeating: [], count: ControlAxes.dims.count)
-        for target in tiltMapping.boundTargets {
-            for (axis, dim) in ControlAxes.dims.enumerated() {
-                if let b = tiltMapping.mapping(for: target).binding(for: dim) {
-                    byAxis[axis].append((target, b))
-                }
-            }
-        }
-        compositeLock.lock()
-        tiltEvalByAxis = byAxis
-        compositeLock.unlock()
-        // Strike/accel blend: clear the change gate (an edit must re-apply)
-        // and run the weight timer only while the pair has bindings.
-        let strikeActive = !(byAxis[Self.strikeAxisIndex].isEmpty
-                             && byAxis[Self.accelAxisIndex].isEmpty)
-        strikeLock.lock()
-        lastBlendOut.removeAll()
-        strikeLock.unlock()
-        updateStrikeTimer(active: strikeActive)
-        // Finger-accel: track/tick only while bound; a fresh binding starts
-        // from a clean tracker.
-        let fingerBound = !byAxis[Self.fingerAxisIndex].isEmpty
-        fingerLock.lock()
-        if fingerBound != fingerActive {
-            fingerTracker.reset()
-            fingerLast = 0
-        }
-        fingerActive = fingerBound
-        fingerLock.unlock()
-        updateFingerTimer(active: fingerBound)
-    }
-
-    private func updateStrikeTimer(active: Bool) {
-        if active, strikeTimer == nil {
-            let t = DispatchSource.makeTimerSource(
-                queue: .global(qos: .userInitiated))
-            t.schedule(deadline: .now(), repeating: 1.0 / 30.0,
-                       leeway: .milliseconds(5))
-            t.setEventHandler { [weak self] in self?.evaluateStrikeBlend() }
-            t.resume()
-            strikeTimer = t
-        } else if !active, let t = strikeTimer {
-            t.cancel()
-            strikeTimer = nil
-        }
-    }
-
-    /// Evaluate the pair: for every target bound on EITHER dimension,
-    /// (1−w)·strikeOut + w·accelOut, an unbound side reading the target's
-    /// DEFAULT. Change-gated per target. Link thread + blend timer.
-    private func evaluateStrikeBlend() {
-        compositeLock.lock()
-        let sBind = tiltEvalByAxis[Self.strikeAxisIndex]
-        let aBind = tiltEvalByAxis[Self.accelAxisIndex]
-        compositeLock.unlock()
-        guard !sBind.isEmpty || !aBind.isEmpty else { return }
-        var sBy: [MapTarget: DimensionBinding] = [:]
-        for (t, b) in sBind { sBy[t] = b }
-        var aBy: [MapTarget: DimensionBinding] = [:]
-        for (t, b) in aBind { aBy[t] = b }
-        func defaultOut(_ t: MapTarget) -> Double {
-            switch t.kind {
-            case .composite: return 0.0    // composite rest convention
-            case .param(let key): return paramDefault(key)
-            }
-        }
-        strikeLock.lock()
-        let m = strikeMeasure
-        let w = strikeWindow.weight(at: ProcessInfo.processInfo.systemUptime)
-        var changed: [(MapTarget, Double)] = []
-        for target in Set(sBy.keys).union(aBy.keys) {
-            let s = sBy[target].map { $0.evaluate(m) } ?? defaultOut(target)
-            let a = aBy[target].map { $0.evaluate(m) } ?? defaultOut(target)
-            let v = (1.0 - w) * s + w * a
-            if let prev = lastBlendOut[target], abs(prev - v) < 1e-9 {
-                continue
-            }
-            lastBlendOut[target] = v
-            changed.append((target, v))
-        }
-        strikeLock.unlock()
-        guard !changed.isEmpty else { return }
-        var rebuild: [String: Double] = [:]
-        for (target, v) in changed {
-            switch target.kind {
-            case .composite(let slot):
-                applyComposite(slot: slot, value: v)
-            case .param(let key):
-                if let pending = applyParamToVoice(key, v) {
-                    rebuild[key] = pending
-                }
-            }
-        }
-        queueRebuildValues(rebuild)
+        axes.currentTouches()
     }
 
     /// Relay the axis values to the iPad as the latest-wins JOYCON_STATE
     /// frame (link-paced); `force` skips pacing for the STATE fields.
     private func sendJoyConDisplay(force: Bool = false) {
-        let s = lastStickAxes
-        strikeLock.lock()
-        let win = strikeWindow.windowS
-        strikeLock.unlock()
-        link.setJoyConState(JoyConTiltDisplay(
-            stickX: s.0, stickY: s.1,
-            wrist1: lastWristTilt?.0 ?? 0,
-            wrist2: lastWristTilt?.1 ?? 0,
-            stickLive: abs(s.0) > 0.04 || abs(s.1) > 0.04,
-            bodyLive: lastWristTilt != nil,
-            connected: joyCon.connectedName != nil,
-            wrist3: lastWristTilt?.2 ?? 0,
-            arm1: lastArmAxes?.0 ?? 0,
-            arm2: lastArmAxes?.1 ?? 0,
-            arm3: lastArmAxes?.2 ?? 0,
-            armLive: lastArmAxes != nil,
-            strikeWindowS: win,
-            fieldWarp: fretFieldWarp,
-            octaveShift: pitchPad.octaveShift), force: force)
+        joyConDisplay.push(force: force)
     }
 
     /// Dpad ←/→: step the playing range one octave (clamped). The shift
@@ -336,26 +129,23 @@ final class AppController: ObservableObject {
     /// drives axes 0–2; otherwise the raw axes pass through, duplicate-dropped.
     private func handleRawTilt(_ axis: Int, _ value: Double) {
         if !joyCon.feedArmTilt(axis, value) {
-            if axis >= 0, axis < lastRawArmTilt.count,
-               lastRawArmTilt[axis] != value {
-                lastRawArmTilt[axis] = value
-                applyTiltAxis(axis, value)
-            }
+            axes.applyRawArmAxis(axis, value)
         }
     }
 
-    /// Apply one control-axis value (−1…+1, rest 0 ↔ curve x 0…1): drive each
-    /// bound target in native units — a composite via `applyComposite`, a
-    /// parameter via the unified apply. Off-main; downstream is thread-safe.
+    /// Apply one control-axis value (−1…+1, rest 0 ↔ curve x 0…1) — the
+    /// entry point every Joy-Con / tilt funnel calls. Off-main; downstream
+    /// is thread-safe.
     private func applyTiltAxis(_ axis: Int, _ value: Double) {
-        guard axis >= 0, axis < ControlAxes.dims.count else { return }
-        compositeLock.lock()
-        let bindings = tiltEvalByAxis[axis]
-        compositeLock.unlock()
-        let curveX = (value + 1) / 2                     // −1…+1 → curve 0…1
+        axes.applyAxis(axis, value)
+    }
+
+    /// Drive one batch of evaluated applications in native units: a
+    /// composite via `applyComposite`, a parameter via the unified apply,
+    /// rebuild-path values through the debounced funnel.
+    private func applyControlBatch(_ apps: [ControlAxisEvaluator.Application]) {
         var rebuild: [String: Double] = [:]
-        for (target, binding) in bindings {
-            let out = binding.evaluate(curveX)           // native units
+        for (target, out) in apps {
             switch target.kind {
             case .composite(let slot):
                 applyComposite(slot: slot, value: out)
@@ -397,9 +187,9 @@ final class AppController: ObservableObject {
     /// slot CC.
     private let compositeLock = NSLock()
     private var compositeMembersByCC: [UInt8: [CompositeMember]] = [:]
-    /// Rebuild-path member values pending a (debounced) main-thread apply.
-    private var pendingRebuildMembers: [String: Double] = [:]
-    private var rebuildFlushScheduled = false
+    /// Rebuild-path values (composites, bindings, the strike blend) funneled
+    /// into ONE debounced main-thread apply — `DebouncedParamFlush`.
+    private var rebuildFlush: DebouncedParamFlush!
 
     /// RESTING VALUES for every `.live`/`.hybrid` parameter (`.rebuild` ones
     /// live in `StringParamStore`). Parameters tab; composites and bindings
@@ -552,10 +342,7 @@ final class AppController: ObservableObject {
         // Control-layer key: the strike→acceleration blend window. Updates
         // the window, forces a blend re-evaluation, relays to the iPad.
         if key == "ctl_strike_window" {
-            strikeLock.lock()
-            strikeWindow.windowS = max(value, 0.05)
-            lastBlendOut.removeAll()
-            strikeLock.unlock()
+            axes.setStrikeWindow(value)
             DispatchQueue.main.async { [weak self] in
                 self?.sendJoyConDisplay(force: true)
             }
@@ -564,19 +351,11 @@ final class AppController: ObservableObject {
         // Control-layer keys: the strum chord's expression (pushed live to
         // the held notes) and the accel-trigger threshold (0–127; ≥127 = off).
         if key == "ctl_strum_expr" {
-            let v = min(max(value, 0), 1)
-            strumExpr = v
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                for h in self.strumHeld {
-                    self.pitchPad.setTouchExpr(touchId: h.id,
-                                               exprScale: v * h.weight)
-                }
-            }
+            strumming.setExpression(value)
             return nil
         }
         if key == "ctl_strum_thresh" {
-            strumThresh01 = value >= 126.5 ? .infinity : value / 127.0
+            strumming.setAccelThreshold(value)
             return nil
         }
         // Control-layer keys: the glide queue's sequencer.
@@ -620,63 +399,38 @@ final class AppController: ObservableObject {
 
     /// VOLUME READOUT relay: 60 Hz poll of `AudioEngine.volumeLevels`
     /// (integrate-and-dump — the ONE poller) → JOYCON_STATE, change-gated.
-    private var volMeterTimer: DispatchSourceTimer?
-    private var lastVolBytes: (UInt8, UInt8) = (0, 0)  // timer queue only
+    private var volMeter: VolumeMeterRelay?
 
     private func startVolMeterRelay() {
-        let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-        t.schedule(deadline: .now(), repeating: 1.0 / 60.0,
-                   leeway: .milliseconds(3))
-        t.setEventHandler { [weak self] in
-            guard let self else { return }
-            let l = self.audio.volumeLevels()
-            let bytes = (TLPVolume.byte(fromLinear: l.voice),
-                         TLPVolume.byte(fromLinear: l.taraf))
-            guard bytes != self.lastVolBytes else { return }
-            self.lastVolBytes = bytes
-            self.link.setVolumeLevels(voice: bytes.0, taraf: bytes.1)
-        }
-        t.resume()
-        volMeterTimer = t
+        let relay = VolumeMeterRelay(
+            levels: { [weak self] in
+                self?.audio.volumeLevels() ?? (voice: 0, taraf: 0)
+            },
+            send: { [weak self] voice, taraf in
+                self?.link.setVolumeLevels(voice: voice, taraf: taraf)
+            })
+        relay.start()
+        volMeter = relay
     }
 
     // MARK: - Controller strum (Joy-Con L)
 
-    /// CONTROLLER STRUM (main queue only): a HELD CHORD sounded as ordinary
-    /// notes in the MAIN voice through the shared `pitchPad` engine (fresh
-    /// strings, taraf charge, firm strike velocity). Held by the L button
-    /// (`strumLHeld`) and/or the ACCEL TRIGGER (`strumAccelHeld` — the strike
-    /// envelope crossing `ctl_strum_thresh`); a press always closes any
-    /// chord still held; ids are GENERATION-scoped so a re-press retriggers.
+    /// CONTROLLER STRUM: the mechanics live in `StrumController` (the L
+    /// button + the accel trigger, the Shepard chord notes, the in-place
+    /// retune, the generation-scoped touch ids). This class owns the note
+    /// engine it plays through and the published selection the views read.
+    /// Main queue, like the engine it drives.
+    private(set) var strumming: StrumController!
+
     /// THE CHORD BAR's ACTIVE selection (iPad taps via the PERF_STATE chord
-    /// bytes, Mac taps via `tapChord` → the local pump) is what the strum
-    /// plays, else the Strings tab's configured set; a change while ringing
+    /// bytes, Mac taps via `tapChord` → the local pump) — what the strum
+    /// plays, else the Strings tab's configured set. A change while ringing
     /// retunes in place. Performance state, never persisted.
     @Published var strumChord: ChordSelection?
 
-    private var strumGen = 0
-    /// The ringing chord's touches + Shepard weights (1.0 for the configured
-    /// set); each note's live expression is `strumExpr × weight`.
-    private var strumHeld: [(id: Int, weight: Double)] = []
-    private var strumLHeld = false
-    private var strumAccelHeld = false
-    private var strumExpr = 1.0                 // ctl_strum_expr
-    /// `ctl_strum_thresh` in the 0…1 strike domain; ≥127 = off (.infinity).
-    private var strumThresh01 = Double.infinity
-    /// Accel-trigger cooldown deadline (systemUptime): 100 ms after each
-    /// accel release so a jittery envelope can't re-strike. Main-queue only.
-    private var strumAccelCooldownUntil: TimeInterval = 0
-    /// Distinct touchId namespace on the shared engine (the keyboard player
-    /// uses 1_000_000).
-    private static let strumTouchBase = 2_000_000
-
+    /// L (or an audition score's `strum` event) holds the chord.
     func strum(pressed: Bool) {
-        strumLHeld = pressed
-        if pressed {
-            strikeStrumChord()      // a press always retriggers
-        } else if !strumAccelHeld {
-            releaseStrum()
-        }
+        strumming.strum(pressed: pressed)
     }
 
     /// The Mac chord bar's tap: toggles against the ACTIVE chord through
@@ -686,100 +440,6 @@ final class AppController: ObservableObject {
             ? nil : ChordSelection(degree: sel.degree, octave: 0))
     }
 
-    /// What the next strum sounds, as (ratio, weight): the active chord under
-    /// the SHEPARD REGISTER LAW (`shepardChordNotes` — centered in the octave
-    /// below the tonic, raised-cosine weights), else the configured set at 1.
-    private func strumNotes() -> [(ratio: Double, weight: Double)] {
-        if let sel = strumChord {
-            let degs = scaleDegrees(from: pitchPad.scale)
-            if sel.degree >= 0, sel.degree < degs.count {
-                return shepardChordNotes(
-                    rootRatio: degs[sel.degree].ratio,
-                    intervals: scaleChords(degrees: degs)[sel.degree].intervals)
-            }
-        }
-        return sarangi.state.strumStringRatios.map { ($0, 1.0) }
-    }
-
-    private func strikeStrumChord() {
-        releaseStrum()
-        strumGen += 1
-        let gen = strumGen
-        for (i, note) in strumNotes().enumerated() {
-            let touch = Self.strumTouchBase + (gen % 1024) * 64 + i
-            // A fixed-register anchor: exempt from the octave shift and from
-            // the glide queue (near-simultaneous onsets must not chain).
-            pitchPad.noteOn(touchId: touch, ratio: note.ratio,
-                            velocity01: 0.9, octaveShifted: false,
-                            exprScale: strumExpr * note.weight,
-                            glideExempt: true)
-            strumHeld.append((touch, note.weight))
-        }
-    }
-
-    private func releaseStrum() {
-        for h in strumHeld { pitchPad.noteOff(touchId: h.id) }
-        strumHeld.removeAll()
-    }
-
-    /// A selection change while RINGING retunes the held notes in place (no
-    /// new attack); a shrinking chord note-offs the surplus, a growing one
-    /// strikes the extra members. Ids are index-deterministic per generation.
-    private func retuneStrumChord() {
-        guard !strumHeld.isEmpty else { return }
-        let notes = strumNotes()
-        for i in strumHeld.indices where i < notes.count {
-            pitchPad.glide(touchId: strumHeld[i].id, ratio: notes[i].ratio)
-            if strumHeld[i].weight != notes[i].weight {
-                strumHeld[i].weight = notes[i].weight
-                pitchPad.setTouchExpr(touchId: strumHeld[i].id,
-                                      exprScale: strumExpr * notes[i].weight)
-            }
-        }
-        if strumHeld.count > notes.count {
-            for h in strumHeld[notes.count...] {
-                pitchPad.noteOff(touchId: h.id)
-            }
-            strumHeld.removeSubrange(notes.count...)
-        }
-        while strumHeld.count < notes.count {
-            let i = strumHeld.count
-            let touch = Self.strumTouchBase + (strumGen % 1024) * 64 + i
-            pitchPad.noteOn(touchId: touch, ratio: notes[i].ratio,
-                            velocity01: 0.9, octaveShifted: false,
-                            exprScale: strumExpr * notes[i].weight,
-                            glideExempt: true)
-            strumHeld.append((touch, notes[i].weight))
-        }
-    }
-
-    /// The accel trigger's edge detector (link receive queue): rising
-    /// through the threshold strikes; falling below releases (unless L
-    /// holds) and arms the cooldown. Edges hop to main, which re-tests.
-    private func strumAccelSense(_ v: Double) {
-        let up = !strumAccelHeld && v >= strumThresh01
-        let down = strumAccelHeld && v < strumThresh01
-        guard up || down else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            let now = ProcessInfo.processInfo.systemUptime
-            if !self.strumAccelHeld, v >= self.strumThresh01,
-               now >= self.strumAccelCooldownUntil {
-                self.strumAccelHeld = true
-                self.strikeStrumChord()
-            } else if self.strumAccelHeld, v < self.strumThresh01 {
-                self.strumAccelHeld = false
-                self.strumAccelCooldownUntil = now + 0.1
-                if !self.strumLHeld { self.releaseStrum() }
-            }
-        }
-    }
-
-    /// Latest axis values for the iPad display relay (main queue). Wrist is
-    /// nil until the fusion runs; arm is nil while no calibration drives.
-    private var lastStickAxes: (Double, Double) = (0, 0)
-    private var lastWristTilt: (Double, Double, Double)?
-    private var lastArmAxes: (Double, Double, Double)?
     private var lastJtDrops = 0.0
     private var jtGateLogTicks = 0
     private var lastJtFlat = 0.0
@@ -828,6 +488,33 @@ final class AppController: ObservableObject {
         self.sarangi = SarangiStore(audio: audio)
         // Physics overrides — seeds the engine before the first BowEngine.
         self.stringParams = StringParamStore(audio: audio)
+        // The debounced rebuild funnel behind every off-main parameter path.
+        self.rebuildFlush = DebouncedParamFlush { [weak self] values in
+            guard let self else { return }
+            for (key, v) in values {
+                self.stringParams.setAuditionParam(key, v)
+            }
+            self.refreshHybridHeadroom()
+        }
+        // The controller strum sounds ordinary notes in the MAIN voice
+        // through the shared pad engine, against the one scale.
+        let pad = self.pitchPad
+        let doc = self.sarangi
+        self.strumming = StrumController(
+            sink: StrumController.NoteSink(
+                noteOn: { id, ratio, velocity01, expr in
+                    // A fixed-register anchor: exempt from the octave shift
+                    // and from the glide queue (near-simultaneous onsets
+                    // must not chain).
+                    pad.noteOn(touchId: id, ratio: ratio,
+                               velocity01: velocity01, octaveShifted: false,
+                               exprScale: expr, glideExempt: true)
+                },
+                noteOff: { pad.noteOff(touchId: $0) },
+                glide: { pad.glide(touchId: $0, ratio: $1) },
+                setExpr: { pad.setTouchExpr(touchId: $0, exprScale: $1) }),
+            degrees: { scaleDegrees(from: pad.scale) },
+            fallbackRatios: { doc.state.strumStringRatios })
 
         // Restore the output device rate on a clean quit (the engine forces
         // 44.1 kHz to drop the output resampler). SIGKILL skips this.
@@ -862,6 +549,24 @@ final class AppController: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     func start() {
+        // The control-axis evaluator's sinks, before anything can drive it
+        // (`setMapping` below arms its timers).
+        axes.onApply = { [weak self] apps in self?.applyControlBatch(apps) }
+        axes.paramDefault = { [weak self] key in self?.paramDefault(key) ?? 0 }
+        // The JOYCON_STATE mirror: the send plus the four acted-on fields.
+        joyConDisplay.send = { [weak self] display, force in
+            self?.link.setJoyConState(display, force: force)
+        }
+        joyConDisplay.connected = { [weak self] in
+            self?.joyCon.connectedName != nil
+        }
+        joyConDisplay.strikeWindowS = { [weak self] in
+            self?.axes.strikeWindowS ?? 2.0
+        }
+        joyConDisplay.fieldWarp = { [weak self] in self?.fretFieldWarp ?? 0 }
+        joyConDisplay.octaveShift = { [weak self] in
+            self?.pitchPad.octaveShift ?? 0
+        }
         midi.start()
         midiIn.start()
         simulator.start()
@@ -871,7 +576,7 @@ final class AppController: ObservableObject {
         startScaleSync()
         // Snapshots for the off-main deliveries, then the baseline values.
         rebuildCompositeSnapshot()
-        rebuildTiltEvalSnapshot()
+        axes.setMapping(tiltMapping)
         refreshHybridHeadroom()      // build depths behind the hybrid knobs
         applyRestingParams()         // resting values for every live param
         // A physics edit can move a hybrid's headroom — keep the cache in step
@@ -895,34 +600,25 @@ final class AppController: ObservableObject {
         // `.acceleration` pair. Change-gated in LinkIngest.
         ingest.onStrike = { [weak self] v in
             guard let self else { return }
-            self.strikeLock.lock()
-            self.strikeMeasure = v
-            self.strikeLock.unlock()
-            self.evaluateStrikeBlend()
+            self.axes.setStrikeMeasure(v)
             // The strum accel trigger rides the same envelope.
-            self.strumAccelSense(v)
+            self.strumming.accelSense(v)
         }
         // Note-lifecycle edges anchor the per-note blend windows (a
         // retrigger re-anchors; releases fall back to the survivor's age).
         ingest.onTouchGate = { [weak self] id, on in
-            guard let self else { return }
-            let now = ProcessInfo.processInfo.systemUptime
-            self.strikeLock.lock()
-            if on { self.strikeWindow.noteOn(id, at: now) }
-            else { self.strikeWindow.noteOff(id) }
-            self.strikeLock.unlock()
-            self.fingerGate(0, id, on)
+            self?.axes.touchGate(lane: .wire, id: id, on: on)
         }
         // The `.fingerAccel` pitch feed — wire lane (source 0) + the local
         // pads/auditions lane (source 1), so the u16 id spaces can't collide.
         ingest.onTouchPitch = { [weak self] id, pitch in
-            self?.fingerPitchUpdate(0, id, pitch)
+            self?.axes.touchPitch(lane: .wire, id: id, pitch: pitch)
         }
         pitchPad.localIngest?.onTouchGate = { [weak self] id, on in
-            self?.fingerGate(1, id, on)
+            self?.axes.touchGate(lane: .local, id: id, on: on)
         }
         pitchPad.localIngest?.onTouchPitch = { [weak self] id, pitch in
-            self?.fingerPitchUpdate(1, id, pitch)
+            self?.axes.touchPitch(lane: .local, id: id, pitch: pitch)
         }
         // Chord-bar selection edges from both lanes (iPad taps, the Mac bar via
         // `tapChord`) land in `strumChord`; a RINGING chord retunes in place.
@@ -930,7 +626,7 @@ final class AppController: ObservableObject {
             DispatchQueue.main.async {
                 guard let self, self.strumChord != sel else { return }
                 self.strumChord = sel
-                self.retuneStrumChord()
+                self.strumming.setSelection(sel)
             }
         }
         ingest.onChordSelect = chordEdge
@@ -953,12 +649,9 @@ final class AppController: ObservableObject {
             NSLog("Tarabdaar: link stale — releasing everything held")
             self.ingest.linkDidDrop()
             // No more frames: the strike measurement rests at 0.
-            self.strikeLock.lock()
-            self.strikeMeasure = 0
-            self.strikeLock.unlock()
-            self.evaluateStrikeBlend()
+            self.axes.setStrikeMeasure(0)
             // An accel-held strum chord must not outlive the link.
-            self.strumAccelSense(0)
+            self.strumming.accelSense(0)
         }
         link.onEvent = { [weak self] event in
             switch event {
@@ -1016,29 +709,27 @@ final class AppController: ObservableObject {
             self.applyTiltAxis(2, t3)
             // Mirror the calibrated arm axes to the iPad's arm square (main
             // thread; the link paces the sends).
-            self.lastArmAxes = (t1, t2, t3)
-            self.sendJoyConDisplay()
+            self.joyConDisplay.setArm(t1, t2, t3)
         }
         joyCon.onWristAttitude = { [weak self] wrist in
             guard let self else { return }
-            self.lastWristTilt = wrist
-            self.sendJoyConDisplay()
+            self.joyConDisplay.setWrist(wrist)
         }
         joyCon.onStickAxes = { [weak self] x01, y01 in
             guard let self else { return }
             self.applyTiltAxis(3, x01)
             self.applyTiltAxis(4, y01)
-            self.lastStickAxes = (x01, y01)
-            self.sendJoyConDisplay()
+            self.joyConDisplay.setStick(x01, y01)
         }
         joyCon.onWristAxes = { [weak self] w1, w2, w3 in
             guard let self else { return }
-            self.applyTiltAxis(Self.wristAxisIndices.0, w1)
-            self.applyTiltAxis(Self.wristAxisIndices.1, w2)
-            self.applyTiltAxis(Self.wristAxisIndices.2, w3)
+            self.applyTiltAxis(ControlAxisEvaluator.wristAxisIndices.0, w1)
+            self.applyTiltAxis(ControlAxisEvaluator.wristAxisIndices.1, w2)
+            self.applyTiltAxis(ControlAxisEvaluator.wristAxisIndices.2, w3)
         }
         joyCon.onJoyConAccel = { [weak self] level in
-            self?.applyTiltAxis(Self.jcAccelAxisIndex, level * 2 - 1)
+            self?.applyTiltAxis(ControlAxisEvaluator.jcAccelAxisIndex,
+                                level * 2 - 1)
         }
         joyCon.onButton = { [weak self] control, pressed in
             guard let self else { return }
@@ -1350,27 +1041,9 @@ final class AppController: ObservableObject {
     }
 
     /// Funnel rebuild-path values (from a composite or a direct tilt
-    /// binding) into one debounced main-thread flush. Thread-safe.
+    /// binding) into the debounced main-thread flush. Thread-safe.
     private func queueRebuildValues(_ values: [String: Double]) {
-        guard !values.isEmpty else { return }
-        compositeLock.lock()
-        pendingRebuildMembers.merge(values) { _, new in new }
-        let schedule = !rebuildFlushScheduled
-        rebuildFlushScheduled = true
-        compositeLock.unlock()
-        guard schedule else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            guard let self else { return }
-            self.compositeLock.lock()
-            let flush = self.pendingRebuildMembers
-            self.pendingRebuildMembers.removeAll()
-            self.rebuildFlushScheduled = false
-            self.compositeLock.unlock()
-            for (key, v) in flush {
-                self.stringParams.setAuditionParam(key, v)
-            }
-            self.refreshHybridHeadroom()
-        }
+        rebuildFlush.queue(values)
     }
 
     /// Convenience: apply by slot index.

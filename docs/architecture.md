@@ -58,6 +58,8 @@ TarabdaarMacApp.swift
                      Parameters, FX, Setup, Scope, TarafScope)
 ```
 
+The Joy-Con path is split by platform: `JoyConReport`, the `JoyConTransport` protocol, `JoyConMapper` (button edges, stick calibration) and `JoyConFusion` (attitude) live in TarabdaarCore and are unit-tested; `JoyConInput` (Mac) coordinates the three Mac-only transports (GameController alias, IOHID full mode, Joy-Con 2 BLE GATT).
+
 **The Mac does not use `NoteManager` for iPad input.** `AppController` holds Mac-side state as `@Published` fields; setters push directly to `AudioEngine`. The **tarab tuning** is owned by `SarangiStore` (`TarabdaarMac/SarangiStore.swift`): it holds the editable `InstrumentState` (the sympathetic-string `[StringSpec]` table, the chromatic set, the melody follower), persists it to UserDefaults and into the `.tarabdaar` preset, and routes each edit to `AudioEngine.rebuildSarangi` — a debounced off-main rebuild that pushes the tuning into the String kernel's taraf. The **String physics scalars** are owned by `StringParamStore` (persisted override dict → `AudioEngine.setStringVoiceOverrides` → debounced `BowEngine` rebuild). The String voice is armed unconditionally at startup; the Live tab's Instrument picker selects the played voice (String / Tanpura / Sitar).
 
 **`AppController` is the WIRING layer, not the mechanism.** The logic it used to carry inline lives in `TarabdaarCore` types with plain inputs and outputs, which it owns, feeds and forwards to:

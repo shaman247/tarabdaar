@@ -308,8 +308,11 @@ public final class StringVoiceSource {
     // above (tails restart across a rebuild; settings never snap back).
     private var fxSettings = FXPoint.allCases.map { _ in FXSettings() }
 
-    /// Apply one FX registry parameter (`fx_<point>_<field>`) and push the
-    /// whole point. False for an unrecognised key. Control-thread safe.
+    /// Apply one FX registry parameter and push the whole point: ONE
+    /// prefix parse (`fx_<point>_` → `FXPoint`) plus one field write
+    /// (`FXSettings.apply`). Every key the registry derives from its
+    /// single insert definition lands here; false for an unrecognised
+    /// key (`FXRackTests` pins the two sides in sync). Control-thread safe.
     @discardableResult
     public func setFXParam(_ key: String, _ value: Double) -> Bool {
         guard let (point, field) = FXPoint.parse(key: key),

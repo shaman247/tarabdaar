@@ -289,87 +289,41 @@ its range widens the slider rather than being clamped.
 | `st_pluck_drive` | pluck contact drive | 0.25 … 4 | 1 | global | live | The mellow↔buzzy axis at constant loudness — how hard the pluck drives the string into the jawari bridge, decoupled from level (same mechanism as tp_pluck_drive). 1 = the fitted sitar (bit-exact). Applies at the next pluck. |
 | `st_taraf` | sympathetic taraf drive | 0 … 8 | 4 | global | live | How strongly the sitar's output drives the sarangi taraf (the modal-jawari web — the Strings tab's rows ARE the sitar's sympathetic strings). The rendered sitar signal feeds the web's bridge drive alongside the String voice's own (kernel inject ring, shaped by the voice→taraf FX insert like any drive). 0 = no halo (byte-exact String-voice parity). The web only rings while the String voice is armed — it always is. |
 
-### FX — voice → taraf
+### FX rack
+
+The same insert is instantiated at **4 points**;
+every key is the point's prefix plus a knob from the table below.
+
+| Insert | Key prefix | What it processes |
+|---|---|---|
+| **Voice → Taraf** | `fx_drive_` | the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched |
+| **Voice** | `fx_voice_` | the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain |
+| **Taraf** | `fx_taraf_` | the sympathetic web's own radiated output (drones included), before the shared radiation chain |
+| **Global** | `fx_global_` | the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level) |
+
+#### The insert (16 knobs × 4 points)
+
+Keys below are written `<prefix>knob` — e.g. `fx_voice_eq_b3` is
+the 125 Hz band of the Voice insert. Every knob has the same
+range, default, scope and timing at every point — only the
+"what it processes" clause of the two toggles differs.
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `fx_drive_eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the 10-band graphic EQ at this point — the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched. Toggling glides the bands to/from flat (click-free). |
-| `fx_drive_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_drive_rev_on` | reverb on | 0 … 1 | 0 | global | live | Enable the reverb at this point — the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched. Toggling glides the wet level (click-free). |
-| `fx_drive_rev_type` | reverb type | 0 … 1 | 0 | global | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
-| `fx_drive_rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
-| `fx_drive_rev_size` | reverb size | 0 … 1 | 0.93 | global | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
-| `fx_drive_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | global | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
-
-### FX — voice
-
-| Key | Name | Range | Default | Scope | Timing | Description |
-|---|---|---|---|---|---|---|
-| `fx_voice_eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the 10-band graphic EQ at this point — the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain. Toggling glides the bands to/from flat (click-free). |
-| `fx_voice_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_voice_rev_on` | reverb on | 0 … 1 | 0 | global | live | Enable the reverb at this point — the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain. Toggling glides the wet level (click-free). |
-| `fx_voice_rev_type` | reverb type | 0 … 1 | 0 | global | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
-| `fx_voice_rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
-| `fx_voice_rev_size` | reverb size | 0 … 1 | 0.93 | global | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
-| `fx_voice_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | global | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
-
-### FX — taraf
-
-| Key | Name | Range | Default | Scope | Timing | Description |
-|---|---|---|---|---|---|---|
-| `fx_taraf_eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the 10-band graphic EQ at this point — the sympathetic web's own radiated output (drones included), before the shared radiation chain. Toggling glides the bands to/from flat (click-free). |
-| `fx_taraf_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_taraf_rev_on` | reverb on | 0 … 1 | 0 | global | live | Enable the reverb at this point — the sympathetic web's own radiated output (drones included), before the shared radiation chain. Toggling glides the wet level (click-free). |
-| `fx_taraf_rev_type` | reverb type | 0 … 1 | 0 | global | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
-| `fx_taraf_rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
-| `fx_taraf_rev_size` | reverb size | 0 … 1 | 0.93 | global | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
-| `fx_taraf_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | global | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
-
-### FX — global
-
-| Key | Name | Range | Default | Scope | Timing | Description |
-|---|---|---|---|---|---|---|
-| `fx_global_eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the 10-band graphic EQ at this point — the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level). Toggling glides the bands to/from flat (click-free). |
-| `fx_global_eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `fx_global_rev_on` | reverb on | 0 … 1 | 0 | global | live | Enable the reverb at this point — the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level). Toggling glides the wet level (click-free). |
-| `fx_global_rev_type` | reverb type | 0 … 1 | 0 | global | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
-| `fx_global_rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
-| `fx_global_rev_size` | reverb size | 0 … 1 | 0.93 | global | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
-| `fx_global_rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | global | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
+| `<prefix>eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the 10-band graphic EQ at this point — what this insert point processes (the table above). Toggling glides the bands to/from flat (click-free). |
+| `<prefix>eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `<prefix>eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `<prefix>eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `<prefix>eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `<prefix>eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
+| `<prefix>eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `<prefix>eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `<prefix>eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `<prefix>eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `<prefix>eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `<prefix>rev_on` | reverb on | 0 … 1 | 0 | global | live | Enable the reverb at this point — what this insert point processes (the table above). Toggling glides the wet level (click-free). |
+| `<prefix>rev_type` | reverb type | 0 … 1 | 0 | global | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
+| `<prefix>rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
+| `<prefix>rev_size` | reverb size | 0 … 1 | 0.93 | global | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
+| `<prefix>rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | global | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
 
