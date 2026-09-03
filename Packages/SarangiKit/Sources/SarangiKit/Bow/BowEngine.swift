@@ -590,8 +590,8 @@ public final class BowEngine {
     /// TERMINATION DRIVE morph 0…1 (`bow_jt_drive_term`): where the played
     /// string's bridge force enters each sympathetic row. 0 = the fitted
     /// 0.90 L tap, whose |sin(kπ·0.9)| comb never charges modes 10/20;
-    /// 1 = the pin's own mode slope (∝ (−1)^k·k, mode 1 held at the tap's
-    /// level, same sign convention as the pin-force radiation). 0 =
+    /// 1 = the pin's own mode slope (∝ (−1)^k·k, energy-matched per row to
+    /// the tap, same sign convention as the pin-force radiation). 0 =
     /// bit-exact. Kernel scalar write, slewed ~40 ms per row.
     public func setJtDriveTerm(_ w01: Double) {
         guard let pk = pkernel else { return }

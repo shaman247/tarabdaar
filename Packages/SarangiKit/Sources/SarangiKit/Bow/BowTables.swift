@@ -28,9 +28,10 @@ public struct JtTables: Sendable {
     public var wd: [Double] = [], phiD: [Double] = []
     /// TERMINATION drive shape, the comb-free sibling of `phiD`: the
     /// bridge force enters through the mode SLOPE at the pin,
-    /// ∝ (−1)^k·k, normalised so mode 1 keeps the 0.90 L tap's drive
-    /// (× sin(0.9π)). Load-ABI `phiDT`; blended against `phiD` by
-    /// `bow_jt_drive_term`.
+    /// ∝ (−1)^k·k, ENERGY-matched per row against the 0.90 L tap
+    /// (Σ_k phiDT_k² == Σ_k phiD_k²) so the row keeps its fitted total
+    /// drive energy and the slope only redistributes it up the modes.
+    /// Load-ABI `phiDT`; blended against `phiD` by `bow_jt_drive_term`.
     public var phiDT: [Double] = []
     public var phiU: [Double] = [], phiF: [Double] = []
     public var b: [Double] = [], G: [Double] = [], G4: [Double] = []
@@ -252,9 +253,25 @@ public enum BowTables {
             // TERMINATION drive: a moving bridge pushes mode k through the
             // mode SLOPE at the pin, φ'_k(L) ∝ (−1)^k·k — no comb, and by
             // reciprocity the SAME sign convention as the pin-force
-            // radiation term Σ(−1)^k·k·q_k in the tick. Normalised by
-            // cTerm so mode 1 keeps the tap's fitted recruitment level.
-            let cTerm = sin(Double.pi * 0.9)
+            // radiation term Σ(−1)^k·k·q_k in the tick.
+            // NORMALISATION LAW — ENERGY MATCH, not mode-1 match: cTerm is
+            // chosen per row so Σ_k phiDT_k² == Σ_k phiD_k² over the row's
+            // built modes (the shared gdrv·amp2/mu factors cancel, so
+            // cTerm = √(Σ sin²(kπ·0.9) / Σ k²)). Each row keeps the FITTED
+            // total drive energy of the 0.90 L tap and the slope weighting
+            // only REDISTRIBUTES it: mode 1 falls, the high cluster rises.
+            // Matching mode 1 instead (× sin(0.9π)) multiplied every mode
+            // above the first by ≈ 1.4·k and rang the web ~17 dB hot.
+            var cTerm = 0.0
+            do {
+                var eTap = 0.0, eSlope = 0.0
+                for k in 0..<M {
+                    let sD = sin(Double(k + 1) * Double.pi * xD / L)
+                    eTap += sD * sD
+                    eSlope += Double(k + 1) * Double(k + 1)
+                }
+                cTerm = eSlope > 0 ? (eTap / eSlope).squareRoot() : 0.0
+            }
             for k in 0..<M {
                 let pd = amp2 * sin(Double(k + 1) * Double.pi * xD / L)
                 T.phiD.append(gdrv * pd / mu)

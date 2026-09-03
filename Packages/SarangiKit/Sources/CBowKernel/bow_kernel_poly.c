@@ -94,7 +94,7 @@ typedef struct {
         *jtPhiD;            /* jtWdI = 1/wd (no division in the rotation) */
     /* TERMINATION DRIVE (bow_jt_drive_term): the second drive shape, the
        bridge force entering through the mode SLOPE at the pin (∝ (−1)^k·k,
-       normalised to the tap's mode-1 level) — no |sin(kπ·0.9)| comb, and by
+       ENERGY-matched per row to the tap) — no |sin(kπ·0.9)| comb, and by
        reciprocity the same sign convention as the pin-force radiation term.
        jtDrvTerm is the 0…1 morph target; each row slews its own copy on the
        radiation's ~40 ms law so a swept knob never steps the drive.
@@ -1792,7 +1792,9 @@ static void jt_gate_eps(bow_poly_state_t *st, double refDisp);
 
 /* TERMINATION DRIVE morph 0..1 (bow_jt_drive_term): 0 = the fitted 0.90 L
    tap shape (byte-null — every row's slewed copy rests at 0 and the tick
-   takes the exact tap branch), 1 = the pin's mode-slope shape. Plain scalar
+   takes the exact tap branch), 1 = the pin's mode-slope shape (energy-matched
+   per row to the tap, so the row's total drive energy is unchanged and only
+   its distribution over the modes moves). Plain scalar
    store, any thread; each row slews toward it on the radiation's ~40 ms law.
    The gate's wake bound follows the effective shape. */
 void bow_poly_jt_set_drive_term(void *vst, double w)

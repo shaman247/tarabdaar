@@ -210,13 +210,20 @@ moving termination excites mode k through the mode slope at the end,
 **0 = byte‑exact**) morphs per row per mode between the two tables (`phiD`
 and the builder's `phiDT`, both in the load ABI; the kernel keeps both and
 blends with a per‑row scalar slewed on the radiation's ~40 ms law, so a swept
-knob never steps the drive). `phiDT` is normalised by sin(0.9π) = 0.309 so
-**mode 1 keeps the tap's fitted level** either way, and its sign convention is
-the pin‑force radiation term's own (Σ(−1)^k·k·q_k) — by reciprocity the same
-weighting drives and radiates, so a positive bridge force makes a positive
-radiated pin force. The quiescence gate's wake bound follows the effective
-shape. At 1 the taraf rings ~17 dB hotter with a much higher modal centroid
-— see roadmap item 2 for the measurement and why it is not the default.
+knob never steps the drive). Its sign convention is the pin‑force radiation
+term's own (Σ(−1)^k·k·q_k) — by reciprocity the same weighting drives and
+radiates, so a positive bridge force makes a positive radiated pin force. The
+quiescence gate's wake bound follows the effective shape.
+
+**Normalisation is an ENERGY match, per row**: `cTerm` is chosen so
+Σ_k phiDT_k² = Σ_k phiD_k² over the row's built modes (the shared
+gdrv·amp2/mu factors cancel, leaving cTerm = √(Σ sin²(kπ·0.9) / Σ k²) ≈
+1.22/M). Each row therefore keeps the FITTED total drive energy of the tap and
+the slope weighting only REDISTRIBUTES it up the mode stack — mode 1 falls,
+the high cluster rises. It replaced a mode‑1 match (× sin(0.9π) = 0.309),
+which multiplied every mode above the first by ≈ 1.4·k and simply added level.
+Neither normalisation lands on the fitted loudness — see roadmap item 2 for
+both measurements and why the knob still rests at 0.
 
 ### Evolution and register
 
@@ -446,16 +453,28 @@ Improvements proposed for the modal‑jawari rows, in the order worth doing.
    `rowPinScale`·Σ(−1)^k·k·q_k, ahead of the DC blocker; no knob (the
    `bow_jt_rad_pin` mix it shipped as was judged at 1 and folded in).
 2. **Drive from the termination too — shipped as an OPTION, default off.**
-   `bow_jt_drive_term` (below) is the 0…1 morph; it is NOT baked, because the
-   slope weighting charges the high cluster far harder than the tap's comb
-   did. Measured on a bowed Sa (0.6 s bow + 0.8 s ring, shipped Pilu bank):
-   ring RMS **+17.5 dB** at morph 1, per‑row scope levels **+0.6 … +27.0 dB**
-   (the tap's comb nulls are exactly the rows that jump most), the Sa row's
-   modal centroid **3.6 → 6.4** (mode index). Stable — a 4 s ring at CC11 127
-   stays finite, peaks 1.61 and decays monotonically after the web charges.
-   So the shape is right and the LEVEL is not: taking it means re‑fitting
-   recruitment (`bow_jt_gain` / `bow_jt_norm` / `bow_jt_sel`) around it, not
-   flipping the default. A/B it with the knob first.
+   `bow_jt_drive_term` (above) is the 0…1 morph; it is NOT baked, because no
+   normalisation of the slope shape lands on the fitted loudness. Measured
+   twice on the shipped Pilu bank, serial jt, a bowed note (0.6 s at CC11 32 /
+   press 0.56 + 0.8 s ring) after a 1.5 s settle pre‑roll, scope peak‑held
+   over the RING only, morph 1 vs 0:
+   - **Mode‑1 match** (`× sin(0.9π)`, the first cut): ring RMS **+7.1 dB** on
+     Sa / **+10.7 dB** on a non‑kin note, per‑row levels **−1.4 … +12.6 dB**
+     and **−1.1 … +20.0 dB** — every mode above the first gains ≈ 1.4·k, so
+     the shape adds level the fit never had. (An earlier, hotter scaffold read
+     this as +17.5 dB / +0.6 … +27.0 dB.)
+   - **Energy match** (the current table: Σ phiDT² = Σ phiD² per row): ring
+     RMS **−12.6 dB** on Sa / **−8.5 dB** non‑kin (taraf bus alone −15.7 /
+     −10.7 dB), per‑row levels **−23.0 … −7.7 dB** (median −12.1) and
+     **−26.6 … −0.9 dB** (median −9.0); the Sa row's modal centroid rises
+     **2.6 → 3.5** (mode index). Holding the drive ENERGY does not hold the
+     RING: the energy lands on high modes that the f² loss and the tone LP
+     eat within the note.
+   Stable either way — a 4 s ring at CC11 127 stays finite and decays
+   monotonically (energy match peaks 0.64 against the tap's 1.69). So the
+   shape is right and the LEVEL is not, under either law: taking it means
+   re‑fitting recruitment (`bow_jt_gain` / `bow_jt_norm` / `bow_jt_sel`)
+   around it, not flipping the default. A/B it with the knob first.
 3. **Two‑way coupling among the rows.** Feed the rows' summed bridge force
    back into the bridge so the web blooms physically. Keep the one‑sample
    lag the drive uses — stability is the risk.
