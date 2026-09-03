@@ -58,9 +58,6 @@ public final class BowEngine {
     /// Membrane radiation-efficiency LF rolloff (`bow_rad_hp`, ord/2
     /// butter-2 sections): a small body cannot radiate below its skin mode.
     private var radHP: [Biquad] = []
-    /// Fingerprint mask (nil = identity). Applied POST-reverb on the full
-    /// mix, tracking the sounding pitch.
-    var fpMask: BowFpMask?
     var reverb: Reverb
 
     // ---- FX RACK: four insert points, off by default (byte-null).
@@ -149,7 +146,6 @@ public final class BowEngine {
     private let slotStride: Int
     private var cF0: [Double], cVb: [Double], cFb: [Double]
     private var cBeta: [Double], cGate: [Double], cXv: [Double]
-    private var cF0Snd: [Double]      // sounding pitch (pre-correction) — mask
     private var y96: [Double], y48: [Double]
     private var y96S: [Double], y48S: [Double]   // stereo side scratch
     private var y96Jt: [Double], y96JtS: [Double] // FX split taraf bus
@@ -166,7 +162,6 @@ public final class BowEngine {
                 rfir: [Double], eLp: Double,
                 reverbRT60: Double, reverbPredelayMs: Double,
                 reverbMix: Double, reverbWidth: Double,
-                fpMask: BowFpMask? = nil,
                 maxFrames: Int = 4096,
                 maxPoly: Int = 1) {
         self.sr = sr
@@ -202,7 +197,6 @@ public final class BowEngine {
                                      gainDB: hillDb,
                                      q: bp.v("bow_hill_q", 1.1), sr: sr)
         }
-        self.fpMask = fpMask
         reverb = Reverb(rt60: reverbRT60, predelayMs: reverbPredelayMs,
                         mix: reverbMix, width: reverbWidth, sr: sr)
         self.maxFrames = maxFrames
@@ -215,7 +209,6 @@ public final class BowEngine {
         cBeta = [Double](repeating: 0.1, count: nk * nPoly)
         cGate = [Double](repeating: 0, count: nk * nPoly)
         cXv = [Double](repeating: 0, count: nk)   // external force: always 0
-        cF0Snd = [Double](repeating: 440.0, count: nk)
         y96 = [Double](repeating: 0, count: nk)
         y48 = [Double](repeating: 0, count: maxFrames)
         y96S = [Double](repeating: 0, count: nk)
@@ -416,7 +409,7 @@ public final class BowEngine {
         // INSTRUMENT WIDTH (`bow_st_width`): the kernel's diffuse-field
         // difference bank on the whole radiated output; fold-down invariant.
         let stWidth = bp.v("bow_st_width", 0.0)
-        if let pk = pkernel, fpMask == nil,
+        if let pk = pkernel,
            stSpread > 1e-6 || stPlayed > 1e-6 || stWidth > 1e-6 {
             let tonic = tables.scalars.count > 44 ? tables.scalars[44]
                                                   : 261.63
@@ -1675,7 +1668,6 @@ public final class BowEngine {
             return
         }
         mapper.snapshotPoly(into: &polySnap)
-        let lead = polySnap.lead
         // Melody follower: target = the HIGHEST gated note (bend included);
         // no gated note keeps the last target, so the string rings out there.
         if trackArmed {
@@ -1697,50 +1689,47 @@ public final class BowEngine {
                 cFb.withUnsafeMutableBufferPointer { fb in
                     cBeta.withUnsafeMutableBufferPointer { be in
                         cGate.withUnsafeMutableBufferPointer { ga in
-                            cF0Snd.withUnsafeMutableBufferPointer { fs in
-                                for s in 0..<maxPoly {
-                                    let slot = polySnap.slots[s]
-                                    if slot.serial != lastSerial[s] {
-                                        lastSerial[s] = slot.serial
-                                        bow_poly_reset_string(pk, Int32(s))
-                                        filters[s].notePrime(f0Target: slot.f0Target)
-                                    }
-                                    let ringing = bow_poly_active(pk, Int32(s)) != 0
-                                    if slot.gate <= 0.0, !ringing,
-                                       filters[s].gateState < 1e-6 {
-                                        // idle string: rows stay zeroed — the
-                                        // kernel skips it whole
-                                        if !slotSilent[s] {
-                                            let o = s * slotStride
-                                            for i in 0..<slotStride {
-                                                fb.baseAddress![o + i] = 0
-                                                ga.baseAddress![o + i] = 0
-                                            }
-                                            slotSilent[s] = true
-                                        }
-                                        continue
-                                    }
-                                    slotSilent[s] = false
-                                    // Per-slot expression scale (the strum
-                                    // chord): ×1.0 is an IEEE identity, so
-                                    // every non-strum path is bit-exact.
-                                    let snap = BowControlMapper.Snapshot(
-                                        f0Target: slot.f0Target, gate: slot.gate,
-                                        expr: polySnap.expr * slot.exprScale,
-                                        press: polySnap.press,
-                                        pos: polySnap.pos, tiltDb: polySnap.tiltDb,
-                                        vib: polySnap.vib,
-                                        onVel: slot.onVel)
-                                    let o = s * slotStride
-                                    filters[s].fill(
-                                        snapshot: snap, n: nk,
-                                        f0: f0.baseAddress! + o,
-                                        vb: vb.baseAddress! + o,
-                                        fb: fb.baseAddress! + o,
-                                        beta: be.baseAddress! + o,
-                                        gate: ga.baseAddress! + o,
-                                        f0Snd: s == lead ? fs.baseAddress! : nil)
+                            for s in 0..<maxPoly {
+                                let slot = polySnap.slots[s]
+                                if slot.serial != lastSerial[s] {
+                                    lastSerial[s] = slot.serial
+                                    bow_poly_reset_string(pk, Int32(s))
+                                    filters[s].notePrime(f0Target: slot.f0Target)
                                 }
+                                let ringing = bow_poly_active(pk, Int32(s)) != 0
+                                if slot.gate <= 0.0, !ringing,
+                                   filters[s].gateState < 1e-6 {
+                                    // idle string: rows stay zeroed — the
+                                    // kernel skips it whole
+                                    if !slotSilent[s] {
+                                        let o = s * slotStride
+                                        for i in 0..<slotStride {
+                                            fb.baseAddress![o + i] = 0
+                                            ga.baseAddress![o + i] = 0
+                                        }
+                                        slotSilent[s] = true
+                                    }
+                                    continue
+                                }
+                                slotSilent[s] = false
+                                // Per-slot expression scale (the strum
+                                // chord): ×1.0 is an IEEE identity, so
+                                // every non-strum path is bit-exact.
+                                let snap = BowControlMapper.Snapshot(
+                                    f0Target: slot.f0Target, gate: slot.gate,
+                                    expr: polySnap.expr * slot.exprScale,
+                                    press: polySnap.press,
+                                    pos: polySnap.pos, tiltDb: polySnap.tiltDb,
+                                    vib: polySnap.vib,
+                                    onVel: slot.onVel)
+                                let o = s * slotStride
+                                filters[s].fill(
+                                    snapshot: snap, n: nk,
+                                    f0: f0.baseAddress! + o,
+                                    vb: vb.baseAddress! + o,
+                                    fb: fb.baseAddress! + o,
+                                    beta: be.baseAddress! + o,
+                                    gate: ga.baseAddress! + o)
                             }
                         }
                     }
@@ -1893,16 +1882,6 @@ public final class BowEngine {
             let wet = reverb.processMono(x)
             y48[i] = x + wet
         }
-        // fingerprint mask rides the FULL mix post-reverb, tracking the
-        // SOUNDING pitch (pre-correction: the string sounds at lf0)
-        if fpMask != nil {
-            y48.withUnsafeMutableBufferPointer { yb in
-                cF0Snd.withUnsafeBufferPointer { fb in
-                    fpMask!.process(yb.baseAddress!, n: n48,
-                                    f0: fb.baseAddress!, f0Stride: osFactor)
-                }
-            }
-        }
         // outGain is interpolated ACROSS the chunk (a chunk-rate step would
         // step the waveform); `gFrom` = where the previous chunk left off
         let gTo = 0.5 * outGain, gFrom = 0.5 * gainPrev
@@ -1950,7 +1929,6 @@ public final class BowEngine {
     /// radiation-chain state (same coefficients), the room adds a width-
     /// decorrelated wet pair, L = mid + side, R = mid − side. Side and the
     /// reverb's side tank cancel in L+R, so the fold-down equals `postChain`.
-    /// No fingerprint mask here (stereo is armed only when `fpMask` is nil).
     private func postChainStereo(n48: Int,
                                  outL: UnsafeMutablePointer<Double>,
                                  outR: UnsafeMutablePointer<Double>) {
@@ -2002,7 +1980,6 @@ public final class BowEngine {
         for i in 0..<nk {
             cF0[i] = f0[i]; cVb[i] = vb[i]; cFb[i] = fb[i]
             cBeta[i] = beta[i]; cGate[i] = gate[i]
-            cF0Snd[i] = f0[i]     // explicit controls: mask rides the input
         }
         guard let pk = pkernel else { return }
         y96.withUnsafeMutableBufferPointer { yb in
@@ -2028,7 +2005,6 @@ public final class BowEngine {
         radLpS?.reset()
         radHillS?.reset()
         for i in radHPS.indices { radHPS[i].reset() }
-        fpMask?.reset()
         reverb.reset()
         tiltLoShelf.reset()
         tiltHiShelf.reset()

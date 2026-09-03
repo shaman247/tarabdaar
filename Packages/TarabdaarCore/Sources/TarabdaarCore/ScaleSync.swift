@@ -259,56 +259,6 @@ public enum FretArrangementSyncStore {
     }
 }
 
-// MARK: - Legacy Joy-Con tilt display codec
-
-/// Per-message Joy-Con display SysEx (subtype `0x05`): `F0 7D 05 <sx> <sy>
-/// <w1> <w2> <flags> F7`, axes 0…127 ↔ −1…+1, flags bit 0 stick / 1 body
-/// / 2 connected; a 7-byte stick-only form also decodes. The shipping
-/// stream is TLP JOYCON_STATE; this is `finalize`'s legacy decode fallback.
-public enum JoyConTiltSysEx {
-    public static let nonCommercialID: UInt8 = 0x7D
-    public static let subtype: UInt8 = 0x05
-
-    /// Encode the 9-byte form.
-    public static func encode(stickX: Double, stickY: Double,
-                              wrist1: Double, wrist2: Double,
-                              stickLive: Bool, bodyLive: Bool,
-                              connected: Bool) -> [UInt8] {
-        // Axes −1…+1 → 0…127.
-        func b(_ v: Double) -> UInt8 {
-            UInt8((max(-1.0, min(1.0, v)) + 1) / 2 * 127.0 + 0.5)
-        }
-        return [0xF0, nonCommercialID, subtype,
-                b(stickX), b(stickY), b(wrist1), b(wrist2),
-                (stickLive ? 1 : 0) | (bodyLive ? 2 : 0)
-                    | (connected ? 4 : 0), 0xF7]
-    }
-
-    public static func decode(_ bytes: [UInt8]) -> JoyConTiltDisplay? {
-        guard bytes.count >= 7, bytes.first == 0xF0, bytes.last == 0xF7,
-              bytes[1] == nonCommercialID, bytes[2] == subtype
-        else { return nil }
-        // 7-bit axes → the −1…+1 display convention.
-        func ax(_ b: UInt8) -> Double { Double(b) / 127.0 * 2.0 - 1.0 }
-        if bytes.count == 9 {
-            return JoyConTiltDisplay(stickX: ax(bytes[3]),
-                                     stickY: ax(bytes[4]),
-                                     wrist1: ax(bytes[5]),
-                                     wrist2: ax(bytes[6]),
-                                     stickLive: bytes[7] & 1 != 0,
-                                     bodyLive: bytes[7] & 2 != 0,
-                                     connected: bytes[7] & 4 != 0)
-        }
-        guard bytes.count == 7 else { return nil }
-        return JoyConTiltDisplay(stickX: ax(bytes[3]),
-                                 stickY: ax(bytes[4]),
-                                 wrist1: 0, wrist2: 0,
-                                 stickLive: bytes[5] != 0,
-                                 bodyLive: false,
-                                 connected: false)
-    }
-}
-
 /// One Mac→iPad display frame (axes −1…+1): Joy-Con stick, fused wrist
 /// attitude, Mac-evaluated ARM axes (`armLive` = a calibration drives
 /// them), liveness flags, and the fields the iPad ACTS on: `connected`
@@ -394,74 +344,37 @@ public final class ScaleSyncReceiver: ObservableObject {
     /// CoreMIDI thread to `TarabLink.receivedSysEx`.
     public var onSysEx: (([UInt8]) -> Void)?
 
-    private var client = MIDIClientRef()
-    private var inputPort = MIDIPortRef()
-    private var destination = MIDIEndpointRef()
+    /// The shared CoreMIDI receive plumbing (client, all-sources input port,
+    /// the "Tarabdaar Scale" virtual destination, packet walk). Lazily built
+    /// so `self` is capturable.
+    private lazy var tap = MIDIInputTap(
+        clientName: "Tarabdaar Scale In",
+        portName: "Tarabdaar Scale In Port",
+        destinationName: "Tarabdaar Scale",
+        logLabel: "ScaleSyncReceiver"
+    ) { [weak self] bytes, sourceKey in
+        self?.consume(bytes, sourceKey: sourceKey)
+    }
 
     /// SysEx reassembly PER SOURCE (a shared buffer corrupts under
-    /// concurrent sources), keyed by the connection refCon; the virtual
-    /// destination uses a sentinel key. Locked across CoreMIDI threads.
+    /// concurrent sources), keyed by the tap's source key. Locked across
+    /// CoreMIDI threads.
     private struct SysExRun {
         var buffer: [UInt8] = []
         var receiving = false
     }
     private var sysexRuns: [UInt: SysExRun] = [:]
-    private static let destinationKey = UInt.max
     private let lock = NSLock()
 
     public init() {}
 
     public func start() {
-        guard client == 0 else { return }
         fretArrangement = FretArrangementSyncStore.load()
-        let cs = MIDIClientCreateWithBlock("Tarabdaar Scale In" as CFString, &client) { [weak self] _ in
-            self?.connectAllSources()
-        }
-        guard cs == noErr else {
-            NSLog("Tarabdaar: ScaleSyncReceiver client create failed: \(cs)")
-            return
-        }
-
-        // Path 1: input port + connect to every source.
-        let ps = MIDIInputPortCreateWithBlock(
-            client, "Tarabdaar Scale In Port" as CFString, &inputPort
-        ) { [weak self] packetList, srcRefCon in
-            self?.handle(packetList: packetList,
-                         sourceKey: UInt(bitPattern: Int(bitPattern: srcRefCon)))
-        }
-        if ps == noErr {
-            connectAllSources()
-        } else {
-            NSLog("Tarabdaar: ScaleSyncReceiver input port create failed: \(ps)")
-        }
-
-        // Path 2: virtual destination (named target).
-        let ds = MIDIDestinationCreateWithBlock(
-            client, "Tarabdaar Scale" as CFString, &destination
-        ) { [weak self] packetList, _ in
-            self?.handle(packetList: packetList,
-                         sourceKey: ScaleSyncReceiver.destinationKey)
-        }
-        if ds != noErr {
-            NSLog("Tarabdaar: ScaleSyncReceiver destination create failed: \(ds)")
-        }
-    }
-
-    private func connectAllSources() {
-        guard inputPort != 0 else { return }
-        let n = MIDIGetNumberOfSources()
-        for i in 0..<n {
-            // Idempotent; the source ref rides as the refCon.
-            let src = MIDIGetSource(i)
-            MIDIPortConnectSource(inputPort, src,
-                                  UnsafeMutableRawPointer(bitPattern: UInt(src)))
-        }
+        tap.start()
     }
 
     public func stop() {
-        if inputPort != 0 { MIDIPortDispose(inputPort); inputPort = 0 }
-        if destination != 0 { MIDIEndpointDispose(destination); destination = 0 }
-        if client != 0 { MIDIClientDispose(client); client = 0 }
+        tap.stop()
         lock.lock()
         sysexRuns.removeAll()
         lock.unlock()
@@ -470,25 +383,6 @@ public final class ScaleSyncReceiver: ObservableObject {
     deinit { stop() }
 
     // MARK: - Packet handling
-
-    private func handle(packetList: UnsafePointer<MIDIPacketList>,
-                        sourceKey: UInt) {
-        let count = Int(packetList.pointee.numPackets)
-        var current = UnsafeRawPointer(packetList).advanced(by: MemoryLayout<UInt32>.size)
-            .assumingMemoryBound(to: MIDIPacket.self)
-        for _ in 0..<count {
-            let len = Int(current.pointee.length)
-            if len > 0 {
-                let raw = UnsafeRawPointer(current)
-                    .advanced(by: MemoryLayout<MIDITimeStamp>.size + MemoryLayout<UInt16>.size)
-                let buf = UnsafeBufferPointer(
-                    start: raw.assumingMemoryBound(to: UInt8.self), count: len
-                )
-                consume(buf, sourceKey: sourceKey)
-            }
-            current = UnsafePointer(MIDIPacketNext(current))
-        }
-    }
 
     private func consume(_ bytes: UnsafeBufferPointer<UInt8>, sourceKey: UInt) {
         lock.lock()
@@ -518,19 +412,12 @@ public final class ScaleSyncReceiver: ObservableObject {
         for msg in completed { finalize(msg) }
     }
 
+    /// Routes one complete SysEx run. The wire is TLP: every envelope
+    /// (`F0 7D 10 …`) goes to the link, and nothing else is understood any
+    /// more — the legacy per-message subtypes (0x01/0x03/0x05) are retired.
     private func finalize(_ bytes: [UInt8]) {
-        // TLP tunnel messages (the shipping wire) route to the link.
         if bytes.count > 3, bytes[1] == 0x7D, bytes[2] == TLPPack.sysExSubtype {
             onSysEx?(bytes)
-            return
-        }
-        // Legacy per-message SysEx (0x01/0x03/0x05): decode fallback.
-        if let state = PitchScaleSysEx.decode(bytes) {
-            applyState(state)
-        } else if let arrangement = FretArrangementSysEx.decode(bytes) {
-            applyArrangement(arrangement)
-        } else if let tilt = JoyConTiltSysEx.decode(bytes) {
-            applyJoyCon(tilt)
         }
     }
 

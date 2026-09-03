@@ -16,7 +16,6 @@ class MotionManager: ObservableObject, MotionSource {
 
     // Peak acceleration magnitude detected recently
     @Published var accelMagnitude: Double = 0.0
-    @Published var recentPeakAccel: Double = 0.0
 
     // Most recent touch velocity estimate (for display)
     @Published var lastTouchVelocity: Double = 0.0
@@ -32,9 +31,6 @@ class MotionManager: ObservableObject, MotionSource {
     }
     private var accelBuffer: [AccelSample] = []
     private let bufferDuration: TimeInterval = Config.accelBufferDuration
-
-    // Peak detection for display
-    private var peakDecay: Double = 0.0
 
     /// Strike-scale envelope (MotionSource): `strikeScale01(magnitude)`
     /// through a fast-attack / slow-decay tracker (τ 150 ms), evolved at
@@ -135,14 +131,6 @@ class MotionManager: ObservableObject, MotionSource {
 
             let mag = sqrt(accel.x * accel.x + accel.y * accel.y + accel.z * accel.z)
             self.accelMagnitude = mag
-
-            // Track peak with fast attack, slow decay
-            if mag > self.peakDecay {
-                self.peakDecay = mag
-            } else {
-                self.peakDecay *= Config.peakDecayRate
-            }
-            self.recentPeakAccel = self.peakDecay
 
             // Strike-scale envelope for the `.strike`/`.acceleration`
             // dimensions, historied for the scope's overlay.

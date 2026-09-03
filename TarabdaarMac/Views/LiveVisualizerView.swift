@@ -177,10 +177,7 @@ struct LiveVisualizerView: View {
         samples.append(Sample(t: now, pitch: pitch, vol: r.active ? r.expression : 0))
         // Keep a little beyond the window so the line enters cleanly from
         // the left edge (clipped) rather than starting at the first sample.
-        let cutoff = now - (window + 0.5)
-        if let first = samples.first, first.t < cutoff {
-            samples.removeAll { $0.t < cutoff }
-        }
+        TimeSeries.trim(&samples, now: now, window: window) { $0.t }
         // Render-time readout doesn't need 60 Hz; refresh it ~5×/s.
         sampleCounter += 1
         if sampleCounter % 12 == 0 {
@@ -273,13 +270,11 @@ private struct TimeSeriesGraph: View {
     }
 
     private func x(_ t: Double, _ w: CGFloat) -> CGFloat {
-        w * CGFloat(1.0 - (now - t) / window)
+        TimeSeries.x(t, now: now, window: window, width: w)
     }
 
     private func y(_ v: Double, _ h: CGFloat) -> CGFloat {
-        let span = range.upperBound - range.lowerBound
-        let n = span > 0 ? (v - range.lowerBound) / span : 0.5
-        return h * (1 - CGFloat(min(1, max(0, n))))
+        TimeSeries.y(v, range: range, bottom: h, height: h)
     }
 
     private func gridPath(w: CGFloat, h: CGFloat) -> Path {
@@ -310,7 +305,7 @@ private struct TimeSeriesGraph: View {
     private func linePath(w: CGFloat, h: CGFloat) -> Path {
         Path { p in
             for run in screenRuns(w: w, h: h) {
-                addSmoothCurve(run, to: &p, moveToStart: true)
+                p.addSmoothCurve(run)
             }
         }
     }
@@ -321,36 +316,10 @@ private struct TimeSeriesGraph: View {
         Path { p in
             for run in screenRuns(w: w, h: h) where !run.isEmpty {
                 p.move(to: CGPoint(x: run[0].x, y: h))
-                addSmoothCurve(run, to: &p, moveToStart: false)
+                p.addSmoothCurve(run, moveToStart: false)
                 p.addLine(to: CGPoint(x: run[run.count - 1].x, y: h))
                 p.closeSubpath()
             }
-        }
-    }
-
-    /// Append a smooth curve through `pts` using a uniform Catmull-Rom spline
-    /// converted to cubic Bézier segments (control points at ±1/6 of the
-    /// neighbour span) — rounds off the sample-to-sample stair-steps that
-    /// straight segments showed. `moveToStart` begins a new subpath at the
-    /// first point; otherwise it lines to it (so an area fill can start at
-    /// the baseline).
-    private func addSmoothCurve(_ pts: [CGPoint], to p: inout Path, moveToStart: Bool) {
-        guard let first = pts.first else { return }
-        if moveToStart { p.move(to: first) } else { p.addLine(to: first) }
-        if pts.count < 3 {
-            for q in pts.dropFirst() { p.addLine(to: q) }
-            return
-        }
-        for i in 0..<(pts.count - 1) {
-            let p0 = pts[max(0, i - 1)]
-            let p1 = pts[i]
-            let p2 = pts[i + 1]
-            let p3 = pts[min(pts.count - 1, i + 2)]
-            let c1 = CGPoint(x: p1.x + (p2.x - p0.x) / 6.0,
-                             y: p1.y + (p2.y - p0.y) / 6.0)
-            let c2 = CGPoint(x: p2.x - (p3.x - p1.x) / 6.0,
-                             y: p2.y - (p3.y - p1.y) / 6.0)
-            p.addCurve(to: p2, control1: c1, control2: c2)
         }
     }
 }

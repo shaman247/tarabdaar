@@ -34,18 +34,8 @@ void tanpura_mount(void *ctx, int slot, int M, int J,
    samples) and store the equilibrium as q0. Off the audio thread. */
 void tanpura_settle(void *ctx, int slot, long n);
 
-/* ---- FD continuum slots (not mounted by TanpuraEngine); kc arrives
-   PRE-DIVIDED by MU. set_oversample = internal steps per output
-   sample, modal slots too. ---- */
+/* internal steps per OUTPUT sample */
 void tanpura_set_oversample(void *ctx, int slot, int steps);
-void tanpura_mount_fd(void *ctx, int slot, int N,
-                      const double *b, const double *pshape,
-                      double lam2, double muk, double s1h,
-                      double A0, double B0, double kc, double alpha,
-                      int o_i, int ramp_n, int steps_per_out,
-                      double gain, double dt, double touch);
-void tanpura_fd_set_state(void *ctx, int slot, const double *u0);
-void tanpura_settle_fd(void *ctx, int slot, long n);
 
 void tanpura_pluck(void *ctx, int slot, double amp);
 void tanpura_damp(void *ctx, int slot);

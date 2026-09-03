@@ -147,44 +147,28 @@ private struct TiltBindingRow: View {
     /// Slider bounds: the target's native range, widened to include any
     /// stored endpoint outside it.
     private var sliderRange: ClosedRange<Double> {
-        let r = target.defaultRange
-        return min(r.0, lo, hi)...max(r.1, lo, hi)
-    }
-
-    private func readout(_ v: Double) -> String {
-        if abs(v) >= 100 { return String(Int(v.rounded())) }
-        if abs(v) < 0.001, v != 0 { return String(format: "%.1e", v) }
-        return String(format: "%.2f", v)
+        ParamFormat.sliderBounds(target.defaultRange, including: lo, hi)
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text(controller.targetDisplayName(target))
-                .font(.padCaption)
-                .frame(width: Typography.scaledWidth(140), alignment: .leading)
-                .help(controller.targetDisplayName(target))
-            Text(readout(lo))
-                .font(.padCaption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: Typography.scaledWidth(44), alignment: .trailing)
-            TiltRangeSlider(
-                lo: Binding(
-                    get: { lo },
-                    set: { controller.setTiltBinding(target, dim: dim,
-                                                     lo: $0, hi: hi,
-                                                     fromCenter: fromCenter) }),
-                hi: Binding(
-                    get: { hi },
-                    set: { controller.setTiltBinding(target, dim: dim,
-                                                     lo: lo, hi: $0,
-                                                     fromCenter: fromCenter) }),
-                range: sliderRange)
-                .frame(minWidth: 180)
-                .help("Drag either handle: left value = tilted fully one way, right value = fully the other. Handles may cross for an inverted mapping.")
-            Text(readout(hi))
-                .font(.padCaption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: Typography.scaledWidth(44), alignment: .leading)
+        RangeSliderRow(
+            label: controller.targetDisplayName(target),
+            labelWidth: Typography.scaledWidth(140),
+            labelHelp: controller.targetDisplayName(target),
+            readoutWidth: Typography.scaledWidth(44),
+            lo: Binding(
+                get: { lo },
+                set: { controller.setTiltBinding(target, dim: dim,
+                                                 lo: $0, hi: hi,
+                                                 fromCenter: fromCenter) }),
+            hi: Binding(
+                get: { hi },
+                set: { controller.setTiltBinding(target, dim: dim,
+                                                 lo: lo, hi: $0,
+                                                 fromCenter: fromCenter) }),
+            range: sliderRange,
+            sliderHelp: "Drag either handle: left value = tilted fully one way, right value = fully the other. Handles may cross for an inverted mapping."
+        ) {
             Toggle("From center", isOn: Binding(
                 get: { fromCenter },
                 set: { controller.setTiltBinding(target, dim: dim, lo: lo,
@@ -192,15 +176,61 @@ private struct TiltBindingRow: View {
                 .toggleStyle(.checkbox)
                 .font(.padCaption2)
             Spacer(minLength: 0)
-            Button {
+            RemoveButton(help: "Remove this binding") {
                 controller.removeTiltBinding(target, dim: dim)
-            } label: {
-                Image(systemName: "xmark.circle")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Remove this binding")
         }
+    }
+}
+
+/// One two-endpoint row: label · lo readout · range slider · hi readout ·
+/// whatever the tab puts after it. Shared by the tilt bindings and the
+/// composite members — the same shape in the same units.
+private struct RangeSliderRow<Trailing: View>: View {
+    let label: String
+    let labelWidth: CGFloat
+    let labelHelp: String
+    let readoutWidth: CGFloat
+    let lo: Binding<Double>
+    let hi: Binding<Double>
+    let range: ClosedRange<Double>
+    let sliderHelp: String
+    @ViewBuilder let trailing: () -> Trailing
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.padCaption)
+                .frame(width: labelWidth, alignment: .leading)
+                .help(labelHelp)
+            Text(ParamFormat.value(lo.wrappedValue))
+                .font(.padCaption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: readoutWidth, alignment: .trailing)
+            TiltRangeSlider(lo: lo, hi: hi, range: range)
+                .frame(minWidth: 180)
+                .help(sliderHelp)
+            Text(ParamFormat.value(hi.wrappedValue))
+                .font(.padCaption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: readoutWidth, alignment: .leading)
+            trailing()
+        }
+    }
+}
+
+/// The row-trailing "remove this" button.
+private struct RemoveButton: View {
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark.circle")
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help(help)
     }
 }
 
@@ -292,54 +322,37 @@ private struct CompositeMemberRow: View {
     }
 
     private var sliderRange: ClosedRange<Double> {
-        min(info.lo, member.lo, member.hi)...max(info.hi, member.lo, member.hi)
+        ParamFormat.sliderBounds((info.lo, info.hi),
+                                 including: member.lo, member.hi)
     }
 
     private var isLive: Bool {
         ParamRegistry.liveKeys.contains(member.key)
     }
 
-    private func readout(_ v: Double) -> String {
-        abs(v) >= 100 ? String(Int(v.rounded())) : String(format: "%.2f", v)
-    }
-
     var body: some View {
-        HStack(spacing: 8) {
-            Text(info.label)
-                .font(.padCaption)
-                .frame(width: Typography.scaledWidth(128), alignment: .leading)
-                .help(isLive
-                      ? "Applies instantly while the composite moves"
-                      : "Re-applies through a crossfaded engine rebuild, ~0.2 s after the value settles")
-            Text(readout(member.lo))
-                .font(.padCaption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: Typography.scaledWidth(46), alignment: .trailing)
-            TiltRangeSlider(
-                lo: Binding(
-                    get: { member.lo },
-                    set: { controller.setCompositeMemberRange(
-                        compositeID, key: member.key, lo: $0, hi: member.hi) }),
-                hi: Binding(
-                    get: { member.hi },
-                    set: { controller.setCompositeMemberRange(
-                        compositeID, key: member.key, lo: member.lo, hi: $0) }),
-                range: sliderRange)
-                .frame(minWidth: 180)
-                .help("The value this base parameter holds at composite 0 (left) and composite 1 (right). Handles may cross for an inverted sweep.")
-            Text(readout(member.hi))
-                .font(.padCaption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: Typography.scaledWidth(46), alignment: .leading)
+        RangeSliderRow(
+            label: info.label,
+            labelWidth: Typography.scaledWidth(128),
+            labelHelp: isLive
+                ? "Applies instantly while the composite moves"
+                : "Re-applies through a crossfaded engine rebuild, ~0.2 s after the value settles",
+            readoutWidth: Typography.scaledWidth(46),
+            lo: Binding(
+                get: { member.lo },
+                set: { controller.setCompositeMemberRange(
+                    compositeID, key: member.key, lo: $0, hi: member.hi) }),
+            hi: Binding(
+                get: { member.hi },
+                set: { controller.setCompositeMemberRange(
+                    compositeID, key: member.key, lo: member.lo, hi: $0) }),
+            range: sliderRange,
+            sliderHelp: "The value this base parameter holds at composite 0 (left) and composite 1 (right). Handles may cross for an inverted sweep."
+        ) {
             Spacer(minLength: 0)
-            Button {
+            RemoveButton(help: "Remove this base parameter from the composite") {
                 controller.removeCompositeMember(compositeID, key: member.key)
-            } label: {
-                Image(systemName: "xmark.circle")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Remove this base parameter from the composite")
         }
     }
 }

@@ -370,61 +370,9 @@ private struct ReceivedMotionView: View {
 
     private static func draw(_ ctx: GraphicsContext, size: CGSize,
                              pts allPts: [SIMD3<Double>], azimuth: Double) {
-        guard allPts.count > 2 else { return }
-        let step = max(1, allPts.count / 400)
-        var pts: [SIMD3<Double>] = []
-        for i in stride(from: 0, to: allPts.count, by: step) {
-            pts.append(allPts[i])
-        }
-        if let last = allPts.last { pts.append(last) }
-
-        var c = SIMD3<Double>()
-        for p in pts { c += p }
-        c /= Double(pts.count)
-        let maxR = viewRadius
-        let half = Double(min(size.width, size.height)) / 2 - 12
-        let s = half / maxR
-        let cx = Double(size.width) / 2
-        let cy = Double(size.height) / 2
-        let cosA = cos(azimuth)
-        let sinA = sin(azimuth)
-        let cosE = cos(0.5)
-        let sinE = sin(0.5)
-
-        func project(_ p: SIMD3<Double>) -> CGPoint {
-            let d = p - c
-            let rx = d.x * cosA - d.y * sinA
-            let ry = d.x * sinA + d.y * cosA
-            return CGPoint(x: cx + rx * s,
-                           y: cy - (d.z * cosE - ry * sinE) * s)
-        }
-
-        for (axis, color) in [(SIMD3<Double>(1, 0, 0), colors[0]),
-                              (SIMD3<Double>(0, 1, 0), colors[1]),
-                              (SIMD3<Double>(0, 0, 1), colors[2])] {
-            var path = Path()
-            path.move(to: project(c - axis * maxR))
-            path.addLine(to: project(c + axis * maxR))
-            ctx.stroke(path, with: .color(color.opacity(0.3)), lineWidth: 0.5)
-        }
-
-        // Age-faded trail: drift reads as a crawling snake, noise as a
-        // fuzz ball, a clean still stream as almost nothing.
-        for i in 1..<pts.count {
-            var seg = Path()
-            seg.move(to: project(pts[i - 1]))
-            seg.addLine(to: project(pts[i]))
-            let age = Double(i) / Double(pts.count)
-            ctx.stroke(seg, with: .color(.white.opacity(0.1 + 0.6 * age)),
-                       lineWidth: 1)
-        }
-
-        if let last = pts.last {
-            let q = project(last)
-            ctx.fill(Path(ellipseIn: CGRect(x: q.x - 4, y: q.y - 4,
-                                            width: 8, height: 8)),
-                     with: .color(.yellow))
-        }
+        MotionScatter.drawTrail(ctx, size: size, points: allPts,
+                                maxRadius: viewRadius, axisColors: colors,
+                                azimuth: azimuth)
     }
 }
 
@@ -481,55 +429,10 @@ private struct VectorTrailView: View {
     private static func draw(_ ctx: GraphicsContext, size: CGSize,
                              pts allPts: [SIMD3<Double>], maxR: Double,
                              azimuth: Double) {
-        guard allPts.count > 2 else { return }
-        let step = max(1, allPts.count / 400)
-        var pts: [SIMD3<Double>] = []
-        for i in stride(from: 0, to: allPts.count, by: step) {
-            pts.append(allPts[i])
-        }
-        if let last = allPts.last { pts.append(last) }
-
-        let half = Double(min(size.width, size.height)) / 2 - 12
-        let s = half / maxR
-        let cx = Double(size.width) / 2
-        let cy = Double(size.height) / 2
-        let cosA = cos(azimuth)
-        let sinA = sin(azimuth)
-        let cosE = cos(0.5)
-        let sinE = sin(0.5)
-
-        func project(_ p: SIMD3<Double>) -> CGPoint {
-            let rx = p.x * cosA - p.y * sinA
-            let ry = p.x * sinA + p.y * cosA
-            return CGPoint(x: cx + rx * s,
-                           y: cy - (p.z * cosE - ry * sinE) * s)
-        }
-
-        for (axis, color) in [(SIMD3<Double>(1, 0, 0), colors[0]),
-                              (SIMD3<Double>(0, 1, 0), colors[1]),
-                              (SIMD3<Double>(0, 0, 1), colors[2])] {
-            var path = Path()
-            path.move(to: project(-axis * maxR))
-            path.addLine(to: project(axis * maxR))
-            ctx.stroke(path, with: .color(color.opacity(0.3)), lineWidth: 0.5)
-        }
-
-        // Age-faded trail: strikes read as jabs from the origin.
-        for i in 1..<pts.count {
-            var seg = Path()
-            seg.move(to: project(pts[i - 1]))
-            seg.addLine(to: project(pts[i]))
-            let age = Double(i) / Double(pts.count)
-            ctx.stroke(seg, with: .color(.white.opacity(0.1 + 0.6 * age)),
-                       lineWidth: 1)
-        }
-
-        if let last = pts.last {
-            let q = project(last)
-            ctx.fill(Path(ellipseIn: CGRect(x: q.x - 4, y: q.y - 4,
-                                            width: 8, height: 8)),
-                     with: .color(.yellow))
-        }
+        // Origin-centred: these signals have a natural zero.
+        MotionScatter.drawTrail(ctx, size: size, points: allPts,
+                                maxRadius: maxR, center: SIMD3<Double>(),
+                                axisColors: colors, azimuth: azimuth)
     }
 }
 
@@ -701,37 +604,21 @@ private struct CalCloudView: View {
         // the arcs are supposed to thread — else the fitted rest, else
         // the data mean.
         let restPts = cloud.first ?? []
-        var c: SIMD3<Double>
+        let c: SIMD3<Double>
         if !restPts.isEmpty {
-            c = SIMD3<Double>()
-            for p in restPts { c += p }
-            c /= Double(restPts.count)
+            c = MotionScatter.mean(restPts)
         } else if let viz {
             c = viz.f0
         } else {
-            c = SIMD3<Double>()
-            for p in extentPts { c += p }
-            c /= Double(extentPts.count)
+            c = MotionScatter.mean(extentPts)
         }
         var maxR = 0.04   // floor doubled with the −1…+1 tilt rescale
         for p in extentPts { maxR = max(maxR, simd_length(p - c)) }
-        let half = Double(min(size.width, size.height)) / 2 - 14
-        let s = half / maxR
-        let cx = Double(size.width) / 2
-        let cy = Double(size.height) / 2
-        let cosA = cos(azimuth)
-        let sinA = sin(azimuth)
-        let cosE = cos(0.5)
-        let sinE = sin(0.5)
-
-        func project(_ p: SIMD3<Double>) -> (x: Double, y: Double, depth: Double) {
-            let d = p - c
-            let rx = d.x * cosA - d.y * sinA
-            let ry = d.x * sinA + d.y * cosA
-            return (cx + rx * s,
-                    cy - (d.z * cosE - ry * sinE) * s,
-                    ry * cosE + d.z * sinE)
-        }
+        // Unlike the trail views this one auto-scales to the cloud.
+        let proj = MotionScatter.Projection(center: c, maxRadius: maxR,
+                                            size: size, inset: 14,
+                                            azimuth: azimuth)
+        let project = proj.project
 
         // Feature axes through the rest centre, for orientation.
         let unit = [SIMD3<Double>(1, 0, 0), SIMD3<Double>(0, 1, 0),

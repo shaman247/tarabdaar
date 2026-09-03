@@ -215,21 +215,6 @@ public class MIDIEngine: ObservableObject {
         return sawDriver ? .wired : .virtualEndpoint
     }
 
-    public func destinationNames() -> [String] {
-        var names: [String] = []
-        for i in 0..<MIDIGetNumberOfDestinations() {
-            let dest = MIDIGetDestination(i)
-            var cfName: Unmanaged<CFString>?
-            MIDIObjectGetStringProperty(dest, kMIDIPropertyDisplayName, &cfName)
-            if let name = cfName?.takeRetainedValue() as String? {
-                names.append(name)
-            } else {
-                names.append("Destination \(i)")
-            }
-        }
-        return names
-    }
-
     public static func sourceNames() -> [String] {
         var names: [String] = []
         for i in 0..<MIDIGetNumberOfSources() {
@@ -251,13 +236,6 @@ public class MIDIEngine: ObservableObject {
         sendControlChange(controller: 100, value: 0, channel: channel)   // RPN LSB
         sendControlChange(controller: 6, value: semitones, channel: channel) // Data Entry MSB
         sendControlChange(controller: 38, value: 0, channel: channel)    // Data Entry LSB
-    }
-
-    /// Channel pressure (aftertouch) — MPE standard for per-note expression
-    public func sendChannelPressure(value: UInt8, channel: UInt8) {
-        guard isActive else { return }
-        let status: UInt8 = 0xD0 | (channel & 0x0F)
-        sendMessage(bytes: [status, value])
     }
 
     public func sendNoteOn(note: UInt8, velocity: UInt8, channel: UInt8) {

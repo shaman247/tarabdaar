@@ -56,6 +56,20 @@ public enum TLPVolume {
 
     /// Wire byte → the 0…1 log-domain display value.
     public static func value01(_ b: UInt8) -> Double { Double(b) / 255.0 }
+
+    /// Linear amplitude (0 dBFS = 1.0) → the same 0…1 log display value,
+    /// without the wire's byte quantisation. The ONE level law behind
+    /// every scope that draws amplitude: 0 at the floor, 1 at 0 dBFS.
+    public static func level01(linear level: Double) -> Double {
+        guard level > 0 else { return 0 }
+        let db = 20.0 * log10(level)
+        return min(1, max(0, 1.0 - db / floorDb))
+    }
+
+    /// The 0…1 display value back to dB (0 → the floor, 1 → 0 dBFS).
+    public static func db(from01 v: Double) -> Double {
+        (1.0 - v) * floorDb
+    }
 }
 
 /// Which end of the link a HELLO comes from.

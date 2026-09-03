@@ -330,6 +330,7 @@ typedef struct {
     double jtHpYS;                    /* side twin of the jt tone HP */
     double jtHoldS, jtOutHoldS;       /* side jt hold walk / async hold */
     double *jtHpS;                    /* pool partial sums, side */
+    double *jtWebScr, *jtWebScrS;     /* offline-pull web scratch (mono/side) */
     double *jtWebRingS;               /* async web FIFO, side */
     /* ---- INSTRUMENT WIDTH: one instrument, two observation points — a dense
        random-sign side-only modal bank (identical at low frequency, diffusely
@@ -1615,6 +1616,40 @@ static inline double jt_ev_step(bow_poly_state_t *st)
     return c;
 }
 
+/* instant-attack peak envelope: a peak jumps to the input, anything below it
+   walks toward it at `rel`. The one idiom behind the cap, scope and voice
+   side-chain envelopes. */
+static inline double peak_env(double e, double a, double rel)
+{
+    return a > e ? a : e + rel * (a - e);
+}
+
+/* One cap stage: peak envelope against the ceiling, the pow(c/e, h) target
+   and the attack/release gain slew. Shared by the per-string rows and the
+   taraf bus — the caller owns the state triple and the exponent; a
+   generation bump resets the stage on its own thread. */
+static inline double cap_gain_step(const bow_poly_state_t *st, double cap,
+                                   double a, double h, int *gen,
+                                   double *env, double *gain)
+{
+    if (*gen != st->jtCapGen) {
+        *gen = st->jtCapGen;
+        *env = 0.0;
+        *gain = 1.0;
+    }
+    const double e = peak_env(*env, a, st->jtCapTRel);
+    *env = e;
+    const double c = cap + 1e-12;
+    double gT = 1.0;
+    if (e > c && h > 0.0)
+        gT = h >= 1.0 ? c / e : pow(c / e, h);
+    double g = *gain;
+    if (gT < g) g += st->jtCapAtk * (gT - g);
+    else g += st->jtCapRel * (gT - g);
+    *gain = g;
+    return g;
+}
+
 /* One row, one divided jt sample — the threading unit (touches only row s
    + shared read-only tables; penmax accumulates locally). cap = this
    tick's row ceiling (jt_cap_ceiling), < 0 = off, cap state untouched. */
@@ -1852,34 +1887,16 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         /* PER-STRING CAP: pure output gain after the physics; a fresh arm
            (generation bump) resets the row here, on its own worker. */
         if (cap >= 0.0) {
-            if (st->jtCapRowGen[s] != st->jtCapGen) {
-                st->jtCapRowGen[s] = st->jtCapGen;
-                st->jtCapEnv[s] = 0.0;
-                st->jtCapGain[s] = 1.0;
-            }
-            const double a = fabs(yjt);
-            double e = st->jtCapEnv[s];
-            if (a > e) e = a;
-            else e += st->jtCapTRel * (a - e);
-            st->jtCapEnv[s] = e;
-            const double c = cap + 1e-12;
-            double gT = 1.0;
             const double h = st->jtCapHard * (1.0 - st->jtCapMode);
-            if (e > c && h > 0.0) {
-                gT = h >= 1.0 ? c / e : pow(c / e, h);
-            }
-            double g = st->jtCapGain[s];
-            if (gT < g) g += st->jtCapAtk * (gT - g);
-            else g += st->jtCapRel * (gT - g);
-            st->jtCapGain[s] = g;
-            yjt *= g;
+            yjt *= cap_gain_step(st, cap, fabs(yjt), h,
+                                 &st->jtCapRowGen[s], &st->jtCapEnv[s],
+                                 &st->jtCapGain[s]);
         }
         /* SCOPE TELEMETRY (after the cap — what the row actually
            contributes) */
         if (st->scopeOn) {
-            const double a = fabs(yjt);
-            double e = st->scopeEnv[s];
-            e = a > e ? a : e + st->scopeRel * (a - e);
+            const double e = peak_env(st->scopeEnv[s], fabs(yjt),
+                                      st->scopeRel);
             st->scopeEnv[s] = e;
             if ((++st->scopeCnt[s] & 3u) == 0u) {
                 const int SK = st->scopeK;
@@ -1917,25 +1934,10 @@ static inline void jt_cap_bus(bow_poly_state_t *st, double cap,
                               double *hold, double *holdS)
 {
     if (cap < 0.0) return;
-    if (st->jtCapBGen != st->jtCapGen) {
-        st->jtCapBGen = st->jtCapGen;
-        st->jtCapBEnv = 0.0;
-        st->jtCapBGain = 1.0;
-    }
-    const double a = fabs(*hold);
-    double e = st->jtCapBEnv;
-    if (a > e) e = a;
-    else e += st->jtCapTRel * (a - e);
-    st->jtCapBEnv = e;
-    const double c = cap + 1e-12;
-    double gT = 1.0;
     const double h = st->jtCapHard * st->jtCapMode;
-    if (e > c && h > 0.0)
-        gT = h >= 1.0 ? c / e : pow(c / e, h);
-    double g = st->jtCapBGain;
-    if (gT < g) g += st->jtCapAtk * (gT - g);
-    else g += st->jtCapRel * (gT - g);
-    st->jtCapBGain = g;
+    const double g = cap_gain_step(st, cap, fabs(*hold), h,
+                                   &st->jtCapBGen, &st->jtCapBEnv,
+                                   &st->jtCapBGain);
     *hold *= g;
     *holdS *= g;
 }
@@ -2058,6 +2060,8 @@ void bow_poly_jt_set_threads(void *vst, int nth)
         st->jtTkv = (int *)malloc(sizeof(int) * JT_POOL_CH);
         st->jtHp = (double *)malloc(sizeof(double) * 16 * JT_POOL_CH);
         st->jtHpS = (double *)malloc(sizeof(double) * 16 * JT_POOL_CH);
+        st->jtWebScr = (double *)malloc(sizeof(double) * JT_POOL_CH);
+        st->jtWebScrS = (double *)malloc(sizeof(double) * JT_POOL_CH);
     }
     st->jtGen = 0; st->jtDone = 0; st->jtQuit = 0;
     st->jtPoolN = nth;
@@ -3115,6 +3119,94 @@ void bow_poly_process3(void *vst, int n, int stride,
                        const double *xv, double *out, double *outS,
                        double *outJt, double *outJtS);
 
+/* ---- one web comb, the two halves shared by the non-passive comb and the
+   passive junction's two passes ---- */
+
+/* The delay-line read: the two most recent taps for the tuning allpass pair
+   (through the y1/y2 outputs) plus the 5-tap series read at the loop delay, which the
+   roll law swaps for its modulated read. */
+static inline double comb_delay_read(const bow_poly_state_t *st, int i,
+                                     const double *b, int wi, int len,
+                                     double *y1, double *y2)
+{
+    const int Li = st->L[i];
+    const double *w0 = st->w0, *w1 = st->w1, *w2 = st->w2;
+    const double *w3 = st->w3, *w4 = st->w4;
+    *y1 = b[(wi + len - 1) % len];
+    *y2 = b[(wi + len - 2) % len];
+    double yL0 = b[(wi + len - Li) % len];
+    double yL1 = b[(wi + len - Li - 1) % len];
+    double yL2 = b[(wi + len - Li - 2) % len];
+    double yL3 = b[(wi + len - Li - 3) % len];
+    double yL4 = b[(wi + len - Li - 4) % len];
+    double ySer = w0[i] * yL0 + w1[i] * yL1 + w2[i] * yL2
+        + w3[i] * yL3 + w4[i] * yL4;
+    if (st->jawRoll > 1e-12 && st->rollD[i] > 1e-12)
+        ySer = roll_read(b, wi, len, Li, w0[i], w1[i],
+                         w2[i], w3[i], w4[i], st->rollD[i]);
+    return ySer;
+}
+
+/* The jawari nonlinearity and the write-back: the brief-contact roll law or
+   the collision/soft fold, the jl loss envelope, the delay write and index
+   advance, the jw DC-blocked buzz term, the output LP and the duck-weighted
+   direct tap. Returns the comb's filtered output (vlp) so the non-passive
+   caller can feed the junction force. */
+static inline double comb_jaw_write(bow_poly_state_t *st, int i,
+                                    double y, double x,
+                                    double *b, int wi, int len,
+                                    double aDuck, int stOn,
+                                    double *tdir, double *tdirS)
+{
+    const double *jn = st->jn, *jl = st->jl, *jw = st->jw;
+    const double jq = st->jq, jq2 = st->jq2;
+    double wv = y;
+    if (st->jawRoll > 1e-12) {
+        /* brief-contact roll law: engage only near the positive
+           displacement extreme */
+        st->rollE[i] = fmax(0.99999 * st->rollE[i], fabs(y));
+        double tgt = (jn[i] > 1e-9
+                      && y > st->jawRollAmp * st->rollE[i])
+            ? st->jawRoll * st->jawG * jn[i] : 0.0;
+        st->rollD[i] += st->rollAv[i] * (tgt - st->rollD[i]);
+        if (st->rollD[i] > 3.0) st->rollD[i] = 3.0;
+    } else if (jn[i] > 1e-9 && y > 0.0) {
+        if (st->jawRho > 1e-12) {
+            /* collision fold */
+            double e2 = y - jq2;
+            if (e2 > 0.0)
+                wv = y - st->jawG * jn[i] * (1.0 + st->jawRho) * e2;
+        } else {
+            double sf = y / (y + jq2 + 1e-30);
+            wv = y * (1.0 - st->jawG * jn[i] * sf);
+        }
+    }
+    if (jl[i] > 1e-9) {
+        double e = 0.9995 * st->jenv[i] + 0.0005 * fabs(y);
+        st->jenv[i] = e;
+        double hot = e / (e + jq + 1e-30);
+        wv = wv * (1.0 - jl[i] * hot);
+    }
+    b[wi] = wv;
+    st->widx[i] = (wi + 1) % len;
+    st->vx2[i] = st->vx1[i];
+    st->vx1[i] = x;
+    double yo = y;
+    if (jw[i] > 1e-9) {
+        double r = fabs(y);
+        st->jdc[i] = 0.99947 * st->jdc[i] + 0.00053 * r;
+        yo = y + st->jawG * jw[i] * (r - st->jdc[i]);
+    }
+    const double v = (1.0 - st->lpA[i]) * yo + st->lpA[i] * st->vlp[i];
+    st->vlp[i] = v;
+    st->dwt[i] += (1.0 - aDuck) * (st->dtg[i] - st->dwt[i]);
+    *tdir += st->dwt[i] * st->twt[i] * st->wout[i] * v;
+    if (stOn)
+        *tdirS += st->stWebPan[i] * st->dwt[i] * st->twt[i]
+            * st->wout[i] * v;
+    return v;
+}
+
 /* Mono entry — the bit-exact parity path. */
 void bow_poly_process(void *vst, int n, int stride,
                       const double *f0, const double *vb, const double *fb,
@@ -3159,34 +3251,29 @@ void bow_poly_process3(void *vst, int n, int stride,
         memset(outJtS, 0, sizeof(double) * (size_t)n);
         if (outJt) joS = outJtS;
     }
-    const double *stWp = st->stWebPan, *stSp = st->stSlotPan;
+    const double *stSp = st->stSlotPan;
     const int nv = st->nv;
     const int K = st->K;
     const int *L = st->L;
     const int *off = st->off;
-    const double *cs = st->cs, *cp = st->cp, *w0 = st->w0, *w1 = st->w1;
-    const double *w2 = st->w2, *w3 = st->w3, *w4 = st->w4, *g = st->g;
-    const double *lpA = st->lpA, *wout = st->wout, *kap = st->kap;
-    const double *alphaw = st->alphaw, *jw = st->jw, *jl = st->jl;
-    const double *jn = st->jn, *zdrv = st->zdrv, *zi = st->zi;
-    const double *twt = st->twt;
+    const double *cs = st->cs, *cp = st->cp, *g = st->g;
+    const double *wout = st->wout, *kap = st->kap;
+    const double *alphaw = st->alphaw, *zdrv = st->zdrv;
     const double *ba1 = st->ba1, *ba2 = st->ba2, *bn0 = st->bn0;
     const double *bA = st->bA, *bC = st->bC;
     const double yinf = st->yinf, c0 = st->c0, dcRho = st->dcRho;
     const double pgain = st->pgain, pA = st->pA, bowW = st->bowW;
     const double Z = st->Z, zload = st->zload;
-    const double jq = st->jq, jq2 = st->jq2;
     const double tdirect = st->tdirect, tshape = st->tshape, tmix = st->tmix;
     const double tuw = st->tuw;
-    double *fv = st->fv, *dwt = st->dwt, *dtg = st->dtg;
+    double *fv = st->fv, *dtg = st->dtg;
     const double aDuck = exp(-1.0 / (0.010 * st->sr));
     const double hpG = st->hpG, jy0 = st->jy0, jzsum = st->jzsum;
     const int psv = st->psv;
     const int bowOn = bowW > 1e-9;
     double *arena = st->arena;
     int *widx = st->widx;
-    double *vx1 = st->vx1, *vx2 = st->vx2, *vlp = st->vlp;
-    double *jdc = st->jdc, *jenv = st->jenv, *sv = st->sv;
+    double *vx1 = st->vx1, *vx2 = st->vx2, *sv = st->sv;
 
     /* per-chunk processed-string set: bowed this chunk, or still ringing */
     int nProc = 0;
@@ -3311,65 +3398,13 @@ void bow_poly_process3(void *vst, int n, int stride,
                 int len = L[i] + 8;
                 double *b = arena + off[i];
                 int wi = widx[i];
-                double y1 = b[(wi + len - 1) % len];
-                double y2 = b[(wi + len - 2) % len];
-                double yL0 = b[(wi + len - L[i]) % len];
-                double yL1 = b[(wi + len - L[i] - 1) % len];
-                double yL2 = b[(wi + len - L[i] - 2) % len];
-                double yL3 = b[(wi + len - L[i] - 3) % len];
-                double yL4 = b[(wi + len - L[i] - 4) % len];
-                double ySer = w0[i] * yL0 + w1[i] * yL1 + w2[i] * yL2
-                    + w3[i] * yL3 + w4[i] * yL4;
-                if (st->jawRoll > 1e-12 && st->rollD[i] > 1e-12)
-                    ySer = roll_read(b, wi, len, L[i], w0[i], w1[i],
-                                     w2[i], w3[i], w4[i], st->rollD[i]);
+                double y1, y2;
+                double ySer = comb_delay_read(st, i, b, wi, len, &y1, &y2);
                 double y = (1.0 - g[i]) * (x + cs[i] * vx1[i] + cp[i] * vx2[i])
                     - cs[i] * y1 - cp[i] * y2
                     + g[i] * ySer;
-                double wv = y;
-                if (st->jawRoll > 1e-12) {
-                    /* brief-contact roll law: engage only near the positive
-                       displacement extreme */
-                    st->rollE[i] = fmax(0.99999 * st->rollE[i], fabs(y));
-                    double tgt = (jn[i] > 1e-9
-                                  && y > st->jawRollAmp * st->rollE[i])
-                        ? st->jawRoll * st->jawG * jn[i] : 0.0;
-                    st->rollD[i] += st->rollAv[i] * (tgt - st->rollD[i]);
-                    if (st->rollD[i] > 3.0) st->rollD[i] = 3.0;
-                } else if (jn[i] > 1e-9 && y > 0.0) {
-                    if (st->jawRho > 1e-12) {
-                        /* collision fold */
-                        double e2 = y - jq2;
-                        if (e2 > 0.0)
-                            wv = y - st->jawG * jn[i] * (1.0 + st->jawRho) * e2;
-                    } else {
-                        double s = y / (y + jq2 + 1e-30);
-                        wv = y * (1.0 - st->jawG * jn[i] * s);
-                    }
-                }
-                if (jl[i] > 1e-9) {
-                    double e = 0.9995 * jenv[i] + 0.0005 * fabs(y);
-                    jenv[i] = e;
-                    double hot = e / (e + jq + 1e-30);
-                    wv = wv * (1.0 - jl[i] * hot);
-                }
-                b[wi] = wv;
-                widx[i] = (wi + 1) % len;
-                vx2[i] = vx1[i];
-                vx1[i] = x;
-                double yo = y;
-                if (jw[i] > 1e-9) {
-                    double r = fabs(y);
-                    jdc[i] = 0.99947 * jdc[i] + 0.00053 * r;
-                    yo = y + st->jawG * jw[i] * (r - jdc[i]);
-                }
-                vlp[i] = (1.0 - lpA[i]) * yo + lpA[i] * vlp[i];
-                F += wout[i] * vlp[i];
-                dwt[i] += (1.0 - aDuck) * (dtg[i] - dwt[i]);
-                tdir += dwt[i] * twt[i] * wout[i] * vlp[i];
-                if (stOn)
-                    tdirS += stWp[i] * dwt[i] * twt[i]
-                        * wout[i] * vlp[i];
+                F += wout[i] * comb_jaw_write(st, i, y, x, b, wi, len,
+                                              aDuck, stOn, &tdir, &tdirS);
             }
         } else {
             /* PASSIVE WAVE JUNCTION, PASS 1 (the strings' delay-free loading
@@ -3378,18 +3413,8 @@ void bow_poly_process3(void *vst, int n, int stride,
                 int len = L[i] + 8;
                 double *b = arena + off[i];
                 int wi = widx[i];
-                double y1 = b[(wi + len - 1) % len];
-                double y2 = b[(wi + len - 2) % len];
-                double yL0 = b[(wi + len - L[i]) % len];
-                double yL1 = b[(wi + len - L[i] - 1) % len];
-                double yL2 = b[(wi + len - L[i] - 2) % len];
-                double yL3 = b[(wi + len - L[i] - 3) % len];
-                double yL4 = b[(wi + len - L[i] - 4) % len];
-                double ySer = w0[i] * yL0 + w1[i] * yL1 + w2[i] * yL2
-                    + w3[i] * yL3 + w4[i] * yL4;
-                if (st->jawRoll > 1e-12 && st->rollD[i] > 1e-12)
-                    ySer = roll_read(b, wi, len, L[i], w0[i], w1[i],
-                                     w2[i], w3[i], w4[i], st->rollD[i]);
+                double y1, y2;
+                double ySer = comb_delay_read(st, i, b, wi, len, &y1, &y2);
                 double S = (1.0 - g[i]) * (cs[i] * vx1[i] + cp[i] * vx2[i])
                     - cs[i] * y1 - cp[i] * y2
                     + g[i] * ySer;
@@ -3421,52 +3446,11 @@ void bow_poly_process3(void *vst, int n, int stride,
             for (int i = 0; i < nv; i++) {
                 double x = alphaw[i] * xv[t] - zdrv[i] * V;
                 double y = (1.0 - g[i]) * x + sv[i];
-                double wv = y;
-                if (st->jawRoll > 1e-12) {
-                    /* brief-contact roll law: engage only near the positive
-                       displacement extreme */
-                    st->rollE[i] = fmax(0.99999 * st->rollE[i], fabs(y));
-                    double tgt = (jn[i] > 1e-9
-                                  && y > st->jawRollAmp * st->rollE[i])
-                        ? st->jawRoll * st->jawG * jn[i] : 0.0;
-                    st->rollD[i] += st->rollAv[i] * (tgt - st->rollD[i]);
-                    if (st->rollD[i] > 3.0) st->rollD[i] = 3.0;
-                } else if (jn[i] > 1e-9 && y > 0.0) {
-                    if (st->jawRho > 1e-12) {
-                        /* collision fold */
-                        double e2 = y - jq2;
-                        if (e2 > 0.0)
-                            wv = y - st->jawG * jn[i] * (1.0 + st->jawRho) * e2;
-                    } else {
-                        double s = y / (y + jq2 + 1e-30);
-                        wv = y * (1.0 - st->jawG * jn[i] * s);
-                    }
-                }
-                if (jl[i] > 1e-9) {
-                    double e = 0.9995 * jenv[i] + 0.0005 * fabs(y);
-                    jenv[i] = e;
-                    double hot = e / (e + jq + 1e-30);
-                    wv = wv * (1.0 - jl[i] * hot);
-                }
                 int len = L[i] + 8;
                 double *b = arena + off[i];
                 int wi = widx[i];
-                b[wi] = wv;
-                widx[i] = (wi + 1) % len;
-                vx2[i] = vx1[i];
-                vx1[i] = x;
-                double yo = y;
-                if (jw[i] > 1e-9) {
-                    double r = fabs(y);
-                    jdc[i] = 0.99947 * jdc[i] + 0.00053 * r;
-                    yo = y + st->jawG * jw[i] * (r - jdc[i]);
-                }
-                vlp[i] = (1.0 - lpA[i]) * yo + lpA[i] * vlp[i];
-                dwt[i] += (1.0 - aDuck) * (dtg[i] - dwt[i]);
-                tdir += dwt[i] * twt[i] * wout[i] * vlp[i];
-                if (stOn)
-                    tdirS += stWp[i] * dwt[i] * twt[i]
-                        * wout[i] * vlp[i];
+                comb_jaw_write(st, i, y, x, b, wi, len,
+                               aDuck, stOn, &tdir, &tdirS);
             }
         }
         if (bowOn) {
@@ -3525,10 +3509,8 @@ void bow_poly_process3(void *vst, int n, int stride,
         /* per-string cap side-chain: instant-attack voice-bus peak envelope,
            recorded per sample (out[t] is voice-only here) */
         if (jtCv) {
-            const double v = fabs(out[t]);
-            double e = st->jtCapVEnv;
-            if (v > e) e = v;
-            else e += st->jtCapVRel * (v - e);
+            const double e = peak_env(st->jtCapVEnv, fabs(out[t]),
+                                      st->jtCapVRel);
             st->jtCapVEnv = e;
             jtCv[t] = e;
         }
@@ -3614,6 +3596,10 @@ void bow_poly_process3(void *vst, int n, int stride,
         if (dispLock)
             pthread_mutex_lock(&st->jtDispMx);
         if (st->jtPoolN < 2) {
+            /* serial: interleaved by design, NOT jt_run_job_locked's serial
+               branch — that one scans the whole job before it walks the
+               output, so every jt_cap_ceiling would read jtGMulCur from
+               before the block's jt_lp_step slews it. */
             for (int t = 0; t < n; t++) {
                 double F = jtFr[t];
                 st->jtFdc += 2e-4 * (F - st->jtFdc);
@@ -3643,95 +3629,24 @@ void bow_poly_process3(void *vst, int n, int stride,
                 if (-F > st->jtFmax) st->jtFmax = -F;
             }
         } else {
-            const int nth = st->jtPoolN;
-            double *fdv = st->jtFdv;
-            double *evv = st->jtEvV;
-            double *capv = st->jtCapV;
-            int *tkv = st->jtTkv;
-            double *hp = st->jtHp;
+            /* pooled: the dispatcher's own job runner, one JT_POOL_CH chunk
+               at a time into the web scratch, then the shared output walk */
+            double *web = st->jtWebScr;
+            double *webS = stOn ? st->jtWebScrS : NULL;
             for (int c0 = 0; c0 < n; c0 += JT_POOL_CH) {
                 const int cn = n - c0 < JT_POOL_CH ? n - c0
                                                    : JT_POOL_CH;
-                int nT = 0;
+                jt_run_job_locked(st, jtFr + c0, jtCv + c0, cn, web, webS);
                 for (int t = 0; t < cn; t++) {
-                    double F = jtFr[c0 + t];
-                    st->jtFdc += 2e-4 * (F - st->jtFdc);
-                    st->jtFacc += F - st->jtFdc;
-                    if (++st->jtPhase >= st->jtDiv) {
-                        double Fd = st->jtFacc / st->jtDiv;
-                        st->jtFacc = 0.0; st->jtPhase = 0;
-                        fdv[nT] = st->jtFprev * st->jtDrv;
-                        evv[nT] = jt_ev_step(st);
-                        capv[nT] = jt_cap_ceiling(st, jtCv[c0 + t]);
-                        tkv[nT] = t;
-                        nT++;
-                        st->jtFprev = Fd;
-                    }
-                    if (F > st->jtFmax) st->jtFmax = F;
-                    if (-F > st->jtFmax) st->jtFmax = -F;
-                }
-                if (nT == 0) {
-                    for (int t = 0; t < cn; t++) {
-                        const double g = jt_gain_step(st);
-                        double jv = g * jt_lp_step(st, st->jtHold);
-                        jo[c0 + t] += jv;
-                        if (stOn) {
-                            joS[c0 + t] += g * jt_lp_stepS(st, st->jtHoldS);
-                            if (st->stWidthOn)
-                                joS[c0 + t] += st->stWidthCur
-                                    * poly_width_bank(st, 1, jv);
-                        }
-                    }
-                    continue;
-                }
-                for (int th = 0; th < nth; th++) {
-                    memset(hp + (size_t)th * JT_POOL_CH, 0,
-                           sizeof(double) * (size_t)nT);
-                    if (stOn && st->jtHpS)
-                        memset(st->jtHpS + (size_t)th * JT_POOL_CH, 0,
-                               sizeof(double) * (size_t)nT);
-                    st->jtWPen[th] = st->jtPenMax;
-                }
-                pthread_mutex_lock(&st->jtMx);
-                st->jtWnT = nT;
-                st->jtWPer = (st->njt + nth - 1) / nth;
-                st->jtDone = 0;
-                st->jtGen++;
-                pthread_cond_broadcast(&st->jtCvW);
-                while (st->jtDone < st->jtPoolN && !st->jtQuit)
-                    pthread_cond_wait(&st->jtCvD, &st->jtMx);
-                pthread_mutex_unlock(&st->jtMx);
-                for (int th = 0; th < nth; th++)
-                    if (st->jtWPen[th] > st->jtPenMax)
-                        st->jtPenMax = st->jtWPen[th];
-                double hold = st->jtHold, holdS = st->jtHoldS;
-                int ki = 0;
-                for (int t = 0; t < cn; t++) {
-                    if (ki < nT && t == tkv[ki]) {
-                        double H = 0.0, HS = 0.0;
-                        for (int th = 0; th < nth; th++) {
-                            H += hp[(size_t)th * JT_POOL_CH + ki];
-                            if (stOn && st->jtHpS)
-                                HS += st->jtHpS[(size_t)th
-                                                * JT_POOL_CH + ki];
-                        }
-                        hold = H;
-                        holdS = HS;
-                        jt_cap_bus(st, capv[ki], &hold, &holdS);
-                        ki++;
-                    }
-                    const double g = jt_gain_step(st);
-                    double jv = g * jt_lp_step(st, hold);
+                    const double jv = web[t];
                     jo[c0 + t] += jv;
                     if (stOn) {
-                        joS[c0 + t] += g * jt_lp_stepS(st, holdS);
+                        joS[c0 + t] += webS[t];
                         if (st->stWidthOn)
                             joS[c0 + t] += st->stWidthCur
                                 * poly_width_bank(st, 1, jv);
                     }
                 }
-                st->jtHold = hold;
-                st->jtHoldS = holdS;
             }
         }
         if (dispLock)
@@ -3774,6 +3689,7 @@ void bow_poly_free(void *vst)
         free(st->jtFrBuf); free(st->jtFdv); free(st->jtTkv);
         free(st->jtEvV);
         free(st->jtHp); free(st->jtHpS);
+        free(st->jtWebScr); free(st->jtWebScrS);
         free(st->sjRing);
         free(st->jtDrvRing); free(st->jtWebRing);
         free(st->jtWebRingS);

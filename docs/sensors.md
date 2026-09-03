@@ -11,7 +11,6 @@ The iPad streams raw motion; the Mac evaluates every binding. This page covers t
 | `pitch`, `roll`, `yaw` | attitude in radians (yaw is the raw CoreMotion value; the wire uses the corrected form below) |
 | `normalizedTilts` | the three angles at a FIXED ±90° full scale, each clamped to −1…+1 — the raw tilt report the wire carries (tilt 1 = pitch, 2 = roll, 3 = corrected yaw) |
 | `userAccelX/Y/Z`, `accelMagnitude` | gravity-removed acceleration in g |
-| `recentPeakAccel` | peak with fast attack / slow decay (`Config.peakDecayRate` 0.95) |
 | `strikeLevel` | the strike envelope (below) |
 
 ### Accelerometer ring buffer

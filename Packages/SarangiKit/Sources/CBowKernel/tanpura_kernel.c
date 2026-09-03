@@ -42,82 +42,8 @@ static inline float tp_fastpow(float x, float A)
     return p2 * v.f;
 }
 
-/* iterative Hunt-Crossley contact solve. Reached only through
-   tp_contact_apply — the live contact is tp_sav_contact. */
-static void tp_solve(int nn, const float *eta0, const float *udot,
-                     const float *Gm, const float *gdm,
-                     float kc, float alpha, float hcB, float *F)
-{
-    float c[TP_MAXJ], f[TP_MAXJ];
-    int act[TP_MAXJ], aci[TP_MAXJ], nac;
-    const float am1 = alpha - 1.0f;
-    for (int o = 0; o < 12; o++) {
-        nac = 0;
-        for (int i = 0; i < nn; i++) {
-            float gf = 0.0f;
-            const float *Gr = Gm + (size_t)i * nn;
-            for (int j = 0; j < nn; j++) gf += Gr[j] * F[j];
-            c[i] = eta0[i] - (gf - gdm[i] * F[i]);
-            act[i] = c[i] > 0.0f;
-            if (act[i]) {
-                f[i] = kc * c[i] * tp_fastpow(c[i], am1);
-                aci[nac++] = i;
-            } else f[i] = 0.0f;
-        }
-        for (int it = 0; it < 10; it++) {
-            for (int a = 0; a < nac; a++) {
-                const int i = aci[a];
-                float eta = c[i] - gdm[i] * f[i];
-                float g, gp;
-                if (eta > 0.0f) {
-                    g = f[i] - kc * eta * tp_fastpow(eta, am1);
-                    gp = 1.0f + kc * alpha * gdm[i]
-                         * tp_fastpow(eta > 1e-12f ? eta : 1e-12f, am1);
-                } else { g = f[i]; gp = 1.0f; }
-                float fn = f[i] - g / gp;
-                if (fn < 0.0f) fn = 0.0f;
-                float cap = c[i] / (gdm[i] > 1e-30f ? gdm[i] : 1e-30f);
-                if (fn > cap) fn = cap;
-                f[i] = fn;
-            }
-        }
-        float dF = 0.0f, fm = 1e-2f;
-        for (int i = 0; i < nn; i++) {
-            float d = fabsf(f[i] - F[i]);
-            if (d > dF) dF = d;
-            if (f[i] > fm) fm = f[i];
-        }
-        for (int i = 0; i < nn; i++) F[i] += 0.5f * (f[i] - F[i]);
-        if (dF < 1e-4f * fm) {   /* relative 1e-4, absolute floor 1e-6 */
-            for (int i = 0; i < nn; i++) F[i] = f[i];
-            break;
-        }
-    }
-    /* F: pre-Hunt-Crossley forces (next call's warm start) */
-}
-
-static void tp_hc(int nn, const float *udot, float hcB,
-                  const float *F, float *Fout)
-{
-    for (int i = 0; i < nn; i++) {
-        float hc = 1.0f + hcB * (-udot[i]);
-        if (hc < 0.15f) hc = 0.15f;
-        if (hc > 1.0f) hc = 1.0f;
-        Fout[i] = F[i] * hc;
-    }
-}
-
 typedef struct {
     int used, active, M, J;
-    /* ---- FD continuum slot (is_fd): a finite-difference string with
-       penalty contact; the modal fields stay unused. Not mounted by
-       TanpuraEngine. ---- */
-    int is_fd, fdN, fdOi, fdSteps;   /* grid pts, obs node, steps/out */
-    double *fdU, *fdUp, *fdB, *fdPsh, *fdScr;
-    double *fdUeq;                   /* settled wrap (touch anchor) */
-    double fdTouch;                  /* finger damp at pluck (1 = off) */
-    double fdLam2, fdMuk, fdS1h, fdA0, fdB0, fdKc, fdAlpha;
-    double fdObsPrev;
     /* tables (owned) */
     double *ca, *cb, *ca4, *cb4, *ca2, *cb2, *cas, *cbs, *wd;
     double *caw, *cbw, *wdw;
@@ -146,8 +72,6 @@ typedef struct {
     double envPrev;             /* stagnation-idle: last window env */
     int stagn;                  /* blocks since the last window */
     double pen0;                /* settled static wrap penetration */
-    long deepRun;               /* unused */
-    long permaCount;            /* unused */
     int forceDeep;              /* f0 > 140 Hz: costEma seed x4 */
     double costEma;             /* smoothed render cost (s/sample) —
                                    the pool's heavy-first sort key */
@@ -194,6 +118,27 @@ static int tp_sav_contact(tp_slot *s, const float *beff,
                           const float *uf, const float *udf,
                           double *fth_out, float *Fn_out);
 
+/* the settled SAV snapshot (psi/eta/dissipation budget) */
+static void tp_restore_sav(tp_slot *s)
+{
+    memcpy(s->svPsi, s->svPsi0, sizeof(s->svPsi));
+    memcpy(s->svEta, s->svEta0, sizeof(s->svEta));
+    memcpy(s->svBud, s->svBud0, sizeof(s->svBud));
+}
+
+/* back to the settled static wrap: q = q0, everything else at rest.
+   The ONE place a string is returned to its equilibrium (idle wake,
+   migration, divergence reset). */
+static void tp_reset_settled(tp_slot *s)
+{
+    memcpy(s->q, s->q0, sizeof(double) * (size_t)s->M);
+    memset(s->p, 0, sizeof(double) * (size_t)s->M);
+    memset(s->qw, 0, sizeof(double) * (size_t)s->M);
+    memset(s->pw, 0, sizeof(double) * (size_t)s->M);
+    memset(s->Fw, 0, sizeof(s->Fw));
+    tp_restore_sav(s);
+}
+
 #define TP_ABLK 4096            /* max job block */
 #define TP_ARING 8               /* job ring */
 #define TP_OUTN 32768            /* rendered-audio ring */
@@ -211,7 +156,6 @@ struct tp_ctx {
     long long pluckSeq;          /* global pluck counter (clone LRU) */
     int polyMax;                 /* live history strings (atomic) */
     tp_slot *s;
-    int deep_budget;             /* unused by the SAV render */
     long resets;                 /* divergence-guard resets (telemetry) */
     /* ---- note-event SPSC ring (producer -> dispatcher) ---- */
     int evSlot[TP_EVN];
@@ -247,7 +191,6 @@ void *tanpura_create(int nslots)
     c->nslots = nslots + TP_CLONES;
     c->polyMax = 6;
     c->s = (tp_slot *)calloc((size_t)c->nslots, sizeof(tp_slot));
-    c->deep_budget = 3;
     /* clone pool: state + frozen-table buffers sized for any owner */
     for (int i = nslots; i < c->nslots; i++) {
         tp_slot *s = &c->s[i];
@@ -291,8 +234,6 @@ static void tp_slot_free(tp_slot *s)
         return;
     }
 #define TPF(x) free(s->x); s->x = 0
-    TPF(fdU); TPF(fdUp); TPF(fdB); TPF(fdPsh); TPF(fdScr);
-    TPF(fdUeq);
     TPF(ca); TPF(cb); TPF(ca4); TPF(cb4); TPF(ca2); TPF(cb2);
     TPF(cas); TPF(cbs); TPF(wd);
     TPF(caw); TPF(cbw); TPF(wdw);
@@ -477,7 +418,6 @@ void tanpura_mount(void *vc, int slot, int M, int J,
     s->rampLeft = 0; s->rampAmp = 0.0; s->rampPrev = 0.0;
     s->envPrev = 0.0; s->stagn = 0; s->pen0 = 0.0;
     s->demoted = 0;
-    s->deepRun = 0; s->permaCount = 0;
     /* wd[0]/2pi ~ f0 */
     s->forceDeep = (wd[0] / (2.0 * 3.14159265358979323846)) > 140.0;
     /* pre-measurement cost seed — a deliberate under-estimate (the
@@ -541,63 +481,6 @@ static void tp_wlat(const tp_slot *s, float *wl)
     }
 }
 
-/* Hunt-Crossley contact on precomputed zone state. Unreferenced — the
-   render path uses tp_sav_contact. */
-static int tp_contact_apply(tp_slot *s, const float *beff,
-                            const float *uf, const float *udf,
-                            const float *wl, int sub, double dtv,
-                            double *fth_out)
-{
-    const int M = s->M, J = s->J;
-    float eta0[TP_MAXJ], F[TP_MAXJ], Gj[TP_MAXJ];
-    int any = 0;
-    for (int j = 0; j < J; j++) {
-        eta0[j] = beff[j] - uf[j];
-        if (eta0[j] > 0.0f) any = 1;
-    }
-    if (!any) {
-        for (int j = 0; j < J; j++) s->Fw[j] = 0.0f;
-        if (fth_out) *fth_out = 0.0;
-        return 0;
-    }
-    const float *Gm = sub == 1 ? s->G4f : (sub == 2 ? s->G2f : s->Gf);
-    const float *gm = sub == 1 ? s->gd4f : (sub == 2 ? s->gd2f : s->gdf);
-    tp_solve(J, eta0, udf, Gm, gm,
-             (float)s->kc, (float)s->alpha, (float)s->hcB, s->Fw);
-    tp_hc(J, udf, (float)s->hcB, s->Fw, F);
-    const int rt_on = s->rt > 0.0 && wl != 0;
-    if (rt_on) {
-        const float rtf = (float)s->rt;
-        for (int j = 0; j < J; j++) Gj[j] = -wl[j] / rtf * F[j];
-    }
-    if (fth_out) {
-        double a = 0.0;
-        for (int j = 0; j < J; j++) a += s->gth[j] * (double)F[j];
-        *fth_out = a;
-    }
-    const double h = dtv, h2 = dtv * dtv / 2.0;
-    for (int k = 0; k < M; k++) {
-        const float *Pr = s->phiFf + (size_t)k * J;
-        float a = 0.0f, gaux = 0.0f;
-        int j = 0;
-        for (; j + 3 < J; j += 4) {
-            a += Pr[j] * F[j] + Pr[j+1] * F[j+1]
-               + Pr[j+2] * F[j+2] + Pr[j+3] * F[j+3];
-            if (rt_on)
-                gaux += Pr[j] * Gj[j] + Pr[j+1] * Gj[j+1]
-                      + Pr[j+2] * Gj[j+2] + Pr[j+3] * Gj[j+3];
-        }
-        for (; j < J; j++) {
-            a += Pr[j] * F[j];
-            if (rt_on) gaux += Pr[j] * Gj[j];
-        }
-        s->p[k] += h * (double)a;
-        s->q[k] += h2 * (double)a;
-        if (rt_on) s->pw[k] += h * (double)gaux;
-    }
-    return 1;
-}
-
 /* build-time settle onto the static wrap: heavy-damping rotation +
    contact, then q -> q0. Off the audio thread. */
 void tanpura_settle(void *vc, int slot, long n)
@@ -641,144 +524,11 @@ void tanpura_settle(void *vc, int slot, long n)
     s->active = 0;
 }
 
-/* ---- FD continuum slot ---- */
-void tanpura_mount_fd(void *vc, int slot, int N,
-                      const double *b, const double *pshape,
-                      double lam2, double muk, double s1h,
-                      double A0, double B0, double kc, double alpha,
-                      int o_i, int ramp_n, int steps_per_out,
-                      double gain, double dt, double touch)
-{
-    /* kc arrives PRE-DIVIDED by MU; touch = finger damp at pluck
-       (state blends toward the settled wrap; 1 = none) */
-    tp_ctx *c = (tp_ctx *)vc;
-    if (slot < 0 || slot >= c->nslots) return;
-    tp_slot *s = &c->s[slot];
-    tp_slot_free(s);
-    memset(s, 0, sizeof(*s));
-    s->is_fd = 1;
-    s->fdN = N;
-    s->fdOi = o_i;
-    s->fdSteps = steps_per_out;
-    s->fdU = (double *)calloc((size_t)N + 1, sizeof(double));
-    s->fdUp = (double *)calloc((size_t)N + 1, sizeof(double));
-    s->fdScr = (double *)calloc((size_t)N + 1, sizeof(double));
-    s->fdUeq = (double *)calloc((size_t)N + 1, sizeof(double));
-    s->fdTouch = touch;
-    s->fdB = tp_dup(b, (size_t)N + 1);
-    s->fdPsh = tp_dup(pshape, (size_t)N + 1);
-    s->fdLam2 = lam2; s->fdMuk = muk; s->fdS1h = s1h;
-    s->fdA0 = A0; s->fdB0 = B0; s->fdKc = kc; s->fdAlpha = alpha;
-    s->rampN = ramp_n;
-    s->gain = gain; s->dt = dt;
-    s->used = 1; s->active = 0;
-}
-
-/* one internal FD step (simply-supported ends, capped one-sided
-   penalty); extra_damp > 0 = settle relaxation */
-static void tp_fd_step(tp_slot *s, double extra_damp)
-{
-    const int N = s->fdN;
-    double *restrict u = s->fdU;
-    double *restrict up = s->fdUp;
-    double *restrict un = s->fdScr;
-    const double *restrict b = s->fdB;
-    const double lam2 = s->fdLam2, muk = s->fdMuk, s1h = s->fdS1h;
-    const double A0 = s->fdA0, B0 = s->fdB0;
-    const double kc = s->fdKc, alpha = s->fdAlpha;
-    const double dt = s->dt;
-    un[0] = 0.0; un[N] = 0.0;
-    for (int i = 1; i < N; i++) {
-        const double d2 = u[i + 1] - 2.0 * u[i] + u[i - 1];
-        const double d2p = up[i + 1] - 2.0 * up[i] + up[i - 1];
-        double d4;
-        if (i == 1)
-            d4 = u[3] - 4.0 * u[2] + 6.0 * u[1] - 4.0 * u[0]
-                 + (-u[1]);
-        else if (i == N - 1)
-            d4 = u[N - 3] - 4.0 * u[N - 2] + 6.0 * u[N - 1]
-                 - 4.0 * u[N] + (-u[N - 1]);
-        else
-            d4 = u[i + 2] - 4.0 * u[i + 1] + 6.0 * u[i]
-                 - 4.0 * u[i - 1] + u[i - 2];
-        /* implicit per-node contact: scalar Newton on
-           f = kc*(eta* − cl*f)^alpha, cl = dt^2/A0 */
-        double v = (2.0 * u[i] - B0 * up[i] + lam2 * d2 - muk * d4
-                    + s1h * (d2 - d2p)) / A0;
-        double eta_s = b[i] - v;
-        if (eta_s > 5e-4) eta_s = 5e-4;
-        if (eta_s > 0.0) {
-            const double cl = dt * dt / A0;
-            double fi = kc * pow(eta_s, alpha);
-            for (int it = 0; it < 8; it++) {
-                double e = eta_s - cl * fi;
-                if (e <= 0.0) { fi *= 0.5; continue; }
-                double g = fi - kc * pow(e, alpha);
-                double gp = 1.0 + kc * alpha * cl
-                            * pow(e, alpha - 1.0);
-                double fn = fi - g / gp;
-                if (fn < 0.0) fn = 0.0;
-                if (fabs(fn - fi) < 1e-9 * (fn > 1.0 ? fn : 1.0)) {
-                    fi = fn;
-                    break;
-                }
-                fi = fn;
-            }
-            v += dt * dt * fi / A0;
-        }
-        if (extra_damp > 0.0) v = u[i] + (v - u[i]) * (1.0 - extra_damp);
-        un[i] = v;
-    }
-    /* rotate buffers: up <- u, u <- un (scr becomes the new up) */
-    double *tmp = s->fdUp;
-    s->fdUp = s->fdU;
-    s->fdU = s->fdScr;
-    s->fdScr = tmp;
-}
-
-/* build-time settle from the tent (caller pre-loads fdU) */
-void tanpura_settle_fd(void *vc, int slot, long n)
-{
-    tp_ctx *c = (tp_ctx *)vc;
-    tp_slot *s = &c->s[slot];
-    if (!s->used || !s->is_fd) return;
-    /* heavy damping swapped into A0/B0 so the settle reaches the wrap */
-    const double a0s = s->fdA0, b0s = s->fdB0;
-    const double sig = 2.0e4;
-    s->fdA0 = 1.0 + sig * s->dt;
-    s->fdB0 = 1.0 - sig * s->dt;
-    for (long t = 0; t < n; t++) tp_fd_step(s, 0.0);
-    s->fdA0 = a0s;
-    s->fdB0 = b0s;
-    memcpy(s->fdUp, s->fdU, sizeof(double) * ((size_t)s->fdN + 1));
-    memcpy(s->fdUeq, s->fdU, sizeof(double) * ((size_t)s->fdN + 1));
-    s->fdObsPrev = s->fdU[s->fdOi];
-    s->active = 0;
-}
-
 void tanpura_set_oversample(void *vc, int slot, int steps)
 {
     tp_ctx *c = (tp_ctx *)vc;
     if (slot < 0 || slot >= c->nslots) return;
     c->s[slot].ovs = steps > 1 ? steps : 1;
-}
-
-void tanpura_fd_get_state(void *vc, int slot, double *u, double *up)
-{
-    tp_ctx *c = (tp_ctx *)vc;
-    tp_slot *s = &c->s[slot];
-    if (!s->used || !s->is_fd) return;
-    memcpy(u, s->fdU, sizeof(double) * ((size_t)s->fdN + 1));
-    memcpy(up, s->fdUp, sizeof(double) * ((size_t)s->fdN + 1));
-}
-
-void tanpura_fd_set_state(void *vc, int slot, const double *u0)
-{
-    tp_ctx *c = (tp_ctx *)vc;
-    tp_slot *s = &c->s[slot];
-    if (!s->used || !s->is_fd) return;
-    memcpy(s->fdU, u0, sizeof(double) * ((size_t)s->fdN + 1));
-    memcpy(s->fdUp, u0, sizeof(double) * ((size_t)s->fdN + 1));
 }
 
 /* voice management: steal the QUIETEST ringing modal slot when a pluck
@@ -796,7 +546,7 @@ static void tp_voice_cap(tp_ctx *c, int keep)
         double cost = 0.0, qe = 1e30;
         for (int k = 0; k < c->nslots; k++) {
             tp_slot *s = &c->s[k];
-            if (!s->used || !s->active || s->is_fd) continue;
+            if (!s->used || !s->active) continue;
             nact++;
             cost += s->costEma;
             if (k != keep && s->idle_env < qe) {
@@ -818,8 +568,7 @@ static void tp_voice_cap(tp_ctx *c, int keep)
 static void tp_ghost_handoff(tp_slot *dst, tp_slot *src, double frac,
                              int split)
 {
-    if (!(frac > 0.0) || !src->active || src->is_fd || dst->is_fd)
-        return;
+    if (!(frac > 0.0) || !src->active) return;
     if (frac > 1.0) frac = 1.0;
     const double keep = 1.0 - frac;
     const int M = src->M;
@@ -862,38 +611,26 @@ static void tp_ghost_handoff(tp_slot *dst, tp_slot *src, double frac,
     const double gs = !toGhost ? 0.0
         : (dst->gGain != 0.0 ? frac * src->gain / dst->gGain : frac);
     const double w1 = src->wd[0];
-    if (src->demoted) {
-        for (int k = 0; k < M; k++) {
-            double wk = 1.0;
-            if (split) {
-                wk = (src->wd[k] / w1 - 2.0) * 0.5;
-                if (wk < 0.0) wk = 0.0;
-                if (wk > 1.0) wk = 1.0;
-            }
-            const double g2 = gs * wk;
-            dst->gq[k] += g2 * src->q[k];
-            dst->gp[k] += g2 * src->p[k];
-            dst->gqw[k] += g2 * src->qw[k];
-            dst->gpw[k] += g2 * src->pw[k];
-            src->q[k] *= keep; src->p[k] *= keep;
-            src->qw[k] *= keep; src->pw[k] *= keep;
+    /* a DEMOTED string's q already holds the deviation, so its wrap
+       anchor is 0 (x - 0 and 0 + keep*(x - 0) are exact identities) */
+    const int dem = src->demoted;
+    for (int k = 0; k < M; k++) {
+        double wk = 1.0;
+        if (split) {
+            wk = (src->wd[k] / w1 - 2.0) * 0.5;
+            if (wk < 0.0) wk = 0.0;
+            if (wk > 1.0) wk = 1.0;
         }
-    } else {
-        for (int k = 0; k < M; k++) {
-            double wk = 1.0;
-            if (split) {
-                wk = (src->wd[k] / w1 - 2.0) * 0.5;
-                if (wk < 0.0) wk = 0.0;
-                if (wk > 1.0) wk = 1.0;
-            }
-            const double g2 = gs * wk;
-            dst->gq[k] += g2 * (src->q[k] - src->q0[k]);
-            dst->gp[k] += g2 * src->p[k];
-            dst->gqw[k] += g2 * src->qw[k];
-            dst->gpw[k] += g2 * src->pw[k];
-            src->q[k] = src->q0[k] + keep * (src->q[k] - src->q0[k]);
-            src->p[k] *= keep; src->qw[k] *= keep; src->pw[k] *= keep;
-        }
+        const double g2 = gs * wk;
+        const double q0k = dem ? 0.0 : src->q0[k];
+        dst->gq[k] += g2 * (src->q[k] - q0k);
+        dst->gp[k] += g2 * src->p[k];
+        dst->gqw[k] += g2 * src->qw[k];
+        dst->gpw[k] += g2 * src->pw[k];
+        src->q[k] = q0k + keep * (src->q[k] - q0k);
+        src->p[k] *= keep; src->qw[k] *= keep; src->pw[k] *= keep;
+    }
+    if (!dem) {
         for (int j = 0; j < src->J; j++) {
             src->svPsi[j] = src->svPsi0[j]
                 + keep * (src->svPsi[j] - src->svPsi0[j]);
@@ -951,7 +688,6 @@ static void tp_migrate(tp_ctx *c, int slot, double iso)
         cl->M = M; cl->J = J;
         cl->owner = slot;
         cl->seq = ++c->pluckSeq;
-        cl->is_fd = 0;
         memcpy(cl->ca, s->ca, sizeof(double) * (size_t)M);
         memcpy(cl->cb, s->cb, sizeof(double) * (size_t)M);
         memcpy(cl->wd, s->wd, sizeof(double) * (size_t)M);
@@ -1018,14 +754,7 @@ static void tp_migrate(tp_ctx *c, int slot, double iso)
         }
     }
 reset_primary:
-    memcpy(s->q, s->q0, sizeof(double) * (size_t)s->M);
-    memset(s->p, 0, sizeof(double) * (size_t)s->M);
-    memset(s->qw, 0, sizeof(double) * (size_t)s->M);
-    memset(s->pw, 0, sizeof(double) * (size_t)s->M);
-    memset(s->Fw, 0, sizeof(s->Fw));
-    memcpy(s->svPsi, s->svPsi0, sizeof(s->svPsi));
-    memcpy(s->svEta, s->svEta0, sizeof(s->svEta));
-    memcpy(s->svBud, s->svBud0, sizeof(s->svBud));
+    tp_reset_settled(s);
     s->thz = 0.0; s->thv = 0.0;
     s->demoted = 0;
     s->rampLeft = 0;
@@ -1041,51 +770,26 @@ void tanpura_pluck(void *vc, int slot, double amp)
     if (!s->used || s->isClone) return;
     /* isolation: migrate the ringing string unless a pre-pluck bend
        already did */
-    if (!s->is_fd && s->iso > 0.0 && s->active && !s->justMigrated)
+    if (s->iso > 0.0 && s->active && !s->justMigrated)
         tp_migrate(c, slot, s->iso);
     s->justMigrated = 0;
-    /* drive (modal slots only; drive 1 leaves gain bit-identical) */
-    if (!s->is_fd && s->drive > 0.0) {
+    /* drive (drive 1 leaves gain bit-identical) */
+    if (s->drive > 0.0) {
         amp *= s->drive;
         s->gain = s->gain0 / s->drive;
     }
     if (s->demoted) {
         for (int k = 0; k < s->M; k++) s->q[k] += s->q0[k];
-        memcpy(s->svPsi, s->svPsi0, sizeof(s->svPsi));
-        memcpy(s->svEta, s->svEta0, sizeof(s->svEta));
-        memcpy(s->svBud, s->svBud0, sizeof(s->svBud));
+        tp_restore_sav(s);
         s->demoted = 0;
     }
     if (!s->active) {
         /* waking from idle: exact settled wrap; a stale ghost is silenced */
-        memcpy(s->q, s->q0, sizeof(double) * (size_t)s->M);
-        memset(s->p, 0, sizeof(double) * (size_t)s->M);
-        memset(s->qw, 0, sizeof(double) * (size_t)s->M);
-        memset(s->pw, 0, sizeof(double) * (size_t)s->M);
-        memset(s->Fw, 0, sizeof(s->Fw));
-        memcpy(s->svPsi, s->svPsi0, sizeof(s->svPsi));
-        memcpy(s->svEta, s->svEta0, sizeof(s->svEta));
-        memcpy(s->svBud, s->svBud0, sizeof(s->svBud));
+        tp_reset_settled(s);
         s->demoted = 0;
         s->ghostOn = 0;
         s->ghost_env = 0.0;
         s->active = 1;
-    }
-    if (s->is_fd) {
-        if (s->fdTouch < 1.0) {
-            for (int i = 0; i <= s->fdN; i++) {
-                s->fdU[i] = s->fdUeq[i]
-                    + s->fdTouch * (s->fdU[i] - s->fdUeq[i]);
-                s->fdUp[i] = s->fdUeq[i]
-                    + s->fdTouch * (s->fdUp[i] - s->fdUeq[i]);
-            }
-        }
-        s->rampLeft = s->rampN > 0 ? s->rampN : 1;
-        s->rampAmp = amp;
-        s->rampPrev = 0.0;
-        s->idle_env = 1.0;
-        s->active = 1;
-        return;
     }
     if (s->rampN > 0) {
         s->rampLeft = s->rampN;
@@ -1124,7 +828,7 @@ void tanpura_damp(void *vc, int slot)
    with tp_render_slot on the same slot. */
 static void tp_apply_bend(tp_slot *s, double r)
 {
-    if (s->is_fd || !s->wd0) return;
+    if (!s->wd0) return;
     if (r < 0.25) r = 0.25;
     if (r > 4.0) r = 4.0;
     if (r == s->bendRatio) return;
@@ -1182,7 +886,6 @@ void tanpura_bend(void *vc, int slot, double ratio)
    cycle that never dies; linearized it idles. A finger stop. */
 static void tp_apply_release(tp_slot *s, double rate)
 {
-    if (s->is_fd) return;
     if (rate <= 0.0) { s->relMul = 1.0; return; }
     s->relMul = exp(-rate * s->dt);
     if (s->active && !s->demoted) {
@@ -1219,7 +922,7 @@ void tanpura_prepluck_bend(void *vc, int slot, double ratio)
     tp_ctx *c = (tp_ctx *)vc;
     if (slot < 0 || slot >= c->nUser) return;
     tp_slot *s = &c->s[slot];
-    if (!s->used || s->is_fd) return;
+    if (!s->used) return;
     if (s->iso > 0.0 && s->active) {
         double rr = ratio < 0.25 ? 0.25 : (ratio > 4.0 ? 4.0 : ratio);
         if (rr != s->bendRatio) {
@@ -1258,56 +961,6 @@ double tanpura_slot_env(void *vc, int slot)
     const tp_slot *s = &c->s[slot];
     return (s->used && s->active) ? s->idle_env : 0.0;
 }
-
-/* render one FD slot, ACCUMULATING into out */
-static int tp_render_fd(tp_ctx *c, tp_slot *s, int n, double *out)
-{
-    double peak = 0.0;
-    for (int t = 0; t < n; t++) {
-        /* the draw ramp rides the internal rate */
-        for (int k = 0; k < s->fdSteps; k++) {
-            if (s->rampLeft > 0) {
-                const double x = (double)(s->rampN - s->rampLeft + 1)
-                                 / (double)s->rampN;
-                const double w = 0.5 * (1.0
-                    - cos(3.14159265358979323846 * x));
-                const double inc = s->rampAmp * (w - s->rampPrev);
-                s->rampPrev = w;
-                s->rampLeft--;
-                double *restrict u = s->fdU, *restrict up = s->fdUp;
-                const double *restrict ps = s->fdPsh;
-                for (int i = 0; i <= s->fdN; i++) {
-                    u[i] += inc * ps[i];
-                    up[i] += inc * ps[i];
-                }
-            }
-            tp_fd_step(s, 0.0);
-        }
-        const double ob = s->fdU[s->fdOi];
-        const double o = s->gain * (ob - s->fdObsPrev) * 48000.0;
-        s->fdObsPrev = ob;
-        out[t] += o;
-        const double ao = fabs(o);
-        if (ao > peak) peak = ao;
-    }
-    int fin = 1;
-    for (int i = 0; i <= s->fdN; i += 7)
-        if (!isfinite(s->fdU[i]) || fabs(s->fdU[i]) > 0.05) fin = 0;
-    if (!fin) {
-        memset(s->fdU, 0, sizeof(double) * ((size_t)s->fdN + 1));
-        memset(s->fdUp, 0, sizeof(double) * ((size_t)s->fdN + 1));
-        s->fdObsPrev = 0.0;
-        s->rampLeft = 0;
-        s->active = 0;
-        __atomic_add_fetch(&c->resets, 1, __ATOMIC_RELAXED);
-        return 0;
-    }
-    s->idle_env = peak > s->idle_env ? peak : s->idle_env * 0.98;
-    /* auto-idle at musical silence (~-86 dBFS post chain) */
-    if (s->idle_env < 1e-3) s->active = 0;
-    return 0;
-}
-
 
 /* SAV modal contact: one J-system per internal sample, no iterations,
    no substeps; approach-only viscosity TP_SAV_CV. Returns 1 if any
@@ -1458,18 +1111,14 @@ sav_build:
     return 1;
 }
 
-/* render one modal slot, ACCUMULATING into out (deep_ok unused;
-   returns 0) */
-static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
-                          int deep_ok)
+/* render one modal slot, ACCUMULATING into out */
+static void tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out)
 {
-    if (s->is_fd) return tp_render_fd(c, s, n, out);
     const int M = s->M, J = s->J;
     const double dt = s->dt, dt4 = dt / 4.0;
     float uf[TP_MAXJ], udf[TP_MAXJ], wl[TP_MAXJ], bf[TP_MAXJ];
     double qs[TP_MAXM], ps[TP_MAXM];
     double peak = 0.0, gpeak = 0.0;
-    int went_deep = 0;
     const int rt_on = s->rt > 0.0;
     const int th_on = s->thH > 0.0;
 #define TP_DEMOTE 1e-2
@@ -1662,14 +1311,7 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
     if (s->ghostOn && (!isfinite(s->gp[0]) || !isfinite(s->gq[M - 1])))
         fin = 0;
     if (!fin) {
-        memcpy(s->q, s->q0, sizeof(double) * (size_t)M);
-        memset(s->p, 0, sizeof(double) * (size_t)M);
-        memset(s->qw, 0, sizeof(double) * (size_t)M);
-        memset(s->pw, 0, sizeof(double) * (size_t)M);
-        memset(s->Fw, 0, sizeof(s->Fw));
-        memcpy(s->svPsi, s->svPsi0, sizeof(s->svPsi));
-        memcpy(s->svEta, s->svEta0, sizeof(s->svEta));
-        memcpy(s->svBud, s->svBud0, sizeof(s->svBud));
+        tp_reset_settled(s);
         s->demoted = 0;
         s->thz = 0.0; s->thv = 0.0;
         s->rampLeft = 0;
@@ -1678,7 +1320,7 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
         s->active = 0;
         __atomic_add_fetch(&((tp_ctx *)c)->resets, 1,
                            __ATOMIC_RELAXED);
-        return went_deep;
+        return;
     }
     if (s->ghostOn) {
         s->ghost_env = gpeak > s->ghost_env ? gpeak
@@ -1698,19 +1340,16 @@ static int tp_render_slot(tp_ctx *c, tp_slot *s, int n, double *out,
         s->envPrev = s->idle_env;
         s->stagn = 0;
     }
-    return went_deep;
 }
 
 /* SYNC render (tests/bench/serial fallback) */
 void tanpura_render(void *vc, int n, double *out)
 {
     tp_ctx *c = (tp_ctx *)vc;
-    int deep_used = 0;
     for (int si = 0; si < c->nslots; si++) {
         tp_slot *s = &c->s[si];
         if (!s->used || !s->active) continue;
-        deep_used += tp_render_slot(c, s, n, out,
-                                    deep_used < c->deep_budget);
+        tp_render_slot(c, s, n, out);
     }
 }
 
@@ -1791,7 +1430,7 @@ static void *tp_worker_run(void *va)
             tp_slot *s = &c->s[c->actList[i]];
             struct timespec t0, t1;
             clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
-            tp_render_slot(c, s, n, buf, 1);
+            tp_render_slot(c, s, n, buf);
             clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
             const double el = ((double)(t1.tv_sec - t0.tv_sec)
                 + 1e-9 * (double)(t1.tv_nsec - t0.tv_nsec))
@@ -1816,7 +1455,7 @@ static void tp_shed_quietest(tp_ctx *c)
     double qe = 1e30;
     for (int k = 0; k < c->nslots; k++) {
         tp_slot *s = &c->s[k];
-        if (!s->used || !s->active || s->is_fd) continue;
+        if (!s->used || !s->active) continue;
         nact++;
         if (k == c->lastPluck) continue;
         if (s->idle_env < qe) { qe = s->idle_env; qi = k; }
@@ -1937,7 +1576,6 @@ void tanpura_set_threads(void *vc, int nworkers)
     }
     c->wBuf = (double *)malloc(sizeof(double)
                                * (size_t)nworkers * TP_ABLK);
-    c->deep_budget = 1 << 30;         /* pool path: no degradation */
     c->gen = 0; c->done = 0; c->quit = 0;
     /* prefill three blocks of silence: ring slack for chord-pluck
        transients (~32 ms total latency, inaudible on a plucked drone) */

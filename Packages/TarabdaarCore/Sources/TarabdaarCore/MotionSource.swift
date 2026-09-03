@@ -25,10 +25,6 @@ public protocol MotionSource: AnyObject {
     /// tilt calibration, learning its own map from these raw axes.
     var normalizedTilts: [Double] { get }
 
-    /// Most recent peak acceleration magnitude (with fast attack / slow
-    /// decay tracking). Used for the on-screen accelerometer indicator.
-    var recentPeakAccel: Double { get }
-
     /// Latest raw user acceleration [x, y, z] in g (gravity removed) —
     /// streamed to the Mac for the received-acceleration diagnostic.
     /// Default: zeros (the Mac's mock source has no accelerometer).

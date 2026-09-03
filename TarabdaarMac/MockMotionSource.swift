@@ -21,7 +21,6 @@ final class MockMotionSource: ObservableObject, MotionSource {
     @Published var strikeForce: Double = 0.1
 
     var normalizedTilts: [Double] { [tilt1, tilt2, tilt3] }
-    var recentPeakAccel: Double { strikeForce }
     var lastTouchVelocity: Double = 0
 
     func peakAccelSince(timestamp: TimeInterval) -> PeakResult {

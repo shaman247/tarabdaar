@@ -232,18 +232,3 @@ struct Cx {
         return Cx(sr, im < 0 ? -si : si)
     }
 }
-
-/// A short cascade of biquads applied in series (e.g. parametric EQ, body modes).
-public struct BiquadChain: Sendable {
-    public var sections: [Biquad]
-    public init(_ sections: [Biquad] = []) { self.sections = sections }
-
-    public mutating func process(_ x: Double) -> Double {
-        var y = x
-        for i in sections.indices { y = sections[i].process(y) }
-        return y
-    }
-
-    public mutating func reset() { for i in sections.indices { sections[i].reset() } }
-    public var isEmpty: Bool { sections.isEmpty }
-}

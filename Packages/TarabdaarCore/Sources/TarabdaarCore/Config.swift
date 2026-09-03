@@ -3,13 +3,6 @@ import CoreGraphics
 
 /// Central configuration for all tunable parameters.
 public enum Config {
-    // MARK: - Timing
-    // `var` rather than `let` so the Mac app can raise it (e.g. to 50 ms)
-    // when running off the iPad's UDP motion stream — absorbs network
-    // jitter so `peakAccelSince` sees the full accel spike. iOS leaves
-    // it at the default.
-    public static var velocityDelay: TimeInterval = 0.020       // 20ms — accelerometer capture window
-
     // MARK: - Glide
     public static let glideDistanceExponent: Double = 0.6    // sublinear: larger intervals grow slower (1.0 = linear, 0.5 = sqrt)
     public static let releaseGracePeriod: Double = 0.050   // 50ms window to connect consecutive notes
@@ -38,16 +31,11 @@ public enum Config {
     /// the headphone DAC. 512 frames ≈ 11.6 ms — fine for monitor speakers,
     /// which are not a performance monitor.
     public static let jitterProneOutputBufferFrames: UInt32 = 512
-    public static let frequencySmoothing: Double = 0.002  // per-sample coefficient (~11ms smoothing)
-    public static let attackCoefficient: Double = 0.05    // envelope attack (~2ms)
-    public static let releaseCoefficient: Double = 0.9993 // envelope release (~50ms)
-    public static let maxAmplitude: Double = 0.3          // velocity=127 amplitude (avoid clipping)
 
     // MARK: - Motion
     public static let motionUpdateRate: Double = 200      // Hz
     public static let accelHistoryLength: Int = 200       // ~1 second at 200Hz
     public static let accelBufferDuration: TimeInterval = 0.1  // 100ms ring buffer for velocity capture
-    public static let peakDecayRate: Double = 0.95        // peak indicator decay per sample
 
     // MARK: - Velocity mapping
     public static let velocityMinG: Double = 0.01  // softest tap acceleration
@@ -61,8 +49,6 @@ public enum Config {
 
 
     // MARK: - Sliders
-    public static let sliderWidth: CGFloat = 150    // ~1.5 inches on iPad
-    public static let sliderHeight: CGFloat = 66   // 1.5× finger-width
     public static let slider1Default: Double = 0.5  // value when not touched
     public static let slider2Default: Double = 0.5
 
@@ -72,10 +58,6 @@ public enum Config {
     /// sound at once one MIDI channel ends up shared. Audio is fine —
     /// the modal renderer scales linearly to dozens of voices.
     public static let maxPolyVoices: Int = 16
-
-    // MARK: - Display
-    public static let pitchHistoryLength: Int = 120  // ~2 seconds at 60Hz
-    public static let peakDelayHistory: Int = 20     // rolling window for delay instrumentation
 
     // MARK: - Reference geometry (iPad)
     /// Logical landscape size of the development iPad (Air 13" M3),

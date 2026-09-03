@@ -139,17 +139,14 @@ private struct FXPointPanel: View {
     private func fxSlider(_ label: String, _ suffix: String,
                           _ range: ClosedRange<Double>,
                           _ fmt: String) -> some View {
-        HStack(spacing: 8) {
-            Text(label)
-                .font(.caption)
-                .frame(width: 42, alignment: .trailing)
-                .onTapGesture(count: 2) { controller.resetParam(prefix + suffix) }
-            Slider(value: bind(suffix), in: range)
-            Text(String(format: fmt, controller.paramValue(prefix + suffix)))
-                .font(.caption.monospacedDigit())
-                .frame(width: 56, alignment: .trailing)
-                .foregroundStyle(.secondary)
-        }
+        ParamSliderRow(
+            label: label, value: bind(suffix), range: range,
+            readout: String(format: fmt, controller.paramValue(prefix + suffix)),
+            labelFont: .caption, labelColor: .primary,
+            labelWidth: 42, labelAlignment: .trailing,
+            readoutFont: .caption.monospacedDigit(), readoutColor: .secondary,
+            readoutWidth: 56,
+            onLabelDoubleTap: { controller.resetParam(prefix + suffix) })
     }
 
     private func resetPoint() {

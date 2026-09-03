@@ -70,14 +70,6 @@ public func scaleLabel(forRatio ratio: Double,
 }
 
 
-/// How a column's chord tones are tuned. 12-TET for now; `justIntonation`
-/// (per-column perfect intervals stacked from the column root) is reserved as
-/// the structural seam and not yet implemented.
-public enum Temperament {
-    case equalTemperament
-    // case justIntonation  // future: per-column perfect intervals
-}
-
 /// Common selectable scales — the modes plus major/minor variants and
 /// pentatonics, and the **12-TET chromatic** scale. These are
 /// **shared**: a preset loads into the one Pitch Pad `PitchScale`

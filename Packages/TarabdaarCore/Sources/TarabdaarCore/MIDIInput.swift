@@ -31,8 +31,15 @@ public final class MIDIInput: ObservableObject {
     /// `ScaleSyncReceiver`).
     public var onSysEx: ((_ bytes: [UInt8]) -> Void)?
 
-    private var client = MIDIClientRef()
-    private var port = MIDIPortRef()
+    /// The shared CoreMIDI receive plumbing (client, all-sources input
+    /// port, packet walk). Lazily built so `self` is capturable.
+    private lazy var tap = MIDIInputTap(
+        clientName: "Tarabdaar MIDI In",
+        portName: "Tarabdaar In",
+        logLabel: "MIDIInput"
+    ) { [weak self] bytes, sourceKey in
+        self?.parseBytes(bytes, sourceKey: sourceKey)
+    }
 
     /// SysEx reassembly, PER SOURCE (keyed by the source endpoint ref
     /// passed as the connection refCon). A single shared buffer corrupts
@@ -62,28 +69,11 @@ public final class MIDIInput: ObservableObject {
     public init() {}
 
     public func start() {
-        if client != 0 { return }
-        let cs = MIDIClientCreateWithBlock("Tarabdaar MIDI In" as CFString, &client) { [weak self] _ in
-            self?.connectAllSources()
-        }
-        guard cs == noErr else {
-            NSLog("Tarabdaar: MIDIInput client create failed: \(cs)")
-            return
-        }
-        let ps = MIDIInputPortCreateWithBlock(client, "Tarabdaar In" as CFString, &port) { [weak self] packetList, srcRefCon in
-            self?.handle(packetList: packetList,
-                         sourceKey: UInt(bitPattern: Int(bitPattern: srcRefCon)))
-        }
-        guard ps == noErr else {
-            NSLog("Tarabdaar: MIDIInput port create failed: \(ps)")
-            return
-        }
-        connectAllSources()
+        tap.start()
     }
 
     public func stop() {
-        if port != 0 { MIDIPortDispose(port); port = 0 }
-        if client != 0 { MIDIClientDispose(client); client = 0 }
+        tap.stop()
         rpnLock.lock()
         rpn.removeAll()
         rpnLock.unlock()
@@ -94,36 +84,7 @@ public final class MIDIInput: ObservableObject {
 
     deinit { stop() }
 
-    private func connectAllSources() {
-        guard port != 0 else { return }
-        for i in 0..<MIDIGetNumberOfSources() {
-            let src = MIDIGetSource(i)
-            // Idempotent: connecting an already-connected source is a no-op.
-            // The source ref rides as the refCon so the read block can keep
-            // one SysEx reassembly buffer per source.
-            MIDIPortConnectSource(port, src,
-                                  UnsafeMutableRawPointer(bitPattern: UInt(src)))
-        }
-    }
-
-    // MARK: - Packet dispatch
-
-    private func handle(packetList: UnsafePointer<MIDIPacketList>,
-                        sourceKey: UInt) {
-        let count = Int(packetList.pointee.numPackets)
-        var current = UnsafeRawPointer(packetList).advanced(by: MemoryLayout<UInt32>.size)
-            .assumingMemoryBound(to: MIDIPacket.self)
-        for _ in 0..<count {
-            let len = Int(current.pointee.length)
-            if len > 0 {
-                let raw = UnsafeRawPointer(current)
-                    .advanced(by: MemoryLayout<MIDITimeStamp>.size + MemoryLayout<UInt16>.size)
-                let buf = UnsafeBufferPointer(start: raw.assumingMemoryBound(to: UInt8.self), count: len)
-                parseBytes(buf, sourceKey: sourceKey)
-            }
-            current = UnsafePointer(MIDIPacketNext(current))
-        }
-    }
+    // MARK: - Packet parsing
 
     /// Parses a flat byte sequence (one packet's worth) of MIDI 1.0
     /// channel-voice messages plus SysEx. CoreMIDI guarantees each packet

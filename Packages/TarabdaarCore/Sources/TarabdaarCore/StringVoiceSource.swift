@@ -654,7 +654,6 @@ public final class StringVoiceSource {
                                reverbPredelayMs: bp.v("bow_rev_predelay", 15.0),
                                reverbMix: bp.v("bow_rev_mix", 0.08),
                                reverbWidth: bp.v("bow_rev_width", 0.6),
-                               fpMask: nil,
                                maxPoly: Int(bp.v("bow_live_poly", 8.0).rounded()))
         // trim = the fitted calibration; `bow_gain` is re-applied by `setEngine`
         engine.outGain = bp.v("bow_live_trim", 0.05)

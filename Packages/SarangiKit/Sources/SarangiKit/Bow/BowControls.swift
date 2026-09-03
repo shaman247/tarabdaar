@@ -363,30 +363,30 @@ public struct BowControlFilter: Sendable {
     let srk: Double
     // baked mapping constants
     let aGate: Double            // 25 ms gate one-pole
-    var vLo: Double, vHi: Double
-    var betaLo: Double, betaHi: Double
-    var pressUnder: Double, pressOver: Double   // wedge-edge overshoot factors
-    var dynP: Double, fCap: Double
-    var exprLift: Double         // expression below which the bow lifts to silence
-    var schellengC: Double, schellengMargin: Double
-    var schellengZ: Double, schellengDmu: Double   // analytic fmax = 2Zv/(βΔμ)
-    var tiltBeta: Double, tiltForce: Double, tiltKnee: Double
-    var betaF0Gamma: Double
-    var fReg: Double, tonicHz: Double   // register force (f0/tonic)^k
+    var vLo = 0.0, vHi = 0.0
+    var betaLo = 0.0, betaHi = 0.0
+    var pressUnder = 0.0, pressOver = 0.0   // wedge-edge overshoot factors
+    var dynP = 0.0, fCap = 0.0
+    var exprLift = 0.0           // expression below which the bow lifts to silence
+    var schellengC = 0.0, schellengMargin = 0.0
+    var schellengZ = 0.0, schellengDmu = 0.0   // analytic fmax = 2Zv/(βΔμ)
+    var tiltBeta = 0.0, tiltForce = 0.0, tiltKnee = 0.0
+    var betaF0Gamma = 0.0
+    var fReg = 0.0, tonicHz = 261.63   // register force (f0/tonic)^k
     // PLACE-then-DRAW: at a fresh attack velocity holds ~0 for placeS (bow
     // set, static stick) then rises over drawS (smoothstep). 0 = bit-null.
-    var placeS: Double, drawS: Double
+    var placeS = 0.0, drawS = 0.0
     // ATTACK SHARPNESS = onset press above attackThresh: a sharp attack
     // draws fast (drawS → drawMinS) and briefly over-forces
     // (fb *= 1 + attackBite·sharp·exp(-t/biteTau)). attackBite 0 = off.
-    var drawMinS: Double, attackBite: Double
-    var attackBiteTau: Double, attackThresh: Double
+    var drawMinS = 0.0, attackBite = 0.0
+    var attackBiteTau = 0.0, attackThresh = 0.0
     // sharpness = max(press law, attackVel·strike velocity). 0 = bit-null.
-    var attackVel: Double
+    var attackVel = 0.0
     // settle depth × (1 − settleSharp·sharp): accents keep their level.
-    var settleSharp: Double
+    var settleSharp = 0.0
     // player vibrato (aftertouch): vibCents at vibHz on the sounding pitch
-    var vibCents: Double, vibHz: Double
+    var vibCents = 0.0, vibHz = 0.0
     // SUSTAIN LIVENESS, as dB on the bow controls (0 = bit-null):
     //   settle — settleDb·smoothstep(t/t0)·exp(-(t-t0)/tau) off the bow
     //     velocity after the place+draw window t0; restarts per attack.
@@ -396,10 +396,10 @@ public struct BowControlFilter: Sendable {
     //   glide dip — lightening while the pitch MOVES: glideDipDb·r/(r+rate),
     //     r = |pitch slew| cents/s (~15 ms attack, ~120 ms release); full on
     //     vbow, 0.3× on force.
-    var settleDb: Double, settleTauS: Double
-    var driftCents: Double, driftDb: Double, driftForceDb: Double
-    var driftHz: Double
-    var glideDipDb: Double, glideDipRate: Double
+    var settleDb = 0.0, settleTauS = 0.0
+    var driftCents = 0.0, driftDb = 0.0, driftForceDb = 0.0
+    var driftHz = 0.0
+    var glideDipDb = 0.0, glideDipRate = 0.0
     var aDrift = 1.0, driftGain = 0.0   // OU pole + unit-variance step gain
     var aDipAtt = 0.0, aDipRel = 0.0    // dip smoother poles
     let pitchKnots: [Double], pitchCentsTab: [Double]
@@ -408,7 +408,7 @@ public struct BowControlFilter: Sendable {
     let pitchCentsPress: [Double]?
     var lf0 = 0.0                // sounding log2 f0 at the last sample
     var gateState = 0.0
-    var attackFms: Double
+    var attackFms = 0.0
     var placeClock = 1.0e9       // seconds since the current attack began
     var attackSharp = 0.0        // onset sharpness of the current attack
     var vibPhase = 0.0
@@ -428,46 +428,6 @@ public struct BowControlFilter: Sendable {
         self.srk = srk
         tonicHz = max(tonic, 40.0)
         aGate = exp(-1.0 / (0.025 * srk))
-        vLo = bp.v("bow_v_lo", 0.05)
-        vHi = bp.v("bow_v_hi", 0.35)
-        betaLo = bp.v("bow_live_beta_lo", 0.04)
-        betaHi = bp.v("bow_live_beta_hi", 0.22)
-        pressUnder = bp.v("bow_live_press_under", 0.55)
-        pressOver = bp.v("bow_live_press_over", 1.25)
-        dynP = bp.v("dyn_p", 0.0)
-        fCap = bp.v("bow_f_cap", 2.6)
-        exprLift = bp.v("bow_expr_lift", 0.0)
-        schellengC = bp.v("bow_schelleng_c", 0.055)
-        schellengMargin = bp.v("bow_schelleng_margin", 1.2)
-        schellengZ = bp.v("bow_Z", 1.0)
-        schellengDmu = max(bp.v("bow_mu_s", 0.8) - bp.v("bow_mu_d", 0.3), 1e-3)
-        tiltBeta = bp.v("bow_tilt_beta", 0.0)
-        tiltForce = bp.v("bow_tilt_force", 0.0)
-        tiltKnee = bp.v("bow_tilt_knee", 0.0)
-        betaF0Gamma = bp.v("bow_beta_f0", 0.0)
-        fReg = bp.v("bow_f_reg", 0.0)
-        placeS = bp.v("bow_place_ms", 0.0) / 1000.0
-        drawS = max(bp.v("bow_draw_ms", 1.0), 1.0) / 1000.0
-        drawMinS = max(bp.v("bow_draw_min_ms", bp.v("bow_draw_ms", 1.0)),
-                       1.0) / 1000.0
-        attackBite = bp.v("bow_attack_bite", 0.0)
-        attackBiteTau = max(bp.v("bow_attack_bite_ms", 60.0), 5.0) / 1000.0
-        attackFms = max(bp.v("bow_attack_fms", 15.0), 2.0) / 1000.0
-        attackThresh = bp.v("bow_attack_thresh", 0.5)
-        attackVel = min(max(bp.v("bow_attack_vel", 0.0), 0.0), 1.0)
-        vibCents = bp.v("bow_vib_cents", 0.0)
-        vibHz = bp.v("bow_vib_hz", 5.5)
-        settleDb = bp.v("bow_settle_db", 0.0)
-        settleTauS = max(bp.v("bow_settle_ms", 150.0), 10.0) / 1000.0
-        settleSharp = min(max(bp.v("bow_settle_sharp", 0.0), 0.0), 1.0)
-        driftCents = bp.v("bow_drift_cents", 0.0)
-        driftDb = bp.v("bow_drift_db", 0.0)
-        driftForceDb = bp.v("bow_drift_force_db", 0.0)
-        driftHz = min(max(bp.v("bow_drift_hz", 1.4), 0.05), 10.0)
-        glideDipDb = bp.v("bow_glide_dip_db", 0.0)
-        glideDipRate = max(bp.v("bow_glide_dip_rate", 900.0), 1.0)
-        aDrift = exp(-2.0 * Double.pi * driftHz / srk)
-        driftGain = sqrt(max(1.0 - aDrift * aDrift, 0.0) * 3.0)
         aDipAtt = exp(-1.0 / (0.015 * srk))
         aDipRel = exp(-1.0 / (0.12 * srk))
         // two-component pitch correction when the artifact carries it
@@ -489,12 +449,13 @@ public struct BowControlFilter: Sendable {
             pitchCentsA = nil
             pitchCentsPress = nil
         }
+        loadMappingConstants(bp: bp)
     }
 
-    /// Re-read the mapping constants on a running filter; render state is
-    /// untouched so a parameter edit does not re-articulate a sounding
-    /// note. Mirror `init` (pitch tables are structural and stay put).
-    public mutating func updateLiveParams(bp: BowParams) {
+    /// Bake the mapping constants from the artifact. Called by `init` and
+    /// by `updateLiveParams`, so a live parameter edit and a fresh filter
+    /// can never read the values differently.
+    private mutating func loadMappingConstants(bp: BowParams) {
         vLo = bp.v("bow_v_lo", 0.05)
         vHi = bp.v("bow_v_hi", 0.35)
         betaLo = bp.v("bow_live_beta_lo", 0.04)
@@ -535,6 +496,13 @@ public struct BowControlFilter: Sendable {
         glideDipRate = max(bp.v("bow_glide_dip_rate", 900.0), 1.0)
         aDrift = exp(-2.0 * Double.pi * driftHz / srk)
         driftGain = sqrt(max(1.0 - aDrift * aDrift, 0.0) * 3.0)
+    }
+
+    /// Re-read the mapping constants on a running filter; render state is
+    /// untouched so a parameter edit does not re-articulate a sounding
+    /// note (the pitch tables are structural and stay put).
+    public mutating func updateLiveParams(bp: BowParams) {
+        loadMappingConstants(bp: bp)
     }
 
     /// Decorrelate the liveness walks across slots, deterministically
@@ -594,18 +562,15 @@ public struct BowControlFilter: Sendable {
         return pitchCentsTab[i] + t * (pitchCentsTab[i + 1] - pitchCentsTab[i])
     }
 
-    /// Fill `n` kernel-rate samples from the mapper state. `f0Snd`
-    /// (optional) receives the PRE-correction f0 — the pitch the string
-    /// actually SOUNDS at (the knot correction cancels the friction pull).
+    /// Fill `n` kernel-rate samples from the mapper state.
     public mutating func fill(from mapper: BowControlMapper, n: Int,
                               f0 f0Out: UnsafeMutablePointer<Double>,
                               vb vbOut: UnsafeMutablePointer<Double>,
                               fb fbOut: UnsafeMutablePointer<Double>,
                               beta betaOut: UnsafeMutablePointer<Double>,
-                              gate gateOut: UnsafeMutablePointer<Double>,
-                              f0Snd: UnsafeMutablePointer<Double>? = nil) {
+                              gate gateOut: UnsafeMutablePointer<Double>) {
         fill(snapshot: mapper.snapshot(), n: n, f0: f0Out, vb: vbOut,
-             fb: fbOut, beta: betaOut, gate: gateOut, f0Snd: f0Snd)
+             fb: fbOut, beta: betaOut, gate: gateOut)
     }
 
     /// Fresh string mounted: start ON the new pitch with the gate closed.
@@ -625,8 +590,7 @@ public struct BowControlFilter: Sendable {
                        vb vbOut: UnsafeMutablePointer<Double>,
                        fb fbOut: UnsafeMutablePointer<Double>,
                        beta betaOut: UnsafeMutablePointer<Double>,
-                       gate gateOut: UnsafeMutablePointer<Double>,
-                       f0Snd: UnsafeMutablePointer<Double>? = nil) {
+                       gate gateOut: UnsafeMutablePointer<Double>) {
         let lfTarget = log2(max(snap.f0Target, 40.0))
         if !primed {
             // first buffer: start ON the target with the gate closed
@@ -697,7 +661,6 @@ public struct BowControlFilter: Sendable {
                 corr += interpKnots(lf - log2(220.0), ks, ps) * (pr - 0.55)
             }
             let f0 = exp2(lf + vibOct + corr / 1200.0)
-            if let snd = f0Snd { snd[i] = exp2(lf + vibOct) }
             // 25 ms softened gate
             gateState = (1.0 - aGate) * snap.gate + aGate * gateState
             // dynamics: expr → dB → v. The law rides [exprLift, 1]; the

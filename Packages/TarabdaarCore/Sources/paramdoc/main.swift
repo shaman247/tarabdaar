@@ -1,4 +1,5 @@
 import Foundation
+import SarangiKit
 import TarabdaarCore
 
 // Build-time parameter-documentation generator .
@@ -17,6 +18,21 @@ func num(_ v: Double) -> String {
         return String(Int(v))
     }
     return String(format: "%g", v)
+}
+
+// THE SHIPPED DEFAULT of a build scalar is the ARTIFACT's value, not the
+// registry's authored one — the fit moves values wherever the physics
+// wants them, and `AppController.paramDefault` resolves
+// `artifactValue(key) ?? spec.def` for every `.rebuild`/`.hybrid` key.
+// This document resolves the same way, so the Default column matches
+// what the Parameters tab shows and what the engine actually runs.
+let artifact = Presets.bowedStringParams()?.num ?? [:]
+
+/// The value the parameter RESTS at in the shipped instrument, plus the
+/// authored registry default when the artifact overrides it.
+func shippedDefault(_ p: ParamSpec) -> (value: Double, authored: Double?) {
+    guard p.apply != .live, let a = artifact[p.key] else { return (p.def, nil) }
+    return (a, a == p.def ? nil : p.def)
 }
 
 // Scope/timing labels and legend texts come from ParamScope/ParamTiming
@@ -100,18 +116,23 @@ for c in CompositeParam.defaults() {
 
 // ---- The parameter list -------------------------------------------------
 out += "## Parameters\n\n"
-out += "Ranges are the editor's slider bounds; defaults are the shipped\n"
-out += "artifact values (a value loaded outside its range widens the\n"
-out += "slider rather than being clamped).\n\n"
+out += "Ranges are the editor's slider bounds; defaults are the values the\n"
+out += "shipped instrument RESTS at — the fitted `bowed_string.json` value\n"
+out += "wherever the artifact carries the key, with the registry's authored\n"
+out += "default in parentheses when the two differ. A value loaded outside\n"
+out += "its range widens the slider rather than being clamped.\n\n"
 for (group, params) in ParamRegistry.groups {
     out += "### \(group)\n\n"
     out += "| Key | Name | Range | Default | Scope | Timing | Description |\n"
     out += "|---|---|---|---|---|---|---|\n"
     for p in params {
-        var def = num(p.def)
+        let shipped = shippedDefault(p)
+        var def = num(shipped.value)
         if p.apply == .hybrid, let rest = p.restFraction {
-            def = "\(num(p.def)) built · rests at \(num(rest))× the built value"
+            def = "\(num(shipped.value)) built · rests at \(num(rest))× the built value"
         }
+        // the artifact wins; the authored value is shown for reference
+        if let a = shipped.authored { def += " (authored \(num(a)))" }
         out += "| `\(p.key)` | \(p.label) | \(num(p.lo)) … \(num(p.hi)) | \(def) | \(p.scope.label) | \(p.timing.label) | \(p.help) |\n"
     }
     out += "\n"

@@ -139,11 +139,11 @@ private struct ParamRow: View {
                        set: { base.wrappedValue = ($0 / step).rounded() * step })
     }
 
+    /// Stepped params read as whole numbers, and so do the ranges that run
+    /// to 100+ (Hz, cents, ms) whatever the current value.
     private func format(_ v: Double) -> String {
-        if spec.step != nil { return String(format: "%.0f", v) }
-        if abs(v) < 0.001, v != 0 { return String(format: "%.1e", v) }
-        return spec.hi >= 100 ? String(format: "%.0f", v)
-                              : String(format: "%.3f", v)
+        ParamFormat.value(v, decimals: 3, integer: spec.step != nil,
+                          integerAbove: spec.hi >= 100 ? 0 : .infinity)
     }
 
     private var boundTilts: [InputDimension] {

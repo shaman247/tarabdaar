@@ -30,9 +30,6 @@ public struct PitchChannel {
     public var glideDuration: Double = 0.4        // s, current segment
     public var touchNotes: [Int: Int] = [:]       // touchId → held MIDI note
     public var midiChannel: UInt8 = 1             // MPE member channel
-    /// Audio-engine bank slot driving this voice; `nil` = `index`.
-    public var bankIndexOverride: Int? = nil
-    public var bankIndex: Int { bankIndexOverride ?? index }
 
     /// Notes to visit in order (a release appends the held note as return).
     public var queue: [GlideWaypoint] = []
@@ -46,20 +43,6 @@ public struct PitchChannel {
     public var keyY: Double = 0.5
 
     public var touchIds: Set<Int> { Set(touchNotes.keys) }
-}
-
-/// A snapshot of pitch state for the pitch graph display.
-public struct PitchSample {
-    public let timestamp: TimeInterval
-    public let frequencies: [Double?]   // per voice, nil if idle
-    public let draggingFlags: [Bool]
-    public let snappingFlags: [Bool]
-    public let touchNotes: [Int]        // all held MIDI notes
-
-    /// Voice-0 accessors.
-    public var frequency0: Double? { frequencies.indices.contains(0) ? frequencies[0] : nil }
-    public var dragging: Bool { draggingFlags.contains(true) }
-    public var snapping: Bool { snappingFlags.contains(true) }
 }
 
 // MARK: - NoteManager
@@ -88,19 +71,6 @@ public class NoteManager: ObservableObject {
         }
     }
 
-
-    private var pitchHistoryBuffer: [PitchSample] = []
-    private var pitchHistoryIndex: Int = 0
-
-    /// Pitch history, oldest first.
-    public var pitchHistory: [PitchSample] {
-        guard pitchHistoryBuffer.count >= Config.pitchHistoryLength else {
-            return pitchHistoryBuffer
-        }
-        let start = pitchHistoryIndex % Config.pitchHistoryLength
-        return Array(pitchHistoryBuffer[start...]) + Array(pitchHistoryBuffer[..<start])
-    }
-    public var recentPeakDelays: [Double] = []
 
     // MARK: - Profiling counters (ms, refreshed every UI tick)
     public private(set) var lastGlideTickMs: Double = 0
@@ -308,35 +278,6 @@ public class NoteManager: ObservableObject {
         // sounds — the Mac's body fusion consumes it as its arm sensor,
         // including during calibration with no note down.
         sendTiltReport()
-
-        let frequencies: [Double?] = (0..<Config.maxPolyVoices).map { i in
-            guard pitchChannels[i].state != .idle else { return nil }
-            return pitchChannels[i].currentFrequency
-        }
-
-        let isUITick = uiUpdateCounter + 1 >= uiUpdateInterval
-        let heldNotes: [Int]
-        if isUITick {
-            var notes: Set<Int> = []
-            for ch in pitchChannels { notes.formUnion(ch.touchNotes.values) }
-            heldNotes = Array(notes)
-        } else {
-            heldNotes = []
-        }
-
-        let sample = PitchSample(
-            timestamp: now,
-            frequencies: frequencies,
-            draggingFlags: (0..<Config.maxPolyVoices).map { pitchChannels[$0].dragging },
-            snappingFlags: (0..<Config.maxPolyVoices).map { pitchChannels[$0].snapping },
-            touchNotes: heldNotes
-        )
-        if pitchHistoryBuffer.count >= Config.pitchHistoryLength {
-            pitchHistoryBuffer[pitchHistoryIndex % Config.pitchHistoryLength] = sample
-        } else {
-            pitchHistoryBuffer.append(sample)
-        }
-        pitchHistoryIndex += 1
 
         let tickElapsed = (CACurrentMediaTime() - tickStart) * 1000.0
         lastGlideTickMs = tickElapsed
@@ -821,15 +762,6 @@ public class NoteManager: ObservableObject {
 
     public static func isBlackKey(_ midiNote: Int) -> Bool {
         Scale.isBlackKey(midiNote)
-    }
-
-    public var averagePeakDelay: Double? {
-        guard !recentPeakDelays.isEmpty else { return nil }
-        return recentPeakDelays.reduce(0, +) / Double(recentPeakDelays.count)
-    }
-
-    public var maxPeakDelay: Double? {
-        recentPeakDelays.max()
     }
 
     /// Silences everything and clears all state.

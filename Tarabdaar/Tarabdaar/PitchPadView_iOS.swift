@@ -58,8 +58,9 @@ struct PadToolbarIOS: View {
             VolumeScopePane(history: scaleSync.volumeHistory,
                             motion: motion)
             Spacer(minLength: 12)
-            PadSoundingReadout(sounding: engine.sounding,
-                               tonicFractionalMidi: engine.tonicFractionalMidi)
+            SoundingReadout(sounding: engine.sounding,
+                            tonicFractionalMidi: engine.tonicFractionalMidi,
+                            style: .column(width: 150))
             // The playing-range octave shift (Mac dpad, JOYCON_STATE).
             Text("Oct \(engine.octaveShift > 0 ? "+" : "")\(engine.octaveShift)")
                 .font(.padCaption2.monospacedDigit())
@@ -86,38 +87,6 @@ struct PadToolbarIOS: View {
                 .background(color.opacity(0.7))
                 .cornerRadius(6)
         }
-    }
-}
-
-// MARK: - Sounding readout
-
-/// Live Hz / note / cents readout for the active touch. Observes only
-/// `SoundingState`, so per-tick updates re-render just this label.
-private struct PadSoundingReadout: View {
-    @ObservedObject var sounding: SoundingState
-    let tonicFractionalMidi: Double
-
-    var body: some View {
-        let ratio = sounding.ratio
-        let text: String = ratio.map { r in
-            // octaveSemis is onset-captured, so a held note reads true.
-            let fractionalMidi = tonicFractionalMidi + sounding.octaveSemis
-                + 12.0 * log2(r)
-            let freq = 440.0 * pow(2.0, (fractionalMidi - 69.0) / 12.0)
-            let nearest = Int(fractionalMidi.rounded())
-            let cents = Int(((fractionalMidi - Double(nearest)) * 100.0).rounded())
-            let hz = freq >= 1000 ? String(format: "%.0f", freq)
-                                  : String(format: "%.1f", freq)
-            let centsStr = cents > 0 ? "+\(cents)¢" : "\(cents)¢"
-            return "\(hz) Hz (\(Scale.noteName(for: nearest)) \(centsStr))"
-        } ?? ""
-        let color: Color = ratio.map {
-            pitchColor(forRatio: $0, lightness: 0.85, chroma: 0.18)
-        } ?? .clear
-        return Text(text)
-            .font(.padSmall(11).monospacedDigit())
-            .foregroundStyle(color)
-            .frame(width: 150, alignment: .trailing)
     }
 }
 
@@ -293,103 +262,70 @@ private struct TiltSquare: View {
 
 /// The strike scope: the strike envelope (0–127 wire scale) as a scrolling
 /// trace with the current value at the right; the amber tick holds the last
-/// onset's reading. Polls the unpublished history at 30 Hz in a
-/// `TimelineView` — never subscribes.
+/// onset's reading. `ScopePane` carries the polling and the grid.
 private struct StrikeScopePane: View {
     let motion: MotionManager
     /// The onset color fade — the Mac's `ctl_strike_window` blend window.
     let fadeS: Double
 
-    private static let window: TimeInterval = 4.0
+    private struct Snapshot {
+        let env: [(t: TimeInterval, level: Double)]
+        let lastStrike: Double
+        let activity: [(t: TimeInterval, active: Int)]
+        let onsets: [TimeInterval]
+        let fadeS: Double
+    }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-            // Read the history HERE, not inside the Canvas closure: capturing
-            // only the class ref lets SwiftUI dedupe the canvas and it freezes.
-            let env = motion.strikeHistory
-            let strike = motion.lastTouchVelocity
-            let activity = motion.noteActivity
-            let onsets = motion.noteOnsets
-            let fade = max(fadeS, 0.05)
-            Canvas { ctx, size in
-                Self.draw(ctx, size: size, env: env,
-                          lastStrike: strike,
-                          activity: activity, onsets: onsets, fadeS: fade)
-            }
-            .frame(width: 150, height: 36)
-            .background(RoundedRectangle(cornerRadius: 4)
-                .fill(Color.gray.opacity(0.15)))
-        }
+        ScopePane(width: 150, sample: {
+            Snapshot(env: motion.strikeHistory,
+                     lastStrike: motion.lastTouchVelocity,
+                     activity: motion.noteActivity,
+                     onsets: motion.noteOnsets,
+                     fadeS: max(fadeS, 0.05))
+        }, draw: Self.draw)
     }
 
     private static func draw(_ ctx: GraphicsContext, size: CGSize,
-                             env: [(t: TimeInterval, level: Double)],
-                             lastStrike: Double,
-                             activity: [(t: TimeInterval, active: Int)],
-                             onsets: [TimeInterval],
-                             fadeS: Double) {
+                             snap: Snapshot) {
         let w = size.width, h = size.height
         // Only the envelope (the control signal the bindings see) is drawn.
-        guard let lastT = env.last?.t else { return }
-        let bins = max(Int(w), 1)
-        let binDur = window / Double(bins)
-        // Bins anchor to ABSOLUTE time (a moving origin makes the trace
-        // shimmer); decimation is per-bin peak-hold, never a sample stride
-        // (a stride aliases and can drop a tap spike).
-        let t0 = (((lastT - window) / binDur).rounded(.down)) * binDur
-        var peak = [Double](repeating: -1.0, count: bins)
+        guard let lastT = snap.env.last?.t else { return }
+        let bins = ScopeTrace.Bins(width: w, endingAt: lastT)
+        var peak = [Double](repeating: -1.0, count: bins.count)
         var current = 0.0
-        for s in env {
-            guard s.t >= t0 else { continue }
+        for s in snap.env {
+            guard s.t >= bins.t0 else { continue }
             current = s.level
-            let b = min(bins - 1, max(0, Int((s.t - t0) / binDur)))
+            let b = bins.index(of: s.t)
             if s.level > peak[b] { peak[b] = s.level }
         }
         // Color per bin: pale yellow at onset fading down `ScopeColor.level`
-        // over `fadeS`, dark gray while nothing plays (one linear walk).
-        var ai = -1        // last activity event with t <= binT
+        // over `fadeS`, dark gray while nothing plays.
+        let soundingArr = ScopeTrace.soundingBins(snap.activity, bins: bins)
         var oi = -1        // last onset with t <= binT
-        var soundingArr = [Bool](repeating: false, count: bins)
-        var colorArr = [Color](repeating: .clear, count: bins)
-        for b in 0..<bins {
-            let binT = t0 + (Double(b) + 0.5) * binDur
-            while ai + 1 < activity.count, activity[ai + 1].t <= binT {
-                ai += 1
+        var colorArr = [Color](repeating: .clear, count: bins.count)
+        for b in 0..<bins.count {
+            let binT = bins.center(b)
+            while oi + 1 < snap.onsets.count, snap.onsets[oi + 1] <= binT {
+                oi += 1
             }
-            while oi + 1 < onsets.count, onsets[oi + 1] <= binT { oi += 1 }
-            let sounding = ai >= 0 && activity[ai].active > 0
-            soundingArr[b] = sounding
-            if sounding {
-                let age = oi >= 0 ? binT - onsets[oi] : fadeS
-                let f = min(max(age / fadeS, 0.0), 1.0)
+            if soundingArr[b] {
+                let age = oi >= 0 ? binT - snap.onsets[oi] : snap.fadeS
+                let f = min(max(age / snap.fadeS, 0.0), 1.0)
                 colorArr[b] = ScopeColor.level(1 - f).opacity(0.95)
             } else {
                 colorArr[b] = Color(white: 0.38).opacity(0.9)
             }
         }
-        // Note-active backdrop, run-length filled, so phrases read as blocks.
-        var b = 0
-        while b < bins {
-            guard soundingArr[b] else { b += 1; continue }
-            var e = b
-            while e + 1 < bins, soundingArr[e + 1] { e += 1 }
-            let x0 = CGFloat(b) / CGFloat(bins) * w
-            let x1 = CGFloat(e + 1) / CGFloat(bins) * w
-            ctx.fill(Path(CGRect(x: x0, y: 0, width: x1 - x0, height: h)),
-                     with: .color(.white.opacity(0.12)))
-            b = e + 1
-        }
-        // Guide lines at thirds (≈42 / 85) — over the backdrop, under the trace.
-        for f in [1.0 / 3.0, 2.0 / 3.0] {
-            var p = Path()
-            p.move(to: CGPoint(x: 0, y: h * CGFloat(1 - f)))
-            p.addLine(to: CGPoint(x: w, y: h * CGFloat(1 - f)))
-            ctx.stroke(p, with: .color(.white.opacity(0.12)), lineWidth: 0.5)
-        }
+        ScopeTrace.fillActivity(ctx, size: size, sounding: soundingArr)
+        // Guide lines at thirds (≈42 / 85).
+        ScopeTrace.guides(ctx, size: size,
+                          [(1.0 / 3.0, 0.12), (2.0 / 3.0, 0.12)])
         // The envelope, stroked per-pair with the newer bin's color.
         var prevPt: CGPoint? = nil
-        for b in 0..<bins where peak[b] >= 0 {
-            let pt = CGPoint(x: (CGFloat(b) + 0.5) / CGFloat(bins) * w,
+        for b in 0..<bins.count where peak[b] >= 0 {
+            let pt = CGPoint(x: bins.x(b, width: w),
                              y: h - CGFloat(peak[b]) * (h - 2) - 1)
             if let pp = prevPt {
                 var seg = Path()
@@ -400,101 +336,69 @@ private struct StrikeScopePane: View {
             prevPt = pt
         }
         // Last onset's reading: an amber tick at its height, right edge.
-        if lastStrike > 0 {
+        if snap.lastStrike > 0 {
             var tick = Path()
-            let y = h - CGFloat(lastStrike) * (h - 2) - 1
+            let y = h - CGFloat(snap.lastStrike) * (h - 2) - 1
             tick.move(to: CGPoint(x: w - 7, y: y))
             tick.addLine(to: CGPoint(x: w, y: y))
             ctx.stroke(tick, with: .color(.orange), lineWidth: 2)
         }
         // Live value, wire scale.
-        let label = Text("\(Int((current * 127).rounded()))")
-            .font(.padSmall(10).monospacedDigit())
-            .foregroundColor(.white.opacity(0.9))
-        let resolved = ctx.resolve(label)
-        let sz = resolved.measure(in: CGSize(width: 40, height: 16))
-        ctx.draw(resolved, at: CGPoint(x: w - sz.width / 2 - 3,
-                                       y: sz.height / 2 + 1))
+        ScopeTrace.drawValueLabel(
+            ctx,
+            Text("\(Int((current * 127).rounded()))")
+                .font(.padSmall(10).monospacedDigit())
+                .foregroundColor(.white.opacity(0.9)),
+            size: size, measureIn: CGSize(width: 40, height: 16))
     }
 }
 
 /// The finger-accel scope: the finger's pitch acceleration on the
 /// `.fingerAccel` −1…+1 scale (centerline = rest or constant-rate meend),
-/// from the iPad's own `FingerAccelSampler` instance of the shared law. Same
-/// rendering discipline as the strike scope.
+/// from the iPad's own `FingerAccelSampler` instance of the shared law.
 private struct FingerAccelScopePane: View {
     let history: FingerAccelSampler
     let motion: MotionManager?
 
-    private static let window: TimeInterval = 4.0
+    private struct Snapshot {
+        let env: [(t: TimeInterval, v: Double)]
+        let activity: [(t: TimeInterval, active: Int)]
+    }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-            let env = history.history()
-            let activity = motion?.noteActivity ?? []
-            Canvas { ctx, size in
-                Self.draw(ctx, size: size, env: env, activity: activity)
-            }
-            .frame(width: 150, height: 36)
-            .background(RoundedRectangle(cornerRadius: 4)
-                .fill(Color.gray.opacity(0.15)))
-        }
+        ScopePane(width: 150, sample: {
+            Snapshot(env: history.history(),
+                     activity: motion?.noteActivity ?? [])
+        }, draw: Self.draw)
     }
 
     private static func draw(_ ctx: GraphicsContext, size: CGSize,
-                             env: [(t: TimeInterval, v: Double)],
-                             activity: [(t: TimeInterval, active: Int)]) {
+                             snap: Snapshot) {
         let w = size.width, h = size.height
-        guard let lastT = env.last?.t else { return }
-        let bins = max(Int(w), 1)
-        let binDur = window / Double(bins)
-        // Absolute-time bins + per-bin signed peak-hold (max |v| keeps its
-        // sign) so brief bursts survive decimation.
-        let t0 = (((lastT - window) / binDur).rounded(.down)) * binDur
-        var peak = [Double](repeating: .nan, count: bins)
+        guard let lastT = snap.env.last?.t else { return }
+        let bins = ScopeTrace.Bins(width: w, endingAt: lastT)
+        // Per-bin SIGNED peak-hold (max |v| keeps its sign) so brief bursts
+        // survive decimation.
+        var peak = [Double](repeating: .nan, count: bins.count)
         var current = 0.0
-        for s in env {
-            guard s.t >= t0 else { continue }
+        for s in snap.env {
+            guard s.t >= bins.t0 else { continue }
             current = s.v
-            let b = min(bins - 1, max(0, Int((s.t - t0) / binDur)))
+            let b = bins.index(of: s.t)
             if peak[b].isNaN || abs(s.v) > abs(peak[b]) { peak[b] = s.v }
         }
-        // Note-active backdrop, run-length filled.
-        var ai = -1
-        var soundingArr = [Bool](repeating: false, count: bins)
-        for b in 0..<bins {
-            let binT = t0 + (Double(b) + 0.5) * binDur
-            while ai + 1 < activity.count, activity[ai + 1].t <= binT {
-                ai += 1
-            }
-            soundingArr[b] = ai >= 0 && activity[ai].active > 0
-        }
-        var b = 0
-        while b < bins {
-            guard soundingArr[b] else { b += 1; continue }
-            var e = b
-            while e + 1 < bins, soundingArr[e + 1] { e += 1 }
-            let x0 = CGFloat(b) / CGFloat(bins) * w
-            let x1 = CGFloat(e + 1) / CGFloat(bins) * w
-            ctx.fill(Path(CGRect(x: x0, y: 0, width: x1 - x0, height: h)),
-                     with: .color(.white.opacity(0.12)))
-            b = e + 1
-        }
+        let soundingArr = ScopeTrace.soundingBins(snap.activity, bins: bins)
+        ScopeTrace.fillActivity(ctx, size: size, sounding: soundingArr)
         // Centerline (rest) bright-ish, ±0.5 guides faint.
-        for (f, op) in [(0.5, 0.25), (0.25, 0.12), (0.75, 0.12)] {
-            var p = Path()
-            p.move(to: CGPoint(x: 0, y: h * CGFloat(f)))
-            p.addLine(to: CGPoint(x: w, y: h * CGFloat(f)))
-            ctx.stroke(p, with: .color(.white.opacity(op)), lineWidth: 0.5)
-        }
+        ScopeTrace.guides(ctx, size: size,
+                          [(0.5, 0.25), (0.25, 0.12), (0.75, 0.12)])
         // The trace: −1…+1 → bottom…top, colored by playing state.
         func yFor(_ v: Double) -> CGFloat {
             h / 2 - CGFloat(v) * (h / 2 - 1)
         }
         var prevPt: CGPoint? = nil
-        for b in 0..<bins where !peak[b].isNaN {
-            let pt = CGPoint(x: (CGFloat(b) + 0.5) / CGFloat(bins) * w,
-                             y: yFor(peak[b]))
+        for b in 0..<bins.count where !peak[b].isNaN {
+            let pt = CGPoint(x: bins.x(b, width: w), y: yFor(peak[b]))
             if let pp = prevPt {
                 var seg = Path()
                 seg.move(to: pp)
@@ -507,13 +411,12 @@ private struct FingerAccelScopePane: View {
             prevPt = pt
         }
         // Live value on the wire-style ±127 scale, signed.
-        let label = Text("\(Int((current * 127).rounded()))")
-            .font(.padSmall(10).monospacedDigit())
-            .foregroundColor(.white.opacity(0.9))
-        let resolved = ctx.resolve(label)
-        let sz = resolved.measure(in: CGSize(width: 44, height: 16))
-        ctx.draw(resolved, at: CGPoint(x: w - sz.width / 2 - 3,
-                                       y: sz.height / 2 + 1))
+        ScopeTrace.drawValueLabel(
+            ctx,
+            Text("\(Int((current * 127).rounded()))")
+                .font(.padSmall(10).monospacedDigit())
+                .foregroundColor(.white.opacity(0.9)),
+            size: size, measureIn: CGSize(width: 44, height: 16))
     }
 }
 
@@ -521,26 +424,22 @@ private struct FingerAccelScopePane: View {
 /// 0…1 log scale (−60…0 dBFS, `TLPVolume`; guides = 20 dB) with the current
 /// dB at the right. Samples are unsmoothed RMS, change-gated on the wire, so
 /// bins peak-hold and forward-fill. Voice orange, taraf cyan while a note
-/// sounds. Polls `ScaleSyncReceiver.volumeHistory` at 30 Hz in a `TimelineView`.
+/// sounds.
 private struct VolumeScopePane: View {
     let history: VolumeHistory
     /// The surface's note timeline (same clock as the samples); nil = none.
     let motion: MotionManager?
 
-    private static let window: TimeInterval = 4.0
+    private struct Snapshot {
+        let samples: [VolumeHistory.Sample]
+        let activity: [(t: TimeInterval, active: Int)]
+    }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-            let samples = history.snapshot()
-            let activity = motion?.noteActivity ?? []
-            Canvas { ctx, size in
-                Self.draw(ctx, size: size, samples: samples,
-                          activity: activity)
-            }
-            .frame(width: 120, height: 36)
-            .background(RoundedRectangle(cornerRadius: 4)
-                .fill(Color.gray.opacity(0.15)))
-        }
+        ScopePane(width: 120, sample: {
+            Snapshot(samples: history.snapshot(),
+                     activity: motion?.noteActivity ?? [])
+        }, draw: Self.draw)
     }
 
     private static let voiceColor = Color.orange
@@ -549,64 +448,39 @@ private struct VolumeScopePane: View {
     private static let tarafIdle = Color(white: 0.35).opacity(0.9)
 
     private static func draw(_ ctx: GraphicsContext, size: CGSize,
-                             samples: [VolumeHistory.Sample],
-                             activity: [(t: TimeInterval, active: Int)]) {
+                             snap: Snapshot) {
         let w = size.width, h = size.height
-        guard !samples.isEmpty else { return }
+        guard !snap.samples.isEmpty else { return }
         // The trace scrolls with NOW, not the last (sparse) sample.
         let now = ProcessInfo.processInfo.systemUptime
-        let bins = max(Int(w), 1)
-        let binDur = window / Double(bins)
-        // Absolute-time bins with peak-hold; empty bins forward-fill.
-        let t0 = (((now - window) / binDur).rounded(.down)) * binDur
-        var voicePk = [Double](repeating: -1.0, count: bins)
-        var tarafPk = [Double](repeating: -1.0, count: bins)
+        let bins = ScopeTrace.Bins(width: w, endingAt: now)
+        // Peak-hold; empty bins forward-fill.
+        var voicePk = [Double](repeating: -1.0, count: bins.count)
+        var tarafPk = [Double](repeating: -1.0, count: bins.count)
         var seedV = 0.0, seedT = 0.0
-        for s in samples {
-            guard s.t >= t0 else { seedV = s.voice; seedT = s.taraf; continue }
-            let b = min(bins - 1, max(0, Int((s.t - t0) / binDur)))
+        for s in snap.samples {
+            guard s.t >= bins.t0 else {
+                seedV = s.voice; seedT = s.taraf; continue
+            }
+            let b = bins.index(of: s.t)
             if s.voice > voicePk[b] { voicePk[b] = s.voice }
             if s.taraf > tarafPk[b] { tarafPk[b] = s.taraf }
         }
         var vFill = seedV, tFill = seedT
-        for b in 0..<bins {
+        for b in 0..<bins.count {
             if voicePk[b] < 0 { voicePk[b] = vFill } else { vFill = voicePk[b] }
             if tarafPk[b] < 0 { tarafPk[b] = tFill } else { tFill = tarafPk[b] }
         }
-        // Per-bin note activity (the timeline is ordered).
-        var ai = -1
-        var soundingArr = [Bool](repeating: false, count: bins)
-        for b in 0..<bins {
-            let binT = t0 + (Double(b) + 0.5) * binDur
-            while ai + 1 < activity.count, activity[ai + 1].t <= binT {
-                ai += 1
-            }
-            soundingArr[b] = ai >= 0 && activity[ai].active > 0
-        }
-        // Note-active backdrop, run-length filled.
-        var run = 0
-        while run < bins {
-            guard soundingArr[run] else { run += 1; continue }
-            var e = run
-            while e + 1 < bins, soundingArr[e + 1] { e += 1 }
-            let x0 = CGFloat(run) / CGFloat(bins) * w
-            let x1 = CGFloat(e + 1) / CGFloat(bins) * w
-            ctx.fill(Path(CGRect(x: x0, y: 0, width: x1 - x0, height: h)),
-                     with: .color(.white.opacity(0.12)))
-            run = e + 1
-        }
+        let soundingArr = ScopeTrace.soundingBins(snap.activity, bins: bins)
+        ScopeTrace.fillActivity(ctx, size: size, sounding: soundingArr)
         // Guide lines at thirds (20 dB steps).
-        for f in [1.0 / 3.0, 2.0 / 3.0] {
-            var p = Path()
-            p.move(to: CGPoint(x: 0, y: h * CGFloat(1 - f)))
-            p.addLine(to: CGPoint(x: w, y: h * CGFloat(1 - f)))
-            ctx.stroke(p, with: .color(.white.opacity(0.12)), lineWidth: 0.5)
-        }
+        ScopeTrace.guides(ctx, size: size,
+                          [(1.0 / 3.0, 0.12), (2.0 / 3.0, 0.12)])
         // Traces: colored while a note sounds, gray otherwise. Taraf under.
         func stroke(_ values: [Double], active: Color, idle: Color) {
             var prevPt: CGPoint? = nil
-            for b in 0..<bins {
-                let pt = CGPoint(x: (CGFloat(b) + 0.5) / CGFloat(bins) * w,
+            for b in 0..<bins.count {
+                let pt = CGPoint(x: bins.x(b, width: w),
                                  y: h - CGFloat(values[b]) * (h - 2) - 1)
                 if let pp = prevPt {
                     var seg = Path()
@@ -624,16 +498,16 @@ private struct VolumeScopePane: View {
         // Current dB values, voice above taraf; silence prints nothing.
         func label(_ v01: Double, _ color: Color, y: CGFloat) {
             guard v01 > 0 else { return }
-            let db = Int(((v01 - 1.0) * 60.0).rounded())
-            let text = Text("\(db)")
-                .font(.padSmall(9).monospacedDigit())
-                .foregroundColor(color.opacity(0.95))
-            let resolved = ctx.resolve(text)
-            let sz = resolved.measure(in: CGSize(width: 40, height: 14))
-            ctx.draw(resolved, at: CGPoint(x: w - sz.width / 2 - 3, y: y))
+            let db = Int(TLPVolume.db(from01: v01).rounded())
+            ScopeTrace.drawValueLabel(
+                ctx,
+                Text("\(db)")
+                    .font(.padSmall(9).monospacedDigit())
+                    .foregroundColor(color.opacity(0.95)),
+                size: size, measureIn: CGSize(width: 40, height: 14), y: y)
         }
-        label(voicePk[bins - 1], voiceColor, y: 7)
-        label(tarafPk[bins - 1], tarafColor, y: h - 7)
+        label(voicePk[bins.count - 1], voiceColor, y: 7)
+        label(tarafPk[bins.count - 1], tarafColor, y: h - 7)
     }
 }
 
@@ -739,64 +613,11 @@ struct RawMotionOverlay: View {
     private static func draw(_ ctx: GraphicsContext, size: CGSize,
                              hist: [(t: TimeInterval, p: Double, r: Double, y: Double)],
                              azimuth: Double) {
-        guard hist.count > 2 else { return }
-        let step = max(1, hist.count / 400)
-        var pts: [SIMD3<Double>] = []
-        for i in stride(from: 0, to: hist.count, by: step) {
-            pts.append(SIMD3(hist[i].p, hist[i].r, hist[i].y))
-        }
-        if let last = hist.last {
-            pts.append(SIMD3(last.p, last.r, last.y))
-        }
-
-        var c = SIMD3<Double>()
-        for p in pts { c += p }
-        c /= Double(pts.count)
-        let maxR = viewRadius
-        let half = Double(min(size.width, size.height)) / 2 - 12
-        let s = half / maxR
-        let cx = Double(size.width) / 2
-        let cy = Double(size.height) / 2
-        let cosA = cos(azimuth)
-        let sinA = sin(azimuth)
-        let cosE = cos(0.5)
-        let sinE = sin(0.5)
-
-        func project(_ p: SIMD3<Double>) -> CGPoint {
-            let d = p - c
-            let rx = d.x * cosA - d.y * sinA
-            let ry = d.x * sinA + d.y * cosA
-            return CGPoint(x: cx + rx * s,
-                           y: cy - (d.z * cosE - ry * sinE) * s)
-        }
-
-        // Axis lines (pitch/roll/yaw), for orientation.
-        for (axis, color) in [(SIMD3<Double>(1, 0, 0), colors[0]),
-                              (SIMD3<Double>(0, 1, 0), colors[1]),
-                              (SIMD3<Double>(0, 0, 1), colors[2])] {
-            var path = Path()
-            path.move(to: project(c - axis * maxR))
-            path.addLine(to: project(c + axis * maxR))
-            ctx.stroke(path, with: .color(color.opacity(0.3)), lineWidth: 0.5)
-        }
-
-        // Age-faded trail: drift reads as a snake, noise as a fuzz ball.
-        for i in 1..<pts.count {
-            var seg = Path()
-            seg.move(to: project(pts[i - 1]))
-            seg.addLine(to: project(pts[i]))
-            let age = Double(i) / Double(pts.count)
-            ctx.stroke(seg, with: .color(.white.opacity(0.1 + 0.6 * age)),
-                       lineWidth: 1)
-        }
-
-        // Current attitude.
-        if let last = pts.last {
-            let q = project(last)
-            ctx.fill(Path(ellipseIn: CGRect(x: q.x - 4, y: q.y - 4,
-                                            width: 8, height: 8)),
-                     with: .color(.yellow))
-        }
+        // Centred on the trail mean — the rest pose is arbitrary.
+        MotionScatter.drawTrail(ctx, size: size,
+                                points: hist.map { SIMD3($0.p, $0.r, $0.y) },
+                                maxRadius: viewRadius, axisColors: colors,
+                                azimuth: azimuth)
     }
 }
 
@@ -847,137 +668,12 @@ struct RawAccelOverlay: View {
     private static func draw(_ ctx: GraphicsContext, size: CGSize,
                              hist: [(t: TimeInterval, x: Double, y: Double, z: Double)],
                              azimuth: Double) {
-        guard hist.count > 2 else { return }
-        let step = max(1, hist.count / 400)
-        var pts: [SIMD3<Double>] = []
-        for i in stride(from: 0, to: hist.count, by: step) {
-            pts.append(SIMD3(hist[i].x, hist[i].y, hist[i].z))
-        }
-        if let last = hist.last {
-            pts.append(SIMD3(last.x, last.y, last.z))
-        }
-
-        let maxR = viewRadius
-        let half = Double(min(size.width, size.height)) / 2 - 12
-        let s = half / maxR
-        let cx = Double(size.width) / 2
-        let cy = Double(size.height) / 2
-        let cosA = cos(azimuth)
-        let sinA = sin(azimuth)
-        let cosE = cos(0.5)
-        let sinE = sin(0.5)
-
-        func project(_ p: SIMD3<Double>) -> CGPoint {
-            let rx = p.x * cosA - p.y * sinA
-            let ry = p.x * sinA + p.y * cosA
-            return CGPoint(x: cx + rx * s,
-                           y: cy - (p.z * cosE - ry * sinE) * s)
-        }
-
-        // Axis lines (x/y/z) through the origin, for orientation.
-        for (axis, color) in [(SIMD3<Double>(1, 0, 0), colors[0]),
-                              (SIMD3<Double>(0, 1, 0), colors[1]),
-                              (SIMD3<Double>(0, 0, 1), colors[2])] {
-            var path = Path()
-            path.move(to: project(-axis * maxR))
-            path.addLine(to: project(axis * maxR))
-            ctx.stroke(path, with: .color(color.opacity(0.3)), lineWidth: 0.5)
-        }
-
-        // Age-faded trail: strikes read as jabs from the origin.
-        for i in 1..<pts.count {
-            var seg = Path()
-            seg.move(to: project(pts[i - 1]))
-            seg.addLine(to: project(pts[i]))
-            let age = Double(i) / Double(pts.count)
-            ctx.stroke(seg, with: .color(.white.opacity(0.1 + 0.6 * age)),
-                       lineWidth: 1)
-        }
-
-        // Current acceleration.
-        if let last = pts.last {
-            let q = project(last)
-            ctx.fill(Path(ellipseIn: CGRect(x: q.x - 4, y: q.y - 4,
-                                            width: 8, height: 8)),
-                     with: .color(.yellow))
-        }
-    }
-}
-
-/// The chord bar below the band: one derived triad per fret column
-/// (`chordBarCells`, shared with the Mac). Highlight = THIS pad's own
-/// selection, asserted in its outbound frame. Display only; taps are
-/// hit-tested in the surface's UIKit touch handler.
-private struct ChordBarVisualIOS: View {
-    let cells: [ChordBarCell]
-    let active: ChordSelection?
-    let edgePad: CGFloat
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(cells) { c in
-                // Octave-agnostic: every octave's cell of the degree lights.
-                let sel = active?.degree == c.degreeIndex
-                let hue = pitchColor(forRatio: c.rootRatio, lightness: 0.78,
-                                     chroma: 0.16)
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(sel ? hue.opacity(0.55) : Color.white.opacity(0.05))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(hue.opacity(sel ? 0.95 : 0.4),
-                                    lineWidth: sel ? 1.5 : 1)
-                    )
-                    .overlay(
-                        Text(c.numeral)
-                            .font(.padSmall(14, weight: .semibold))
-                            .foregroundColor(.white.opacity(sel ? 1.0 : 0.75))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.5)
-                    )
-                    .frame(width: c.rect.width, height: c.rect.height)
-                    .offset(x: edgePad + c.rect.minX, y: edgePad + c.rect.minY)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-}
-
-/// Drone buttons (the shared `droneButtonRects`), display only — presses are
-/// hit-tested in the surface's UIKit touch handler, never via SwiftUI
-/// gestures, so they can't interfere with melody multitouch.
-private struct DroneButtonsVisualIOS: View {
-    let ratios: [Double]
-    /// The synced scale's degrees — buttons are named by the scale
-    /// (`scaleLabel(forRatio:)`).
-    let degrees: [(ratio: Double, label: String)]
-    let held: Set<Int>
-    let size: CGSize
-    let edgePad: CGFloat
-
-    var body: some View {
-        let rects = droneButtonRects(size: size)
-        ZStack(alignment: .topLeading) {
-            ForEach(rects.indices, id: \.self) { i in
-                let ratio = i < ratios.count ? ratios[i] : 1.0
-                let hue = pitchColor(forRatio: ratio, lightness: 0.75,
-                                     chroma: 0.17)
-                let r = rects[i]
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(hue.opacity(held.contains(i) ? 0.9 : 0.25))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(hue.opacity(0.8), lineWidth: 1)
-                    )
-                    .overlay(
-                        Text(scaleLabel(forRatio: ratio, degrees: degrees))
-                            .font(.padSmall(15, weight: .bold))
-                            .foregroundColor(.white)
-                    )
-                    .frame(width: r.width, height: r.height)
-                    .offset(x: edgePad + r.minX, y: edgePad + r.minY)
-            }
-        }
-        .allowsHitTesting(false)
+        // Origin-centred: acceleration has a natural zero.
+        MotionScatter.drawTrail(ctx, size: size,
+                                points: hist.map { SIMD3($0.x, $0.y, $0.z) },
+                                maxRadius: viewRadius,
+                                center: SIMD3<Double>(),
+                                axisColors: colors, azimuth: azimuth)
     }
 }
 
@@ -1031,8 +727,7 @@ private struct FretPadSurfaceIOS: View {
                 Canvas { ctx, _ in
                     ctx.translateBy(x: edgePad, y: edgePad)
                     // Band border — the playable strip against the dead space.
-                    ctx.stroke(Path(band),
-                               with: .color(.white.opacity(0.12)), lineWidth: 1)
+                    ctx.strokeFretBand(band)
                     ctx.translateBy(x: band.minX, y: band.minY)
                     for p in placements {
                         let hue = pitchColor(forRatio: p.ratio,
@@ -1054,16 +749,18 @@ private struct FretPadSurfaceIOS: View {
                                        edgePad: edgePad)
 
                 // The chord bar (display only; taps hit-tested in `began`).
-                ChordBarVisualIOS(cells: chordCells,
-                                  active: engine.chordSelection,
-                                  edgePad: edgePad)
+                ChordBarVisual(cells: chordCells,
+                               active: engine.chordSelection,
+                               edgePad: edgePad, cornerRadius: 6,
+                               fontSize: 14)
 
                 // Drone buttons (display only; hidden with a Joy-Con attached).
                 if !dronesHidden {
-                    DroneButtonsVisualIOS(ratios: arrangement.droneRatios,
-                                          degrees: degrees,
-                                          held: Set(droneTouches.values),
-                                          size: size, edgePad: edgePad)
+                    DroneButtonsVisual(ratios: arrangement.droneRatios,
+                                       degrees: degrees,
+                                       held: Set(droneTouches.values),
+                                       size: size, edgePad: edgePad,
+                                       cornerRadius: 10, fontSize: 15)
                 }
 
                 TouchOverlayView(
@@ -1168,37 +865,15 @@ private struct FretPadSurfaceIOS: View {
                          strikeVel: vel01)
         if recorder.isRecording {
             recorder.begin(touchId: ev.touchId,
-                           context: strokeContext(placements: placements,
-                                                  size: band.size),
+                           context: .snapshot(
+                               placements: placements, size: band.size,
+                               snapDistance: snapDistance,
+                               ghostExtentOctaves: arrangement.ghostExtentOctaves,
+                               fieldWarp: fieldWarp, assist: assist),
                            offset: offset, x: pt.x, y: pt.y,
                            u: fieldLog + offset, o: onsetLog, time: now)
         }
         startAssistTimerIfNeeded()
-    }
-
-    /// Snapshot the geometry + live assist settings for a recorded stroke.
-    private func strokeContext(placements: [FretPlacement],
-                               size: CGSize) -> FretGestureRecorder.Context {
-        FretGestureRecorder.Context(
-            frets: placements.map {
-                .init(id: $0.id, log2Ratio: log2($0.ratio), x: Double($0.x),
-                      topY: Double($0.topY), bottomY: Double($0.bottomY),
-                      ghost: $0.isGhost)
-            },
-            snapDistance: Double(snapDistance),
-            ghostExtentOctaves: arrangement.ghostExtentOctaves,
-            width: Double(size.width), height: Double(size.height),
-            assistParams: ["fieldWarp": fieldWarp,
-                           "speedFloor": assist.speedFloor,
-                           "speedCeiling": assist.speedCeiling,
-                           "speedTau": assist.speedTau,
-                           "settleTau": assist.settleTau,
-                           "radiusScale": assist.radiusScale,
-                           "turnGain": assist.turnGain,
-                           "turnTau": assist.turnTau,
-                           "stillRadiusPx": assist.stillRadiusPx,
-                           "stopDwellMin": assist.stopDwellMin,
-                           "stopDwellRamp": assist.stopDwellRamp])
     }
 
     /// Drag: the field pitch plus this touch's onset offset, then the drag

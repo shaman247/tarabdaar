@@ -81,9 +81,11 @@ below are the shipped defaults (all editable in-app).
 
 ## Parameters
 
-Ranges are the editor's slider bounds; defaults are the shipped
-artifact values (a value loaded outside its range widens the
-slider rather than being clamped).
+Ranges are the editor's slider bounds; defaults are the values the
+shipped instrument RESTS at — the fitted `bowed_string.json` value
+wherever the artifact carries the key, with the registry's authored
+default in parentheses when the two differ. A value loaded outside
+its range widens the slider rather than being clamped.
 
 ### Bow stroke
 
@@ -98,42 +100,42 @@ slider rather than being clamped).
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `bow_body_modes` | modes | 0 … 16 | 12 | global | rebuild | Analytic body mode count. 0 = rigid bridge (the bare string, no body colour). |
-| `bow_body_scale` | body size | 0.15 … 2.5 | 1 | global | in-place | Scales every mode: <1 = smaller body (violin direction), >1 = larger (cello direction). 1 = built for the current tonic. |
-| `bow_body_air_ratio` | air mode ratio | 0.4 … 2.2 | 1.4 | global | in-place | Lowest (air) resonance as a multiple of the open string. Under 1 (air mode BELOW the tonic) is what charges the taraf. |
-| `bow_body_q` | wood Q | 5 … 60 | 25 | global | in-place | Mode sharpness: low = damp/soft wood, high = ringy/hard. |
-| `bow_body_q_air` | air Q | 4 … 30 | 12 | global | in-place | Air-resonance sharpness. |
-| `bow_body_y` | mobility depth | 0 … 2 | 0.35 | global | in-place | How much the bridge moves at the modes — note-to-note unevenness, wolf tendency, attack bloom. |
-| `bow_body_rad` | modal radiation | 0 … 3 | 1 | global | in-place | How loudly the modes radiate (vs the direct term). |
-| `bow_body_c0` | direct radiation | 0 … 1 | 0.3 | global | in-place | Non-modal (flat) radiation floor. 1 with modes 0 = the raw bridge force. |
+| `bow_body_modes` | modes | 0 … 16 | 9 (authored 12) | global | rebuild | Analytic body mode count. 0 = rigid bridge (the bare string, no body colour). |
+| `bow_body_scale` | body size | 0.1 … 1.5 | 0.241243 (authored 1) | global | in-place | Scales every mode: <1 = smaller body (violin direction), >1 = larger (cello direction). 1 = built for the current tonic. |
+| `bow_body_air_ratio` | air mode ratio | 0.4 … 2.2 | 0.694463 (authored 1.4) | global | in-place | Lowest (air) resonance as a multiple of the open string. Under 1 (air mode BELOW the tonic) is what charges the taraf. |
+| `bow_body_q` | wood Q | 5 … 60 | 14.9759 (authored 25) | global | in-place | Mode sharpness: low = damp/soft wood, high = ringy/hard. |
+| `bow_body_q_air` | air Q | 4 … 50 | 27.8606 (authored 12) | global | in-place | Air-resonance sharpness. |
+| `bow_body_y` | mobility depth | 0 … 2 | 1.01785 (authored 0.35) | global | in-place | How much the bridge moves at the modes — note-to-note unevenness, wolf tendency, attack bloom. |
+| `bow_body_rad` | modal radiation | 0 … 3 | 2.87716 (authored 1) | global | in-place | How loudly the modes radiate (vs the direct term). |
+| `bow_body_c0` | direct radiation | 0 … 1 | 0.464459 (authored 0.3) | global | in-place | Non-modal (flat) radiation floor. 1 with modes 0 = the raw bridge force. |
 | `bow_body_tail_n` | formant modes | 0 … 48 | 32 | global | rebuild | Diffuse mid/high mode forest between the tail corners — the FIXED body formants the harmonics sweep through during a glide, the cue that separates a real slide from a pitch-shifted tone. √n-normalized: more modes = denser, individually shallower structure at held total power. 0 = flat feedthrough only. |
 | `bow_body_tail_f0` | formants from (Hz) | 150 … 1500 | 280 | global | rebuild | Low edge of the diffuse formant forest. |
 | `bow_body_tail_f1` | formants to (Hz) | 2000 … 12000 | 6500 | global | rebuild | High edge of the diffuse formant forest. |
 | `bow_body_tail_q` | formant Q | 5 … 60 | 30 | global | rebuild | Formant sharpness: higher = deeper peaks/valleys and slower per-mode bloom (Q 30 at 300 Hz rings ~70 ms — body bloom, physical). |
 | `bow_body_tail_y` | formant mobility | 0 … 1.5 | 0.4 | global | rebuild | Bridge-load side of the formant modes. The default 0.4 leaves the admittance maximum (and the loop cap) unchanged; raising it far invites wolves. |
 | `bow_body_tail_rad` | formant radiation | 0 … 8 | 2.5 | global | rebuild | How loudly the formant forest radiates against the flat floor. The default 2.5 gives ≈ ±4 dB ripple std across 250–6500 Hz (extremes ~26 dB) — real-body territory; near 0 the transfer is inaudibly flat. |
-| `bow_yinf` | bridge give | 0 … 0.4 | 0.05 | global | in-place | Broadband bridge admittance floor under the modes. |
+| `bow_yinf` | bridge give | 0 … 0.4 | 0.021048 (authored 0.05) | global | in-place | Broadband bridge admittance floor under the modes. |
 | `bow_kret` | body return | 0 … 0.5 | 0.35 | global | in-place | Bridge motion fed back into the string (loop-cap protected). More = livelier, wolfier. |
 
 ### Bow & string
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `bow_mu_s` | static friction | 0.4 … 1.2 | 0.8 | global | in-place | Rosin stick strength (grip). |
-| `bow_mu_d` | dynamic friction | 0.1 … 0.6 | 0.3 | global | in-place | Slip friction. The stick/slip GAP sets the Schelleng ceiling. |
-| `bow_v0` | friction corner | 0.05 … 0.5 | 0.2 | global | in-place | Friction-curve knee: smaller = sharper corner = brighter attack edge. |
-| `bow_Zt` | torsional damping | 0 … 15 | 7.9 | global | in-place | String rotation losses at the bow contact. |
-| `bow_gut_g` | gut loss | 0.985 … 1 | 0.998 | global | in-place | Per-round-trip broadband loss — lower = duller, deader string. |
-| `bow_gut_fc2` | gut top (Hz) | 500 … 12000 | 3500 | global | in-place | Second termination pole: the gut string's own HF ceiling. |
-| `bow_nut_fc` | nut corner (Hz) | 1000 … 12000 | 5500 | global | in-place | Nut/finger termination low-pass. |
-| `bow_br_fc` | bridge corner (Hz) | 1000 … 12000 | 6750 | global | in-place | Bridge termination low-pass. |
+| `bow_mu_s` | static friction | 0.4 … 1.2 | 1.06607 (authored 0.8) | global | in-place | Rosin stick strength (grip). |
+| `bow_mu_d` | dynamic friction | 0.1 … 0.6 | 0.184372 (authored 0.3) | global | in-place | Slip friction. The stick/slip GAP sets the Schelleng ceiling. |
+| `bow_v0` | friction corner | 0.05 … 0.5 | 0.107992 (authored 0.2) | global | in-place | Friction-curve knee: smaller = sharper corner = brighter attack edge. |
+| `bow_Zt` | torsional damping | 0 … 15 | 11.3381 (authored 7.9) | global | in-place | String rotation losses at the bow contact. |
+| `bow_gut_g` | gut loss | 0.99 … 1 | 1 (authored 0.998) | global | in-place | Per-round-trip broadband loss — lower = duller, deader string. |
+| `bow_gut_fc2` | gut top (Hz) | 500 … 12000 | 3172.33 (authored 3500) | global | in-place | Second termination pole: the gut string's own HF ceiling. |
+| `bow_nut_fc` | nut corner (Hz) | 1000 … 12000 | 8921.51 (authored 5500) | global | in-place | Nut/finger termination low-pass. |
+| `bow_br_fc` | bridge corner (Hz) | 1000 … 12000 | 9000 (authored 6750) | global | in-place | Bridge termination low-pass. |
 | `bow_loss_reg` | register damping | 0 … 1.5 | 0.7 | global | in-place | Register-tracking string loss: below the tonic the nut/bridge/gut loss corners scale down with pitch — fc × (f0/tonic)^this — so a low note's Helmholtz corner rounds in proportion to its period, keeping the low register warm instead of brassy, and glides darken smoothly on the way down. At and above the tonic the corners are untouched. 0 = fixed corners; 0.7 (default) = moderate warmth; 1 = full period-proportional tracking. |
 | `bow_twang` | sitar twang | 0 … 1 | 0 | global | live | Grazing jawari wrap on the PLAYED strings' bridge — the sitar's flat-bridge contact on the melody string (the taraf's bones are separate). 0 = the plain bridge, bit-exact. Rising: while an excursion tip presses the bone the speaking length shortens a hair (an energy-conserving per-cycle phase modulation that pumps the harmonic cascade) and the terminations morph toward sitar hardware (brighter bridge/nut, eased release damping), so a staccato note keeps a sustained buzzy 2.5–6 kHz cluster through its ring. ~0.75 is a classic sitar buzz; the last quarter opens the wrap and brightness further for a hotter, more present buzz. The graze knee rides each string's own envelope, so the twang engages at any strike level, and pitch-lock terms hold the twanged ring on the plain ring's pitch (±5 ¢ at the extremes). Applies live, slewed in-kernel. |
 | `bow_noise` | contact noise | 0 … 0.4 | 0.1 | global | in-place | Hair-scatter noise recirculated into the friction loop. |
 | `bow_noise_dir` | direct noise | 0 … 0.4 | 0.12 | global | in-place | Contact noise radiated directly (inter-harmonic air). |
-| `bow_tors_c` | torsion coupling | 0 … 0.5 | 0 | global | in-place | Slip → torsional wave → returned micro-slips: period-locked harmonic HF regeneration at the source. 0 = off. |
-| `bow_tors_g` | torsion return | 0.5 … 0.98 | 0.85 | global | in-place | Torsional loop reflection/loss (higher = stronger ripple). |
-| `bow_tors_ratio` | torsion speed × | 3.5 … 8 | 5.2 | global | in-place | Torsional/transverse wave-speed ratio (gut ≈ 5). |
+| `bow_tors_c` | torsion coupling | 0 … 0.5 | 0.048906 (authored 0) | global | in-place | Slip → torsional wave → returned micro-slips: period-locked harmonic HF regeneration at the source. 0 = off. |
+| `bow_tors_g` | torsion return | 0.5 … 0.98 | 0.959677 (authored 0.85) | global | in-place | Torsional loop reflection/loss (higher = stronger ripple). |
+| `bow_tors_ratio` | torsion speed × | 3.5 … 8 | 4.46653 (authored 5.2) | global | in-place | Torsional/transverse wave-speed ratio (gut ≈ 5). |
 | `bow_age_a` | contact aging | 0 … 0.9 | 0 | global | in-place | Rate-and-state friction: static grip grows with stick time — a freshly-slipped contact is weak, so slips collect at one phase per period (cleaner, more locked slip pattern). 0 = off. |
 | `bow_age_ms` | aging time (ms) | 0.2 … 5 | 1.5 | global | in-place | Contact re-adhesion timescale (fraction of a period = strongest phase discipline). |
 | `bow_cr_w` | contact spread | 0 … 0.5 | 0 | global | in-place | Continuum contact: grip-limit spread across the hair band — partial release near the boundary (adds bow-surface flutter texture; darkens quiet mids). 0 = off. |
@@ -163,8 +165,8 @@ slider rather than being clamped).
 | `bow_jt_radius` | bone radius (m) | 0.05 … 2 | 0.3 | global | in-place | Curvature radius of the bone's parabola, in metres. Small = a rounded bridge (the wrap point stays put, a cleaner ring); large = a nearly flat bone (the string rolls along it as it swings — the wide open sitar/tanpura-style jawari). |
 | `bow_jt_evolve` | evolution | 0 … 1 | 0.5 | global | live | Harmonic-evolution rate — the tanpura/sitar twang axis: a signed bone offset spanning graze margin ×4 … ×¼ around the fitted bone, slewed inside the kernel (~40 ms) so the bone glides — tilt-sweepable without a strum. 1 = the ring always sits in the grazing band: energy cascades up the partials fast (centroid rise ~0.3 s) at any level, and the taraf rings a few dB hotter (trim with level). 0 = the string is pressed past the knee: harmonics stay put, no twang. 0.5 = the fitted geometry, bit-exact. Applies live. |
 | `bow_jt_ev_reg` | evolution register | -1 … 1 | 0 | global | live | Register tilt of the evolution axis, in evolve units per octave from the tonic — each row's bone evaluates the margin map at its own shifted evolve (kernel-slewed ~40 ms). Positive opens the below-tonic rows toward the grazing band while pressing the above-tonic web closed, so the long-ringing Sa/Pa anchor rows bloom for their whole ring without the whole web buzzing; negative reverses it (highs shimmer, lows stay put). 0 = the uniform bone, bit-exact. Relative to wherever the evolution knob sits. Applies live. |
-| `bow_jt_alpha` | contact law | 1 … 2 | 1.5 | global | in-place | Contact stiffness exponent. 1.5 = Hertz (the fast sqrt path); the fitted instrument runs 1.3, and other values cost more CPU. |
-| `bow_jt_norm` | level norm | 0 … 1.5 | 1 | global | in-place | Per-string t60-response normalization — evens the driven level across scale degrees (long-ring rows charge hotter); 0 = raw physics. |
+| `bow_jt_alpha` | contact law | 1 … 2 | 1.3 (authored 1.5) | global | in-place | Contact stiffness exponent. 1.5 = Hertz (the fast sqrt path); the fitted instrument runs 1.3, and other values cost more CPU. |
+| `bow_jt_norm` | level norm | 0 … 1.5 | 0 (authored 1) | global | in-place | Per-string t60-response normalization — evens the driven level across scale degrees (long-ring rows charge hotter); 0 = raw physics. |
 | `bow_jt_hcb` | contact damping | 1 … 40 | 8 | global | in-place | Hysteretic damping of the string–bone contact. More = softer buzz transients (rounder force pulses, less clang). Default 8. |
 | `bow_jt_fhf` | damping corner (Hz) | 800 … 12000 | 4000 | global | in-place | Corner of the per-mode f² damping law — above it, partials die progressively faster. Lower = warmer (the top decays in tens of ms while fundamentals sustain). Default 4000 Hz. |
 | `bow_jt_bst` | inharmonicity | 0 … 0.001 | 0.0002 | global | in-place | Stiffness stretch of the upper partials (steel-wire dispersion). Lower = a more harmonic, less bell-metallic top; the default 2e-4 puts mode 40 ~15% sharp. |
@@ -274,12 +276,12 @@ slider rather than being clamped).
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `bow_rad_hp` | radiation HP (Hz) | 50 … 600 | 200 | global | in-place | A finite radiator can't radiate below its size — butter-2 high-pass corner. |
-| `bow_rad_lp` | radiation LP (Hz) | 500 … 16000 | 8000 | global | in-place | Air/skin HF absorption — one-pole corner. |
-| `bow_w` | excitation level | 0.2 … 2.5 | 1.196 | global | in-place | Bridge-force weight (pre-radiation drive). |
+| `bow_rad_hp` | radiation HP (Hz) | 50 … 600 | 84.8227 (authored 200) | global | in-place | A finite radiator can't radiate below its size — butter-2 high-pass corner. |
+| `bow_rad_lp` | radiation LP (Hz) | 500 … 16000 | 10373.7 (authored 8000) | global | in-place | Air/skin HF absorption — one-pole corner. |
+| `bow_w` | excitation level | 0.2 … 2.5 | 0.632167 (authored 1.196) | global | in-place | Bridge-force weight (pre-radiation drive). |
 | `bow_gain` | master gain | 0 … 2 | 1 | global | live | Performance volume of the WHOLE radiated instrument — played voice, taraf ring and room together — on top of the fitted calibration trim. Expression drives the bow (the played string only), so the ringing taraf keeps the total level up; this is the knob that actually moves it. 1 = the calibrated level. INSTANT (a dedicated 25 ms-ramped engine setter — no rebuild, no debounce), so bind it to a tilt or the Strike/Acceleration pair for real-time volume control. The safety limiter still guards the ceiling. |
 | `bow_bal` | voice↔taraf balance | -1 … 1 | 0 | global | live | Volume balance between the played VOICE bus and the sympathetic TARAF (jt) bus, at the point where they merge: −1 = voice only, 0 = neutral (the calibrated mix, bit-exact), +1 = taraf only. A pure attenuator pair — the favored side stays at its calibrated level, the other turns down — so no headroom appears and the limiter calibration holds. Slewed ~30 ms; INSTANT like master gain, so bind it to a tilt to lean into the wash mid-phrase. The iPad volume readout tracks it (the meter taps post-balance). Applies live. |
-| `bow_live_trim` | output trim | 0.01 … 0.5 | 0.175 | global | in-place | Final calibration level of the fitted instrument — the CALIBRATION half; use master gain for performance volume. |
+| `bow_live_trim` | output trim | 0.01 … 0.5 | 0.2332 (authored 0.175) | global | in-place | Final calibration level of the fitted instrument — the CALIBRATION half; use master gain for performance volume. |
 | `bow_lim_thresh` | limiter ceiling | 0.1 … 1 | 0.8 | global | in-place | Output safety limiter: linked-stereo peak ceiling at the very end of the chain (after global FX). Below it samples pass bit-exact; above, instant-attack gain riding with the release below. Guards the coherent kin peaks (hard-struck Sa/Pa: voice + jt ring + coupling return add in phase) and the ±16 dB expression axis. To even the CAUSE, see bow_jt_norm — long-ring anchor rows charge hotter. |
 | `bow_lim_rel_ms` | limiter release (ms) | 20 … 500 | 150 | global | in-place | Release time of the output safety limiter's gain recovery. Shorter pumps on sustained hot material; longer ducks the wash noticeably after a peak. |
 | `bow_rev_mix` | room mix | 0 … 0.3 | 0.08 | global | in-place | Room level. The wet pair is width-decorrelated (see room width); the L+R fold-down stays pan-invariant. 0 = bone dry. |
@@ -294,7 +296,7 @@ slider rather than being clamped).
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `tp_gain` | output gain | 0 … 0.1 | 0.02 | global | live | The tanpura voice's output trim, applied after its fitted body EQ and before its calibration room. The 0.02 default IS the artifact's fitted trim (tanpura_live.json `gain`) — keep the two in step when the artifact regenerates. |
+| `tp_gain` | output gain | 0 … 0.03 | 0.02 | global | live | The tanpura voice's output trim, applied after its fitted body EQ and before its calibration room. The 0.02 default IS the artifact's fitted trim (tanpura_live.json `gain`) — keep the two in step when the artifact regenerates. |
 | `tp_drone_level` | drone pluck level | 0 … 2 | 1 | global | live | Scales the drone buttons' tanpura pluck displacement (1 = the role's fitted pluck at velocity 100). Only the tanpura drone voice reads it; the sympathetic-swell drone voice keeps its own bow_drone_* calibration. |
 | `tp_drone_cycle` | drone re-pluck period (s) | 0 … 8 | 2.5 | global | live | While a drone button stays held, the tanpura re-plucks its string every this many seconds — the strumming hand. Below 0.1 s the cycle is off (a press is then a single pluck; the string still rings for its full t60 either way). Applies live, mid-hold. |
 | `tp_pluck_level` | played pluck level | 0 … 2 | 1 | global | live | Scales the fret-note tanpura plucks when the tanpura is the MAIN instrument (velocity still shapes each pluck on top). Inert while the String voice is the played instrument. |
@@ -314,7 +316,7 @@ slider rather than being clamped).
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `st_gain` | output gain | 0 … 0.1 | 0.015186 | global | live | The sitar voice's output trim, applied before its calibration room (the body weighting is baked per mode — the scale-model radiation law). The 0.015186 default IS the artifact's fitted trim (sitar_live.json `gain`, calibrated so a velocity-100 sitar pluck peaks like a tanpura drone pluck) — keep the two in step when the artifact regenerates. |
+| `st_gain` | output gain | 0 … 0.03 | 0.015186 | global | live | The sitar voice's output trim, applied before its calibration room (the body weighting is baked per mode — the scale-model radiation law). The 0.015186 default IS the artifact's fitted trim (sitar_live.json `gain`, calibrated so a velocity-100 sitar pluck peaks like a tanpura drone pluck) — keep the two in step when the artifact regenerates. |
 | `st_pluck_level` | played pluck level | 0 … 2 | 1 | global | live | Scales the fret-note sitar plucks when the sitar is the MAIN instrument (velocity still shapes each pluck on top). Inert otherwise. |
 | `st_rel_t60` | note-off release t60 (s) | 0.05 … 3 | 0.15 | per-note | live | Note-off decay: a HELD fret note rings at the string's natural rate, a released one decays to −60 dB in this many seconds — a finger lift off the fret. Shorter than the tanpura's default: sitar lines articulate. |
 | `st_pluck_touch` | pluck isolation | 0 … 1 | 1 | global | live | Same axis as tp_pluck_touch (0 = each pluck rides the ringing past; above 0 the old ring moves to a history string and the new pluck starts settled). Defaults to 1 for the sitar: fret runs re-pluck at NEW pitches, and isolation keeps the previous note's tail at its own pitch instead of retuning history with the glide. |

@@ -99,8 +99,9 @@ struct FretPadView: View {
                 .help("Clean playing surface: editing off, octave gridlines + labels + endpoint handles hidden, octave-repeat frets shown identically to the editable ones, and the scale editor hidden.")
             recordControl
             Spacer()
-            FretSoundingReadout(sounding: engine.sounding,
-                                tonicFractionalMidi: pitchPad.tonicFractionalMidi)
+            SoundingReadout(sounding: engine.sounding,
+                            tonicFractionalMidi: pitchPad.tonicFractionalMidi,
+                            style: .capsule)
             snapControl
             warpControl
             velocityControl
@@ -266,49 +267,41 @@ struct FretPadView: View {
 
     /// Horizontal onset-snap distance in px (`engine.marginPixels`); 0 = fretless.
     private var snapControl: some View {
-        HStack(spacing: 6) {
-            Text("Snap").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
-            Slider(value: $engine.marginPixels, in: 0...64)
-                .frame(width: 80)
-            Text("\(Int(engine.marginPixels.rounded())) px")
-                .font(.padCaption.monospacedDigit())
-                .frame(width: Typography.scaledWidth(36), alignment: .trailing)
-        }
+        ParamSliderRow(label: "Snap", value: $engine.marginPixels,
+                       range: 0...64,
+                       readout: "\(Int(engine.marginPixels.rounded())) px",
+                       spacing: 6, sliderWidth: 80,
+                       readoutFont: .padCaption.monospacedDigit(),
+                       readoutWidth: Typography.scaledWidth(36))
         .help("How close (horizontally) a touch must start to a fret to snap to its pitch. Only applies within the fret's vertical extent, and only at touch onset — drags glide continuously. 0 = fretless.")
     }
 
     /// `ctl_fret_warp` (bindable, relayed to the iPad): the slider edits the
     /// RESTING value; a binding's output rides on top.
     private var warpControl: some View {
-        HStack(spacing: 6) {
-            Text("Warp").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
-            Slider(value: Binding(
+        ParamSliderRow(
+            label: "Warp",
+            value: Binding(
                 get: { controller.paramValue("ctl_fret_warp") },
-                set: { controller.setParamValue("ctl_fret_warp", $0) }
-            ), in: 0...1)
-                .frame(width: 80)
-            Text("\(Int((controller.fretFieldWarp * 100).rounded())) %")
-                .font(.padCaption.monospacedDigit())
-                .frame(width: Typography.scaledWidth(36), alignment: .trailing)
-        }
+                set: { controller.setParamValue("ctl_fret_warp", $0) }),
+            range: 0...1,
+            readout: "\(Int((controller.fretFieldWarp * 100).rounded())) %",
+            spacing: 6, sliderWidth: 80,
+            readoutFont: .padCaption.monospacedDigit(),
+            readoutWidth: Typography.scaledWidth(36))
         .help("How strongly the frets warp the pitch space around them (the ctl_fret_warp parameter — also on the Parameters tab, bindable to a tilt/stick axis for live morphing): 0 = linear (pitch moves at a constant rate between frets); higher = pitch plateaus near each fret and transitions quickly through the middle, so a straight slide between two frets traces a logistic curve. The readout shows the LIVE value (binding included). Out of Perform mode the contour lines show the resulting territories.")
     }
 
     private var velocityControl: some View {
-        HStack(spacing: 6) {
-            Text("Velocity").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
-            Slider(
-                value: Binding(
-                    get: { Double(engine.velocity) },
-                    set: { engine.velocity = Int($0.rounded()) }
-                ),
-                in: 1...127
-            )
-            .frame(width: 90)
-            Text("\(engine.velocity)")
-                .font(.padCaption)
-                .frame(width: Typography.scaledWidth(28), alignment: .trailing)
-        }
+        ParamSliderRow(
+            label: "Velocity",
+            value: Binding(
+                get: { Double(engine.velocity) },
+                set: { engine.velocity = Int($0.rounded()) }),
+            range: 1...127,
+            readout: "\(engine.velocity)",
+            spacing: 6, sliderWidth: 90,
+            readoutWidth: Typography.scaledWidth(28))
     }
 
     /// The tonic, edited here only: **Hz** (the app's one absolute pitch) and
@@ -370,119 +363,6 @@ struct FretPadView: View {
                 .foregroundStyle(.secondary)
             Spacer()
         }
-    }
-}
-
-// MARK: - Drone buttons
-
-/// Drone buttons, display only — presses are hit-tested in the surface's
-/// mouse handlers via the shared `droneButtonRects`.
-private struct DroneButtonsVisual: View {
-    let ratios: [Double]
-    /// The scale's degrees — buttons are named by the scale (`scaleLabel`).
-    let degrees: [(ratio: Double, label: String)]
-    let held: Set<Int>
-    let size: CGSize
-    let edgePad: CGFloat
-
-    var body: some View {
-        let rects = droneButtonRects(size: size)
-        ZStack(alignment: .topLeading) {
-            ForEach(rects.indices, id: \.self) { i in
-                let ratio = i < ratios.count ? ratios[i] : 1.0
-                let hue = pitchColor(forRatio: ratio, lightness: 0.75,
-                                     chroma: 0.17)
-                let r = rects[i]
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(hue.opacity(held.contains(i) ? 0.9 : 0.25))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(hue.opacity(0.8), lineWidth: 1)
-                    )
-                    .overlay(
-                        Text(scaleLabel(forRatio: ratio, degrees: degrees))
-                            .font(.padSmall(12, weight: .bold))
-                            .foregroundStyle(.white)
-                    )
-                    .frame(width: r.width, height: r.height)
-                    .offset(x: edgePad + r.minX, y: edgePad + r.minY)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-}
-
-// MARK: - Chord bar
-
-/// The chord bar below the band: one derived triad per fret column
-/// (`chordBarCells`, shared with the iPad). Highlight = the active strum
-/// chord (`AppController.strumChord`); clicks are hit-tested in `handleDown`.
-private struct ChordBarVisual: View {
-    let cells: [ChordBarCell]
-    let active: ChordSelection?
-    let edgePad: CGFloat
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(cells) { c in
-                // Octave-agnostic: every octave's cell of the degree lights.
-                let sel = active?.degree == c.degreeIndex
-                let hue = pitchColor(forRatio: c.rootRatio, lightness: 0.78,
-                                     chroma: 0.16)
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(sel ? hue.opacity(0.55) : Color.white.opacity(0.05))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5)
-                            .stroke(hue.opacity(sel ? 0.95 : 0.4),
-                                    lineWidth: sel ? 1.5 : 1)
-                    )
-                    .overlay(
-                        Text(c.numeral)
-                            .font(.padSmall(12, weight: .semibold))
-                            .foregroundStyle(.white.opacity(sel ? 1.0 : 0.75))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.5)
-                    )
-                    .frame(width: c.rect.width, height: c.rect.height)
-                    .offset(x: edgePad + c.rect.minX, y: edgePad + c.rect.minY)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-}
-
-// MARK: - Sounding readout
-
-/// Live Hz / note / cents readout for the active touch. Observes only
-/// `SoundingState`, so glide ticks re-render this capsule alone.
-private struct FretSoundingReadout: View {
-    @ObservedObject var sounding: SoundingState
-    let tonicFractionalMidi: Double
-
-    var body: some View {
-        let ratio = sounding.ratio
-        let text: String = ratio.map { r in
-            // octaveSemis is onset-captured, so a held note reads true.
-            let fractionalMidi = tonicFractionalMidi + sounding.octaveSemis
-                + 12.0 * log2(r)
-            let freq = 440.0 * pow(2.0, (fractionalMidi - 69.0) / 12.0)
-            let nearest = Int(fractionalMidi.rounded())
-            let cents = Int(((fractionalMidi - Double(nearest)) * 100.0).rounded())
-            let hz = freq >= 1000 ? String(format: "%.0f", freq)
-                                  : String(format: "%.1f", freq)
-            let centsStr = cents > 0 ? "+\(cents)¢" : "\(cents)¢"
-            return "\(hz) Hz (\(Scale.noteName(for: nearest)) \(centsStr))"
-        } ?? "000.0 Hz"
-        let color: Color = ratio.map {
-            pitchColor(forRatio: $0, lightness: 0.85, chroma: 0.18)
-        } ?? .clear
-        return Text(text)
-            .font(.padSmall(11).monospacedDigit())
-            .foregroundStyle(color)
-            .padding(.horizontal, 8).padding(.vertical, 1)
-            .background(Capsule().fill(Color(white: 0.12).opacity(ratio == nil ? 0 : 1)))
-            .opacity(ratio == nil ? 0 : 1)
-            .fixedSize()
     }
 }
 
@@ -553,8 +433,7 @@ private struct FretPadSurface: View {
                 Canvas { ctx, _ in
                     ctx.translateBy(x: edgePad, y: edgePad)
                     // Band border — the playable strip against the dead space.
-                    ctx.stroke(Path(band),
-                               with: .color(.white.opacity(0.12)), lineWidth: 1)
+                    ctx.strokeFretBand(band)
                     ctx.translateBy(x: band.minX, y: band.minY)
 
                     // Octave-band boundaries (hidden in perform).
@@ -622,7 +501,8 @@ private struct FretPadSurface: View {
 
                 // The chord bar (display only; clicks hit-tested in handleDown).
                 ChordBarVisual(cells: chordCells, active: chordActive,
-                               edgePad: edgePad)
+                               edgePad: edgePad, cornerRadius: 5,
+                               fontSize: 12)
 
                 // Drone buttons (display only). Hidden while a Joy-Con is
                 // attached (its arrows pluck the drones).
@@ -630,7 +510,8 @@ private struct FretPadSurface: View {
                     DroneButtonsVisual(ratios: arrangement.droneRatios,
                                        degrees: degrees,
                                        held: droneDown.map { [$0] } ?? [],
-                                       size: size, edgePad: edgePad)
+                                       size: size, edgePad: edgePad,
+                                       cornerRadius: 8, fontSize: 12)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -747,37 +628,16 @@ private struct FretPadSurface: View {
                      uncorrectedLog: fieldLog + snapOffsetLog, time: now)
         if recorder.isRecording {
             recorder.begin(touchId: touch,
-                           context: strokeContext(placements: placements, size: size),
+                           context: .snapshot(
+                               placements: placements, size: size,
+                               snapDistance: snapDistance,
+                               ghostExtentOctaves: arrangement.ghostExtentOctaves,
+                               fieldWarp: warp, assist: assist),
                            offset: snapOffsetLog, x: pt.x, y: pt.y,
                            u: fieldLog + snapOffsetLog,
                            o: onsetLog, time: now)
         }
         startAssistTimer()
-    }
-
-    /// Snapshot the geometry + live assist settings for a recorded stroke.
-    private func strokeContext(placements: [FretPlacement],
-                               size: CGSize) -> FretGestureRecorder.Context {
-        FretGestureRecorder.Context(
-            frets: placements.map {
-                .init(id: $0.id, log2Ratio: log2($0.ratio), x: Double($0.x),
-                      topY: Double($0.topY), bottomY: Double($0.bottomY),
-                      ghost: $0.isGhost)
-            },
-            snapDistance: Double(snapDistance),
-            ghostExtentOctaves: arrangement.ghostExtentOctaves,
-            width: Double(size.width), height: Double(size.height),
-            assistParams: ["fieldWarp": warp,
-                           "speedFloor": assist.speedFloor,
-                           "speedCeiling": assist.speedCeiling,
-                           "speedTau": assist.speedTau,
-                           "settleTau": assist.settleTau,
-                           "radiusScale": assist.radiusScale,
-                           "turnGain": assist.turnGain,
-                           "turnTau": assist.turnTau,
-                           "stillRadiusPx": assist.stillRadiusPx,
-                           "stopDwellMin": assist.stopDwellMin,
-                           "stopDwellRamp": assist.stopDwellRamp])
     }
 
     /// 60 Hz settle loop while a play touch is down. Captures only the class

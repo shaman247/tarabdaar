@@ -23,7 +23,6 @@ Audition scores reach any parameter via `voiceParam` name `param.<key>` or `stri
 | `sampleRate` | 44100 Hz | The nominal engine rate reported in Setup (the String kernel renders 96 → 48 kHz at its artifact's native rate) |
 | `preferredOutputBufferFrames` | 128 | Output IO buffer on solid transports (built-in, USB, Thunderbolt) ≈ 2.7 ms — the play-latency floor; clamped to the device's range |
 | `jitterProneOutputBufferFrames` | 512 | Output IO buffer for DisplayPort/HDMI, Bluetooth and AirPlay outputs, which cannot hold the ~3 ms cadence (`preferredBufferFrames(for:)`) |
-| `frequencySmoothing`, `attackCoefficient`, `releaseCoefficient`, `maxAmplitude` | 0.002 / 0.05 / 0.9993 / 0.3 | Legacy envelope constants; unreferenced |
 
 ## Motion and strike
 
@@ -32,10 +31,8 @@ Audition scores reach any parameter via `voiceParam` name `param.<key>` or `stri
 | `motionUpdateRate` | 200 Hz | CoreMotion sample rate |
 | `accelHistoryLength` | 200 | Display buffer (~1 s at 200 Hz) |
 | `accelBufferDuration` | 100 ms | Ring buffer the strike estimate scans; must exceed `velocityLookback` |
-| `peakDecayRate` | 0.95 | Peak indicator decay per sample |
 | `velocityMinG` / `velocityMaxG` | 0.01 g / 0.5 g | Softest / hardest tap on the shared strike law (`StrikeLaw`, log-scale 0…1) — the per-touch strike velocity, the strike envelope, the Joy-Con accel dimension and the audition velocity range all use it |
 | `velocityLookback` | 50 ms | The TRAILING window a fret-pad onset scans for its strike spike (`MotionSource.strikeVelocity01`) — backward-looking, so the onset never waits |
-| `velocityDelay` | 20 ms | Unreferenced |
 
 ## Fret Pad geometry
 
@@ -58,11 +55,8 @@ These serve the in-process paths only — audition scores, external controllers,
 | `maxPolyVoices` | 16 | Voice-slot capacity of `NoteManager.pitchChannels` and the pitch-history graph — a capacity, not a mode; the played voice's polyphony is `bow_live_poly` strings on one bridge |
 | `glideDistanceExponent` / `glideMidpoint` / `releaseGracePeriod` / `dragSnapDelay` | 0.6 / 0.6 / 50 ms / 60 ms | `NoteManager`'s scripted glide and drag-snap shaping for audition `glide` events |
 | `slider1Default` / `slider2Default` | 0.5 | Rest values of the simulator's two slider dimensions |
-| `sliderWidth` / `sliderHeight` | 150 / 66 pt | Unreferenced |
 
 ## Display
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `pitchHistoryLength` | 120 | `NoteManager` pitch graph buffer (~2 s at 60 Hz) |
-| `peakDelayHistory` | 20 | Unreferenced |

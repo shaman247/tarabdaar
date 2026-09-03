@@ -193,13 +193,6 @@ final class ScopeModel: ObservableObject {
         centroidEMA.removeAll()
     }
 
-    /// Level in output units (1.0 ≈ 0 dBFS) → 0…1 over the iPad volume
-    /// scope's 60 dB (`TLPVolume.floorDb`).
-    static func level01(_ linear: Double) -> Double {
-        guard linear > 0 else { return 0 }
-        return min(1, max(0, 1 + 20 * log10(linear) / 60))
-    }
-
     /// Spectral centroid (mode units, 1-based) of the per-mode velocity
     /// envelopes — energy-weighted (p_k²); 1 when nothing rings.
     static func centroid(_ modes: [Float]) -> Double {
@@ -237,7 +230,7 @@ final class ScopeModel: ObservableObject {
         var newRows: [Row] = []
         newRows.reserveCapacity(n)
         for (i, r) in snap.taraf.enumerated() {
-            let l = Self.level01(r.level)
+            let l = TLPVolume.level01(linear: r.level)
             let raw = Self.centroid(r.modes)
             // a silent row keeps its last character rather than snapping to 1
             if l > 0 { centroidEMA[i] += alpha * (raw - centroidEMA[i]) }
@@ -259,10 +252,7 @@ final class ScopeModel: ObservableObject {
         rows = newRows.sorted { $0.f0 < $1.f0 }
         frames.append(Frame(t: now, touches: touches, voices: snap.voices,
                             tarafHz: hz, tarafLevel: lv, tarafBright: br))
-        let cutoff = now - (window + 0.5)
-        if let first = frames.first, first.t < cutoff {
-            frames.removeAll { $0.t < cutoff }
-        }
+        TimeSeries.trim(&frames, now: now, window: window) { $0.t }
         // The axis follows the scale/tonic (and grows to fit the rows);
         // the scale rarely changes, so re-derive it ~once a second.
         if tickCount % 60 == 0 { refreshAxis() }
@@ -348,15 +338,16 @@ private struct PitchField: View {
     }
 
     private func x(_ t: Double, _ plot: CGRect) -> CGFloat {
-        plot.minX + plot.width * CGFloat(1.0 - (now - t) / model.window)
+        TimeSeries.x(t, now: now, window: model.window,
+                     minX: plot.minX, width: plot.width)
     }
 
+    /// Pitch axis; a touch just off-field draws its stub rather than
+    /// snapping to the edge, so the clamp is deliberately loose.
     private func y(hz: Double, _ plot: CGRect) -> CGFloat {
         guard hz > 0 else { return plot.maxY }
-        let a = model.axis
-        let span = a.upperBound - a.lowerBound
-        let n = span > 0 ? (log2(hz) - a.lowerBound) / span : 0.5
-        return plot.maxY - plot.height * CGFloat(min(1.05, max(-0.05, n)))
+        return TimeSeries.y(log2(hz), range: model.axis, bottom: plot.maxY,
+                            height: plot.height, clamp: -0.05...1.05)
     }
 
     private func drawGrid(_ ctx: GraphicsContext, _ plot: CGRect) {
@@ -392,7 +383,7 @@ private struct PitchField: View {
             return
         }
         var path = Path()
-        if smooth { Self.addSmoothCurve(pts.map(\.p), to: &path) }
+        if smooth { path.addSmoothCurve(pts.map(\.p)) }
         else {
             path.move(to: first.p)
             for q in pts.dropFirst() { path.addLine(to: q.p) }
@@ -408,28 +399,6 @@ private struct PitchField: View {
                                          endPoint: CGPoint(x: last.p.x, y: 0)),
                    style: StrokeStyle(lineWidth: width, lineCap: .round,
                                       lineJoin: .round))
-    }
-
-    /// Uniform Catmull-Rom → cubic Bézier (the Live tab's curve): rounds
-    /// off the sample-to-sample stair-steps of a 60 Hz-sampled glide.
-    private static func addSmoothCurve(_ pts: [CGPoint], to p: inout Path) {
-        guard let first = pts.first else { return }
-        p.move(to: first)
-        if pts.count < 3 {
-            for q in pts.dropFirst() { p.addLine(to: q) }
-            return
-        }
-        for i in 0..<(pts.count - 1) {
-            let p0 = pts[max(0, i - 1)]
-            let p1 = pts[i]
-            let p2 = pts[i + 1]
-            let p3 = pts[min(pts.count - 1, i + 2)]
-            let c1 = CGPoint(x: p1.x + (p2.x - p0.x) / 6.0,
-                             y: p1.y + (p2.y - p0.y) / 6.0)
-            let c2 = CGPoint(x: p2.x - (p3.x - p1.x) / 6.0,
-                             y: p2.y - (p3.y - p1.y) / 6.0)
-            p.addCurve(to: p2, control1: c1, control2: c2)
-        }
     }
 
     /// Split a time-ordered series into runs at gaps and (optionally) at

@@ -1579,8 +1579,7 @@ public class AudioEngine: ObservableObject {
 
     /// Plucked-string output envelope (1.0 at the pluck) → 0…1 over the same 60 dB.
     static func pluckScopeLevel01(_ env: Double) -> Double {
-        guard env > 0 else { return 0 }
-        return min(1, max(0, 1 + 20 * log10(env) / 60))
+        TLPVolume.level01(linear: env)
     }
 
     /// Thread-safe; allocates — poll at UI rate only.

@@ -115,7 +115,7 @@ private struct TarafRowStrip: View {
                 }
                 .frame(height: 6)
                 Text(row.level01 > 0
-                     ? String(format: "%.0f dB", 60 * (row.level01 - 1))
+                     ? String(format: "%.0f dB", TLPVolume.db(from01: row.level01))
                      : "—")
                     .font(.padSmall(9, design: .monospaced))
                     .foregroundStyle(.secondary)
