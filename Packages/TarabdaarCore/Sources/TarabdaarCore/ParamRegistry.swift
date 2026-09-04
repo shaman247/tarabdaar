@@ -100,6 +100,24 @@ public enum ParamTiming: String {
     }
 }
 
+/// WHERE a `.live` value goes — the other thing the one apply path
+/// (`AppController.applyParamToVoice`) switches on, so a control-layer
+/// knob is one registry entry and no special case.
+public enum ParamTarget: Sendable {
+    /// The String voice's control cache (`AudioEngine.setStringControlParam`).
+    case stringVoice
+    /// The strike→acceleration blend window (`ControlAxisEvaluator`), relayed to the iPad.
+    case strikeWindow
+    /// The strum chord's expression (`StrumController.setExpression`).
+    case strumExpression
+    /// The strum chord's accel trigger (`StrumController.setAccelThreshold`).
+    case strumThreshold
+    /// The glide queue (`GlideSequencer.setControl`).
+    case glideQueue
+    /// The fret field's pitch warp: the glide queue, the Mac pad, the iPad.
+    case fretWarp
+}
+
 /// One INSERT POINT of a repeated parameter block — the FX rack's four
 /// points. `keyPrefix` matches `SarangiKit.FXPoint.keyPrefix`; a derived
 /// key is the prefix plus a template knob (`fx_voice_rev_mix`).
@@ -171,6 +189,8 @@ public struct ParamSpec: Identifiable {
     /// Integer-ish parameters (mode count, armed flags).
     public let step: Double?
     public let apply: ParamApply
+    /// `.live` only: where the value goes.
+    public let target: ParamTarget
     /// `.hybrid` only: the resting value as a FRACTION of the build-time
     /// headroom — 1 = the fitted depth, 0 = off.
     public let restFraction: Double?
@@ -207,13 +227,15 @@ public struct ParamSpec: Identifiable {
     public init(_ key: String, _ label: String, group: String,
                 _ lo: Double, _ hi: Double, _ def: Double,
                 step: Double? = nil, apply: ParamApply = .rebuild,
+                target: ParamTarget = .stringVoice,
                 restFraction: Double? = nil, timing: ParamTiming? = nil,
                 scope: ParamScope = .global,
                 insert: ParamInsert? = nil,
                 help: String = "") {
         self.key = key; self.label = label; self.group = group
         self.lo = lo; self.hi = hi; self.def = def; self.step = step
-        self.apply = apply; self.restFraction = restFraction
+        self.apply = apply; self.target = target
+        self.restFraction = restFraction
         self.timingOverride = timing
         self.scope = scope; self.insert = insert; self.help = help
     }
@@ -515,7 +537,7 @@ public enum ParamRegistry {
         // scope's onset fade tracks it).
         ("Strike blend", [
             ParamSpec("ctl_strike_window", "blend window (s)", group: "Strike blend",
-                      0.25, 8.0, 2.0, apply: .live,
+                      0.25, 8.0, 2.0, apply: .live, target: .strikeWindow,
                       scope: .perNote,
                       help: "How long a note takes to hand the accelerometer measure from its Strike bindings to its Acceleration bindings: at onset the Strike side applies fully, by this many seconds the Acceleration side does — linear in between, per note (a new note never resets a sounding note's window). Also sets the iPad strike scope's onset fade (yellow → violet on the shared magma level ramp)."),
         ]),
@@ -526,7 +548,7 @@ public enum ParamRegistry {
         // live (ride a stick between fretless meend and quantized runs).
         ("Fret pad", [
             ParamSpec("ctl_fret_warp", "pitch warp", group: "Fret pad",
-                      0.0, 1.0, 0.0, apply: .live,
+                      0.0, 1.0, 0.0, apply: .live, target: .glideQueue,
                       help: "How strongly the frets warp the pitch space around them (the Fret Pad's logistic field reshaping): 0 = linear (pitch moves at a constant rate between frets), 1 = pitch plateaus hard around each fret and jumps quickly through the middle of each gap — a straight slide traces a logistic curve, and fast runs land near-quantized. Applies at every touch onset and move on both surfaces (relayed to the iPad over JOYCON_STATE), so a tilt/stick binding morphs the pad mid-phrase between meend-friendly and run-friendly."),
         ]),
 
@@ -538,25 +560,25 @@ public enum ParamRegistry {
         // never deferred. Toggle 0 = off (pure pass-through).
         ("Glide", [
             ParamSpec("ctl_glide_on", "glide enable", group: "Glide",
-                      0.0, 1.0, 0.0, apply: .live,
+                      0.0, 1.0, 0.0, apply: .live, target: .fretWarp,
                       scope: .perNote,
                       help: "The glide queue's on/off toggle (≥ 0.5 = on). On: a note played while another is still HELD does not mount a fresh string — it is QUEUED and the sounding voice glides to it; further overlapping notes join the queue and are hit in sequence, and once every chained touch has lifted the next tap is a fresh attack (staccato is untouched — releases are never deferred). A repeat tap at the sounding pitch still re-attacks. 0 = off — every onset is a fresh note."),
             ParamSpec("ctl_glide_rate", "glide rate (st/s)", group: "Glide",
-                      2.0, 200.0, 40.0, apply: .live,
+                      2.0, 200.0, 40.0, apply: .live, target: .glideQueue,
                       scope: .perNote,
                       help: "Base speed of a queued glide, in semitones per second, when the note being left has been RELEASED. A 12-semitone glide at 40 st/s takes 0.3 s. Bindable."),
             ParamSpec("ctl_glide_held", "held glide ×", group: "Glide",
-                      0.05, 1.0, 0.3, apply: .live,
+                      0.05, 1.0, 0.3, apply: .live, target: .glideQueue,
                       scope: .perNote,
                       help: "Rate multiplier while the note being left is STILL HELD — holding the old note makes the glide slower and more deliberate (expressive meend); lifting it mid-glide snaps back to the full rate. 1 = held and released glide alike."),
             ParamSpec("ctl_glide_catchup", "catch-up ×", group: "Glide",
-                      1.0, 16.0, 4.0, apply: .live,
+                      1.0, 16.0, 4.0, apply: .live, target: .glideQueue,
                       scope: .perNote,
                       help: "Rate multiplier while the note being glided TOWARD is not the END of the queue — when the player has already moved on, the trajectory hurries through the intermediate pitches to catch up. 1 = no hurry (every waypoint at the plain rate)."),
             // DEFAULT = SEQUENCER FALLBACK: GlideSequencer.overFrac must
             // equal this def (tests construct the sequencer directly).
             ParamSpec("ctl_glide_over", "overshoot", group: "Glide",
-                      0.0, 0.3, 0.08, apply: .live,
+                      0.0, 0.3, 0.08, apply: .live, target: .glideQueue,
                       scope: .perNote,
                       help: "How far a glide's FINAL approach overshoots past the target before settling back, as a fraction of the glide distance (capped at ±50 ¢) — the human player's land-and-correct: a 12-semitone jump at 0.08 lands ~50 ¢ past and eases back on at a gentler rate. Only the run's last note gets the miss (catch-up glides through a queue are already hurrying and hit their waypoints dead-on). 0 = every glide lands exactly."),
         ]),
@@ -567,10 +589,10 @@ public enum ParamRegistry {
         // holds the chord.
         ("Controller", [
             ParamSpec("ctl_strum_expr", "strum expression", group: "Controller",
-                      0.0, 1.0, 1.0, apply: .live,
+                      0.0, 1.0, 1.0, apply: .live, target: .strumThreshold,
                       help: "Loudness of the controller strum's held chord: a per-note expression scale on the chord's notes only. On the String bow voice it multiplies the bow's expression axis for those strings LIVE — a bound stick swells the ringing chord without touching the melody; on the Tanpura/Sitar mains it scales the pluck level at the onset (a sounded pluck can't swell). 1 = the chord follows the global expression untouched; 0 = the bow lifts to silence. Bound to the Joy-Con stick Y by default (rest = 0.5)."),
             ParamSpec("ctl_strum_thresh", "strum accel trigger", group: "Controller",
-                      0.0, 1.0, 1.0, apply: .live,
+                      0.0, 1.0, 1.0, apply: .live, target: .strumExpression,
                       help: "Accelerometer level that TRIGGERS the strum chord — the iPad's strike envelope (the same measurement the Strike dimension reads), 0…1. Crossing the threshold strikes the chord exactly as an L press does; the chord releases when the envelope falls back below ~60% of the threshold (unless L is holding it). 1 = off (the default — no accel strum). Lower values let a gentler shake strum."),
         ]),
 

@@ -403,45 +403,9 @@ final class AppController: ObservableObject {
     @discardableResult
     func applyParamToVoice(_ key: String, _ value: Double) -> Double? {
         guard let spec = ParamRegistry.spec(key) else { return nil }
-        // Control-layer key: the strike→acceleration blend window. Updates
-        // the window, forces a blend re-evaluation, relays to the iPad.
-        if key == "ctl_strike_window" {
-            axes.setStrikeWindow(value)
-            DispatchQueue.main.async { [weak self] in
-                self?.sendJoyConDisplay()
-            }
-            return nil
-        }
-        // Control-layer keys: the strum chord's expression (pushed live to
-        // the held notes) and the accel-trigger threshold (0…1; 1 = off).
-        if key == "ctl_strum_expr" {
-            strumming.setExpression(value)
-            return nil
-        }
-        if key == "ctl_strum_thresh" {
-            strumming.setAccelThreshold(value)
-            return nil
-        }
-        // Control-layer keys: the glide queue's sequencer.
-        if key.hasPrefix("ctl_glide_") {
-            audio.glideQueue.setControl(key, value)
-            return nil
-        }
-        // Control-layer key: the fret pitch warp — published for the Mac pad,
-        // relayed to the iPad (link-paced), shapes the glide queue.
-        if key == "ctl_fret_warp" {
-            let v = min(max(value, 0), 1)
-            audio.glideQueue.setWarp(v)
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.fretFieldWarp != v else { return }
-                self.fretFieldWarp = v
-                self.sendJoyConDisplay()
-            }
-            return nil
-        }
         switch spec.apply {
         case .live:
-            audio.setStringControlParam(key, value)
+            applyLive(spec.target, key, value)
             return nil
         case .rebuild:
             return value
@@ -455,6 +419,33 @@ final class AppController: ObservableObject {
             }
             audio.setStringHybridScaler(scaler, value / h)
             return nil
+        }
+    }
+
+    /// The `.live` routing — ONE switch on the registry's target.
+    private func applyLive(_ target: ParamTarget, _ key: String, _ value: Double) {
+        switch target {
+        case .stringVoice:
+            audio.setStringControlParam(key, value)
+        case .strikeWindow:
+            // Updates the window, forces a blend re-evaluation, relays to the iPad.
+            axes.setStrikeWindow(value)
+            DispatchQueue.main.async { [weak self] in self?.sendJoyConDisplay() }
+        case .strumExpression:
+            strumming.setExpression(value)
+        case .strumThreshold:
+            strumming.setAccelThreshold(value)
+        case .glideQueue:
+            audio.glideQueue.setControl(key, value)
+        case .fretWarp:
+            // Published for the Mac pad, relayed to the iPad, shapes the glide queue.
+            let v = min(max(value, 0), 1)
+            audio.glideQueue.setWarp(v)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.fretFieldWarp != v else { return }
+                self.fretFieldWarp = v
+                self.sendJoyConDisplay()
+            }
         }
     }
 

@@ -13,13 +13,6 @@ is re-blessed with a before/after render for an A/B by ear.
 
 ## Altitude — special cases on shared mechanisms
 
-1. **`applyParamToVoice` has five name-keyed escape hatches** ahead of the
-   registry's `apply` switch (`ctl_strike_window`, `ctl_strum_expr`,
-   `ctl_strum_thresh`, `ctl_glide_*`, `ctl_fret_warp`), each hand-routing to
-   the axes, the strummer or the glide queue. The registry declares them
-   `.live` but has no notion of *where* a live value goes. Change: a routing
-   `target` on `ParamSpec` (`.stringVoice`, `.strike`, `.strum`, `.glide`,
-   `.fretWarp`) so the apply is a pure switch.
 3. **Two tonics on the Mac.** `pitchPad` and `fretPad` are two
    `PitchPadEngine`s each with `tonicMidi`/`tonicCents`, mirrored by Combine,
    with five separate `(scale, tonic)` subscriptions at four debounce times
