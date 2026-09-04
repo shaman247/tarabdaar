@@ -210,7 +210,7 @@ struct JoyConStatusView: View {
     private var wristPanel: some View {
         TiltCalPanel(
             cal: joyCon.wristCal, title: "Wrist calibration",
-            intro: "The Joy-Con's tilt calibration: hold the Joy-Con in the playing grip and capture a rest pose, then three wrist sweeps — up/down, inward/outward, clockwise/counterclockwise — each starting from rest. The fit learns the rest pose and the three movement directions from the Joy-Con's fused attitude (gravity pitch/roll + drift-corrected yaw) and turns them into the Wrist ↕ / ↔ / ⟲ dimensions on the Controls tab (rest = 0, sweep extremes ±1). Dpad-up advances, dpad-down steps back, ZL re-zeroes the rest pose. Without a calibration the wrist axes stay silent; Joy-Con Accel needs no calibration.")
+            intro: "The Joy-Con's tilt calibration: hold the Joy-Con in the playing grip and capture a rest pose, then three wrist sweeps — up/down, inward/outward, clockwise/counterclockwise — each starting from rest. Each sweep claims the attitude axis it moved most along (pitch, roll or yaw); that axis alone, rest-relative and scaled by the sweep's range, becomes the Wrist ↕ / ↔ / ⟲ dimension on the Controls tab (rest = 0, sweep extremes ±1). Motion on the other axes during a sweep is ignored, and two sweeps that claim the same axis repeat. Dpad-up advances, dpad-down steps back, ZL re-zeroes the rest pose. Without a calibration the wrist axes stay silent; Joy-Con Accel needs no calibration.")
     }
 
     /// The Mac twin of the iPad's GYRO overlay: the same 3D attitude

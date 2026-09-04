@@ -53,11 +53,21 @@ public final class TiltCalibrator: ObservableObject {
         public var legacyKey01: String?
         /// Per-frame EMA constant for the feature vector.
         public var smoothAlpha: Double
+        /// ORTHOGONAL MODE (2026-09-04, the wrist): each sweep claims the
+        /// FEATURE AXIS it moved most along (pitch, roll or yaw), the
+        /// solve is that axis alone (rows of `m` are unit vectors, no
+        /// PCA, no Gram inverse) and cross-axis motion during a sweep is
+        /// simply ignored. Two sweeps claiming the same axis = redo. The
+        /// joint mode's separation of non-perpendicular sweeps proved
+        /// hard to control by hand for the wrist — the solve turns any
+        /// cross-talk in the capture into cross-talk in play.
+        public var orthogonal: Bool
 
         public init(name: String, stepNames: [String], sweepNames: [String],
                     featureNames: [String], markerName: String,
                     streamHint: String, key: String,
-                    legacyKey01: String? = nil, smoothAlpha: Double) {
+                    legacyKey01: String? = nil, smoothAlpha: Double,
+                    orthogonal: Bool = false) {
             self.name = name
             self.stepNames = stepNames
             self.sweepNames = sweepNames
@@ -67,6 +77,7 @@ public final class TiltCalibrator: ObservableObject {
             self.key = key
             self.legacyKey01 = legacyKey01
             self.smoothAlpha = smoothAlpha
+            self.orthogonal = orthogonal
         }
 
         /// The iPad ARM calibration : feature = the iPad's
@@ -93,7 +104,9 @@ public final class TiltCalibrator: ObservableObject {
         /// The Joy-Con WRIST calibration : feature = the
         /// Joy-Con's fused attitude (gravity pitch/roll + drift-learned
         /// relative yaw, all at ±90° full scale). The fusion is already
-        /// smooth, so a lighter EMA keeps the axes responsive.
+        /// smooth, so a lighter EMA keeps the axes responsive. ORTHOGONAL
+        /// (2026-09-04): each wrist axis IS one attitude axis, rest-
+        /// relative and scaled by the sweep's range — no joint solve.
         public static let wrist = Config(
             name: "wrist",
             stepNames: [
@@ -107,7 +120,8 @@ public final class TiltCalibrator: ObservableObject {
             markerName: "Wrist now",
             streamHint: "the Joy-Con motion stream isn't flowing (Joy-Con 2 over BLE, or a controller with GC motion)",
             key: "tarabdaar.wristCal.v1",
-            smoothAlpha: 0.5)
+            smoothAlpha: 0.5,
+            orthogonal: true)
     }
 
     /// The fitted model: rest, solve matrix, per-axis extents.
@@ -393,6 +407,10 @@ public final class TiltCalibrator: ObservableObject {
         let startOff = Self.dist(startRest, anchor)
         let endOff = Self.dist(endRest, anchor)
         let local = startOff <= endOff ? startRest : endRest
+        if config.orthogonal {
+            return evaluateOrthogonalSweep(idx, sweep: sweep, local: local,
+                                           startOff: startOff, endOff: endOff)
+        }
         let dir = Self.dominantDirection(of: sweep)
         var lo = 0.0, hi = 0.0
         for s in sweep {
@@ -441,7 +459,81 @@ public final class TiltCalibrator: ObservableObject {
         return true
     }
 
-    /// Fit the joint three-axis map from the recorded phases.
+    /// Orthogonal-mode verdict: the sweep claims the feature axis with
+    /// the largest range about its rest reading; both-ways on that
+    /// axis; an axis already claimed by an earlier sweep = redo. A
+    /// second axis moving more than 60% as much warns (that motion is
+    /// ignored by the fit — the player may want a cleaner sweep).
+    private func evaluateOrthogonalSweep(_ idx: Int, sweep: [[Double]],
+                                         local: [Double],
+                                         startOff: Double, endOff: Double) -> Bool {
+        let name = config.sweepNames[idx]
+        let ext = Self.axisExtents(of: sweep, about: local)
+        let j = Self.dominantAxis(ext)
+        let axisName = config.featureNames[j]
+        let (lo, hi) = ext[j]
+        guard hi > 0.04, -lo > 0.04 else {
+            dirs[idx] = nil
+            detail = String(
+                format: "⚠ %@ was one-sided about its rest on %@ (%+.3f / %+.3f, need ±0.04) — redo, moving past the rest pose both ways; if rest sits at one end of this motion's range, the motion can't calibrate.",
+                name, axisName, lo, hi)
+            return false
+        }
+        for k in 0..<idx {
+            guard let other = dirs[k], other[j] != 0 else { continue }
+            dirs[idx] = nil
+            detail = "⚠ \(name) moved mostly along \(axisName), which \(config.sweepNames[k]) already owns — redo with a motion on a different axis (or Cancel if \(config.sweepNames[k]) was the bad capture)"
+            return false
+        }
+        var dir = [Double](repeating: 0, count: Self.dims)
+        dir[j] = 1
+        dirs[idx] = dir
+        var msg = String(format: "%@ captured (%d samples) → %@, range %+.2f / %+.2f",
+                         name, sweep.count, axisName, lo, hi)
+        if max(startOff, endOff) > 0.1 {
+            msg += String(
+                format: ", %@ sat %.3f off rest (fine — using the %@ reading)",
+                startOff > endOff ? "start" : "end", max(startOff, endOff),
+                startOff > endOff ? "end" : "start")
+        }
+        let range = hi - lo
+        var warning = ""
+        for i in 0..<Self.dims where i != j {
+            let r = ext[i].1 - ext[i].0
+            if r > 0.6 * range {
+                warning = String(format: "%@ also moved %d%% as much (ignored — only %@ counts); a cleaner sweep would help",
+                                 config.featureNames[i], Int((r / range * 100).rounded()), axisName)
+            }
+        }
+        detail = warning.isEmpty ? "✓ \(msg)" : "⚠ \(msg) — \(warning)"
+        return true
+    }
+
+    /// Per-feature-axis (lo, hi) extents of a sweep about `local`.
+    static func axisExtents(of samples: [[Double]], about local: [Double])
+        -> [(Double, Double)] {
+        var ext = [(Double, Double)](repeating: (0, 0), count: dims)
+        for s in samples {
+            for i in 0..<dims {
+                let d = s[i] - local[i]
+                ext[i].0 = min(ext[i].0, d)
+                ext[i].1 = max(ext[i].1, d)
+            }
+        }
+        return ext
+    }
+
+    /// The axis with the largest range.
+    static func dominantAxis(_ ext: [(Double, Double)]) -> Int {
+        var best = 0
+        for i in 1..<ext.count where ext[i].1 - ext[i].0 > ext[best].1 - ext[best].0 {
+            best = i
+        }
+        return best
+    }
+
+    /// Fit the three-axis map from the recorded phases: the joint solve,
+    /// or (orthogonal mode) one feature axis per sweep.
     private func fit() {
         let n = Self.dims
         let rest = samples[0]
@@ -465,7 +557,7 @@ public final class TiltCalibrator: ObservableObject {
                 refreshActiveFlag()
                 return
             }
-            sweepDirs.append(Self.dominantDirection(of: sweep))
+            sweepDirs.append(config.orthogonal ? [] : Self.dominantDirection(of: sweep))
             let w = Self.restWindowMeans(of: sweep)
             windows.append(w)
             readings.append(w.start)
@@ -496,35 +588,61 @@ public final class TiltCalibrator: ObservableObject {
             localRests.append(min(ds, de) <= tol ? best : f0)
         }
 
-        var worst = 0.0
-        var worstA = 0
-        var worstB = 1
-        for a in 0..<n {
-            for b in (a + 1)..<n {
-                let cos = Self.alignment(sweepDirs[a], sweepDirs[b])
-                if cos > worst { worst = cos; worstA = a; worstB = b }
-            }
-        }
-        let worstPct = Int((worst * 100).rounded())
-        let worstPair = "sweeps \(worstA + 1) (\(config.sweepNames[worstA])) and \(worstB + 1) (\(config.sweepNames[worstB]))"
-
-        var gram = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
-        for a in 0..<n {
-            for b in 0..<n {
-                gram[a][b] = zip(sweepDirs[a], sweepDirs[b]).reduce(0) { $0 + $1.0 * $1.1 }
-            }
-        }
-        guard worst < 0.95, let gInv = Self.invert(gram) else {
-            info = "Discarded — \(worstPair) were nearly identical movements (\(worstPct)% aligned)"
-            detail = "Redo with more distinct motions — three clearly different movements (up/down, in/out, rotation)"
-            refreshActiveFlag()
-            return
-        }
         var m = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
-        for k in 0..<n {
-            for i in 0..<n {
-                for a in 0..<n { m[k][i] += gInv[k][a] * sweepDirs[a][i] }
+        var separation = ""
+        if config.orthogonal {
+            // One feature axis per sweep — the axis it moved most along
+            // about its own rest reading; distinct axes or the run is
+            // discarded (the per-sweep verdict already catches this).
+            var claimed = [Int]()
+            for k in 0..<n {
+                let j = Self.dominantAxis(Self.axisExtents(of: samples[k + 1],
+                                                           about: localRests[k]))
+                if let other = claimed.firstIndex(of: j) {
+                    info = "Discarded — sweeps \(other + 1) (\(config.sweepNames[other])) and \(k + 1) (\(config.sweepNames[k])) both moved mostly along \(config.featureNames[j])"
+                    detail = "Each wrist motion must own its own attitude axis — redo with three clearly different motions (up/down, in/out, rotation)"
+                    refreshActiveFlag()
+                    return
+                }
+                claimed.append(j)
+                sweepDirs[k] = [Double](repeating: 0, count: n)
+                sweepDirs[k][j] = 1
+                m[k][j] = 1
             }
+            separation = "Axes: " + (0..<n).map {
+                "\(config.sweepNames[$0]) → \(config.featureNames[claimed[$0]])"
+            }.joined(separator: ", ")
+        } else {
+            var worst = 0.0
+            var worstA = 0
+            var worstB = 1
+            for a in 0..<n {
+                for b in (a + 1)..<n {
+                    let cos = Self.alignment(sweepDirs[a], sweepDirs[b])
+                    if cos > worst { worst = cos; worstA = a; worstB = b }
+                }
+            }
+            let worstPct = Int((worst * 100).rounded())
+            let worstPair = "sweeps \(worstA + 1) (\(config.sweepNames[worstA])) and \(worstB + 1) (\(config.sweepNames[worstB]))"
+
+            var gram = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
+            for a in 0..<n {
+                for b in 0..<n {
+                    gram[a][b] = zip(sweepDirs[a], sweepDirs[b]).reduce(0) { $0 + $1.0 * $1.1 }
+                }
+            }
+            guard worst < 0.95, let gInv = Self.invert(gram) else {
+                info = "Discarded — \(worstPair) were nearly identical movements (\(worstPct)% aligned)"
+                detail = "Redo with more distinct motions — three clearly different movements (up/down, in/out, rotation)"
+                refreshActiveFlag()
+                return
+            }
+            for k in 0..<n {
+                for i in 0..<n {
+                    for a in 0..<n { m[k][i] += gInv[k][a] * sweepDirs[a][i] }
+                }
+            }
+            separation = "Axis separation: closest sweep pair \(worstPair) at \(worstPct)% aligned (lower separates more cleanly)"
         }
 
         var lo = [Double](repeating: 0, count: n)
@@ -565,8 +683,8 @@ public final class TiltCalibrator: ObservableObject {
             (0..<n).map { String(format: "%.2f/%.2f", -lo[$0], hi[$0]) }
                 .joined(separator: "  "))
         detail = String(
-            format: "Axis separation: closest sweep pair %@ at %d%% aligned (lower separates more cleanly) · rest: %d of %d readings agreed (±%.3f)%@",
-            worstPair, worstPct, readings.count - rejected, readings.count,
+            format: "%@ · rest: %d of %d readings agreed (±%.3f)%@",
+            separation, readings.count - rejected, readings.count,
             restSpread,
             rejected > 0 ? ", \(rejected) off-rest reading\(rejected == 1 ? "" : "s") ignored" : "")
         NSLog("Tarabdaar: %@ calibration fitted — %@ · %@", config.name, info, detail)
