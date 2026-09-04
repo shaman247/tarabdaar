@@ -11,7 +11,8 @@ final class TLPCodecTests: XCTestCase {
         for i in 0..<touches {
             let pitch: Float = 60.0 + Float(i) * 1.01
             list.append(TLPTouch(id: UInt16(i * 7 + 1), onsetSeq: UInt8(i),
-                                 velocity: UInt8(200 - i), pressure: UInt8(i * 3),
+                                 velocity: UInt8(200 - i),
+                                 radius: UInt8(i * 3),   // v13: fingertip size
                                  pitch: pitch))
         }
         return TLPPerfState(
@@ -57,6 +58,28 @@ final class TLPCodecTests: XCTestCase {
             XCTAssertLessThanOrEqual(bytes.count, TLP.maxFrameBytes)
             XCTAssertEqual(TLPFrame.decode(bytes), frame, "round-trip failed for \(frame)")
         }
+    }
+
+    /// v13: the touch record's `radius` byte survives the round trip and
+    /// keeps the record at 9 bytes, and the points↔byte law is exact at
+    /// quarter-point steps (clamped at the ends).
+    func testTouchRadiusRoundTrip() {
+        let frame = TLPFrame.perfState(samplePerf(touches: 4))
+        guard case .perfState(let back)? = TLPFrame.decode(frame.encode()) else {
+            return XCTFail("perf state did not decode")
+        }
+        XCTAssertEqual(back.touches.map(\.radius), [0, 3, 6, 9])
+        // header (1+1+2+4 + 6·2 + 1+1+1+1 + 1 = 25) + 9 per touch
+        XCTAssertEqual(frame.encode().count, 25 + 4 * 9)
+
+        XCTAssertEqual(TLPTouch.radiusByte(points: 0), 0)
+        XCTAssertEqual(TLPTouch.radiusByte(points: -3), 0)
+        XCTAssertEqual(TLPTouch.radiusByte(points: 5.25), 21)
+        XCTAssertEqual(TLPTouch.radiusByte(points: 1000), 255)
+        XCTAssertEqual(TLPTouch.radiusPoints(21), 5.25, accuracy: 1e-12)
+        XCTAssertEqual(TLPTouch(id: 1, onsetSeq: 0, velocity: 0,
+                                radius: 92, pitch: 60).radiusPoints,
+                       23.0, accuracy: 1e-12)
     }
 
     /// A truncated frame decodes to nothing, never to a plausible one.

@@ -53,6 +53,10 @@ public final class LinkIngest {
     /// Per-touch pitch (id, fractional MIDI) at every onset and glide — the
     /// `.fingerAccel` feed.
     public var onTouchPitch: ((UInt16, Double) -> Void)?
+    /// Per-touch FINGERTIP RADIUS in points, at every onset and on every
+    /// change of the wire byte — the `TouchFlattenDetector` feed behind the
+    /// flatten→vibrato ease. 0 from producers without a touchscreen.
+    public var onTouchRadius: ((UInt16, Double) -> Void)?
     /// Chord bar selection, on CHANGE only (heartbeat repeats are silent,
     /// so a Mac-local selection is not clobbered by an idle iPad); nil =
     /// deselected.
@@ -95,6 +99,7 @@ public final class LinkIngest {
                                  velocity: Double(t.velocity) / 255.0)
                     onTouchGate?(t.id, true)
                     onTouchPitch?(t.id, Double(t.pitch))
+                    onTouchRadius?(t.id, t.radiusPoints)
                 } else {
                     if p.exprScale != t.exprScale {
                         sink.touchExpr(t.id, exprScale: t.exprScale)
@@ -102,6 +107,9 @@ public final class LinkIngest {
                     if p.pitch != t.pitch {
                         sink.touchGlide(t.id, pitchSemis: Double(t.pitch))
                         onTouchPitch?(t.id, Double(t.pitch))
+                    }
+                    if p.radius != t.radius {
+                        onTouchRadius?(t.id, t.radiusPoints)
                     }
                 }
             } else {
@@ -113,6 +121,7 @@ public final class LinkIngest {
                              velocity: Double(t.velocity) / 255.0)
                 onTouchGate?(t.id, true)
                 onTouchPitch?(t.id, Double(t.pitch))
+                onTouchRadius?(t.id, t.radiusPoints)
             }
         }
 

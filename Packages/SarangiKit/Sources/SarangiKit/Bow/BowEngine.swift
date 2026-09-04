@@ -583,7 +583,7 @@ public final class BowEngine {
                                     expr: polySnap.expr * slot.exprScale,
                                     press: polySnap.press,
                                     pos: polySnap.pos, tiltDb: polySnap.tiltDb,
-                                    vib: polySnap.vib,
+                                    vib: slot.vib,
                                     onVel: slot.onVel)
                                 let o = s * slotStride
                                 filters[s].fill(

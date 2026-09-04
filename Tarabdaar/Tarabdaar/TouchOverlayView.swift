@@ -14,6 +14,10 @@ struct TouchEvent {
     let xFraction: Double  // 0-1 across view width
     let yFraction: Double  // 0-1 across view height (0 = top)
     let timestamp: TimeInterval
+    /// `UITouch.majorRadius` in POINTS — the fingertip-size signal behind
+    /// the flatten detector. Coarse by construction (Apple quantises it
+    /// hard); used as a BINARY "flattened" state, never a continuous axis.
+    let radius: Double
 }
 
 struct TouchOverlayView: UIViewRepresentable {
@@ -72,7 +76,8 @@ class TouchCaptureView: UIView {
                 touchId: nextTouchId,
                 xFraction: xFrac,
                 yFraction: yFrac,
-                timestamp: touch.timestamp
+                timestamp: touch.timestamp,
+                radius: Double(touch.majorRadius)
             ))
         }
         reportTouches()
@@ -88,7 +93,8 @@ class TouchCaptureView: UIView {
                 touchId: id,
                 xFraction: xFrac,
                 yFraction: yFrac,
-                timestamp: touch.timestamp
+                timestamp: touch.timestamp,
+                radius: Double(touch.majorRadius)
             ))
         }
         reportTouches()

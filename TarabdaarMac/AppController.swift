@@ -89,6 +89,11 @@ final class AppController: ObservableObject {
     /// This class only feeds it raw axes and applies what it emits.
     let axes = ControlAxisEvaluator()
 
+    /// FINGERTIP FLATTEN → per-note vibrato: the shared
+    /// `TouchFlattenDetector` law fed by both ingest lanes, easing each
+    /// sounding touch's own vibrato depth in and out.
+    let flattenVib = FlattenVibrato()
+
     /// The live `ctl_fret_warp` value, written only by the `applyParamToVoice`
     /// interception (main); read by the Mac pad, relayed over JOYCON_STATE.
     @Published private(set) var fretFieldWarp: Double = 0
@@ -591,6 +596,7 @@ final class AppController: ObservableObject {
         // retrigger re-anchors; releases fall back to the survivor's age).
         ingest.onTouchGate = { [weak self] id, on in
             self?.axes.touchGate(lane: .wire, id: id, on: on)
+            self?.flattenVib.touchGate(id, on)
         }
         // The `.fingerAccel` pitch feed — wire lane (source 0) + the local
         // local-pad lane (source 1), so the u16 id spaces can't collide.
@@ -599,9 +605,22 @@ final class AppController: ObservableObject {
         }
         pitchPad.localIngest?.onTouchGate = { [weak self] id, on in
             self?.axes.touchGate(lane: .local, id: id, on: on)
+            self?.flattenVib.touchGate(id, on)
         }
         pitchPad.localIngest?.onTouchPitch = { [weak self] id, pitch in
             self?.axes.touchPitch(lane: .local, id: id, pitch: pitch)
+        }
+        // FINGERTIP RADIUS (the iPad's `UITouch.majorRadius`; the Mac pads
+        // send 0 = unknown, so the detector never fires there) → the
+        // per-note flatten→vibrato ease.
+        ingest.onTouchRadius = { [weak self] id, r in
+            self?.flattenVib.touchRadius(id, radiusPt: r)
+        }
+        pitchPad.localIngest?.onTouchRadius = { [weak self] id, r in
+            self?.flattenVib.touchRadius(id, radiusPt: r)
+        }
+        flattenVib.onDepth = { [weak self] id, depth in
+            self?.audio.setStringVibrato(depth, forTouch: id)
         }
         // Chord-bar selection edges from both lanes (iPad taps, the Mac bar via
         // `tapChord`) land in `strumChord`; a RINGING chord retunes in place.
@@ -633,6 +652,8 @@ final class AppController: ObservableObject {
             self.ingest.linkDidDrop()
             // No more frames: the strike measurement rests at 0.
             self.axes.setStrikeMeasure(0)
+            // …and no flatten ease outlives the link.
+            self.flattenVib.reset()
             // An accel-held strum chord must not outlive the link.
             self.strumming.accelSense(0)
         }

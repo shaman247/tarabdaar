@@ -53,7 +53,7 @@ Known limit: a tap whose spike lands later than the lookback window under-reads 
 
 ### The player can see the law
 
-- Every onset draws its reading on the touch indicator: an impact ripple sized by the estimate plus the number (0–127), surviving release as a ~1 s fading ghost.
+- The toolbar's strike scope is the readout. (The per-touch indicator's onset ripple + 0–127 number were removed 2026-09-04 when the overlay became the fingertip-radius display — see [Fret Pad](fret-pad.md).)
 - The toolbar's **strike scope** (`StrikeScopePane`) draws the envelope — the exact signal the bindings consume — as a scrolling ~4 s trace on the 0–127 scale, the current value at the right, an amber tick holding the last onset. Buckets sit on a TIME-QUANTIZED grid (a moving origin shimmers); decimation is per-pixel PEAK-HOLD, never a sample stride (a stride aliases the 200 Hz stream). It polls the unpublished history at 30 Hz, so motion samples never re-render the toolbar.
 - Colour is playing state: pale yellow at onset fading down the magma ramp to violet over the strike blend window (violet = fully handed over to Acceleration), dark gray while nothing plays, a lighter backdrop on note-active frames. The surface reports melody-note begins/ends into `MotionManager.noteBegan/noteEnded` (id-keyed, so drone presses never unbalance it); the window length arrives as the JOYCON_STATE `strikeWin` byte.
 
@@ -107,6 +107,7 @@ The iPad toolbar shows a matching **finger-accel scope** beside the strike scope
 |---|---|---|
 | Feature stream | the iPad's raw tilt report (`feedArmTilt` → `armTick`, hopped to main) | the Joy-Con's fused attitude: gravity pitch/roll from the complementary filter + a RELATIVE yaw (wrap-safe increments, drift rate learned while quiescent, 60 s leak — the iPad's tilt-3 law ported), ±90° full scale |
 | Sweeps | rest, then arm ↕, arm ↔, arm rotation | rest, then wrist up/down, inward/outward, clockwise/counter-clockwise |
+| Solve | JOINT: each sweep's direction by PCA about its own mean, `c = (DᵀD)⁻¹Dᵀ(f − f0)` separates non-perpendicular sweeps, extents measured through the solve | ORTHOGONAL (`Config.orthogonal`): each sweep CLAIMS the attitude axis it moved most along (pitch, roll or yaw); the wrist axis IS that attitude axis, rest-relative, scaled by the sweep's range on it; cross-axis motion in the sweep is ignored (>60 % on a second axis warns), two sweeps claiming one axis redo. No PCA, no Gram inverse — the joint solve turned capture cross-talk into play cross-talk and was hard to control by hand |
 | Output | control axes 0–2 | control axes 8–10 (`tilt4`, `wrist2`, `wrist3`) |
 | Uncalibrated | raw axes pass through, uncentred | silent (the fused attitude's rest is arbitrary) |
 | Persistence | `tarabdaar.armCal.v2` (a `.v1` record migrates exactly: f0′ = 2·f0−1, extents ×2) | `tarabdaar.wristCal.v1` |
@@ -119,7 +120,7 @@ The two captures are independent. Joy-Con **dpad-up** advances and **dpad-down**
 1. **Rest** phase, then three guided sweeps, each starting from the rest pose (ending there is good practice, not enforced).
 2. The rest pose is measured SEVEN times — the rest phase plus each sweep's first/last ~0.25 s windows — and merged ROBUSTLY: component-wise median, inliers within `max(0.1, 2 × median distance)`, mean of the inliers = `f0`. Off-rest readings are rejected as outliers, never a redo. The fitted detail line reports how many readings agreed and the inlier spread.
 3. Each sweep's extents and both-ways check are judged against the sweep's own nearest rest reading (start or end, whichever is at rest; merged `f0` if neither), so rest wander between phases neither biases the solve nor fails the capture.
-4. Live feedback: per-phase sample counts, refusal to advance an under-sampled phase, and an instant per-sweep verdict on advance (samples, both-ways with measured ± extents, % alignment against every earlier sweep). A fatal sweep — one-sided relative to rest, or ≥ 95 % aligned with an earlier one — **clears itself and repeats on the spot**; 80–95 % warns but advances. One-sided almost always means the rest pose sat at one END of that motion's range: restart with a mid-range rest pose.
+4. Live feedback: per-phase sample counts, refusal to advance an under-sampled phase, and an instant per-sweep verdict on advance (samples, both-ways with measured ± extents, and — joint mode — % alignment against every earlier sweep, or — orthogonal mode — the claimed axis and its range). A fatal sweep — one-sided relative to rest, ≥ 95 % aligned with an earlier one (joint), or claiming an axis an earlier sweep owns (orthogonal) — **clears itself and repeats on the spot**; 80–95 % alignment (joint) or a second axis moving > 60 % as much (orthogonal) warns but advances. One-sided almost always means the rest pose sat at one END of that motion's range: restart with a mid-range rest pose.
 5. `CalCloudView` draws a rotating 3D scatter of the capture live (rest cluster white, sweep arcs orange/green/cyan, a ring on the rest centre, a yellow "you are here" marker with its raw values); the finished capture stays visible until the next one begins.
 
 ### The solve
@@ -156,6 +157,47 @@ The Mac evaluates every binding itself (`AppController.handleRawTilt` → `apply
 
 Existing installs adopt these once (flags `tarabdaar.tiltAxes.defaultBindings.v1`, `.v2` for the expression default); unbinding afterwards sticks. Composite slots 4–8 are free macros defined in the Controls tab.
 
+## Fingertip flatten → vibrato
+
+`UITouch.majorRadius` is far too coarse to be a continuous axis — every
+finger reads essentially one size, and deliberately **flattening** the
+fingertip moves it up about a single Apple step. So it is used as a
+**binary** signal, one shared law on both devices
+(`TouchFlattenDetector`, TarabdaarCore — the `FingerAccelTracker`
+pattern):
+
+| Stage | Law |
+|---|---|
+| baseline | the MEDIAN of every radius sample in the first `TouchFlattenDetector.baselineWindowS` (150 ms) after this touch's onset — a median, not a mean, because a landing finger's contact ramps and one outlier must not move the reference. A motionless finger's window closes on a plain `tick` (UIKit only reports a touch that moves) |
+| flattened | `radius ≥ baseline + Config.touchFlattenStepPt` (**3 pt**, one Apple size step) |
+| un-flattened | `radius ≤ baseline + step/2` — hysteresis; in between the state holds |
+
+The baseline is the touch's OWN onset size, so the state is **relative**:
+a finger that lands already flattened reads un-flattened (its flattened
+size IS its baseline) and only fires after it relaxes and flattens again.
+That is deliberate — the gesture is "flatten from where you were", so the
+law never depends on absolute finger size. Guard: `TouchFlattenTests`.
+
+**The Mac's ease** (`FlattenVibrato`, wired in `AppController` beside the
+`ControlAxisEvaluator`): fed by `LinkIngest.onTouchRadius` on both lanes
+(the wire and the local pump; the Mac pads have no radius and send 0, so
+the detector never fires there), it eases each sounding touch's OWN
+vibrato depth 0 → 1 over `Config.flattenVibratoEaseInS` (**2 s**) while
+that fingertip reads flattened, and back to 0 over
+`Config.flattenVibratoEaseOutS` (**0.5 s**) when it relaxes or lifts, on
+a 30 Hz tick while anything is down. The depth reaches the kernel through
+`BowControlMapper.setVibrato(_:forTouch:)` — vibrato depth is **per
+slot** (`SlotSnapshot.vib`), so it is one note's vibrato and no other's.
+A touch the ease has never driven is never written, so the global vibrato
+axis keeps working untouched.
+
+It exists for the **trailing note**, where adding vibrato by moving the
+finger would add unwanted energy to the gesture: hold the note, flatten
+the fingertip, and the vibrato arrives by itself. The player can see the
+signal — the iPad's per-touch indicator prints the raw radius in points
+and rings violet while the detector reads flattened (see
+[Fret Pad](fret-pad.md)), which is how `touchFlattenStepPt` gets judged.
+
 ## Vibrato
 
-There is **no automatic vibrato LFO**. Vibrato is a playing technique: the pitch tracks the finger directly (see [Fret Pad](fret-pad.md)), so moving the finger across the surface bends the pitch with the motion. The kernel's own finger-vibrato depth is the single `hybrid` parameter **`bow_vib_cents`** (Articulation group) — bind a tilt to it to add depth by leaning.
+There is **no automatic vibrato LFO**. Vibrato is a playing technique: the pitch tracks the finger directly (see [Fret Pad](fret-pad.md)), so moving the finger across the surface bends the pitch with the motion — or, for a trailing note, the fingertip-flatten ease above. The kernel's own finger-vibrato depth is the single `hybrid` parameter **`bow_vib_cents`** (Articulation group, shipped at **25 ¢** at **5.5 Hz** with a resting APPLIED depth of 0 — the ceiling a 100 % ease reaches) — bind a tilt to it to add depth by leaning instead.

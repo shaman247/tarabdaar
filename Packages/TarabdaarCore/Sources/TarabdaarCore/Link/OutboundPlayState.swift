@@ -12,7 +12,8 @@ public final class OutboundPlayState {
         let wireId: UInt16
         let onsetSeq: UInt8
         let velocity: UInt8
-        var pressure: UInt8
+        /// Fingertip size, the wire byte (see `TLPTouch.radius`).
+        var radius: UInt8
         var pitch: Float
         /// In-process only — see `TLPTouch.exprScale`.
         var exprScale: Double
@@ -52,15 +53,17 @@ public final class OutboundPlayState {
 
     // MARK: producers (any thread)
 
+    /// `radiusPt`: the fingertip's `UITouch.majorRadius` in POINTS
+    /// (0 = unknown — producers without a touchscreen).
     public func touchOn(_ token: AnyHashable, pitchSemis: Double,
-                        velocity: Double, pressure: Double = 0,
+                        velocity: Double, radiusPt: Double = 0,
                         exprScale: Double = 1.0, glideExempt: Bool = false) {
         lock.lock()
         touches.removeAll { $0.token == token }
         let t = Touch(wireId: idNamespace | (nextWireId & 0x0FFF),
                       onsetSeq: nextOnsetSeq,
                       velocity: clamp255(velocity),
-                      pressure: clamp255(pressure),
+                      radius: TLPTouch.radiusByte(points: radiusPt),
                       pitch: Float(pitchSemis),
                       exprScale: exprScale,
                       glideExempt: glideExempt)
@@ -79,6 +82,20 @@ public final class OutboundPlayState {
             return
         }
         touches[i].touch.exprScale = exprScale
+        markDirtyLockedThenNotify()
+    }
+
+    /// Fingertip size update for a held touch, in POINTS. Gated on the
+    /// WIRE BYTE (quarter-point steps) so jitter cannot dirty the frame.
+    public func touchRadius(_ token: AnyHashable, radiusPt: Double) {
+        lock.lock()
+        let b = TLPTouch.radiusByte(points: radiusPt)
+        guard let i = touches.firstIndex(where: { $0.token == token }),
+              touches[i].touch.radius != b else {
+            lock.unlock()
+            return
+        }
+        touches[i].touch.radius = b
         markDirtyLockedThenNotify()
     }
 
@@ -210,7 +227,7 @@ public final class OutboundPlayState {
                 TLPTouch(id: pair.touch.wireId,
                          onsetSeq: pair.touch.onsetSeq,
                          velocity: pair.touch.velocity,
-                         pressure: pair.touch.pressure,
+                         radius: pair.touch.radius,
                          pitch: pair.touch.pitch,
                          exprScale: pair.touch.exprScale,
                          glideExempt: pair.touch.glideExempt)

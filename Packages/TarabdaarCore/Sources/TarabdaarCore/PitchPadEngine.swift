@@ -447,12 +447,15 @@ public final class PitchPadEngine: ObservableObject {
     /// caller's `touchId`. The pitch enters the outbound state as
     /// fractional MIDI (`tonicFractionalMidi + octave + 12·log2(ratio)`).
     /// `velocity01`: onset strike velocity (nil = the flat `velocity`).
+    /// `radiusPt`: the fingertip's `UITouch.majorRadius` in points
+    /// (0 = unknown — the Mac pads have no touchscreen).
     /// `octaveShifted: false` exempts the note from the octave shift (the
     /// strum chord). `exprScale` (1 = neutral) and `glideExempt` are the
     /// strum chord's in-process expression and glide-queue exemption.
     public func noteOn(touchId: Int, ratio: Double,
                        weights: [String: Double] = [:],
                        velocity01: Double? = nil,
+                       radiusPt: Double = 0,
                        octaveShifted: Bool = true,
                        exprScale: Double = 1.0,
                        glideExempt: Bool = false) {
@@ -465,6 +468,7 @@ public final class PitchPadEngine: ObservableObject {
         let pitchSemis = tonicFractionalMidi + octSemis + 12.0 * log2(r)
         playState.touchOn(touchId, pitchSemis: pitchSemis,
                           velocity: velocity01 ?? Double(velocity) / 127.0,
+                          radiusPt: radiusPt,
                           exprScale: exprScale, glideExempt: glideExempt)
         sounding.ratio = r
         sounding.octaveSemis = octSemis
@@ -476,6 +480,13 @@ public final class PitchPadEngine: ObservableObject {
     public func setTouchExpr(touchId: Int, exprScale: Double) {
         guard currentRatio[touchId] != nil else { return }
         playState.touchExpr(touchId, exprScale)
+    }
+
+    /// Fingertip-size update for a held note (points) — the flatten
+    /// detector's feed; change-gated on the wire byte downstream.
+    public func setTouchRadius(touchId: Int, radiusPt: Double) {
+        guard currentRatio[touchId] != nil else { return }
+        playState.touchRadius(touchId, radiusPt: radiusPt)
     }
 
     /// Published fill weights = the per-seed max across active touches.

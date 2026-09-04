@@ -56,4 +56,20 @@ public enum Config {
     /// the bordered band, the dead space above/below it, and the drone
     /// buttons at their full-surface position.
     public static let fretPadHeightFraction: CGFloat = 0.5
+
+    // MARK: - Fingertip flatten → vibrato
+
+    /// ONE Apple touch-size step, in points. `UITouch.majorRadius` is far
+    /// too coarse for a continuous axis — every finger reads one size and
+    /// deliberately FLATTENING the fingertip moves it up a single step —
+    /// so it is used as a BINARY signal: a touch reads flattened once its
+    /// radius sits this far above its own onset baseline, and unflattened
+    /// again below half of it (`TouchFlattenDetector`). The iPad's per-touch
+    /// indicator prints the raw radius, so 3 pt can be re-judged by eye.
+    public static let touchFlattenStepPt: Double = 3.0
+
+    /// Flatten → vibrato ease-in time: 0 → 100 % depth while flattened.
+    public static let flattenVibratoEaseInS: TimeInterval = 2.0
+    /// Ease-out time back to 0 once the fingertip un-flattens (or lifts).
+    public static let flattenVibratoEaseOutS: TimeInterval = 0.5
 }

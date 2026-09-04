@@ -744,9 +744,8 @@ private struct FretPadSurfaceIOS: View {
                               cells: fretFillCells(placements), edgePad: edgePad)
                     .offset(x: band.minX, y: band.minY)
 
-                // Per-touch indicator: stop-detector ring + pitch readouts.
-                TouchIndicatorLayerIOS(model: indicators, degrees: degrees,
-                                       edgePad: edgePad)
+                // Per-touch indicator: fingertip-radius ring + flatten state.
+                TouchIndicatorLayerIOS(model: indicators, edgePad: edgePad)
 
                 // The chord bar (display only; taps hit-tested in `began`).
                 ChordBarVisual(cells: chordCells,
@@ -853,7 +852,8 @@ private struct FretPadSurfaceIOS: View {
         }
         engine.noteOn(touchId: ev.touchId, ratio: pow(2.0, onsetLog),
                       weights: weights,
-                      velocity01: vel01)
+                      velocity01: vel01,
+                      radiusPt: ev.radius)
         motion?.noteBegan(ev.touchId, at: now)   // strike-scope coloring
 
         assist.setContext(placements: placements, snapDistance: snapDistance)
@@ -861,8 +861,7 @@ private struct FretPadSurfaceIOS: View {
                      uncorrectedLog: fieldLog + offset, time: now)
         // Every touch is born stopped — the indicator starts amber.
         indicators.begin(ev.touchId, point: spt, stopGate: 1,
-                         rawLog: fieldLog, playedLog: onsetLog,
-                         strikeVel: vel01)
+                         radiusPt: ev.radius, at: now)
         if recorder.isRecording {
             recorder.begin(touchId: ev.touchId,
                            context: .snapshot(
@@ -895,8 +894,9 @@ private struct FretPadSurfaceIOS: View {
                               uncorrectedLog: fieldLog + offset, time: now)
         engine.glide(touchId: ev.touchId, ratio: pow(2.0, out.log2Pitch),
                      weights: out.weights)
+        engine.setTouchRadius(touchId: ev.touchId, radiusPt: ev.radius)
         indicators.update(ev.touchId, point: spt, stopGate: out.stopGate,
-                          playedLog: out.log2Pitch, rawLog: fieldLog)
+                          radiusPt: ev.radius, at: now)
         recorder.sample(touchId: ev.touchId, x: pt.x, y: pt.y,
                         u: fieldLog + offset, o: out.log2Pitch, time: now)
     }
@@ -916,8 +916,7 @@ private struct FretPadSurfaceIOS: View {
             for (id, out) in assist.tick(time: now) {
                 engine.glide(touchId: id, ratio: pow(2.0, out.log2Pitch),
                              weights: out.weights)
-                indicators.update(id, stopGate: out.stopGate,
-                                  playedLog: out.log2Pitch)
+                indicators.update(id, stopGate: out.stopGate, at: now)
                 recorder.sampleTick(touchId: id, o: out.log2Pitch, time: now)
             }
             if assist.isEmpty { timer.invalidate() }
@@ -927,196 +926,139 @@ private struct FretPadSurfaceIOS: View {
 
 // MARK: - Per-touch indicator overlay
 
-/// Live per-touch indicator state (stop gate, raw and sounding pitch). A
-/// class so the settle-timer closure can feed it; no-op updates are skipped.
+/// Live per-touch indicator state: the stop gate and the RAW FINGERTIP
+/// RADIUS (`UITouch.majorRadius`) with the shared `TouchFlattenDetector`'s
+/// verdict on it. A class so the settle-timer closure can feed it; no-op
+/// updates are skipped.
+///
+/// The pitch-correction readout and the accelerometer strike ripple/number
+/// are deliberately NOT here any more — the toolbar's strike and
+/// finger-accel scopes are the surviving readouts for those.
 private final class TouchIndicatorModel: ObservableObject {
     struct Info {
         var point: CGPoint      // padded-content coords (the canvases' space)
         var stopGate: Double    // 0 = moving … 1 = stopped
-        var rawLog: Double      // field pitch under the finger (no snap/assist)
-        var playedLog: Double   // the pitch actually sounding
-        // The strike estimate 0…1 captured at onset; `hasStrike` false draws
-        // nothing. Drawn as a ripple plus a 0–127 readout beside the ring.
-        var hasStrike = false
-        var strikeVel = 0.0
-        var bornAt: TimeInterval = 0   // CACurrentMediaTime at onset
-        // Set on release: the info survives as a fading GHOST number.
-        var endedAt: TimeInterval? = nil
+        /// `UITouch.majorRadius` in points, as reported (0 = unknown).
+        var radiusPt: Double = 0
+        /// The shared detector's binary state for this touch.
+        var flattened = false
     }
 
     @Published private(set) var infos: [Int: Info] = [:]
 
-    /// How long the onset strike ripple lives.
-    static let strikeFlashDuration: TimeInterval = 0.5
-    /// How long the velocity number lingers after release (the ghost).
-    static let strikeGhostDuration: TimeInterval = 1.0
-    /// Redraw driver: the canvas only invalidates on a publish and a staccato
-    /// touch may never move, so a ~15 Hz ticker publishes while a flash
-    /// decays. `.common` mode so touch tracking doesn't starve it.
-    private var flashTimer: Timer?
-    private var flashUntil: TimeInterval = 0
+    /// The iPad's own display instance of the law the Mac's bindings run
+    /// (`FlattenVibrato`) — the same baseline + hysteresis, so the ring's
+    /// highlight is exactly the state that eases the vibrato in.
+    private var flatten = TouchFlattenDetector()
 
     func begin(_ id: Int, point: CGPoint, stopGate: Double,
-               rawLog: Double, playedLog: Double,
-               strikeVel: Double? = nil) {
+               radiusPt: Double, at t: TimeInterval) {
+        flatten.begin(id, radiusPt: radiusPt, at: t)
         infos[id] = Info(point: point, stopGate: stopGate,
-                         rawLog: rawLog, playedLog: playedLog,
-                         hasStrike: strikeVel != nil,
-                         strikeVel: min(max(strikeVel ?? 0, 0), 1),
-                         bornAt: CACurrentMediaTime())
-        if strikeVel != nil { armFlashTicker(for: Self.strikeFlashDuration) }
+                         radiusPt: radiusPt,
+                         flattened: flatten.isFlattened(id))
     }
 
-    private func armFlashTicker(for duration: TimeInterval) {
-        let now = CACurrentMediaTime()
-        flashUntil = max(flashUntil, now + duration)
-        guard flashTimer == nil else { return }
-        let t = Timer(timeInterval: 1.0 / 15.0, repeats: true) { [weak self] timer in
-            guard let self else { timer.invalidate(); return }
-            let now = CACurrentMediaTime()
-            // Prune expired ghosts (the mutation publishes).
-            let expired = self.infos.filter {
-                ($0.value.endedAt).map {
-                    now - $0 >= Self.strikeGhostDuration
-                } ?? false
-            }
-            if expired.isEmpty {
-                self.objectWillChange.send()
-            } else {
-                for id in expired.keys { self.infos.removeValue(forKey: id) }
-            }
-            if now > self.flashUntil || self.infos.isEmpty {
-                timer.invalidate()
-                self.flashTimer = nil
-            }
-        }
-        RunLoop.main.add(t, forMode: .common)
-        flashTimer = t
-    }
-
+    /// `radiusPt` nil = a settle tick (the finger has not moved, so UIKit
+    /// reported no new size); the detector still ticks so a motionless
+    /// touch's baseline window closes.
     func update(_ id: Int, point: CGPoint? = nil, stopGate: Double,
-                playedLog: Double, rawLog: Double? = nil) {
-        guard var info = infos[id], info.endedAt == nil else { return }
+                radiusPt: Double? = nil, at t: TimeInterval) {
+        guard var info = infos[id] else { return }
+        if let radiusPt {
+            flatten.sample(id, radiusPt: radiusPt, at: t)
+        } else {
+            flatten.tick(id, at: t)
+        }
         let p = point ?? info.point
-        let raw = rawLog ?? info.rawLog
-        // ~0.6c / half-px thresholds: a settled hold publishes nothing.
+        let r = radiusPt ?? info.radiusPt
+        let flat = flatten.isFlattened(id)
+        // ~half-px / quarter-point thresholds: a settled hold publishes
+        // nothing.
         if abs(info.stopGate - stopGate) < 0.01,
-           abs(info.playedLog - playedLog) < 0.0005,
-           abs(info.rawLog - raw) < 0.0005,
+           abs(info.radiusPt - r) < 0.25,
+           info.flattened == flat,
            abs(p.x - info.point.x) + abs(p.y - info.point.y) < 0.5 { return }
         info.point = p
         info.stopGate = stopGate
-        info.rawLog = raw
-        info.playedLog = playedLog
+        info.radiusPt = r
+        info.flattened = flat
         infos[id] = info
     }
 
     func end(_ id: Int) {
-        // A strike-carrying touch leaves its number as a fading ghost;
-        // everything else clears immediately.
-        if var info = infos[id], info.hasStrike {
-            info.endedAt = CACurrentMediaTime()
-            infos[id] = info
-            armFlashTicker(for: Self.strikeGhostDuration)
-        } else {
-            infos.removeValue(forKey: id)
-        }
+        flatten.end(id)
+        infos.removeValue(forKey: id)
     }
 }
 
-/// One ring per touch (cyan gliding → amber stopped), an "original →
-/// corrected" readout when the sounding pitch differs from the raw field
-/// pitch, and an onset ripple sized by the strike estimate.
+/// One ring per touch, SIZED BY THE RAW FINGERTIP RADIUS: cyan gliding →
+/// amber stopped, a violet double ring while the shared detector reads the
+/// fingertip FLATTENED (the state that eases this note's vibrato in), and
+/// the radius in points printed beside it so the coarse steps Apple
+/// actually reports are visible while playing.
 private struct TouchIndicatorLayerIOS: View {
     @ObservedObject var model: TouchIndicatorModel
-    let degrees: [(ratio: Double, label: String)]
     let edgePad: CGFloat
+
+    /// Points → ring radius in px (a ~23 pt fingertip draws the historic
+    /// 46 px ring), clamped so an unknown or extreme reading still draws.
+    private func ringRadius(_ radiusPt: Double) -> CGFloat {
+        CGFloat(min(max(radiusPt * 2.0, 16.0), 120.0))
+    }
 
     var body: some View {
         Canvas { ctx, size in
             ctx.translateBy(x: edgePad, y: edgePad)
-            let now = CACurrentMediaTime()
             for info in model.infos.values {
-                draw(info, in: &ctx, size: size, now: now)
+                draw(info, in: &ctx, size: size)
             }
         }
         .allowsHitTesting(false)
     }
 
     private func draw(_ info: TouchIndicatorModel.Info,
-                      in ctx: inout GraphicsContext, size: CGSize,
-                      now: TimeInterval) {
-        // Ghost (released strike touch): only the number remains, fading.
-        if let ended = info.endedAt {
-            let alpha = max(0.0, 1.0 - (now - ended)
-                            / TouchIndicatorModel.strikeGhostDuration)
-            drawStrikeNumber(info, alpha: alpha, in: &ctx, size: size)
-            return
-        }
+                      in ctx: inout GraphicsContext, size: CGSize) {
         let g = info.stopGate
-        // Moving = cool cyan, stopped = warm amber, blended by the gate.
-        let color = Color(red: 0.25 + 0.75 * g,
-                          green: 0.75 - 0.15 * g,
-                          blue: 1.0 - 0.9 * g)
-        let radius: CGFloat = 46
-        // Onset strike ripple: expands and fades over ~0.5 s; reach,
-        // brightness and weight scale with the estimate.
-        if info.hasStrike {
-            let age = now - info.bornAt
-            if age >= 0, age < TouchIndicatorModel.strikeFlashDuration {
-                let t = age / TouchIndicatorModel.strikeFlashDuration
-                let v = info.strikeVel
-                let reach = CGFloat(10 + 40 * v) * CGFloat(t)
-                let r = radius + 4 + reach
-                let alpha = (1 - t) * (0.12 + 0.6 * v)
-                let ripple = Path(ellipseIn: CGRect(x: info.point.x - r,
-                                                    y: info.point.y - r,
-                                                    width: 2 * r,
-                                                    height: 2 * r))
-                ctx.stroke(ripple, with: .color(.white.opacity(alpha)),
-                           lineWidth: 1.5 + 3.5 * CGFloat(v) * CGFloat(1 - t))
-            }
-            // The number itself, beside the ring for the note's life.
-            drawStrikeNumber(info, alpha: 1.0, in: &ctx, size: size)
-        }
+        // Moving = cool cyan, stopped = warm amber, blended by the gate;
+        // flattened overrides both with violet.
+        let color = info.flattened
+            ? Color(red: 0.72, green: 0.45, blue: 1.0)
+            : Color(red: 0.25 + 0.75 * g,
+                    green: 0.75 - 0.15 * g,
+                    blue: 1.0 - 0.9 * g)
+        let radius = ringRadius(info.radiusPt)
         let ring = Path(ellipseIn: CGRect(x: info.point.x - radius,
                                           y: info.point.y - radius,
                                           width: 2 * radius,
                                           height: 2 * radius))
         ctx.stroke(ring, with: .color(color.opacity(0.45 + 0.45 * g)),
-                   lineWidth: 3)
-
-        let cents = (info.playedLog - info.rawLog) * 1200
-        guard abs(cents) >= 1 else { return }
-        let text = Text("\(pitchName(info.rawLog)) → \(pitchName(info.playedLog))")
-            .font(.system(size: 13, weight: .semibold).monospacedDigit())
-            .foregroundColor(.white)
-        let resolved = ctx.resolve(text)
-        let sz = resolved.measure(in: CGSize(width: 320, height: 40))
-        let above = info.point.y - radius - 26
-        let cy = above > sz.height ? above : info.point.y + radius + 26
-        let cx = min(max(info.point.x, sz.width / 2 + 4),
-                     size.width - 2 * edgePad - sz.width / 2 - 4)
-        let box = CGRect(x: cx - sz.width / 2 - 6, y: cy - sz.height / 2 - 3,
-                         width: sz.width + 12, height: sz.height + 6)
-        ctx.fill(Path(roundedRect: box, cornerRadius: 6),
-                 with: .color(.black.opacity(0.6)))
-        ctx.draw(resolved, at: CGPoint(x: cx, y: cy))
+                   lineWidth: info.flattened ? 5 : 3)
+        // Flattened: a second, wider ring — "the vibrato is easing in".
+        if info.flattened {
+            let r2 = radius + 8
+            let halo = Path(ellipseIn: CGRect(x: info.point.x - r2,
+                                              y: info.point.y - r2,
+                                              width: 2 * r2, height: 2 * r2))
+            ctx.stroke(halo, with: .color(color.opacity(0.5)), lineWidth: 1.5)
+        }
+        drawRadiusNumber(info, radius: radius, in: &ctx, size: size)
     }
 
-    /// The strike estimate on the 0–127 scale at the ring's right; `alpha`
-    /// fades the released ghost.
-    private func drawStrikeNumber(_ info: TouchIndicatorModel.Info,
-                                  alpha: Double,
+    /// The raw `majorRadius` in points at the ring's right — the signal
+    /// itself, so `Config.touchFlattenStepPt` can be judged by eye.
+    private func drawRadiusNumber(_ info: TouchIndicatorModel.Info,
+                                  radius: CGFloat,
                                   in ctx: inout GraphicsContext,
                                   size: CGSize) {
-        guard info.hasStrike, alpha > 0.01 else { return }
-        let text = Text("\(Int((info.strikeVel * 127).rounded()))")
+        guard info.radiusPt > 0 else { return }
+        let text = Text(String(format: "%.1f", info.radiusPt))
             .font(.system(size: 13, weight: .bold).monospacedDigit())
-            .foregroundColor(.white.opacity(0.92 * alpha))
+            .foregroundColor(info.flattened
+                             ? Color(red: 0.85, green: 0.68, blue: 1.0)
+                             : .white.opacity(0.92))
         let resolved = ctx.resolve(text)
         let sz = resolved.measure(in: CGSize(width: 80, height: 30))
-        let radius: CGFloat = 46
         let rightX = info.point.x + radius + 14 + sz.width / 2
         let cx = min(rightX, size.width - 2 * edgePad - sz.width / 2 - 4)
         let cy = min(max(info.point.y, sz.height / 2 + 4),
@@ -1124,25 +1066,7 @@ private struct TouchIndicatorLayerIOS: View {
         let box = CGRect(x: cx - sz.width / 2 - 5, y: cy - sz.height / 2 - 2,
                          width: sz.width + 10, height: sz.height + 4)
         ctx.fill(Path(roundedRect: box, cornerRadius: 5),
-                 with: .color(.black.opacity(0.55 * alpha)))
+                 with: .color(.black.opacity(0.55)))
         ctx.draw(resolved, at: CGPoint(x: cx, y: cy))
     }
-
-    /// A pitch in the scale's vocabulary: the nearest degree's label (any
-    /// octave, `'`/`,` marks) plus signed cents when meaningfully off it.
-    private func pitchName(_ log2Pitch: Double) -> String {
-        guard !degrees.isEmpty else {
-            return String(format: "%+.0f¢", log2Pitch * 1200)
-        }
-        let label = scaleLabel(forRatio: pow(2.0, log2Pitch), degrees: degrees)
-        var off = Double.infinity
-        for d in degrees where d.ratio > 0 {
-            let dl = log2(d.ratio)
-            let o = log2Pitch - dl - (log2Pitch - dl).rounded()
-            if abs(o) < abs(off) { off = o }
-        }
-        let cents = off * 1200
-        return abs(cents) < 1 ? label : label + String(format: "%+.0f¢", cents)
-    }
 }
-

@@ -50,6 +50,10 @@ public final class BowControlMapper: @unchecked Sendable {
         /// chord's per-note expression); frozen on release. ×1.0 is an IEEE
         /// identity, so every path but the strum is bit-exact.
         var exprScale: Double = 1.0
+        /// PER-TOUCH player-vibrato depth 0…1 (the fingertip-flatten ease
+        /// and the global vibrato axis). A fresh string inherits the
+        /// global "set all" value; 0 is bit-null.
+        var vib: Double = 0.0
     }
 
     // ---- control-thread state (locked) ----
@@ -62,7 +66,11 @@ public final class BowControlMapper: @unchecked Sendable {
     private var pos: Double
     private var tilt01: Double
     /// Player vibrato = depth 0..1 into bow_vib_cents at bow_vib_hz —
-    /// never free-running.
+    /// never free-running. This is the "set all" BASELINE (the vibrato
+    /// axis / the `.vibratoAmount` composite): it writes every slot and
+    /// every freshly mounted string inherits it. The depth the filter
+    /// actually reads is the SLOT's (`Slot.vib`), which the per-touch
+    /// fingertip-flatten ease drives note by note.
     private var vibAT = 0.0
 
     /// Tilt axis dB mapping: the 0…1 axis spans [tiltMinDb, tiltMaxDb];
@@ -131,6 +139,9 @@ public final class BowControlMapper: @unchecked Sendable {
         slots[i].onVel = vel
         // a reused slot must not inherit a strum note's expression scale
         slots[i].exprScale = 1.0
+        // a fresh string starts at the global baseline, never the previous
+        // note's eased-in flatten depth
+        slots[i].vib = vibAT
         return i
     }
 
@@ -194,10 +205,26 @@ public final class BowControlMapper: @unchecked Sendable {
     }
 
     /// Player vibrato depth 0…1 — the vibrato axis, scaling
-    /// `bow_vib_cents` at `bow_vib_hz`. Never free-running.
+    /// `bow_vib_cents` at `bow_vib_hz`. Never free-running. SET ALL: it
+    /// moves the baseline AND every slot, so the axis still behaves as one
+    /// global depth; the per-touch ease overrides individual slots after.
     public func setVibrato(_ depth: Double) {
         os_unfair_lock_lock(&lock)
-        vibAT = min(max(depth, 0), 1)
+        let d = min(max(depth, 0), 1)
+        vibAT = d
+        for i in slots.indices { slots[i].vib = d }
+        os_unfair_lock_unlock(&lock)
+    }
+
+    /// Player vibrato depth 0…1 for ONE touch — the fingertip-flatten
+    /// ease (`FlattenVibrato`). Silently ignored once the touch's slot has
+    /// been re-mounted by another note.
+    public func setVibrato(_ depth: Double, forTouch id: UInt16) {
+        let d = min(max(depth, 0), 1)
+        os_unfair_lock_lock(&lock)
+        for i in 0..<slotLimit where slots[i].used && slots[i].touchId == id {
+            slots[i].vib = d
+        }
         os_unfair_lock_unlock(&lock)
     }
 
@@ -231,6 +258,8 @@ public final class BowControlMapper: @unchecked Sendable {
         public var onVel: Double = 0.0
         /// Per-slot expression scale (see `Slot.exprScale`); 1 = neutral.
         public var exprScale: Double = 1.0
+        /// Per-slot player-vibrato depth 0…1 (see `Slot.vib`).
+        public var vib: Double = 0.0
     }
 
     /// Poly snapshot into a preallocated buffer (render thread, no
@@ -285,7 +314,8 @@ public final class BowControlMapper: @unchecked Sendable {
                 gate: s.gateOn ? 1.0 : 0.0,
                 serial: s.serial,
                 onVel: s.onVel,
-                exprScale: s.exprScale)
+                exprScale: s.exprScale,
+                vib: s.vib)
         }
         for i in lim..<snap.slots.count {
             snap.slots[i].gate = 0.0
@@ -304,7 +334,7 @@ public final class BowControlMapper: @unchecked Sendable {
             + tilt01 * (BowControlMapper.tiltMaxDb - BowControlMapper.tiltMinDb)
         return Snapshot(f0Target: f0, gate: s.gateOn ? 1.0 : 0.0,
                         expr: expr * s.exprScale, press: press, pos: pos,
-                        tiltDb: tdb, vib: vibAT, onVel: s.onVel)
+                        tiltDb: tdb, vib: s.vib, onVel: s.onVel)
     }
 }
 

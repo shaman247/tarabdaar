@@ -14,8 +14,8 @@ public enum TLP {
     /// Protocol version — both apps ship in lockstep; the HELLO range check
     /// refuses a mismatched peer cleanly (the symptom otherwise: "drones and
     /// tilt work, touches are silent").
-    public static let versionMin: UInt16 = 12
-    public static let versionMax: UInt16 = 12
+    public static let versionMin: UInt16 = 13
+    public static let versionMax: UInt16 = 13
     /// Hard cap on an encoded frame.
     public static let maxFrameBytes = 1024
     /// HELLO magic 'TRBL' (LE u32).
@@ -79,7 +79,7 @@ public enum TLPRole: UInt8, Equatable, Sendable {
 }
 
 /// One active touch inside a PERF_STATE frame — 9 bytes on the wire:
-/// `id u16 · onsetSeq u8 · velocity u8 · pressure u8 · pitch f32`.
+/// `id u16 · onsetSeq u8 · velocity u8 · radius u8 · pitch f32`.
 /// `pitch` is a fractional MIDI note number (69.0 = A440). `onsetSeq`
 /// bumps on each fresh articulation of this id, so a lift + re-press
 /// survives latest-wins coalescing as a retrigger.
@@ -87,7 +87,12 @@ public struct TLPTouch: Equatable, Sendable {
     public var id: UInt16
     public var onsetSeq: UInt8
     public var velocity: UInt8      // 0–255 onset velocity
-    public var pressure: UInt8      // 0–255, 0 if unavailable
+    /// FINGERTIP SIZE — `UITouch.majorRadius` in POINTS × 4, clamped to
+    /// 255 (0 = unknown: producers without a touchscreen). Quarter-point
+    /// steps are far finer than Apple's own quantisation; the signal is
+    /// used as a BINARY flatten detection, not a continuous axis
+    /// (`TouchFlattenDetector`).
+    public var radius: UInt8
     public var pitch: Float         // fractional MIDI note
     /// IN-PROCESS ONLY (the Mac strum chord's live loudness): not encoded;
     /// decoded frames carry 1.0.
@@ -97,16 +102,29 @@ public struct TLPTouch: Equatable, Sendable {
     public var glideExempt: Bool
 
     public init(id: UInt16, onsetSeq: UInt8, velocity: UInt8,
-                pressure: UInt8 = 0, pitch: Float, exprScale: Double = 1.0,
+                radius: UInt8 = 0, pitch: Float, exprScale: Double = 1.0,
                 glideExempt: Bool = false) {
         self.id = id
         self.onsetSeq = onsetSeq
         self.velocity = velocity
-        self.pressure = pressure
+        self.radius = radius
         self.pitch = pitch
         self.exprScale = exprScale
         self.glideExempt = glideExempt
     }
+
+    /// Fingertip radius in points → the wire byte (quarter-point steps,
+    /// clamped to 255 ≈ 63.75 pt). Negative/zero reads as unknown.
+    public static func radiusByte(points: Double) -> UInt8 {
+        guard points > 0 else { return 0 }
+        return UInt8(min(255.0, max(0.0, (points * 4.0).rounded())))
+    }
+
+    /// The wire byte back to points (0 = unknown).
+    public static func radiusPoints(_ b: UInt8) -> Double { Double(b) / 4.0 }
+
+    /// This touch's fingertip radius in points (0 = unknown).
+    public var radiusPoints: Double { TLPTouch.radiusPoints(radius) }
 }
 
 /// iPad→Mac: the whole performance in one atomic frame — the COMPLETE set
@@ -304,7 +322,7 @@ extension TLPFrame {
                 out.appendLE(t.id)
                 out.append(t.onsetSeq)
                 out.append(t.velocity)
-                out.append(t.pressure)
+                out.append(t.radius)
                 out.appendLE(t.pitch.bitPattern)
             }
         case .joyConState(let s):
@@ -364,10 +382,10 @@ extension TLPFrame {
             touches.reserveCapacity(Int(count))
             for _ in 0..<count {
                 guard let id = r.u16(), let onset = r.u8(), let vel = r.u8(),
-                      let press = r.u8(),
+                      let rad = r.u8(),
                       let pitchBits = r.u32() else { return nil }
                 touches.append(TLPTouch(id: id, onsetSeq: onset, velocity: vel,
-                                        pressure: press,
+                                        radius: rad,
                                         pitch: Float(bitPattern: pitchBits)))
             }
             guard r.isAtEnd else { return nil }

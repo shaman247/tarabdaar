@@ -163,27 +163,30 @@ aligns inflections to a known svara sequence by monotonic DP; `selftest`
 runs synthetic strokes. The hindsight thresholds define "truth" and are not
 fitted. Fitting rounds: `docs/history/`.
 
-## Touch indicator and strike display
+## Touch indicator: the fingertip radius
 
-Each touch draws an **indicator ring** — amber at onset and whenever the
-stop detector holds (`FretDragAssist.Output.stopGate`), cyan while the
-finger glides — and, whenever the sounding pitch differs ≥1 ¢ from the raw
-field pitch under the finger, a readout `original → corrected` in the
-scale's vocabulary with signed cents (`R−18¢ → R`). Display-only
-(`TouchIndicatorModel` + `TouchIndicatorLayerIOS`). The ring is a plain
-circle and held notes hold their expression (a fret-linger / auto-vibrato
-layer is not present — see `docs/history/`).
+Each touch draws one **indicator ring**, and the ring's SIZE is the raw
+fingertip radius (`UITouch.majorRadius` × 2 px, clamped 16–120 px; a ~23 pt
+fingertip draws the historic 46 px circle). Beside it the radius itself is
+printed in points, to one decimal — the signal in the raw, so
+`Config.touchFlattenStepPt` (3 pt, one Apple size step) can be judged by
+eye while playing. Colour is playing state: cyan while the finger glides,
+amber whenever the stop detector holds (`FretDragAssist.Output.stopGate`,
+and every touch is born stopped), and **violet with a second outer ring
+whenever the shared `TouchFlattenDetector` reads the fingertip FLATTENED** —
+the state that eases that note's vibrato in on the Mac (see
+[sensors.md](sensors.md)). The iPad runs its own display-only instance of
+the same law, so the highlight and the sounding vibrato agree.
 
-**Onset strike ripple.** At every onset a white impact ring expands from
-the touch ring and fades over ~0.5 s, its reach, brightness and stroke
-weight scaled by the accelerometer strike estimate ([sensors.md](sensors.md));
-a faint ripple at 0 still confirms "read: soft". **The number** is printed
-beside the ring for the note's life — MIDI 0–127; `bow_attack_vel` sees
-value/127 — and survives release as a **fading ghost for ~1 s**, so a
-staccato tap's reading is legible. It is the LOCAL estimate at capture time
-(the exact byte that rode the wire), not a Mac round-trip. A ~15 Hz redraw
-ticker runs while a ripple or ghost decays. No motion source (previews) =
-no ripple, no number; the Mac preview pad has no such overlay.
+Display-only (`TouchIndicatorModel` + `TouchIndicatorLayerIOS`); the Mac
+preview pad has no such overlay. The detector is ticked by the 60 Hz settle
+loop as well as by moves, so a motionless finger's baseline window still
+closes.
+
+**Not on this overlay** (removed 2026-09-04): the `original → corrected`
+pitch-correction readout and the accelerometer strike ripple + 0–127
+number. Both signals survive in the toolbar scopes — the strike scope and
+the finger-accel scope — which are unaffected.
 
 ## Layout
 
