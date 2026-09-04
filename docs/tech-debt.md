@@ -68,15 +68,12 @@ is re-blessed with a before/after render for an A/B by ear.
 26. **Dead two-component pitch-correction path** (`pitchKnotsRel/CentsRel/
     KnotsAbs/CentsAbs/CentsPress` in `BowConfig`, the branch in
     `BowControls`): the shipped artifact carries only `pitch_knots_oct`.
-27. **Unread keys in `bowed_string.json`**: `bow_jw_R`, `ctl_expr_gain`,
-    `ctl_expr_off`, `ctl_pos_off`, `ctl_pos_scale`, `ctl_press_off`,
-    `ctl_press_scale`.
 28. **Definition-only API still resident** (files the audit could not touch
     at the time): `Biquad.butterBandpass`, `Biquad.modeAllpass`,
     `Cx.expMinusJ`, `BowEngine.liveLevelTrim`.
-31. **Oversized seams:** `AppController.start()` (~300 lines of independent
-    wiring); `bow_kernel_poly.c` (the jt/taraf half is separable into
-    `bow_jt.c`).
+31. **`bow_kernel_poly.c`** (3200 lines): the jt/taraf half is separable
+    into `bow_jt.c` with a private header; today every taraf edit means
+    reading past the friction solver.
 32. **`tlpsim`** (`Packages/TarabdaarCore/Sources/tlpsim`) is referenced by
     nothing and undocumented — keep deliberately or delete.
 ## Efficiency — wasted work by thread
