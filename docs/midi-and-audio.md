@@ -1,8 +1,8 @@
 # MIDI & Audio
 
-The iPad↔Mac wire is **TLP** (the TarabLink Protocol), not the MIDI vocabulary. The iPad streams one compact binary **state frame** (all touches at full-resolution pitch + tilt + strike + drones + chord selection, atomic, latest-wins) plus a small set of reliable **events**; the Mac streams sync events and a display/control frame back. Both directions tunnel inside one SysEx envelope over the CoreMIDI transports — the USB session when wired, the BLE-MIDI session otherwise. The MIDI vocabulary survives **in-process only** (audition scripts, external controllers, the tanpura pending-pluck) — the parity substrate. Code: `Packages/TarabdaarCore/Sources/TarabdaarCore/Link/`.
+The iPad↔Mac wire is **TLP** (the TarabLink Protocol). The iPad streams one compact binary **state frame** (all touches at full-resolution pitch + tilt + strike + drones + chord selection, atomic, latest-wins) plus a small set of reliable **events**; the Mac streams sync events and a display/control frame back. Both directions tunnel inside one SysEx envelope over the CoreMIDI transports — the USB session when wired, the BLE-MIDI session otherwise. Code: `Packages/TarabdaarCore/Sources/TarabdaarCore/Link/`.
 
-MPE note+bend, tilt CC pairs and per-message SysEx blobs are not on the wire — see docs/history/.
+**There is no MIDI note vocabulary.** No notes, bends, control changes, aftertouch or MPE exist anywhere in the app — not on the wire and not in-process. CoreMIDI is the tunnel's BEARER and nothing else: the only bytes either side sends or reads are SysEx-framed TLP frames. Pitch is an f32 fractional-MIDI number inside a state frame; expression, press, position, tilt and vibrato are 0…1 axes set directly on `BowControlMapper`; drone presses are `droneMask` bits. (MPE note+bend, tilt CC pairs, per-message SysEx blobs and the in-process note path are all gone — see docs/history/.)
 
 ## The SysEx envelope (`TLPPack.swift`)
 
@@ -101,7 +101,7 @@ Flags: bit 0 stick live, bit 1 wrist/body live, bit 2 **`connected`** (a Joy-Con
 
 `MIDIInput` opens a CoreMIDI input port, `MIDIPortConnectSource`s every visible source, and re-runs the connect pass on every setup-changed notification (plugging the iPad in mid-session brings it online). Inbound SysEx is reassembled per source (realtime bytes skipped); complete `F0 7D 10` runs fire `onSysEx` → `TarabLink.receivedSysEx`.
 
-**Channel-voice MIDI still flows** — external controllers and the in-process paths — through `AudioEngine.sendHostedMIDI` → `routeSarangiModelMIDI` → the long-lived `BowControlMapper` (`.midi` slot keys; the wire uses `.touch` keys — same allocation laws, shared slots; every note-on mounts a fresh string). Drone CCs 102–104 (≥ 64 = pressed; 105 swallowed) are intercepted in `sendHostedMIDI` for this path; on the wire drones are `droneMask` bits. The in-process tilt CC pairs (16/17/18 + 48/49/50) decode in `AudioEngine` for audition scores only. The Live tab's `performanceReadout()` tracks both key kinds (touch-keyed reads exact semis, MIDI-keyed note + bend).
+That is the whole class. Channel-voice bytes arriving on the port are stepped over at their message length so a following SysEx run is still found — nothing decodes them, and an external MIDI controller plays nothing. The Live tab's `performanceReadout()` reads the touch-keyed pitch (exact semitones).
 
 ## Joy-Con input (Mac, `TarabdaarMac/JoyConInput.swift`)
 
@@ -147,14 +147,14 @@ Connection status, the profile's element inventory with aliases grouped on one l
 ## Audio graph (Mac, `AudioEngine.swift`)
 
 ```
-touch / MIDI ► StringVoiceSource  ─┐
+touch ► StringVoiceSource         ─┐
                TanpuraVoiceSource ─┼► symGain ► mainMixerNode ► output
                (sitar) TanpuraVoiceSource ─┘
 ```
 
 - Three `AVAudioSourceNode`s connect DIRECTLY to `symGain` (`outputVolume` 1), which feeds the main mixer: the String voice (`SarangiKit.BowEngine` + the C kernel — the complete instrument: played strings + modal-jawari taraf + body + radiation + room + the FX rack), the tanpura node (default drone voice / optional main instrument) and the sitar node (main instrument; its output charges the String kernel's inject ring, `st_taraf`). The tanpura's output also feeds the inject ring (`tp_taraf`). No hosted AU, no master filter/reverb bus.
 - The String kernel runs 96 kHz internally and half-band-decimates to 48 kHz; the tanpura nodes run at their artifact's 48 kHz; the mixer input converts to the engine rate, `Config.sampleRate` (44 100).
-- The String node's async jawari worker pool renders one block late so the callback never waits. The audio thread never does MIDI or state logic.
+- The String node's async jawari worker pool renders one block late so the callback never waits. The audio thread never does link or state logic.
 
 ### Output device
 
@@ -170,14 +170,14 @@ See [Sound Design](sound-design.md) for the voice DSP.
 
 `AppController`'s `@Published` setters push to `AudioEngine` via `didSet` — slider drags fire immediately, no timer. The String voice routes through `StringParamStore` / `SarangiStore`: live keys and composite members push instantly (chunk-rate smoothed in `BowEngine`); a structural edit (tarab tuning, a `bow_*` build scalar) schedules a debounced off-thread `BowEngine` rebuild, swapped in lock-free, so rapid drags coalesce into one rebuild. See [Parameters](parameters.md).
 
-## MIDIEngine (iPad)
+## MIDIEngine (the tunnel's byte pump)
 
-`MIDIEngine` is the tunnel's byte pump. It owns the CoreMIDI client, destination classification and the wired-first rule, and two send paths:
+`MIDIEngine` owns the CoreMIDI client, the output port, destination classification and the wired-first rule, and has two send paths:
 
 - **`sendSysExToLink`** — the TLP tunnel: real links only (wired first, BLE otherwise), never virtual endpoints (the device's own "Tarabdaar Scale" receiver would loop it back).
-- The channel-voice senders (`sendNoteOn`/`sendPitchBend`/…) serve **the in-process bus only** (`publishToCoreMIDI: false` + `onLocalEvent`) — the substrate of the audition scripts and `IPadSimulator`.
+- **`sendSysEx`** — the Mac's side of the same tunnel, with an optional destination-name filter.
 
-Setup is deferred to `onAppear` (the iOS MIDI server may not be ready at launch; 3 retries). The virtual source "Tarabdaar Output" exists for external listeners, but playing emits no MPE: `PitchPadEngine` writes touches into `OutboundPlayState`, `NoteManager`'s 60 Hz tick writes tilt/accel/strike into the same snapshot, and `TarabLink` paces it onto the wire.
+There are no other senders: SysEx is the only thing that leaves the port. Setup is deferred to `onAppear` (the iOS MIDI server may not be ready at launch; 3 retries). Playing emits nothing on CoreMIDI beyond the tunnel: `PitchPadEngine` writes touches into `OutboundPlayState`, `NoteManager`'s 60 Hz tick writes tilt/accel/strike into the same snapshot, and `TarabLink` paces it onto the wire.
 
 ## Connecting
 
@@ -222,4 +222,4 @@ One-way; the iPad has no scale editor and its tonic is read-only. It persists th
 
 ## External MIDI hosts
 
-The iPad does not drive third-party DAWs (no MPE on the wire). The Mac accepts external MPE controllers on `MIDIInput`'s channel-voice path; with Ableton's "Note PB" mode, pitch bends are per-note when MPE is enabled.
+Neither side speaks MIDI to anything else: the iPad does not drive third-party DAWs, and the Mac plays nothing from an external MIDI controller. The instrument is played from the iPad's Fret Pad, the Mac's own pads and the Joy-Con.

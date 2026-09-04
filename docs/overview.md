@@ -22,5 +22,4 @@ Tarabdaar is an expressive electronic music instrument, loosely inspired by the 
 - Renders the **String voice** (`BowEngine` + `CBowKernel`, 96 kHz → 48 kHz) as the default played voice, and the plucked **Tanpura** (default drone voice, optional main instrument) and **Sitar** (main instrument only) — see [Sarangi](sarangi.md), [Tanpura Voice](tanpura-voice.md), [Sitar Voice](sitar-voice.md)
 - Sympathetic (tarab) strings as modal-jawari rows fused into the kernel, tuned from the **Strings tab** (every string a degree of the centralized scale)
 - **Parameters tab** — every parameter in one grouped, searchable list, applied live; **Controls tab** — tilt bindings (to a composite or straight to a parameter) and composite macros; **FX tab** — the four-insert rack; **Scope** and **Taraf** tabs — the performance and the sympathetic rows at a glance
-- Joy-Con supplemental input (stick, wrist tilt, strum, octave shift) and computer-keyboard notes
-- **Autonomous audition pipeline** — drop a JSON score into `<repo>/auditions/inbox/` and `AuditionRunner` plays it through the headless simulator, recording to `<repo>/auditions/outputs/<name>.wav`. See [Simulator & Audition Loop](simulator.md).
+- Joy-Con supplemental input (stick, wrist tilt, strum, octave shift)

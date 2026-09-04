@@ -328,8 +328,8 @@ instead. Mapping, labels and signal path apply to both modes.
   octave). An unmapped slot keeps its last ratio.
 - **Signal path**: both surfaces call `PitchPadEngine.setDrone(_:pressed:)`,
   which flips a held-state bit (`droneMask`) in the outbound TLP state frame
-  — latest-wins and stuck-drone safe (CC 102–104 survives in-process for
-  audition scores); multi-finger safe on iPad (refcounted). `LinkIngest`
+  — latest-wins and stuck-drone safe; multi-finger safe on iPad
+  (refcounted). `LinkIngest`
   diffs the mask edges → `setDronePressed` → `BowEngine.dronePress/
   droneRelease` → the kernel's `bow_poly_jt_pluck` / `bow_poly_jt_drone` /
   `_drone_env` + `_drone_tone`, applied inside `jt_tick_string` so every
@@ -353,14 +353,13 @@ instead. Mapping, labels and signal path apply to both modes.
 - **Levels**: `bow_drone_level` 0.026 · `bow_drone_onset` 0.052 ·
   `bow_drone_attack_ms` 150 · `bow_drone_release_ms` 350 ·
   `bow_drone_onset_decay_ms` 500 — bp constants read in `BowEngine.init`,
-  overridable via the audition `string.<key>` path (rise-to-90 % ≈ 310 ms).
+  overridable from the Parameters tab (rise-to-90 % ≈ 310 ms).
   Calibration TARGET: **a drone tap = a fret tap at the same pitch**,
   matched on an A-weighted short-window peak (raw RMS undersells the gap;
   the level–ring curve turns superlinear past ~0.008). **Calibrate with ONE
-  app instance running**, against a fresh pad tap. Audition hooks:
-  `voiceParam` `drone1`–`drone3` (> 0.5 = press). **A drone mapped to a
-  DISABLED tarab string is inert by design** — press `drone3` (Sa) when
-  auditioning, and check the mapped string first when a button seems dead.
+  app instance running**, against a fresh pad tap. **A drone mapped to a
+  DISABLED tarab string is inert by design** — check the mapped string
+  first when a button seems dead.
 
 ## The strum (Joy-Con L / accel trigger)
 
@@ -434,8 +433,7 @@ rides every PERF_STATE frame as `chordDegree`/`chordOctave` (0xFF = none;
 never clobbers a Mac-local selection). The Mac's own taps travel the
 identical in-process path, so `AppController.strumChord` — what the Mac bar
 highlights — is literally what the next strum sounds; the iPad highlights
-its own outbound selection. Audition route: `voiceParam` `chord`, value =
-degree index, negative = deselect.
+its own outbound selection.
 
 ## On the iPad
 

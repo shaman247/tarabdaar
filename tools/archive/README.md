@@ -14,8 +14,12 @@ code):
 - `gen-harmonic-graphs.py`, `gen-sym-graphs.py`, `sym_lag_probe.py`,
   `sym-harmonics.html`, `sym-envelopes.html` — the Harmonics-tab graph
   pipeline (tab removed 2026-07-23).
+- `audition_analyze.py`, `audition_compare.py`, `audition_iterate.py` —
+  the headless audition loop's score writer / WAV comparer / refine
+  driver. The pipeline they drove (the `IPadSimulator` + `AuditionRunner`
+  inbox→WAV path) was removed 2026-09-03; nothing watches
+  `auditions/inbox/` any more, so these scripts have no runner.
 
 Live tools stay in `tools/`: `build-mac.sh`, `release-mac.sh`,
-`test-full.sh`, `gen_docs_html.py`, the audition pipeline
-(`audition_iterate.py`, `audition_analyze.py`, `audition_compare.py`) and
-`fretpad_fit.py` (the drag-assist refit).
+`test-full.sh`, `gen_docs_html.py` and `fretpad_fit.py` (the drag-assist
+refit).

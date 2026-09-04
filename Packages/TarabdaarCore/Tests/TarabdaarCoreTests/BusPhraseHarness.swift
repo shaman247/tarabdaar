@@ -22,7 +22,7 @@ enum BusPhrase {
         "bow_jt_async": 0.0, "bow_jt_threads": 0.0,
     ]
 
-    /// The parity phrase: two overlapping notes with a release tail, so
+    /// The parity phrase: two overlapping touches with a release tail, so
     /// the voice bus, the jt bus and the room all carry signal. The
     /// meter is integrate-and-dump, so two readings come back: `mid` =
     /// the exact RMS of everything up to 0.9 s (both notes sounding),
@@ -54,14 +54,16 @@ enum BusPhrase {
         configure(src)
         let sr = src.modelSR
         let block = 128
-        src.mapper.midi(0xB0, 11, 40)
+        src.mapper.setAxis(expr: 40.0 / 127.0)
         var out: [Float] = []
         var t = 0.0
-        let events: [(Double, UInt8, UInt8, UInt8)] = [
-            (0.05, 0x90, 64, 100),
-            (0.60, 0x91, 71, 90),
-            (1.10, 0x80, 64, 0),
-            (1.50, 0x81, 71, 0),
+        /// `(at, id, pitch?, velocity)` — a non-nil pitch is a touch-on,
+        /// nil is the release of that id.
+        let events: [(Double, UInt16, Double?, Double)] = [
+            (0.05, 1, 64.0, 100.0 / 127.0),
+            (0.60, 2, 71.0, 90.0 / 127.0),
+            (1.10, 1, nil, 0),
+            (1.50, 2, nil, 0),
         ]
         var next = 0
         var mid: (voice: Double, taraf: Double) = (0, 0)
@@ -69,7 +71,11 @@ enum BusPhrase {
         while t < 2.5 {
             while next < events.count, events[next].0 <= t {
                 let e = events[next]
-                src.mapper.midi(e.1, e.2, e.3)
+                if let pitch = e.2 {
+                    src.mapper.touchOn(e.1, pitchSemis: pitch, velocity: e.3)
+                } else {
+                    src.mapper.touchOff(e.1)
+                }
                 next += 1
             }
             let (l, r) = src.renderForTesting(frames: block)

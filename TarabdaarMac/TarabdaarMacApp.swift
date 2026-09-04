@@ -1,16 +1,8 @@
-import TarabdaarCore
 import SwiftUI
 
 @main
 struct TarabdaarMacApp: App {
     @StateObject private var controller = AppController()
-
-    init() {
-        // Starpad/TarabPad → Tarabdaar identity migration . Must run
-        // before AppController exists — its stores read UserDefaults and
-        // the preset library at init.
-        LegacyMigration.runIfNeeded()
-    }
 
     var body: some Scene {
         WindowGroup("Tarabdaar") {

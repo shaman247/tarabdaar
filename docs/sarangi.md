@@ -40,8 +40,8 @@ touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (o
   the split, and the sum is bit‑identical to a single‑bus render.
 - **Rates.** Kernel 96 kHz → 48 kHz; `StringVoiceSource` is an
   `AVAudioSourceNode` at 48 kHz, converted by the mixer input to
-  `Config.sampleRate` 44.1 kHz. In‑process MIDI arrives via
-  `AudioEngine.sendHostedMIDI` → `routeSarangiModelMIDI` ([MIDI & Audio](midi-and-audio.md)).
+  `Config.sampleRate` 44.1 kHz. Touches arrive from the link
+  ([MIDI & Audio](midi-and-audio.md)).
 
 ## The kernel and its host
 
@@ -72,17 +72,17 @@ touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (o
   persist as an override dict (`tarabdaar.stringOverrides.v1`,
   `StringParamStore`) applied over `bowed_string.json` at build time; one that
   lands on the artifact value is dropped (*dirty* = differs from default).
-  Audition path `string.<key>`. Registry defaults for keys the artifact does
-  not carry must equal the engine fallbacks (`ParamUnificationTests`).
-- **Controls — `BowControlMapper`**, long‑lived across rebuilds: CC11
-  expression · CC1 press · CC74 position · CC2/75 tilt · aftertouch · CC120/123
-  all‑off; slots keyed `.touch` (wire) and `.midi` (in‑process) under identical
-  laws (`TouchMapperTests`). The Mac pads hold CC11 = 32 (the fitted
-  expression median).
+  Registry defaults for keys the artifact does not carry must equal the
+  engine fallbacks (`ParamUnificationTests`).
+- **Controls — `BowControlMapper`**, long‑lived across rebuilds: the 0…1
+  axes (expression · press · position · tilt · vibrato) plus
+  `touchOn`/`touchGlide`/`touchOff`/`touchAllOff`, every slot keyed by its
+  u16 touch id (`TouchMapperTests`). The Mac pads hold the expression axis
+  at the fitted median (0.25).
 - **Telemetry.** `StringVoiceSource.jtStats()` (async‑web dropped‑job /
   flat‑fill counters) and `renderStats()` (callbacks timed against 90 % of
-  budget — a LATE callback glitches at the device while an audition tap
-  records a clean WAV); `AppController`'s 5 s watchdog logs "jt OVERLOAD" /
+  budget — a LATE callback glitches at the device even when the render
+  itself is clean); `AppController`'s 5 s watchdog logs "jt OVERLOAD" /
   "render OVERRUN" when they grow. Check these first for clicking.
 - **Scope (⌘8) and Taraf (⌘9) tabs** draw display‑only kernel meters:
   `bow_poly_scope_arm` turns on, per jt row, a peak envelope of its radiated
@@ -251,7 +251,7 @@ bench sweep said 0.2.
 **The range is 0…1 of a MEASURED safe range** (`BowEngine.jtCoupleFullScale`
 = 0.4 kernel gain — half the divergence gain). Measured on the HEAVY case,
 because one note is far more forgiving than a chord: shipped Pilu bank, serial
-jt, **Sa + Pa + Sa′ at CC11 127** held 1 s then a 4 s ring, output trim pulled
+jt, **Sa + Pa + Sa′ at full expression** held 1 s then a 4 s ring, output trim pulled
 60 dB so the safety limiter cannot mask growth. The ring's fall from +1 s to
 +4 s: **31 dB** uncoupled, 31 / 27 / 28 / 18 / 23 dB at 0.2 / 0.3 / 0.4 / 0.5
 / 0.6 — and at **0.8** it stops decaying and GROWS +6 dB through the last
@@ -326,7 +326,7 @@ would park the instrument on the note‑independent flat wash).
 The web is a constant‑cost simulation — every row ticks its whole mode stack
 whether ringing or silent (~350 % CPU idle without the gate). `bow_jt_gate` is
 a **bp scalar, not a registry parameter**, always on at **40 dB** below the
-graze apex (`bow_poly_jt_set_gate`; a 0 override in tests/auditions is the
+graze apex (`bow_poly_jt_set_gate`; a 0 override in tests is the
 raw‑physics escape hatch). A row whose peak LOW‑mode momentum rests below the
 floor (10^(−gate/20) × apex × mode‑1 rate) for ~30 ms of consecutive ticks,
 with no bridge drive above its wake bound and no drone drive, sleeps **in
@@ -439,7 +439,7 @@ range keys are bp scalars (`string.<key>`). Path: binding →
   `BowEngine.setBusMeter` meters the split buses' radiated levels (the
   `TLPVolume` bytes for the iPad toolbar scope), bit‑exact.
 - **Levels** are calibrated in the artifact / overrides (`bow_live_trim`,
-  `bow_rev_*`) with the pads' flat CC11 = 32; kin notes (hard‑struck Sa/Pa)
+  `bow_rev_*`) with the pads' flat expression median; kin notes (hard‑struck Sa/Pa)
   are the hot spots — `bow_jt_norm` at the cause, the per‑string cap on the
   taraf.
 
@@ -550,7 +550,7 @@ The guard set is deliberately small; the sound is judged by ear.
   `TarabRatioTests`, `TarabSetTests`, `DroneStringTests`, `ScaleLabelTests`,
   plus the link/pad/glide suites (`TLPCodecTests`, `TarabLinkTests`,
   `LinkIngestTests`, `GlideSequencerTests`, `FretLayoutTests`, `FretWarpTests`,
-  `ChordBarTests`, `LegacyMigrationTests`, `ScalePresetTests`).
+  `ChordBarTests`, `ScalePresetTests`).
 
 Run both packages' `swift test` and `tools/test-full.sh` before committing a
 kernel, builder, parameter or levels change.

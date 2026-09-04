@@ -41,7 +41,7 @@ struct TiltControlsView: View {
                     .font(.padCaption.weight(.bold))
                     .foregroundStyle(.secondary)
                     .padding(.top, 8)
-                Text("A composite parameter is a named 0\u{2013}1 control built from several parameters: each member sweeps its own low\u{2192}high range as the composite rises. Bind composites to tilts above, or drive them from audition scores. Most members follow the tilt instantly; a few are engine-build values that re-apply through a crossfaded rebuild about a fifth of a second after the value settles (hover a member for which).")
+                Text("A composite parameter is a named 0\u{2013}1 control built from several parameters: each member sweeps its own low\u{2192}high range as the composite rises. Bind composites to tilts above. Most members follow the tilt instantly; a few are engine-build values that re-apply through a crossfaded rebuild about a fifth of a second after the value settles (hover a member for which).")
                     .font(.padCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -492,7 +492,7 @@ public enum ParamRegistry {
             ParamSpec("bow_attack_vel", "velocity sharpness", group: "Articulation",
                       0.0, 1.0, 0.0,
                       scope: .perNote,
-                      help: "How much the ONSET STRIKE VELOCITY sharpens the attack: sharpness = max(press law, this × velocity 0…1). Makes articulation per-note — tap hard = martelé bite, place gently = legato draw. Velocity comes from the iPad's accelerometer strike estimate (or MIDI/audition velocity); 0 = off (the press law alone decides)."),
+                      help: "How much the ONSET STRIKE VELOCITY sharpens the attack: sharpness = max(press law, this × velocity 0…1). Makes articulation per-note — tap hard = martelé bite, place gently = legato draw. Velocity comes from the iPad's accelerometer strike estimate; 0 = off (the press law alone decides)."),
             // HYBRID: the vibrato depth in cents. The kernel scales the
             // built depth by a live 0…1 amount — 0…built ¢ is instant,
             // above it the build scalar moves.
@@ -743,8 +743,8 @@ public enum ParamRegistry {
     /// while the point's EQ is off). The insert is now described once
     /// (`fxTemplate`) and instantiated for each point (`fxPoints`):
     /// `ParamRegistry.all` still answers every `fx_<point>_<knob>` key, so
-    /// presets, tilt targets, composites, the FX tab and `param.` audition
-    /// routes are untouched — but each derived spec carries its `insert`,
+    /// presets, tilt targets, composites and the FX tab are untouched —
+    /// but each derived spec carries its `insert`,
     /// so the Parameters tab shows FOUR collapsible inserts instead of 64
     /// flat rows and docs/parameters.md renders the template once.
     ///

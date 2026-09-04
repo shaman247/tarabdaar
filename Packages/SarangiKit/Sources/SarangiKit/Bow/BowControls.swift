@@ -1,6 +1,6 @@
 import Foundation
 
-/// MIDI/UI/touch events → kernel-rate bow controls (f0, vbow, fbow, beta,
+/// Touch and UI events → kernel-rate bow controls (f0, vbow, fbow, beta,
 /// gate). The control thread writes target state under a lock; once per
 /// render buffer the audio thread snapshots it and fills per-sample arrays,
 /// interpolating the axes linearly from the previous snapshot:
@@ -9,15 +9,15 @@ import Foundation
 ///             target (meend is the finger's own movement), then the
 ///             calibrated `pitch_cents` correction.
 ///   * gate  — note state through a ~25 ms one-pole.
-///   * vbow  — expression (CC11) → dB (rel ∈ [−14, +5]) → v =
+///   * vbow  — the expr axis → dB (rel ∈ [−14, +5]) → v =
 ///             v_ref·10^(rel/(20·dyn_p)) clipped to [v_lo, 1.3·v_hi]
 ///             (dyn_p ≤ 0.1: affine). Rides [bow_expr_lift, 1]; below the
 ///             lift the bow fades to SILENCE.
-///   * fbow  — press (CC1) → LOG-force position across the analytic
+///   * fbow  — the press axis → LOG-force position across the analytic
 ///             Schelleng wedge, edges reachable (see `fill`).
-///   * beta  — pos (CC74) affine in [bow_live_beta_lo, bow_live_beta_hi];
-///             tilt (CC2, dB) moves toward the bridge (bow_tilt_beta, soft
-///             knee) and brightens force (bow_tilt_force).
+///   * beta  — the pos axis affine in [bow_live_beta_lo, bow_live_beta_hi];
+///             the tilt axis (dB) moves toward the bridge (bow_tilt_beta,
+///             soft knee) and brightens force (bow_tilt_force).
 ///
 /// Starts from silence (no pre-roll). Articulation, vibrato and glide
 /// gestures are the player's, supplied on the axes.
@@ -26,31 +26,25 @@ public final class BowControlMapper: @unchecked Sendable {
     /// Fixed slot-table size (the engine's `maxPoly` is clamped to this).
     public static let maxSlots = 16
 
-    /// Note identity on a slot. `.midi` = the in-process MIDI path (pitch =
-    /// note + per-channel bend; the parity substrate). `.touch` = the
-    /// TarabLink path (pitch = the fractional-MIDI Double `touchSemis`).
-    enum SlotKey: Equatable {
-        case midi(note: UInt8, ch: UInt8)
-        case touch(id: UInt16)
-    }
-
     /// One voice slot = one gut string on the shared bridge. EVERY note-on
     /// mounts a FRESH string (unused slot, else longest-released, else the
     /// oldest sounding note is stolen) and bumps `serial` — the engine
     /// zeroes that kernel string and snaps its pitch, so pitch never glides
     /// BETWEEN notes. Note-off only lifts the bow; the string rings on.
     private struct Slot {
-        var key: SlotKey = .midi(note: 69, ch: 0)
+        /// The TarabLink touch id that owns this slot (meaningless while
+        /// `used` is false).
+        var touchId: UInt16 = 0
         var gateOn = false
         var used = false
         var serial: UInt32 = 0
         var lastOn: UInt64 = 0
         var lastOff: UInt64 = 0
-        /// Onset strike velocity 0…1 (MIDI d2/127 or the touch frame's
-        /// velocity byte); read only when `bow_attack_vel` > 0.
+        /// Onset strike velocity 0…1 (the touch frame's velocity byte);
+        /// read only when `bow_attack_vel` > 0.
         var onVel: Double = 0.0
-        /// Pitch of a `.touch` key, fractional MIDI (69.0 = A440): updated
-        /// by `touchGlide` while gated, FROZEN on release.
+        /// The slot's pitch, fractional MIDI (69.0 = A440): updated by
+        /// `touchGlide` while gated, FROZEN on release.
         var touchSemis: Double = 69.0
         /// Per-slot expression scale on the GLOBAL expr axis (the strum
         /// chord's per-note expression); frozen on release. ×1.0 is an IEEE
@@ -63,19 +57,16 @@ public final class BowControlMapper: @unchecked Sendable {
     private var slots = [Slot](repeating: Slot(), count: BowControlMapper.maxSlots)
     private var slotLimit = 1
     private var evt: UInt64 = 0
-    /// Pitch bend PER CHANNEL (semitones).
-    private var chBend = [Double](repeating: 0.0, count: 16)
     private var expr: Double
     private var press: Double
     private var pos: Double
     private var tilt01: Double
-    /// Player vibrato = aftertouch depth 0..1 into bow_vib_cents at
-    /// bow_vib_hz — never free-running.
+    /// Player vibrato = depth 0..1 into bow_vib_cents at bow_vib_hz —
+    /// never free-running.
     private var vibAT = 0.0
-    public var bendRange = 2.0             // semitones at full wheel
 
-    /// Tilt axis dB mapping: CC2 0…127 spans [tiltMinDb, tiltMaxDb];
-    /// neutral 0 dB ≈ CC 42.
+    /// Tilt axis dB mapping: the 0…1 axis spans [tiltMinDb, tiltMaxDb];
+    /// neutral 0 dB ≈ 0.33.
     public static let tiltMinDb = -12.0
     public static let tiltMaxDb = 24.3
 
@@ -109,12 +100,12 @@ public final class BowControlMapper: @unchecked Sendable {
     /// Every note-on = a fresh string. Returns the mounted slot index so
     /// the touch path can seed its pitch. Callers hold the lock.
     @discardableResult
-    private func noteOn(key: SlotKey, vel: Double) -> Int {
+    private func noteOn(id: UInt16, vel: Double) -> Int {
         evt += 1
         let lim = slotLimit
-        // a note-on for a key already gated = a retrigger: release that
+        // a note-on for an id already gated = a retrigger: release that
         // slot, the old string rings on at its frozen pitch
-        for i in 0..<lim where slots[i].gateOn && slots[i].key == key {
+        for i in 0..<lim where slots[i].gateOn && slots[i].touchId == id {
             slots[i].gateOn = false
             slots[i].lastOff = evt
         }
@@ -133,7 +124,7 @@ public final class BowControlMapper: @unchecked Sendable {
             }
         }
         slots[i].serial &+= 1
-        slots[i].key = key
+        slots[i].touchId = id
         slots[i].gateOn = true
         slots[i].used = true
         slots[i].lastOn = evt
@@ -143,51 +134,11 @@ public final class BowControlMapper: @unchecked Sendable {
         return i
     }
 
-    private func noteOff(key: SlotKey) {
+    private func noteOff(id: UInt16) {
         evt += 1
-        for i in 0..<slotLimit where slots[i].gateOn && slots[i].key == key {
+        for i in 0..<slotLimit where slots[i].gateOn && slots[i].touchId == id {
             slots[i].gateOn = false
             slots[i].lastOff = evt
-        }
-    }
-
-    /// In-process MIDI: note on/off, CC11 expr · CC1 press · CC74 pos ·
-    /// CC2/CC75 tilt, per-channel bend, aftertouch vibrato, CC120/123
-    /// all-off. The channel nibble keys note identity and bend; CCs are
-    /// global.
-    public func midi(_ status: UInt8, _ d1: UInt8, _ d2: UInt8) {
-        let kind = status & 0xF0
-        let ch = status & 0x0F
-        os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
-        switch kind {
-        case 0x90 where d2 > 0:
-            noteOn(key: .midi(note: d1, ch: ch), vel: Double(d2) / 127.0)
-        case 0x80, 0x90:
-            noteOff(key: .midi(note: d1, ch: ch))
-        case 0xE0:
-            let raw = Int(d2) << 7 | Int(d1)
-            chBend[Int(ch)] = (Double(raw) - 8192.0) / 8192.0 * bendRange
-        case 0xD0:                          // channel aftertouch → vibrato
-            vibAT = Double(d1) / 127.0
-        case 0xA0:                          // poly aftertouch (any note)
-            vibAT = Double(d2) / 127.0
-        case 0xB0:
-            let v = Double(d2) / 127.0
-            switch d1 {
-            case 11: expr = v
-            case 1: press = v
-            case 74: pos = v
-            case 2, 75: tilt01 = v
-            case 120, 123:
-                evt += 1
-                for i in slots.indices where slots[i].gateOn {
-                    slots[i].gateOn = false
-                    slots[i].lastOff = evt
-                }
-            default: break
-            }
-        default: break
         }
     }
 
@@ -195,12 +146,12 @@ public final class BowControlMapper: @unchecked Sendable {
 
     /// Note-on from a TarabLink frame: fractional-MIDI pitch, onset strike
     /// `velocity` 0…1 (inert while `bow_attack_vel` is 0), `exprScale`
-    /// (see `Slot.exprScale`). Same allocation as the MIDI path.
+    /// (see `Slot.exprScale`).
     public func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double,
                         exprScale: Double = 1.0) {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
-        let i = noteOn(key: .touch(id: id), vel: min(max(velocity, 0.0), 1.0))
+        let i = noteOn(id: id, vel: min(max(velocity, 0.0), 1.0))
         slots[i].touchSemis = pitchSemis
         slots[i].exprScale = min(max(exprScale, 0.0), 1.0)
     }
@@ -209,8 +160,7 @@ public final class BowControlMapper: @unchecked Sendable {
     public func setExprScale(_ scale: Double, forTouch id: UInt16) {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
-        for i in 0..<slotLimit
-        where slots[i].gateOn && slots[i].key == .touch(id: id) {
+        for i in 0..<slotLimit where slots[i].gateOn && slots[i].touchId == id {
             slots[i].exprScale = min(max(scale, 0.0), 1.0)
         }
     }
@@ -220,8 +170,7 @@ public final class BowControlMapper: @unchecked Sendable {
     public func touchGlide(_ id: UInt16, pitchSemis: Double) {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
-        for i in 0..<slotLimit
-        where slots[i].gateOn && slots[i].key == .touch(id: id) {
+        for i in 0..<slotLimit where slots[i].gateOn && slots[i].touchId == id {
             slots[i].touchSemis = pitchSemis
         }
     }
@@ -230,10 +179,10 @@ public final class BowControlMapper: @unchecked Sendable {
     public func touchOff(_ id: UInt16) {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
-        noteOff(key: .touch(id: id))
+        noteOff(id: id)
     }
 
-    /// All bows off (link drop / panic) — the touch twin of CC123.
+    /// All bows off (link drop / panic).
     public func touchAllOff() {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
@@ -244,7 +193,15 @@ public final class BowControlMapper: @unchecked Sendable {
         }
     }
 
-    /// UI setters (the same axes the sliders drive through CCs).
+    /// Player vibrato depth 0…1 — the vibrato axis, scaling
+    /// `bow_vib_cents` at `bow_vib_hz`. Never free-running.
+    public func setVibrato(_ depth: Double) {
+        os_unfair_lock_lock(&lock)
+        vibAT = min(max(depth, 0), 1)
+        os_unfair_lock_unlock(&lock)
+    }
+
+    /// UI setters (the axes the pads and the Parameters tab drive).
     public func setAxis(expr e: Double? = nil, press p: Double? = nil,
                         pos ps: Double? = nil, tilt t: Double? = nil) {
         os_unfair_lock_lock(&lock)
@@ -259,7 +216,7 @@ public final class BowControlMapper: @unchecked Sendable {
         var f0Target: Double
         var gate: Double
         var expr: Double, press: Double, pos: Double, tiltDb: Double
-        var vib: Double = 0.0              // aftertouch vibrato depth 0..1
+        var vib: Double = 0.0              // player vibrato depth 0..1
         /// Onset strike velocity 0…1 (read at a fresh attack edge).
         var onVel: Double = 0.0
     }
@@ -280,7 +237,7 @@ public final class BowControlMapper: @unchecked Sendable {
     /// allocation). `lead` = newest gated slot, else newest used.
     public struct PolySnapshot: Sendable {
         public var expr = 0.0, press = 0.0, pos = 0.0, tiltDb = 0.0
-        public var vib = 0.0               // aftertouch vibrato depth 0..1
+        public var vib = 0.0               // player vibrato depth 0..1
         public var lead = 0
         public var slots: [SlotSnapshot]
         public init(count: Int) {
@@ -289,15 +246,10 @@ public final class BowControlMapper: @unchecked Sendable {
         }
     }
 
-    /// Pitch of a slot. Keep the .midi expression TEXTUALLY as it is — the
+    /// Pitch of a slot. Keep this expression TEXTUALLY as it is — the
     /// render hash depends on its FP evaluation order. Callers hold the lock.
     private func f0TargetLocked(_ slot: Slot) -> Double {
-        switch slot.key {
-        case .midi(let note, let ch):
-            return 440.0 * pow(2.0, (Double(note) - 69.0 + chBend[Int(ch)]) / 12.0)
-        case .touch:
-            return 440.0 * pow(2.0, (slot.touchSemis - 69.0) / 12.0)
-        }
+        440.0 * pow(2.0, (slot.touchSemis - 69.0) / 12.0)
     }
 
     /// The newest slot: gated wins over released; ties broken by recency.
@@ -385,7 +337,7 @@ public struct BowControlFilter: Sendable {
     var attackVel = 0.0
     // settle depth × (1 − settleSharp·sharp): accents keep their level.
     var settleSharp = 0.0
-    // player vibrato (aftertouch): vibCents at vibHz on the sounding pitch
+    // player vibrato: vibCents at vibHz on the sounding pitch
     var vibCents = 0.0, vibHz = 0.0
     // SUSTAIN LIVENESS, as dB on the bow controls (0 = bit-null):
     //   settle — settleDb·smoothstep(t/t0)·exp(-(t-t0)/tau) off the bow
@@ -627,7 +579,7 @@ public struct BowControlFilter: Sendable {
             let tk = p.tiltDb + u * (snap.tiltDb - p.tiltDb)
             let lf = lfStart + u * (lfTarget - lfStart)
             lf0 = lf
-            // player vibrato (aftertouch depth) on the sounding pitch
+            // player vibrato depth on the sounding pitch
             var vibOct = 0.0
             if vibCents > 1e-9 {
                 vibPhase += vibW

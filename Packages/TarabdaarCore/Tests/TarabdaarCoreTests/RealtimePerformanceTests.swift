@@ -49,11 +49,9 @@ final class RealtimePerformanceTests: XCTestCase {
             case .hybrid:
                 let h = headroom[key] ?? spec.def
                 if h > 1e-12, value <= h {
-                    // vibrato's scaler IS the aftertouch axis, the same
-                    // channel `AudioEngine.setStringVibrato` uses
-                    let a = value / h
-                    src.mapper.midi(0xD0,
-                        UInt8(max(0, min(127, Int((a * 127).rounded())))), 0)
+                    // vibrato's scaler IS the vibrato axis, the one
+                    // `AudioEngine.setStringVibrato` drives
+                    src.mapper.setVibrato(value / h)
                     return
                 }
                 push(key, value)
@@ -109,7 +107,7 @@ final class RealtimePerformanceTests: XCTestCase {
         let sr = rig.src.modelSR
         var r = Result()
         r.budgetMs = Double(frames) / sr * 1000.0
-        rig.src.mapper.midi(0xB0, 11, 40)          // expression, as the pads do
+        rig.src.mapper.setAxis(expr: 40.0 / 127.0)  // expression, as the pads do
         // let the voice settle before the measured window
         for _ in 0..<8 { _ = rig.src.renderForTesting(frames: 4096) }
 
@@ -129,11 +127,13 @@ final class RealtimePerformanceTests: XCTestCase {
         while done < total {
             let t = Double(done) / sr
             while onIdx < noteOn.count, noteOn[onIdx].at <= t {
-                rig.src.mapper.midi(0x90, noteOn[onIdx].note, 100)
+                rig.src.mapper.touchOn(UInt16(noteOn[onIdx].note),
+                                       pitchSemis: Double(noteOn[onIdx].note),
+                                       velocity: 100.0 / 127.0)
                 noteHeld = true; onIdx += 1
             }
             while offIdx < noteOff.count, noteOff[offIdx].at <= t {
-                rig.src.mapper.midi(0x80, noteOff[offIdx].note, 0)
+                rig.src.mapper.touchOff(UInt16(noteOff[offIdx].note))
                 offIdx += 1
                 if offIdx >= noteOff.count { noteHeld = false }
             }

@@ -115,9 +115,10 @@ final class StringParamStore: ObservableObject {
         pushNow()
     }
 
-    /// Audition hook (`string.<key>`): same path as the sliders, so scripted
-    /// sweeps show in the UI and persist like hand edits.
-    func setAuditionParam(_ key: String, _ value: Double) {
+    /// Raw artifact-scalar hook for a key the registry does not know:
+    /// the same path as the sliders, so it shows in the UI and persists
+    /// like a hand edit.
+    func setRawScalar(_ key: String, _ value: Double) {
         set(key, value)
     }
 

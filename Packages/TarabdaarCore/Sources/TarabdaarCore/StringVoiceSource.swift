@@ -487,7 +487,7 @@ public final class StringVoiceSource {
 
     /// All notes off (panic / instrument switch); the strings ring out.
     public func reset() {
-        mapper.midi(0xB0, 123, 0)
+        mapper.touchAllOff()
     }
 
     /// Settle pre-roll blocks (4096 frames each) rendered and discarded before

@@ -151,12 +151,10 @@ isolation keeps the old tail at its own pitch), `st_poly` (4),
 `st_taraf` (above — a per-source tap gain; the String-side kernel gain is
 the shared arm and survives bow rebuilds).
 
-## Auditions and tests
+## Tests
 
-`voiceParam` name `instrument` (0 = String, 1 = Tanpura, 2 = Sitar); give the
-first sitar note a few seconds after the switch (engine build). Plucks land
-only within 60 ¢ of a mounted JI slot — use exact scale ratios in `padOn`
-events.
+Give the first sitar note a few seconds after the instrument switch (the
+engine builds on arming). Plucks land only within 60 ¢ of a mounted JI slot.
 
 Guards: `TanpuraEngineTests.testTablesLockstepGolden` (the nil-fields path
 is byte-identical with the ladder fields in the schema),

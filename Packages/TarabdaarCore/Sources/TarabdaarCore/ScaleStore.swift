@@ -48,9 +48,9 @@ struct ScaleDocument: Codable {
 /// are written to `~/Library/Application Support/Tarabdaar/Scales/`.
 ///
 /// This is Mac-only persistence with no iPad coupling — scales live
-/// entirely on this side, like presets and audition scores. Writes are
+/// entirely on this side, like presets. Writes are
 /// atomic (`*.json.tmp` → move) so a reader never observes a partial
-/// file, matching the convention the audition runner relies on.
+/// file.
 public enum ScaleStore {
     /// Reserved name for the bundled default. The Save UI refuses it so
     /// the default can't be shadowed by a user file of the same name.

@@ -6,27 +6,17 @@ import Foundation
 /// members, drag ranges) in the Mac's Controls tab; a tilt can bind to a
 /// composite or directly to any single parameter.
 ///
-/// MIDI CC numbers are a TRANSPORT detail: each composite occupies one of
-/// 8 fixed slots; no user-facing surface shows CCs.
+/// Each composite occupies one of 8 fixed slots; the slot index is its
+/// whole identity.
+///
 /// RAW TILT REPORT: the iPad knows nothing about parameters, slots or
-/// mappings — it streams three raw tilt values and the Mac evaluates its
-/// own bindings. In-process (auditions, external controllers) each axis
-/// is a 14-bit CC PAIR — MSB on `ccs`, LSB on `lsbCCs` (MSB + 32), value
-/// = `msb·128 + lsb` of `round(norm·16383)`, sent MSB-then-LSB and
-/// combined on LSB arrival; an MSB with no LSB decodes at 7-bit. The CC
-/// numbers are a transport constant, never user-facing.
-public enum TiltAxisWire {
-    public static let ccs: [UInt8] = [16, 17, 18]
-    public static let lsbCCs: [UInt8] = [48, 49, 50]
-    public static let dims: [InputDimension] = [.tilt1, .tilt2, .tilt3]
-}
+/// mappings — it streams three raw tilt values in the PERF_STATE frame
+/// and the Mac evaluates its own bindings.
 
 /// The Mac's bindable control axes — what the Controls tab and the
 /// binding menus iterate. Axis index = position here
 /// (`AppController.applyTiltAxis`; axis values −1…+1, rest 0). Append
-/// new axes so earlier indices stay put. `TiltAxisWire` above is the
-/// in-process CC TRANSPORT — wire format and Mac axes are different
-/// things.
+/// new axes so earlier indices stay put.
 public enum ControlAxes {
     /// Per-axis semantics: `InputDimension`. Invariant: `.strike` and
     /// `.acceleration` are evaluated JOINTLY by
@@ -77,12 +67,8 @@ public struct CompositeParam: Codable, Equatable, Identifiable {
         self.members = members
     }
 
-    /// Transport CCs per slot — an implementation detail (slots 0–2 keep
-    /// their historic CCs so persisted bindings stay valid).
-    public static let slotCCs: [UInt8] = [71, 73, 72, 20, 21, 22, 23, 24]
-    public static var maxSlots: Int { slotCCs.count }
-
-    public var slotCC: UInt8 { CompositeParam.slotCCs[slot] }
+    /// How many composite slots exist.
+    public static let maxSlots = 8
 
     /// The factory composites — the shipped taraf/tone behaviors plus
     /// Expression (so a resting device still plays with dynamics), all as

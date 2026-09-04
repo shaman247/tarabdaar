@@ -41,9 +41,9 @@ final class BowStereoTests: XCTestCase {
 
     private func renderSeconds(_ engine: BowEngine, seconds: Double)
         -> (l: [Double], r: [Double]) {
-        engine.mapper.midi(0xB0, 11, 60)     // expression
-        engine.mapper.midi(0xB0, 1, 80)      // press
-        engine.mapper.midi(0x91, 62, 96)     // note on, MPE ch 1
+        engine.mapper.setAxis(expr: 60.0 / 127.0)     // expression
+        engine.mapper.setAxis(press: 80.0 / 127.0)      // press
+        engine.mapper.touchOn(62, pitchSemis: 62, velocity: 96.0 / 127.0)  // note on
         let sr = engine.sr
         let n = Int(seconds * sr)
         var l = [Double](repeating: 0, count: n)

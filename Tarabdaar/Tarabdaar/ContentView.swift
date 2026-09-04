@@ -35,9 +35,8 @@ struct ContentView: View {
     @State private var subscriptions = SubscriptionBox()
 
     init() {
-        // One MIDIEngine, shared by the link tunnel (SysEx out) and
-        // NoteManager (kept alive for audition scripts). StateObject's
-        // autoclosures capture the same instance and run once.
+        // The MIDIEngine is the TLP tunnel's byte pump (SysEx out).
+        // StateObject's autoclosure captures this instance and runs once.
         let sharedMidi = MIDIEngine()
         let state = OutboundPlayState()
         _midi = StateObject(wrappedValue: sharedMidi)
@@ -63,16 +62,13 @@ struct ContentView: View {
         .persistentSystemOverlays(.hidden)
         .defersSystemGestures(on: .all)
         .onAppear {
-            // NoteManager runs purely as the tilt sampler; its voice/glide
-            // MIDI paths stay idle because the pad never activates its
-            // pitchChannels.
+            // NoteManager is the tilt sampler and nothing else.
             noteManager.motionSource = motion
             // THE tilt wire: NoteManager's 60 Hz tick writes the raw tilt
             // into the outbound state (16-bit, atomic with pitch in the
             // state frame). Without this assignment the writes no-op
-            // silently — same trap as the old midiEngine wire.
+            // silently.
             noteManager.playState = playState
-            noteManager.midiEngine = midi     // audition scripts only
             midi.start()
 
             // Scale sync: open on the last state pushed from the Mac (scale

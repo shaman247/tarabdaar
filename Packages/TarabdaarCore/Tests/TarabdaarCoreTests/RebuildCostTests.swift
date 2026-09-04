@@ -33,8 +33,8 @@ final class RebuildCostTests: XCTestCase {
             throw XCTSkip("bowed_string.json not available in this bundle")
         }
         src.setEngine(a, crossfadeMs: 0)
-        mapper.midi(0xB0, 11, 32)
-        mapper.midi(0x90, 60, 100)
+        mapper.setAxis(expr: 32.0 / 127.0)
+        mapper.touchOn(1, pitchSemis: 60, velocity: 100.0 / 127.0)
         // the size the app actually requests from CoreAudio
         let frames = Int(Config.preferredOutputBufferFrames)
         let budgetMs = Double(frames) / 48.0

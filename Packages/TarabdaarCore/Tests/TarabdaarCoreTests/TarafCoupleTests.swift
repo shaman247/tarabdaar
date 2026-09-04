@@ -104,12 +104,11 @@ final class TarafCoupleTests: XCTestCase {
         try skipUnlessSlowTestsEnabled()
         let r = try makeRig()
         r.e.setJtCouple(1.0)
-        r.mapper.midi(0xB0, 11, 32)
-        r.mapper.midi(0xB0, 1, 71)
+        r.mapper.setAxis(expr: 32.0 / 127.0, press: 71.0 / 127.0)
         render(r, seconds: 1.0)                 // settle
-        r.mapper.midi(0x90, 64, 100)
+        r.mapper.touchOn(1, pitchSemis: 64, velocity: 100.0 / 127.0)
         render(r, seconds: 0.6)
-        r.mapper.midi(0x80, 64, 0)
+        r.mapper.touchOff(1)
         let ring = render(r, seconds: 12.0)
         let tail = ring[Int(11.5 * r.sr)...]
         XCTAssertLessThan(Self.db(Self.peak(tail)), -80.0,
@@ -127,16 +126,15 @@ final class TarafCoupleTests: XCTestCase {
         try skipUnlessSlowTestsEnabled()
         let r = try makeRig(["bow_live_trim": 5e-5])
         r.e.setJtCouple(1.0)
-        r.mapper.midi(0xB0, 11, 127)
-        r.mapper.midi(0xB0, 1, 100)
+        r.mapper.setAxis(expr: 1.0, press: 100.0 / 127.0)
         render(r, seconds: 1.0)
-        r.mapper.midi(0x90, 64, 110)            // Sa
-        r.mapper.midi(0x91, 71, 110)            // Pa
-        r.mapper.midi(0x92, 76, 110)            // Sa'
+        r.mapper.touchOn(1, pitchSemis: 64, velocity: 110.0 / 127.0)   // Sa
+        r.mapper.touchOn(2, pitchSemis: 71, velocity: 110.0 / 127.0)   // Pa
+        r.mapper.touchOn(3, pitchSemis: 76, velocity: 110.0 / 127.0)   // Sa'
         render(r, seconds: 1.0)
-        r.mapper.midi(0x80, 64, 0)
-        r.mapper.midi(0x81, 71, 0)
-        r.mapper.midi(0x82, 76, 0)
+        r.mapper.touchOff(1)
+        r.mapper.touchOff(2)
+        r.mapper.touchOff(3)
         let ring = render(r, seconds: 4.0)
         let early = Self.peak(ring[Int(0.5 * r.sr)..<Int(1.0 * r.sr)])
         let late = Self.peak(ring[Int(3.5 * r.sr)..<Int(4.0 * r.sr)])

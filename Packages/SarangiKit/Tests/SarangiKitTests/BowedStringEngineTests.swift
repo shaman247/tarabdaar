@@ -235,7 +235,7 @@ final class BowedStringEngineTests: XCTestCase {
         XCTAssertLessThan(idle, 1e-6, "string not silent before note-on")
 
         // bow a note
-        mapper.midi(0x90, 60, 100)
+        mapper.touchOn(60, pitchSemis: 60, velocity: 100.0 / 127.0)
         _ = rms(seconds: 0.3)                        // speak/settle
         let sustain = rms(seconds: 1.0)
         XCTAssertGreaterThan(sustain, 0.003, "bowed string made no sound")
@@ -248,7 +248,7 @@ final class BowedStringEngineTests: XCTestCase {
                                       tonic: 261.63)
         func settledFb(press: Double) -> Double {
             let m2 = BowControlMapper()
-            m2.midi(0x90, 60, 100)
+            m2.touchOn(60, pitchSemis: 60, velocity: 100.0 / 127.0)
             m2.setAxis(expr: 0.5, press: press, pos: 0.45)
             let n = 4096
             var a = [Double](repeating: 0, count: n)
@@ -280,7 +280,7 @@ final class BowedStringEngineTests: XCTestCase {
                              "press authority collapsed on the analytic envelope")
 
         // release decays
-        mapper.midi(0x80, 60, 0)
+        mapper.touchOff(60)
         _ = rms(seconds: 1.0)
         let tail = rms(seconds: 0.5)
         XCTAssertLessThan(tail, sustain * 0.5, "string note did not release")

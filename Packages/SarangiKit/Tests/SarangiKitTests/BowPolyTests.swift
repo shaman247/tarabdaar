@@ -221,7 +221,7 @@ final class BowPolyTests: XCTestCase {
 
         mapper.setAxis(expr: 1.0, press: 1.0, pos: 0.5)
         for note in [57, 60, 62, 64, 67, 69, 72, 76] {
-            mapper.midi(0x90, UInt8(note), 100)
+            mapper.touchOn(UInt16(note), pitchSemis: Double(note), velocity: 100.0 / 127.0)
         }
         _ = run(seconds: 0.5)                       // speak/settle
         let sustain = run(seconds: 2.5)
@@ -232,7 +232,7 @@ final class BowPolyTests: XCTestCase {
         let s2 = run(seconds: 1.0)
         XCTAssertLessThan(s2, sustain * 3.0, "chord energy still growing")
 
-        mapper.midi(0xB0, 123, 0)                   // all off
+        mapper.touchAllOff()                   // all off
         // the taraf rings on by design (and radiates its termination force
         // as well as the bone contact force), so the settle is measured well
         // clear of the release transient

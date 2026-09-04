@@ -78,7 +78,10 @@ final class TarafRemovalParityTests: XCTestCase {
     /// The blessed render's SHA-256. Re-bless DELIBERATELY when the shipped
     /// sound changes (write mode: `TARABDAAR_TARAF_REF=write`), and say why
     /// in the commit. Last bless: pin-force radiation baked in — the
-    /// radiated sample is contact force + termination force.
+    /// radiated sample is contact force + termination force. (The phrase
+    /// was later re-expressed as touch events when the in-process MIDI
+    /// vocabulary was removed; max sample delta 0.0 — bit-identical, so
+    /// the hash did NOT move.)
     private static let referenceSHA256 =
         "b61d3c209868e1875cc3bff79c2d5092f652d4453bf7121796aee570aabf57f4"
 

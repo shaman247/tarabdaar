@@ -1,31 +1,10 @@
 import XCTest
 @testable import SarangiKit
 
-/// The mapper's touch-id path allocates and releases exactly like the MIDI path — the parity substrate the render hash rests on.
+/// The mapper's slot allocation on the touch path — the ONE note path.
+/// Every note-on mounts a FRESH string (unused slot, else longest-released,
+/// else steal the oldest sounding note) and bumps `serial`.
 final class TouchMapperTests: XCTestCase {
-
-    /// One abstract step of a performance, playable through either path.
-    private enum Step {
-        case on(note: UInt8)     // touch id = note; MPE channel = note % 15 + 1
-        case off(note: UInt8)
-        case allOff
-    }
-
-    private func applyMIDI(_ m: BowControlMapper, _ s: Step) {
-        switch s {
-        case .on(let n): m.midi(0x90 | (n % 15 + 1), n, 100)
-        case .off(let n): m.midi(0x80 | (n % 15 + 1), n, 0)
-        case .allOff: m.midi(0xB0, 123, 0)
-        }
-    }
-
-    private func applyTouch(_ m: BowControlMapper, _ s: Step) {
-        switch s {
-        case .on(let n): m.touchOn(UInt16(n), pitchSemis: Double(n), velocity: 0.8)
-        case .off(let n): m.touchOff(UInt16(n))
-        case .allOff: m.touchAllOff()
-        }
-    }
 
     private func snap(_ m: BowControlMapper, count: Int = 8) -> BowControlMapper.PolySnapshot {
         var s = BowControlMapper.PolySnapshot(count: count)
@@ -33,52 +12,104 @@ final class TouchMapperTests: XCTestCase {
         return s
     }
 
-    private func assertIdentical(_ script: [Step], slotLimit: Int,
-                                 file: StaticString = #filePath, line: UInt = #line) {
-        let midi = BowControlMapper()
-        let touch = BowControlMapper()
-        midi.setSlotLimit(slotLimit)
-        touch.setSlotLimit(slotLimit)
-        for (stepIdx, step) in script.enumerated() {
-            applyMIDI(midi, step)
-            applyTouch(touch, step)
-            let a = snap(midi), b = snap(touch)
-            XCTAssertEqual(a.lead, b.lead, "lead @ step \(stepIdx)", file: file, line: line)
-            for i in 0..<a.slots.count {
-                XCTAssertEqual(a.slots[i].f0Target, b.slots[i].f0Target,
-                               "f0 slot \(i) @ step \(stepIdx)", file: file, line: line)
-                XCTAssertEqual(a.slots[i].gate, b.slots[i].gate,
-                               "gate slot \(i) @ step \(stepIdx)", file: file, line: line)
-                XCTAssertEqual(a.slots[i].serial, b.slots[i].serial,
-                               "serial slot \(i) @ step \(stepIdx)", file: file, line: line)
-            }
-        }
+    private func f0(_ semis: Double) -> Double {
+        440.0 * pow(2.0, (semis - 69.0) / 12.0)
     }
 
     func testSingleNoteAndRelease() {
-        assertIdentical([.on(note: 60), .off(note: 60)], slotLimit: 4)
+        let m = BowControlMapper()
+        m.setSlotLimit(4)
+        m.touchOn(60, pitchSemis: 60, velocity: 0.8)
+        var s = snap(m)
+        XCTAssertEqual(s.slots[0].gate, 1.0)
+        XCTAssertEqual(s.slots[0].f0Target, f0(60))
+        XCTAssertEqual(s.slots[0].serial, 1)
+        XCTAssertEqual(s.lead, 0)
+
+        m.touchOff(60)
+        s = snap(m)
+        XCTAssertEqual(s.slots[0].gate, 0.0)
+        // the bow lifts; the string keeps its pitch and rings on
+        XCTAssertEqual(s.slots[0].f0Target, f0(60))
     }
 
     func testChordAllocationAndSteal() {
-        assertIdentical([.on(note: 60), .on(note: 64), .on(note: 67),
-                         .on(note: 71),                    // steals oldest
-                         .off(note: 64), .on(note: 72)],   // longest-released reuse
-                        slotLimit: 3)
+        let m = BowControlMapper()
+        m.setSlotLimit(3)
+        for n in [60, 64, 67] as [UInt16] {
+            m.touchOn(n, pitchSemis: Double(n), velocity: 0.8)
+        }
+        var s = snap(m)
+        XCTAssertEqual(s.slots[0..<3].map(\.gate), [1.0, 1.0, 1.0])
+        XCTAssertEqual(s.slots[0..<3].map(\.f0Target), [f0(60), f0(64), f0(67)])
+
+        // no free slot, none released: the OLDEST sounding note is stolen
+        m.touchOn(71, pitchSemis: 71, velocity: 0.8)
+        s = snap(m)
+        XCTAssertEqual(s.slots[0].f0Target, f0(71))
+        XCTAssertEqual(s.slots[0].serial, 2, "the stolen slot mounts a fresh string")
+        XCTAssertEqual(s.lead, 0)
+
+        // a released slot is the longest-released reuse before any steal
+        m.touchOff(64)
+        m.touchOn(72, pitchSemis: 72, velocity: 0.8)
+        s = snap(m)
+        XCTAssertEqual(s.slots[1].f0Target, f0(72))
+        XCTAssertEqual(s.slots[1].gate, 1.0)
+        XCTAssertEqual(s.slots[2].f0Target, f0(67), "a sounding note was stolen early")
     }
 
-    // MARK: touch-only semantics
-
-    func testMixedMidiAndTouchCoexist() {
-        // In-process MIDI (Mac keyboard/auditions) and link touches share
-        // the mapper today only in tests, but identity must never collide.
+    func testRetriggerOnALiveIdMountsAFreshString() {
         let m = BowControlMapper()
         m.setSlotLimit(4)
-        m.midi(0x91, 60, 100)
-        m.touchOn(60, pitchSemis: 64.0, velocity: 1.0)   // same number, distinct identity
+        m.touchOn(7, pitchSemis: 60, velocity: 0.8)
+        m.touchOn(7, pitchSemis: 62, velocity: 0.8)     // same id, retrigger
         let s = snap(m)
+        XCTAssertEqual(s.slots[0].gate, 0.0, "the first string was not released")
+        XCTAssertEqual(s.slots[0].f0Target, f0(60), "the released string moved")
+        XCTAssertEqual(s.slots[1].gate, 1.0)
+        XCTAssertEqual(s.slots[1].f0Target, f0(62))
+    }
+
+    func testGlideMovesOnlyTheHeldTouch() {
+        let m = BowControlMapper()
+        m.setSlotLimit(4)
+        m.touchOn(1, pitchSemis: 60, velocity: 0.8)
+        m.touchOn(2, pitchSemis: 64, velocity: 0.8)
+        m.touchGlide(1, pitchSemis: 61.5)
+        var s = snap(m)
+        XCTAssertEqual(s.slots[0].f0Target, f0(61.5))
+        XCTAssertEqual(s.slots[1].f0Target, f0(64))
+
+        // a released string freezes: its glides are ignored
+        m.touchOff(1)
+        m.touchGlide(1, pitchSemis: 55)
+        s = snap(m)
+        XCTAssertEqual(s.slots[0].f0Target, f0(61.5))
+    }
+
+    func testTouchAllOffLiftsEveryBow() {
+        let m = BowControlMapper()
+        m.setSlotLimit(4)
+        for n in [60, 64, 67] as [UInt16] {
+            m.touchOn(n, pitchSemis: Double(n), velocity: 0.8)
+        }
+        m.touchAllOff()
+        let s = snap(m)
+        XCTAssertEqual(s.slots[0..<3].map(\.gate), [0.0, 0.0, 0.0])
+    }
+
+    func testDistinctIdsAtTheSamePitchKeepDistinctIdentities() {
+        let m = BowControlMapper()
+        m.setSlotLimit(4)
+        m.touchOn(1, pitchSemis: 60, velocity: 1.0)
+        m.touchOn(2, pitchSemis: 60, velocity: 1.0)
+        var s = snap(m)
         XCTAssertEqual(s.slots[0].gate, 1.0)
         XCTAssertEqual(s.slots[1].gate, 1.0)
-        XCTAssertEqual(s.slots[0].f0Target, 440.0 * pow(2.0, (60.0 - 69.0) / 12.0))
-        XCTAssertEqual(s.slots[1].f0Target, 440.0 * pow(2.0, (64.0 - 69.0) / 12.0))
+        m.touchOff(1)
+        s = snap(m)
+        XCTAssertEqual(s.slots[0].gate, 0.0)
+        XCTAssertEqual(s.slots[1].gate, 1.0, "releasing one id released the other")
     }
 }

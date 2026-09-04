@@ -7,9 +7,9 @@ import SwiftUI
 /// time-series graphs of the **played pitch** and **volume**.
 ///
 /// The pitch + volume traces are read from `AudioEngine.performanceReadout()`,
-/// derived at the single MIDI choke point, so they reflect every input
-/// path — the USB iPad, the Mac pads, and the simulator. The volume line
-/// is the commanded CC11 (Expression).
+/// derived at the single voice-routing choke point, so they reflect every
+/// input path — the iPad over the link and the Mac pads. The volume line
+/// is the commanded expression.
 ///
 /// The graphs show a fixed **6-second** window and scroll smoothly: a
 /// 60 Hz timer appends timestamped samples to a ring buffer, and a

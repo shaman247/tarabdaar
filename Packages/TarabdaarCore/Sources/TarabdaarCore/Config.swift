@@ -3,17 +3,6 @@ import CoreGraphics
 
 /// Central configuration for all tunable parameters.
 public enum Config {
-    // MARK: - Glide
-    public static let glideDistanceExponent: Double = 0.6    // sublinear: larger intervals grow slower (1.0 = linear, 0.5 = sqrt)
-    public static let releaseGracePeriod: Double = 0.050   // 50ms window to connect consecutive notes
-    public static let glideMidpoint: Double = 0.6   // sigmoid midpoint — shifted left for faster onset
-
-    // MARK: - Drag glide
-    public static let dragSnapDelay: Double = 0.060        // 60ms after finger stops, start snapping
-
-    // MARK: - MIDI
-    public static let midiPitchBendRange: Double = 48  // ±48 semitones — must match receiving synth
-
     // MARK: - Audio
     public static let sampleRate: Double = 44100
     /// Requested output IO buffer size (frames) on macOS — the play-latency
@@ -47,17 +36,6 @@ public enum Config {
     /// Must stay under `accelBufferDuration`.
     public static let velocityLookback: TimeInterval = 0.05
 
-
-    // MARK: - Sliders
-    public static let slider1Default: Double = 0.5  // value when not touched
-    public static let slider2Default: Double = 0.5
-
-    // MARK: - Polyphonic Mode
-    /// Concurrent played voices. MPE forwarding round-robins channels
-    /// 1-15 (channel 0 is the MPE master), so when more than 15 voices
-    /// sound at once one MIDI channel ends up shared. Audio is fine —
-    /// the modal renderer scales linearly to dozens of voices.
-    public static let maxPolyVoices: Int = 16
 
     // MARK: - Reference geometry (iPad)
     /// Logical landscape size of the development iPad (Air 13" M3),

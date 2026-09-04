@@ -471,7 +471,7 @@ public final class BowEngine {
     /// Kin-row drive scale 0..1 (`bow_drone_spread`): how strongly a press
     /// recruits the held row's kin rows. 0 = the held row only.
     public var droneSpread = 1.0
-    /// Held drone rows; guarded by `droneLock` (presses arrive on the MIDI
+    /// Held drone rows; guarded by `droneLock` (presses arrive on the link
     /// thread, remaps on main).
     private var droneHeldRows: Set<Int> = []
     private var droneLock = os_unfair_lock()
@@ -594,7 +594,7 @@ public final class BowEngine {
     /// safe range, so the knob's top is a bound, not a cliff.
     ///
     /// Measured on the shipped Pilu bank (34 rows), serial jt, the HEAVY
-    /// case — a Sa/Pa/Sa′ chord at CC11 127 held 1 s, then a 4 s ring, the
+    /// case — a Sa/Pa/Sa′ chord at full expression held 1 s, then a 4 s ring, the
     /// output trim pulled 60 dB so the safety limiter never masks growth.
     /// The ring's decay from +1 s to +4 s: 31 dB uncoupled, 23 dB at 0.6,
     /// and at **0.8** it stops decaying and GROWS +6 dB through the last

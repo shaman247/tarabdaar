@@ -66,8 +66,8 @@ final class LiveParamPushTests: XCTestCase {
         guard let (pushed, _) = makeSource() else {
             throw XCTSkip("bowed_string.json not available in this bundle")
         }
-        pushed.mapper.midi(0xB0, 11, 64)
-        pushed.mapper.midi(0x90, 60, 100)
+        pushed.mapper.setAxis(expr: 64.0 / 127.0)
+        pushed.mapper.touchOn(1, pitchSemis: 60, velocity: 100.0 / 127.0)
         _ = pull(pushed, 8)
         _ = pushed.applyLiveParams(tonicHz: 328.9, strings: strings(),
                                    overrides: [key: v])
@@ -80,8 +80,8 @@ final class LiveParamPushTests: XCTestCase {
             overrides: Self.deterministic.merging([key: v]) { _, b in b })
         else { return XCTFail("build failed") }
         rebuilt.setEngine(e, crossfadeMs: 0)
-        rebuilt.mapper.midi(0xB0, 11, 64)
-        rebuilt.mapper.midi(0x90, 60, 100)
+        rebuilt.mapper.setAxis(expr: 64.0 / 127.0)
+        rebuilt.mapper.touchOn(1, pitchSemis: 60, velocity: 100.0 / 127.0)
         _ = pull(rebuilt, 8)
         let rebuiltTail = pull(rebuilt, 30)
 
@@ -115,8 +115,8 @@ final class LiveParamPushTests: XCTestCase {
                 return []
             }
             src.setEngine(e, crossfadeMs: 0)
-            src.mapper.midi(0xB0, 11, 64)
-            src.mapper.midi(0x90, 60, 100)
+            src.mapper.setAxis(expr: 64.0 / 127.0)
+            src.mapper.touchOn(1, pitchSemis: 60, velocity: 100.0 / 127.0)
             var out: [Double] = []
             for i in 0..<10 {
                 if push, i == 5 {

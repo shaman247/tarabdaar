@@ -99,7 +99,6 @@ struct AudioSettingsView: View {
                                ? String(format: "%.0f Hz", sampleRate)
                                : "—")
                 LabeledContent("DSP sample rate", value: String(format: "%.0f Hz", Config.sampleRate))
-                LabeledContent("Max poly voices", value: "\(Config.maxPolyVoices)")
             }
             .font(.system(.body))
         }

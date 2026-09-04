@@ -32,10 +32,7 @@ public struct PresetLibrary {
     public func names() -> [String] {
         let urls = (try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil)) ?? []
-        // `.starpad`/`.tarabpad` are the pre-rename extensions (see
-        // `LegacyMigration`) — still listed so a legacy backup dropped
-        // into the folder works without a manual rename.
-        return Set(urls.filter { Self.extensions.contains($0.pathExtension) }
+        return Set(urls.filter { $0.pathExtension == Self.ext }
             .map { $0.deletingPathExtension().lastPathComponent })
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
@@ -54,37 +51,22 @@ public struct PresetLibrary {
     }
 
     public func load(name: String) throws -> TarabdaarPreset {
-        let target = urls(for: name)
-            .first { FileManager.default.fileExists(atPath: $0.path) }
-            ?? url(for: name)
-        return try TarabdaarPreset.decode(Data(contentsOf: target))
+        try TarabdaarPreset.decode(Data(contentsOf: url(for: name)))
     }
 
     public func delete(name: String) throws {
-        var deleted = false
-        for url in urls(for: name)
-        where FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.removeItem(at: url)
-            deleted = true
-        }
-        if !deleted {
+        let u = url(for: name)
+        guard FileManager.default.fileExists(atPath: u.path) else {
             throw CocoaError(.fileNoSuchFile)
         }
+        try FileManager.default.removeItem(at: u)
     }
 
-    /// Current extension first, then the pre-rename ones.
-    private static let extensions = ["tarabdaar", "starpad", "tarabpad"]
-
-    /// Every filename `name` may live under, current extension first.
-    private func urls(for name: String) -> [URL] {
-        Self.extensions.map {
-            directory.appendingPathComponent(name).appendingPathExtension($0)
-        }
-    }
+    /// The one preset extension.
+    private static let ext = "tarabdaar"
 
     public func url(for name: String) -> URL {
-        directory.appendingPathComponent(name)
-            .appendingPathExtension("tarabdaar")
+        directory.appendingPathComponent(name).appendingPathExtension(Self.ext)
     }
 
     /// A preset name doubles as its filename, so path separators (and the

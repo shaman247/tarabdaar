@@ -26,7 +26,7 @@ public final class ControlAxisEvaluator {
 
     /// The two touch id spaces feeding the finger registry. Only the WIRE
     /// lane anchors the strike blend's per-note windows (the strike byte
-    /// is a wire measurement — the local pads/auditions have none).
+    /// is a wire measurement — the local pads have none).
     public enum TouchLane: Int {
         case wire = 0
         case local = 1

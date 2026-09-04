@@ -45,7 +45,7 @@ Small text — captions, table columns, row labels, pad labels, graph annotation
 
 ### Live tab (⌘1)
 
-The **Instrument picker** — String (bowed) / Tanpura (plucked) / Sitar (plucked) — then MIDI input status, an audio render-time readout, and two live **time-series graphs** of the played voice: **PITCH** (log-frequency, y-axis fixed to the Fret Pad's playable range, labelled with the nearest note name + Hz) and **VOLUME** (the commanded expression, 0–100%). Both read `AudioEngine.performanceReadout()`, so they reflect every source (the iPad, the Mac Fret Pad, the keyboard, the simulator). A fixed **6-second** window scrolls smoothly: a 60 Hz timer appends timestamped samples to a ring buffer and a `TimelineView(.animation)` redraws every display frame, placing each sample by its age; traces are Catmull-Rom curves.
+The **Instrument picker** — String (bowed) / Tanpura (plucked) / Sitar (plucked) — then link status, an audio render-time readout, and two live **time-series graphs** of the played voice: **PITCH** (log-frequency, y-axis fixed to the Fret Pad's playable range, labelled with the nearest note name + Hz) and **VOLUME** (the commanded expression, 0–100%). Both read `AudioEngine.performanceReadout()`, so they reflect every source (the iPad, the Mac Fret Pad, the Joy-Con strum). A fixed **6-second** window scrolls smoothly: a 60 Hz timer appends timestamped samples to a ring buffer and a `TimelineView(.animation)` redraws every display frame, placing each sample by its age; traces are Catmull-Rom curves.
 
 ### Strings tab (⌘2)
 

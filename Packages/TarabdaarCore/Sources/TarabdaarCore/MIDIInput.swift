@@ -1,27 +1,11 @@
 import CoreMIDI
 import Foundation
 
-/// CoreMIDI input bridge for the Mac. Every incoming MPE channel-voice
-/// message is forwarded verbatim to the hosted Audio Unit (SWAM Viola)
-/// via `AudioEngine.sendHostedMIDI(...)`. The AU does its own voice
-/// allocation, pitch bending, and expression handling per the MPE spec.
-///
-/// We still run a small local handler for CC101/100/6 (RPN pitch-bend
-/// range) and CC123 (all-notes-off) so a per-channel bend-range state
-/// stays accurate across preset switches and so a future on-the-fly
-/// re-route (different AU, different bend range) inherits a sane
-/// starting state. Those CCs are ALSO forwarded to the AU so its own
-/// state stays in sync — the local handler is a side observer, not a
-/// gatekeeper.
-///
-/// CCs are also delivered to `onCC` so `AppController` can drive
-/// Tarabdaar-owned parameters (sym pool + FX) from incoming controllers.
+/// CoreMIDI input bridge for the Mac — the TLP tunnel's receive socket.
+/// It exists for ONE job: reassemble inbound SysEx runs per source and
+/// hand each complete run to `onSysEx`. There is no MIDI note vocabulary;
+/// channel-voice bytes on the port are skipped.
 public final class MIDIInput: ObservableObject {
-    public weak var audioEngine: AudioEngine?
-
-    /// Fires on the CoreMIDI thread for every incoming CC. The consumer
-    /// (AppController) hops to main before touching `@Published` state.
-    public var onCC: ((_ cc: UInt8, _ value: UInt8) -> Void)?
 
     /// Fires on the CoreMIDI thread with each COMPLETE inbound SysEx run
     /// (F0…F7 inclusive) — the TarabLink tunnel's receive socket
@@ -54,18 +38,6 @@ public final class MIDIInput: ObservableObject {
     private var sysexRuns: [UInt: SysExRun] = [:]
     private let sysexLock = NSLock()
 
-    /// Per-channel RPN accumulator for the (CC101, CC100, CC6, CC38)
-    /// sequence that sets pitch-bend range. Per-channel because MPE
-    /// member channels can each opt into a different range.
-    private struct RPNState {
-        var msb: UInt8 = 0x7F   // 0x7F/0x7F = "RPN reset" — no in-flight RPN
-        var lsb: UInt8 = 0x7F
-        var dataMsb: UInt8 = 0
-        var bendRangeSemitones: Double = Config.midiPitchBendRange
-    }
-    private var rpn: [UInt8: RPNState] = [:]
-    private let rpnLock = NSLock()
-
     public init() {}
 
     public func start() {
@@ -74,9 +46,6 @@ public final class MIDIInput: ObservableObject {
 
     public func stop() {
         tap.stop()
-        rpnLock.lock()
-        rpn.removeAll()
-        rpnLock.unlock()
         sysexLock.lock()
         sysexRuns.removeAll()
         sysexLock.unlock()
@@ -86,10 +55,10 @@ public final class MIDIInput: ObservableObject {
 
     // MARK: - Packet parsing
 
-    /// Parses a flat byte sequence (one packet's worth) of MIDI 1.0
-    /// channel-voice messages plus SysEx. CoreMIDI guarantees each packet
-    /// contains whole channel-voice messages, but a SysEx may span packets
-    /// and callbacks — the per-source accumulator carries it across calls.
+    /// Walks a flat byte sequence (one packet's worth) for SysEx runs. A
+    /// SysEx may span packets and callbacks, so the per-source accumulator
+    /// carries it across calls; every other status byte is stepped over at
+    /// its message length.
     private func parseBytes(_ bytes: UnsafeBufferPointer<UInt8>,
                             sourceKey: UInt) {
         // One callback = one source; work on a local copy of that source's
@@ -140,77 +109,14 @@ public final class MIDIInput: ObservableObject {
                 continue
             }
 
-            let status = byte & 0xF0
-            let channel = byte & 0x0F
-
-            switch status {
-            case 0x80: // Note Off
-                if i + 2 < bytes.count {
-                    audioEngine?.sendHostedMIDI(status: byte, data1: bytes[i + 1], data2: bytes[i + 2])
-                }
-                i += 3
-            case 0x90: // Note On (vel=0 → Note Off; AU handles internally)
-                if i + 2 < bytes.count {
-                    audioEngine?.sendHostedMIDI(status: byte, data1: bytes[i + 1], data2: bytes[i + 2])
-                }
-                i += 3
-            case 0xB0: // CC
-                if i + 2 < bytes.count {
-                    audioEngine?.sendHostedMIDI(status: byte, data1: bytes[i + 1], data2: bytes[i + 2])
-                    handleCC(channel: channel, cc: bytes[i + 1], value: bytes[i + 2])
-                }
-                i += 3
-            case 0xD0: // Channel Pressure
-                if i + 1 < bytes.count {
-                    audioEngine?.sendHostedMIDI2(status: byte, data1: bytes[i + 1])
-                }
-                i += 2
-            case 0xE0: // Pitch Bend
-                if i + 2 < bytes.count {
-                    audioEngine?.sendHostedMIDI(status: byte, data1: bytes[i + 1], data2: bytes[i + 2])
-                }
-                i += 3
-            case 0xA0, 0xC0:
-                // Poly Aftertouch (3 bytes) / Program Change (2 bytes).
-                // Not used by Tarabdaar's iPad output; skip safely.
-                i += (status == 0xC0 ? 2 : 3)
-            case 0xF0:
-                // System-common / system-realtime (F0/F7 handled above).
-                // Skip the single byte.
-                i += 1
-            default:
-                i += 1
+            // Channel-voice and system-common bytes carry nothing this app
+            // reads; step over each at its message length so a following
+            // SysEx is still found.
+            switch byte & 0xF0 {
+            case 0x80, 0x90, 0xA0, 0xB0, 0xE0: i += 3   // 2 data bytes
+            case 0xC0, 0xD0: i += 2                     // 1 data byte
+            default: i += 1                             // F0-range / running status
             }
         }
-    }
-
-    /// Local CC observer for RPN-bend-range and CC123. The AU has
-    /// already received these bytes by the time we get here; this
-    /// handler just keeps a Mac-side mirror of per-channel bend range
-    /// (used by any future feature that needs to know what range the
-    /// controller agreed on) and propagates the CC to `onCC` for
-    /// Tarabdaar-owned mappings.
-    private func handleCC(channel: UInt8, cc: UInt8, value: UInt8) {
-        rpnLock.lock()
-        var state = rpn[channel] ?? RPNState()
-        switch cc {
-        case 101: state.msb = value
-        case 100: state.lsb = value
-        case 6:
-            state.dataMsb = value
-            if state.msb == 0 && state.lsb == 0 {
-                state.bendRangeSemitones = Double(value)
-            }
-        case 38:
-            // Data LSB — Tarabdaar sends 0 here, ignore.
-            break
-        default:
-            break
-        }
-        rpn[channel] = state
-        rpnLock.unlock()
-
-        // Per-preset CC → parameter routing happens above this layer.
-        onCC?(cc, value)
     }
 }

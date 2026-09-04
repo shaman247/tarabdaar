@@ -30,9 +30,8 @@ two. Per point:
 Every derived knob is an ordinary registry parameter (all `.live`,
 `.global`, group "FX rack"), so nothing downstream knows the difference:
 `ParamRegistry.all` answers all 64 keys, presets capture them under the
-SAME key strings older `.tarabdaar` files carry, tilt bindings and
-composites drive them, and auditions reach them via
-`param.fx_<point>_<field>`. What the derivation buys is presentation —
+SAME key strings older `.tarabdaar` files carry, and tilt bindings and
+composites drive them. What the derivation buys is presentation —
 each spec carries its `insert` (point + knob), and
 `ParamRegistry.insertSections(of:)` splits any group into flat rows plus
 insert sections, so the **Parameters tab shows four collapsible inserts**

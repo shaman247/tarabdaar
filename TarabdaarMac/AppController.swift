@@ -20,10 +20,6 @@ final class AppController: ObservableObject {
     let link = TarabLink(role: .host)
     let ingest: LinkIngest
 
-    /// Headless iPad simulator behind the audition pipeline. Owns its own
-    /// `NoteManager` + `MockMotionSource`.
-    let simulator: IPadSimulator
-    let audition: AuditionRunner
     /// Joy-Con / game-controller input, wired in `start()` into the same
     /// funnels the iPad drives (control axes, drone buttons, strum).
     let joyCon = JoyConInput()
@@ -184,9 +180,9 @@ final class AppController: ObservableObject {
     }
 
     /// Off-main-readable snapshot of the composite member sets, keyed by
-    /// slot CC.
+    /// slot index.
     private let compositeLock = NSLock()
-    private var compositeMembersByCC: [UInt8: [CompositeMember]] = [:]
+    private var compositeMembersBySlot: [Int: [CompositeMember]] = [:]
     /// Rebuild-path values (composites, bindings, the strike blend) funneled
     /// into ONE debounced main-thread apply — `DebouncedParamFlush`.
     private var rebuildFlush: DebouncedParamFlush!
@@ -279,7 +275,7 @@ final class AppController: ObservableObject {
         abs(paramValue(key) - paramDefault(key)) <= 1e-9
     }
 
-    /// Set a parameter's resting value (Parameters tab / audition script).
+    /// Set a parameter's resting value (the Parameters tab's path).
     /// Routes to whichever store owns it and applies to the voice.
     func setParamValue(_ key: String, _ value: Double) {
         guard let spec = ParamRegistry.spec(key) else { return }
@@ -428,7 +424,7 @@ final class AppController: ObservableObject {
     /// retunes in place. Performance state, never persisted.
     @Published var strumChord: ChordSelection?
 
-    /// L (or an audition score's `strum` event) holds the chord.
+    /// L holds the chord.
     func strum(pressed: Bool) {
         strumming.strum(pressed: pressed)
     }
@@ -467,11 +463,6 @@ final class AppController: ObservableObject {
         self.midi = midi
         self.midiIn = midiIn
         self.ingest = LinkIngest(sink: audio)
-        midiIn.audioEngine = audio
-        // Simulator + audition runner (back-ref wired after init).
-        let sim = IPadSimulator(audio: audio)
-        self.simulator = sim
-        self.audition = AuditionRunner(simulator: sim, audio: audio)
         self.pitchPad = PitchPadEngine(audio: audio)
         self.fretPad = PitchPadEngine(audio: audio)
         self.fretPad.tonicMidi = self.pitchPad.tonicMidi
@@ -492,7 +483,7 @@ final class AppController: ObservableObject {
         self.rebuildFlush = DebouncedParamFlush { [weak self] values in
             guard let self else { return }
             for (key, v) in values {
-                self.stringParams.setAuditionParam(key, v)
+                self.stringParams.setRawScalar(key, v)
             }
             self.refreshHybridHeadroom()
         }
@@ -538,9 +529,6 @@ final class AppController: ObservableObject {
         audio.setMainInstrument(mainInstrument)
         audio.setDroneVoiceMode(droneVoice)
 
-        // Wire the simulator's CC route back to this controller.
-        simulator.controller = self
-
         // The Fret Pad is the only surface — force the synced layout.
         ipadLayout = .fretPad
     }
@@ -569,10 +557,8 @@ final class AppController: ObservableObject {
         }
         midi.start()
         midiIn.start()
-        simulator.start()
         pitchPad.start()
         fretPad.start()
-        audition.start()
         startScaleSync()
         // Snapshots for the off-main deliveries, then the baseline values.
         rebuildCompositeSnapshot()
@@ -584,12 +570,9 @@ final class AppController: ObservableObject {
         stringParams.$values
             .sink { [weak self] v in self?.refreshHybridHeadroom(from: v) }
             .store(in: &cancellables)
-        // The iPad's raw tilt: the TarabLink state frame (change-gated in
-        // LinkIngest) and the in-process tilt CCs (audition scores).
+        // The iPad's raw tilt, off the TarabLink state frame (change-gated
+        // in LinkIngest).
         ingest.onTiltAxis = { [weak self] axis, value in
-            self?.handleRawTilt(axis, value)
-        }
-        audio.onTiltAxis = { [weak self] axis, value in
             self?.handleRawTilt(axis, value)
         }
         // Raw accelerometer off the same frames — display only.
@@ -610,7 +593,7 @@ final class AppController: ObservableObject {
             self?.axes.touchGate(lane: .wire, id: id, on: on)
         }
         // The `.fingerAccel` pitch feed — wire lane (source 0) + the local
-        // pads/auditions lane (source 1), so the u16 id spaces can't collide.
+        // local-pad lane (source 1), so the u16 id spaces can't collide.
         ingest.onTouchPitch = { [weak self] id, pitch in
             self?.axes.touchPitch(lane: .wire, id: id, pitch: pitch)
         }
@@ -696,9 +679,6 @@ final class AppController: ObservableObject {
                     self.fretPad.noteOff(touchId: 999)
                 }
             }
-        }
-        audio.onCompositeCC = { [weak self] cc, value in
-            self?.applyComposite(slotCC: cc, value: value)
         }
         // Joy-Con. Control axes: arm 0–2 (the iPad's tilts), stick 3/4, wrist
         // + acceleration (`wristAxisIndices` / `jcAccelAxisIndex`).
@@ -810,7 +790,7 @@ final class AppController: ObservableObject {
                     NSLog("Tarabdaar: jt gate — no String voice")
                 }
             }
-            // Render overruns glitch at the DEVICE (an audition WAV can't
+            // Render overruns glitch at the DEVICE (an offline render can't
             // show them) — log whenever they grow.
             if let r = self.audio.stringVoiceRenderStats() {
                 if r.overruns > self.lastRenderOverruns {
@@ -1019,16 +999,16 @@ final class AppController: ObservableObject {
 
     private func rebuildCompositeSnapshot() {
         compositeLock.lock()
-        compositeMembersByCC = Dictionary(
-            uniqueKeysWithValues: composites.map { ($0.slotCC, $0.members) })
+        compositeMembersBySlot = Dictionary(
+            uniqueKeysWithValues: composites.map { ($0.slot, $0.members) })
         compositeLock.unlock()
     }
 
     /// Apply a composite's value 0…1: every member sweeps its lo→hi range via
     /// the unified apply; rebuild members go through the debounced flush.
-    func applyComposite(slotCC: UInt8, value: Double) {
+    func applyComposite(slot: Int, value: Double) {
         compositeLock.lock()
-        let members = compositeMembersByCC[slotCC] ?? []
+        let members = compositeMembersBySlot[slot] ?? []
         compositeLock.unlock()
         guard !members.isEmpty else { return }
         var rebuild: [String: Double] = [:]
@@ -1044,12 +1024,6 @@ final class AppController: ObservableObject {
     /// binding) into the debounced main-thread flush. Thread-safe.
     private func queueRebuildValues(_ values: [String: Double]) {
         rebuildFlush.queue(values)
-    }
-
-    /// Convenience: apply by slot index.
-    func applyComposite(slot: Int, value: Double) {
-        guard slot >= 0, slot < CompositeParam.slotCCs.count else { return }
-        applyComposite(slotCC: CompositeParam.slotCCs[slot], value: value)
     }
 
     /// The user-facing name for a target: the composite's name (or
@@ -1292,59 +1266,5 @@ final class AppController: ObservableObject {
     func deletePresetFromLibrary(name: String) throws {
         try presetLibrary.delete(name: name)
         refreshPresetLibrary()
-    }
-
-    /// No-op kept for the simulator's call site.
-    func handleSimulatorCC(cc: Int, value: Int) {}
-
-    /// Entry point for audition scores' `voiceParam` events, values in each
-    /// parameter's natural units. Unknown names log and no-op.
-    func setVoiceParam(name: String, value: Double) {
-        switch name {
-        // Drone buttons: "drone1".."drone3", value > 0.5 = press.
-        case "drone1", "drone2", "drone3":
-            let i = Int(String(name.dropFirst(5)))! - 1
-            audio.setDronePressed(i, value > 0.5)
-        // Strum: > 0.5 = press (chord holds), ≤ 0.5 = release — send both.
-        case "strum":
-            strum(pressed: value > 0.5)
-        // Chord bar: value = degree index (octave 0), negative = deselect.
-        case "chord":
-            pitchPad.setChordSelection(value < 0 ? nil
-                : ChordSelection(degree: Int(value), octave: 0))
-        // Main instrument: 0 = String, 1 = Tanpura, 2 = Sitar (the sitar arms
-        // + builds on first switch — give the score a few seconds).
-        case "instrument":
-            let all: [AudioEngine.MainInstrument] = [.string, .tanpura, .sitar]
-            let i = Int(value.rounded())
-            if all.indices.contains(i) { mainInstrument = all[i] }
-        case "stringPurity":     applyComposite(slot: 0, value: clamp(value, 0, 1))
-        case "stringTarafDecay": applyComposite(slot: 1, value: clamp(value, 0, 1))
-        case "stringToneTilt":   applyComposite(slot: 2, value: (clamp(value, -1, 1) + 1) / 2)
-        // Composites: the default-slot names above (stringToneTilt takes
-        // −1…1) or "composite1".."composite8" with 0…1.
-        case let n where n.hasPrefix("composite") && Int(n.dropFirst(9)) != nil:
-            applyComposite(slot: Int(n.dropFirst(9))! - 1,
-                           value: clamp(value, 0, 1))
-        default:
-            // Any registry parameter: "string.<key>" or "param.<key>", via the
-            // unified setter (the Parameters-tab path: visible, persisted, live).
-            for prefix in ["string.", "param."] where name.hasPrefix(prefix) {
-                let key = String(name.dropFirst(prefix.count))
-                if ParamRegistry.spec(key) != nil {
-                    setParamValue(key, value)
-                } else {
-                    // Not in the registry but possibly a real artifact scalar
-                    // — keep the raw override path.
-                    stringParams.setAuditionParam(key, value)
-                }
-                return
-            }
-            NSLog("Tarabdaar: setVoiceParam unknown name '\(name)'")
-        }
-    }
-
-    private func clamp(_ x: Double, _ lo: Double, _ hi: Double) -> Double {
-        max(lo, min(hi, x))
     }
 }

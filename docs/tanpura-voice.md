@@ -69,7 +69,7 @@ latency on this path only). Telemetry: `AudioEngine.tanpuraStats()`
 
 ## Drone mode (default)
 
-CC 102–104 → `AudioEngine.setDronePressed` → tanpura branch: **press** = one
+A drone button (`setDronePressed`) → tanpura branch: **press** = one
 pluck at the mapped pitch (velocity 100 × `tp_drone_level`); **hold** =
 re-pluck every `tp_drone_cycle` s (default 2.5; below 0.1 = off; read each
 hop, so a live edit applies mid-hold); **release** = the cycle stops and the
@@ -108,11 +108,6 @@ every launch starts on the String voice; presets can switch it;
   TLP frame, so the pluck fires immediately — the nearest mounted slot
   (60 ¢ tolerance) **bent to the exact Hz**, scaled by `tp_pluck_level`,
   recorded per touch id (`tanpuraTouchSlot`).
-- **In-process MIDI** (auditions, controllers): `routeSarangiModelMIDI`
-  gates note messages away from the String mapper and holds each note-on as
-  a **pending pluck** that fires on the pitch bend immediately following it
-  (the note number is only the nearest semitone; CC11 is the fallback
-  trigger); the slot is recorded per MPE channel (`tanpuraChannelSlot`).
 - **Glides retune the ringing string** — `TanpuraEngine.bend`, a
   kernel-side live retune (`tp_apply_bend`): each mode's rotation angle is
   rescaled from mount-time base tables (damping, so every t60, preserved)

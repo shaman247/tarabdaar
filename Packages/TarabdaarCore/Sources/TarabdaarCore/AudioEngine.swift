@@ -10,8 +10,8 @@ import SarangiKit
 ///
 ///   `{string, tanpura, sitar}.node → symGain → mainMixerNode → output`
 ///
-/// Touches arrive on the TLP path (via the glide queue); in-process MIDI at
-/// `sendHostedMIDI`. Public methods take `lock` for state and release it
+/// Touches arrive on the TLP path (via the glide queue) — there is no MIDI
+/// note vocabulary. Public methods take `lock` for state and release it
 /// before calling into an engine.
 public class AudioEngine: ObservableObject {
     private let engine = AVAudioEngine()
@@ -76,13 +76,8 @@ public class AudioEngine: ObservableObject {
     /// Last structural scale push, retained for BOTH plucked (re)builds. Guarded by `lock`.
     private var lastTanpuraTonic: Double = 261.63
     private var lastTanpuraRatios: [Double] = []
-    /// MIDI path: a main-instrument pluck waits for the pitch bend that
-    /// follows the note-on (it carries the exact pitch). Guarded by `lock`.
-    private var tanpuraPendingPluck: [UInt8: (note: UInt8, vel: UInt8)] = [:]
-    /// The slot each ringing main-instrument note plucked (bends retune it,
-    /// note-off releases it). Cleared on instrument switch and rebuild.
-    private var tanpuraChannelSlot: [UInt8: Int] = [:]
-    /// Touch-id twin of `tanpuraChannelSlot` for the TLP path.
+    /// The slot each ringing main-instrument touch plucked (glides retune
+    /// it, release releases it). Cleared on instrument switch and rebuild.
     private var tanpuraTouchSlot: [UInt16: Int] = [:]
     /// Per-button generation token for the hold re-pluck cycle. Guarded by `lock`.
     private var droneCycleGen = [Int](repeating: 0,
@@ -120,21 +115,9 @@ public class AudioEngine: ObservableObject {
 
     @Published public var isRunning = false
 
-    // MARK: - In-process MIDI bookkeeping (Live-tab readout)
+    // MARK: - Live-tab readout bookkeeping
 
-    /// Currently-sounding note per MIDI channel. Guarded by `lock`.
-    private var hostedChannelNote: [UInt8: UInt8] = [:]
-    /// 14-bit pitch bend per channel (8192 = centre). Guarded by `lock`.
-    private var hostedChannelBend: [UInt8: Int] = [:]
-    /// Latest CC11 per channel, 0…127 — the Live tab's volume readout.
-    /// Guarded by `lock`.
-    private var hostedChannelExpr: [UInt8: UInt8] = [:]
-    /// Still-held channels in play order, most-recent last; the readout
-    /// tracks the last entry. Guarded by `lock`.
-    private var heldChannelOrder: [UInt8] = []
-
-    // Touch-keyed twins for the TLP path (full-resolution pitch). When any
-    // touch is held the readout prefers it. Guarded by `lock`.
+    // Touch-keyed, full-resolution pitch (the TLP path). Guarded by `lock`.
     /// Fractional-MIDI pitch per live touch id.
     private var touchPitchSemis: [UInt16: Double] = [:]
     /// Still-held touches in play order, most-recent last.
@@ -477,7 +460,7 @@ public class AudioEngine: ObservableObject {
     private var recActive = false
     private var recOverflow = false       // ran out of pre-allocated capacity
 
-    /// Frames written + first error of the last recording (the audition `.done` marker).
+    /// Frames written + first error of the last recording.
     public var lastRecordingStats: (frames: Int64, error: String?) {
         recordingLock.lock(); defer { recordingLock.unlock() }
         return (Int64(recCountFinal / 2), recOverflow ? "buffer overflow (recording exceeded capacity)" : nil)
@@ -616,21 +599,12 @@ public class AudioEngine: ObservableObject {
     }
 
     /// `(pitchHz, expression, active)` for the primary held voice. `lock` held.
+    /// Expression reads 0 — the axis idles in the mapper.
     private func meterSnapshotLocked() -> (Double, Double, Bool) {
-        // touches first: exact pitch; expression reads 0 (the axis idles in the mapper)
-        if let id = heldTouchOrder.last, let semis = touchPitchSemis[id] {
-            let hz = 440.0 * pow(2.0, (semis - 69.0) / 12.0)
-            return (hz, 0, true)
-        }
-        guard let ch = heldChannelOrder.last, let note = hostedChannelNote[ch] else {
+        guard let id = heldTouchOrder.last, let semis = touchPitchSemis[id] else {
             return (0, 0, false)
         }
-        let bend = hostedChannelBend[ch] ?? 8192
-        let semis = Double(note)
-            + (Double(bend - 8192) / 8192.0) * Config.midiPitchBendRange
-        let hz = 440.0 * pow(2.0, (semis - 69.0) / 12.0)
-        let expr = Double(hostedChannelExpr[ch] ?? 0) / 127.0
-        return (hz, expr, true)
+        return (440.0 * pow(2.0, (semis - 69.0) / 12.0), 0, true)
     }
 
     /// Publish a snapshot. Takes `meterLock`, which must never nest with `lock`.
@@ -641,28 +615,6 @@ public class AudioEngine: ObservableObject {
         meterActive = snap.2
         meterLock.unlock()
     }
-
-    // MARK: - MIDI in
-
-    /// Push a 3-byte in-process MIDI message. Drone buttons (CC 102–104) are
-    /// consumed here; everything else routes through `routeSarangiModelMIDI`.
-    public func sendHostedMIDI(status: UInt8, data1: UInt8, data2: UInt8) {
-        let channel = UInt8(status & 0x0F)
-        let statusHi = status & 0xF0
-
-        // drone buttons: CC 102+i, value ≥ 64 = pressed; never forwarded.
-        // CC 105 is swallowed too (`setDronePressed` bounds-checks it away).
-        if statusHi == 0xB0, (102...105).contains(data1) {
-            setDronePressed(Int(data1) - 102, data2 >= 64)
-            return
-        }
-
-        routeSarangiModelMIDI(channel: channel, statusHi: statusHi,
-                              data1: data1, data2: data2)
-    }
-
-    /// Two-byte variant (Channel Pressure / Program Change) — ignored.
-    public func sendHostedMIDI2(status: UInt8, data1: UInt8) {}
 
     // MARK: - TarabLink touch ingestion (the wire path)
     //
@@ -826,128 +778,6 @@ public class AudioEngine: ObservableObject {
         lock.unlock()
     }
 
-    // MARK: - In-process MIDI routing
-
-    /// Route one in-process MIDI message: the `BowControlMapper` mounts a
-    /// fresh gut string per note-on with per-channel bend; CCs 11/1/74/2/75
-    /// drive the axes. Also keeps the `hostedChannel*` readout bookkeeping.
-    private func routeSarangiModelMIDI(channel: UInt8, statusHi: UInt8,
-                                       data1: UInt8, data2: UInt8) {
-        lock.lock()
-        let src = stringVoiceSource
-        let mapper = src?.mapper
-        if statusHi == 0x90 && data2 > 0 {
-            hostedChannelNote[channel] = data1
-            hostedChannelBend[channel] = 8192
-            heldChannelOrder.removeAll { $0 == channel }
-            heldChannelOrder.append(channel)
-        } else if statusHi == 0x80 || (statusHi == 0x90 && data2 == 0) {
-            hostedChannelNote.removeValue(forKey: channel)
-            hostedChannelBend.removeValue(forKey: channel)
-            hostedChannelExpr.removeValue(forKey: channel)
-            heldChannelOrder.removeAll { $0 == channel }
-        } else if statusHi == 0xE0 {
-            let bend = (Int(data2) << 7) | Int(data1)
-            if hostedChannelNote[channel] != nil { hostedChannelBend[channel] = bend }
-        } else if statusHi == 0xB0 {
-            if data1 == 11 { hostedChannelExpr[channel] = data2 }
-            else if data1 == 123 {
-                hostedChannelNote.removeAll(keepingCapacity: true)
-                hostedChannelBend.removeAll(keepingCapacity: true)
-                hostedChannelExpr.removeAll(keepingCapacity: true)
-                heldChannelOrder.removeAll(keepingCapacity: true)
-            }
-        }
-        // Plucked main instrument: the note-on plucks at the EXACT pitch,
-        // which arrives on the following pitch bend (CC11 = fallback); later
-        // bends retune the slot, note-off releases it. The mapper sees no notes.
-        let inst = mainInstrumentStorage
-        let tpSrc = pluckSourceLocked(inst)
-        var pendingHz: Double?
-        var pendingVel: UInt8 = 0
-        var pendingChannel: UInt8 = 0
-        var bendSlot: (slot: Int, hz: Double)?
-        var releaseSlots: [Int] = []
-        if inst != .string {
-            func soundingHz(note: UInt8) -> Double {
-                let bend = hostedChannelBend[channel] ?? 8192
-                let semis = Double(note)
-                    + (Double(bend - 8192) / 8192.0) * Config.midiPitchBendRange
-                return 440.0 * pow(2.0, (semis - 69.0) / 12.0)
-            }
-            if statusHi == 0x90 && data2 > 0 {
-                tanpuraPendingPluck[channel] = (note: data1, vel: data2)
-            } else if statusHi == 0x80 || (statusHi == 0x90 && data2 == 0) {
-                tanpuraPendingPluck.removeValue(forKey: channel)
-                if let s = tanpuraChannelSlot.removeValue(forKey: channel) {
-                    releaseSlots.append(s)
-                }
-            } else if statusHi == 0xB0 && data1 == 123 {
-                tanpuraPendingPluck.removeAll(keepingCapacity: true)
-                releaseSlots.append(contentsOf: tanpuraChannelSlot.values)
-                tanpuraChannelSlot.removeAll(keepingCapacity: true)
-            } else if statusHi == 0xE0 || (statusHi == 0xB0 && data1 == 11) {
-                if let p = tanpuraPendingPluck.removeValue(forKey: channel) {
-                    pendingHz = soundingHz(note: p.note)
-                    pendingVel = p.vel
-                    pendingChannel = channel
-                } else if statusHi == 0xE0,
-                          let slot = tanpuraChannelSlot[channel],
-                          let note = hostedChannelNote[channel] {
-                    bendSlot = (slot, soundingHz(note: note))
-                }
-            }
-        }
-        let relT60 = pluckTrimsLocked(inst).relT60
-        let snap = meterSnapshotLocked()
-        lock.unlock()
-        storeMeter(snap)
-        if let pendingHz {
-            pluckMain(inst, hz: pendingHz, velocity: pendingVel,
-                      channel: pendingChannel)
-        }
-        if let engine = tpSrc?.currentEngine() {
-            if let b = bendSlot, b.slot < engine.slotFrequencies.count {
-                engine.bend(slot: b.slot,
-                            ratio: b.hz / engine.slotFrequencies[b.slot])
-            }
-            let rate = log(1000.0) / max(0.05, relT60)
-            for s in releaseSlots { engine.release(slot: s, rate: rate) }
-        }
-        // Raw tilt axes (`TiltAxisWire`, in-process): 14-bit MSB/LSB pairs,
-        // MSB first. Emit on the LSB so the pair lands atomically; a stream
-        // that has never carried an LSB is 7-bit — emit on the MSB.
-        if statusHi == 0xB0, let axis = TiltAxisWire.ccs.firstIndex(of: data1) {
-            tiltMSB[axis] = data2
-            if !tiltLSBSeen {
-                onTiltAxis?(axis, Double(data2) / 127.0 * 2.0 - 1.0)
-            }
-        }
-        if statusHi == 0xB0, let axis = TiltAxisWire.lsbCCs.firstIndex(of: data1) {
-            tiltLSBSeen = true
-            let v14 = Int(tiltMSB[axis]) << 7 | Int(data2)
-            onTiltAxis?(axis, Double(v14) / 16383.0 * 2.0 - 1.0)
-        }
-        // composite-parameter slot CCs (audition scores / hardware); the mapper ignores them
-        if statusHi == 0xB0, CompositeParam.slotCCs.contains(data1) {
-            onCompositeCC?(data1, Double(data2) / 127.0)
-        }
-        // Notes reach the String mapper only while it is the played
-        // instrument; axes/CCs flow either way (kept current for a switch back).
-        if inst != .string, statusHi == 0x90 || statusHi == 0x80 { return }
-        mapper?.midi(statusHi | channel, data1, data2)
-    }
-
-    /// Raw-tilt delivery: (axis 0…2, value −1…+1), MIDI thread; handler must be thread-safe.
-    public var onTiltAxis: ((Int, Double) -> Void)?
-    /// 14-bit tilt-pair assembly: latest MSB per axis; LSB ever seen (false = 7-bit). MIDI thread.
-    private var tiltMSB = [UInt8](repeating: 0, count: 3)
-    private var tiltLSBSeen = false
-
-    /// Composite-parameter delivery: (slot CC, value 0…1), MIDI thread;
-    /// the handler must be thread-safe.
-    public var onCompositeCC: ((UInt8, Double) -> Void)?
-
     /// Enable/disable the String voice: creates + connects the node on first
     /// enable and builds the engine off-main. False if `bowed_string.json` is missing.
     @discardableResult
@@ -958,7 +788,6 @@ public class AudioEngine: ObservableObject {
                 return false
             }
             let src = StringVoiceSource()
-            src.mapper.bendRange = Config.midiPitchBendRange
             // always armed — the metered render is bit-exact (`BusMeterTests`)
             src.setBusMeter(true)
             stringVoiceSource = src
@@ -990,10 +819,6 @@ public class AudioEngine: ObservableObject {
         let strings = lastSarangiStrings
         let tonic = lastSarangiTonic
         let follower = lastSarangiFollower
-        hostedChannelNote.removeAll(keepingCapacity: true)
-        hostedChannelBend.removeAll(keepingCapacity: true)
-        hostedChannelExpr.removeAll(keepingCapacity: true)
-        heldChannelOrder.removeAll(keepingCapacity: true)
         lock.unlock()
         if on { rebuildStringVoice(tonic: tonic, strings: strings,
                                    follower: follower) }
@@ -1104,7 +929,6 @@ public class AudioEngine: ObservableObject {
     private func pluckedEnginePublished(_ v: PluckedVoice) {
         lock.lock()
         if v !== sitarVoice || mainInstrumentStorage == .sitar {
-            tanpuraChannelSlot.removeAll(keepingCapacity: true)
             tanpuraTouchSlot.removeAll(keepingCapacity: true)
         }
         lock.unlock()
@@ -1246,8 +1070,6 @@ public class AudioEngine: ObservableObject {
         guard inst != mainInstrumentStorage else { lock.unlock(); return }
         let old = mainInstrumentStorage
         mainInstrumentStorage = inst
-        tanpuraPendingPluck.removeAll(keepingCapacity: true)
-        tanpuraChannelSlot.removeAll(keepingCapacity: true)
         tanpuraTouchSlot.removeAll(keepingCapacity: true)
         let strSrc = stringVoiceSource
         lock.unlock()
@@ -1360,25 +1182,6 @@ public class AudioEngine: ObservableObject {
         for i in held { tanpuraPluckDrone(i) }
     }
 
-    /// A main-instrument pluck (MIDI path): the nearest slot (60 ¢) bent to
-    /// the exact Hz, recorded per channel for later bends / release.
-    private func pluckMain(_ inst: MainInstrument, hz: Double,
-                           velocity: UInt8, channel: UInt8) {
-        lock.lock()
-        let (level, touch, drive, _) = pluckTrimsLocked(inst)
-        let src = pluckSourceLocked(inst)
-        lock.unlock()
-        guard let engine = src?.currentEngine(),
-              let slot = engine.nearestSlot(toHz: hz, toleranceCents: 60)
-        else { return }
-        engine.pluck(slot: slot, velocity: Int(velocity), scale: level,
-                     bendRatio: hz / engine.slotFrequencies[slot],
-                     touch: touch, drive: drive)
-        lock.lock()
-        tanpuraChannelSlot[channel] = slot
-        lock.unlock()
-    }
-
     /// Jawari-web overload telemetry (see `StringVoiceSource.jtStats`); nil without a voice.
     public func stringVoiceJtStats() -> (drops: Double, flat: Double,
                                          fill: Double, on: Double)? {
@@ -1476,10 +1279,9 @@ public class AudioEngine: ObservableObject {
         }
     }
 
-    /// Player vibrato depth 0..1 (the aftertouch axis), as a channel-pressure message.
+    /// Player vibrato depth 0..1 (the vibrato axis).
     public func setStringVibrato(_ v01: Double) {
-        let byte = UInt8(max(0, min(127, Int((v01 * 127.0).rounded()))))
-        stringVoiceSource?.mapper.midi(0xD0, byte, 0)
+        stringVoiceSource?.mapper.setVibrato(v01)
     }
 
     /// Apply one `.live` registry parameter to the String voice — the ONE

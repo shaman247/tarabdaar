@@ -28,9 +28,9 @@ final class ByteNullContractTests: XCTestCase {
 
     /// Bow Sa 0.4 s, lift, ring 0.3 s; both channels concatenated.
     private func phrase(_ e: BowEngine) -> [Double] {
-        e.mapper.midi(0xB0, 11, 60)
-        e.mapper.midi(0xB0, 1, 80)
-        e.mapper.midi(0x91, 60, 100)
+        e.mapper.setAxis(expr: 60.0 / 127.0)
+        e.mapper.setAxis(press: 80.0 / 127.0)
+        e.mapper.touchOn(60, pitchSemis: 60, velocity: 100.0 / 127.0)
         let nBow = Int(0.4 * e.sr), nRing = Int(0.3 * e.sr)
         var l = [Double](repeating: 0, count: nBow + nRing)
         var r = [Double](repeating: 0, count: nBow + nRing)
@@ -48,7 +48,7 @@ final class ByteNullContractTests: XCTestCase {
             }
         }
         render(0, nBow)
-        e.mapper.midi(0x81, 60, 0)
+        e.mapper.touchOff(60)
         render(nBow, nRing)
         return l + r
     }

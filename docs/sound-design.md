@@ -5,7 +5,7 @@ Sound design lives on the Mac (TarabdaarMac). The iPad is a controller — it st
 ## Signal path
 
 ```
-TLP touches / in-process MIDI ► BowControlMapper ► StringVoiceSource (BowEngine + CBowKernel, 96 kHz → 48 kHz) ► symGain ► mainMixerNode ► out
+TLP touches ► BowControlMapper ► StringVoiceSource (BowEngine + CBowKernel, 96 kHz → 48 kHz) ► symGain ► mainMixerNode ► out
 ```
 
 `StringVoiceSource` (`Packages/TarabdaarCore/.../StringVoiceSource.swift`) wraps the `BowEngine` as a 48 kHz `AVAudioSourceNode` connected directly to `symGain → mainMixerNode`. The kernel runs at 96 kHz and half-band-decimates to 48 kHz; the mixer converts to the engine rate. There is no master filter/reverb bus — the kernel owns its body and room, and the only inserts are the four-point [FX rack](fx.md) inside `BowEngine`. The tanpura and sitar are sibling source nodes; the sitar's output and the tanpura's `tp_taraf` tap charge the String kernel's jt web through its inject ring. Full physics: [Sarangi](sarangi.md).
@@ -33,7 +33,7 @@ Mechanisms and traps: [Sarangi](sarangi.md).
 2. **OU drift.** Three independent Ornstein–Uhlenbeck walks (deterministic per-slot xorshift64; panic → `reset()` rewinds, so renders reproduce) at `bow_drift_hz` 1.2, scaling into pitch cents (0.55), vbow dB (0.15) and force dB (0.3) — the not-quite-vibrato life of a held note, its harmonic shimmer arriving through the body slope. **TRAP:** the fitted sarangi body is ~3 dB/¢ steep around D4, so tune drift to the LEVEL outcome (0.55 ¢ ≈ 0.7 dB std), not to a violin's pitch depth — 2 ¢ reads as slow tremolo. Do NOT inject per-harmonic motion directly.
 3. **Glide dip.** The bow eases toward `bow_glide_dip_db` 5 · r/(r+`bow_glide_dip_rate` 900 ¢/s) while the SOUNDING pitch slews (15 ms attack / 120 ms release; full depth on vbow, 0.3× on force — more slows the string's re-capture). Fast finger glides dip 2–7 dB; drift-rate motion (~20 ¢/s) never triggers it.
 
-Guards: `LivenessTests` (settle shape, drift bounds/determinism, dip selectivity, absent-keys bit-null); `BowControlsTests` strips the liveness keys for the law tests. Reference captures: `auditions/swam_refs/`.
+Guards: `LivenessTests` (settle shape, drift bounds/determinism, dip selectivity, absent-keys bit-null); `BowControlsTests` strips the liveness keys for the law tests.
 
 ### The modal-jawari taraf, fused in-kernel
 
@@ -55,10 +55,10 @@ ONE width law: `bow_st_width` (0.2) — the whole instrument (voice, taraf wash,
 
 ## Editing the sound
 
-- **Parameters tab (⌘5).** `ParametersView` over `ParamRegistry` — filterable groups covering **every** parameter, physics and live alike, in native units, each row with a mapping button. `rebuild` rows re-apply through a crossfaded off-main `BowEngine` rebuild ~0.2 s after the value settles (below) and persist as an override dict (`tarabdaar.stringOverrides.v1`); `live` and `hybrid` rows apply instantly and persist in `tarabdaar.controlDefaults.v1`. "Default (Sarangi Live)" / "Reset all" clears both; double-clicking a row label resets one. Audition path: `param.<key>` or `string.<key>`.
+- **Parameters tab (⌘5).** `ParametersView` over `ParamRegistry` — filterable groups covering **every** parameter, physics and live alike, in native units, each row with a mapping button. `rebuild` rows re-apply through a crossfaded off-main `BowEngine` rebuild ~0.2 s after the value settles (below) and persist as an override dict (`tarabdaar.stringOverrides.v1`); `live` and `hybrid` rows apply instantly and persist in `tarabdaar.controlDefaults.v1`. "Default (Sarangi Live)" / "Reset all" clears both; double-clicking a row label resets one.
 - **DEFAULT = ENGINE TRUTH.** An untouched `.rebuild` row displays `ParamSpec.def`, but the engine runs artifact + overrides only — so for a key the artifact does not carry, the authored def MUST equal the engine's code fallback or the tab lies about the sound. `ParamUnificationTests.testAuthoredDefaultsMatchEngineFallbacks` pins the articulation/liveness set; when adding an artifact-absent rebuild key, keep def, code fallback and that test in step.
 - **Strings tab (⌘2).** The editable `[StringSpec]` tarab table (below) tunes the in-kernel taraf.
-- **Controls tab (⌘4).** Named 0–1 composite macros built from any parameters, plus direct tilt→parameter bindings — driven live from tilts or audition scores, without a rebuild wherever the parameter allows it.
+- **Controls tab (⌘4).** Named 0–1 composite macros built from any parameters, plus direct tilt→parameter bindings — driven live from the sensors, without a rebuild wherever the parameter allows it.
 - **FX tab (⌘6).** The four-insert rack, all `.live` `fx_<point>_*` params, off by default = byte-null ([FX](fx.md)).
 
 ## Sympathetic strings — the editable bank
@@ -100,7 +100,7 @@ Three press-to-sound drone buttons inside the Fret Pad's right edge each pluck *
 
 ## Levels
 
-Calibration is inside the fitted preset: `bow_live_trim` / `bow_rev_*` set the output level, and **`bow_gain`** (def 1 = bit-exact) multiplies the trim as the PERFORMANCE master volume of the whole radiated instrument — the knob that moves total loudness where expression can't, because the taraf keeps ringing. The Mac pads hold a flat per-note **CC11 = 32** (the fitted expression median — CC11 is a real ±16 dB loudness axis, not a trim).
+Calibration is inside the fitted preset: `bow_live_trim` / `bow_rev_*` set the output level, and **`bow_gain`** (def 1 = bit-exact) multiplies the trim as the PERFORMANCE master volume of the whole radiated instrument — the knob that moves total loudness where expression can't, because the taraf keeps ringing. The Mac pads hold the expression axis at its fitted median (0.25) — a real ±16 dB loudness axis, not a trim.
 
 **The safety limiter.** Loud peaks are backstopped inside the kernel, and a **linked-stereo output safety limiter** rides the very end of both post-chains (after the global FX insert): instant-attack peak detector, `bow_lim_rel_ms` release, hard clamp at min(1, 1.25 × ceiling) for the attack samples. **Below `bow_lim_thresh` (default 0.8) it is bit-exact passthrough** — the parity phrase peaks ~0.06, so every golden is untouched (`LimiterTests`).
 
@@ -152,7 +152,7 @@ Most parameters do not rebuild at all. `BowEngine.setLiveParams` pushes an edit 
 
 ### Zipper
 
-The push writes coefficients directly, so `ZipperTests` measures it rather than assuming it safe. Friction coefficients cannot click by construction — they change how the string *evolves*, not the current sample (`bow_mu_s` swept over 2 s at 60 Hz: −2 dB excess HF vs a smooth sweep). The parameters that CAN click are the ones that multiply the signal, and only on a large instantaneous jump: a +17 dB `bow_live_trim` step mid-note is a **17.9×** seam (an audible click) with no ramp, 3.4× with a 25 ms chunk-rate ramp, and **0.0×** with per-sample `outGain` interpolation on top. Both are needed — the chunk ramp alone leaves a ~20% step at the first boundary — so `postChain` interpolates the output gain **across** the chunk, and the ramp caps the render chunk to 256 frames while it runs (otherwise the offline/audition path resolves a whole 4096-frame glide in one step, which is exactly the click being prevented).
+The push writes coefficients directly, so `ZipperTests` measures it rather than assuming it safe. Friction coefficients cannot click by construction — they change how the string *evolves*, not the current sample (`bow_mu_s` swept over 2 s at 60 Hz: −2 dB excess HF vs a smooth sweep). The parameters that CAN click are the ones that multiply the signal, and only on a large instantaneous jump: a +17 dB `bow_live_trim` step mid-note is a **17.9×** seam (an audible click) with no ramp, 3.4× with a 25 ms chunk-rate ramp, and **0.0×** with per-sample `outGain` interpolation on top. Both are needed — the chunk ramp alone leaves a ~20% step at the first boundary — so `postChain` interpolates the output gain **across** the chunk, and the ramp caps the render chunk to 256 frames while it runs (otherwise an offline render resolves a whole 4096-frame glide in one step, which is exactly the click being prevented).
 
 ### The chunk cap is not neutral
 
@@ -162,4 +162,4 @@ Chunk size sets the control-interpolation grid and the jawari web's block bounda
 
 `RealtimePerformanceTests` (headless, buffer-accurate; a gated slow suite — see CLAUDE.md) renders the voice at the device's 128-frame buffer with notes through `BowControlMapper` and tilts evaluated through `DimensionBinding` into the same apply paths `AppController` uses: a composite swept by tilt, direct params, 5 Hz full-range flicks, polyphony with everything moving, and a crossfaded rebuild-tier sweep. It asserts zero over-budget buffers, zero dropouts and bounded worst steps against the 2.67 ms budget.
 
-**Judge realtime behaviour on p99 with preallocated buffers** — a `[Float]` allocation per buffer or wall-clock timing in a normal-priority process reports phantom overruns. In the app, the overrun watchdog logs render overruns and jawari-web overloads to Console; an audition score with the parameter motion removed is the control that proves a clean run is not measuring an inert path. Not covered: a real iPad over the wire adds link jitter the in-process pump does not have.
+**Judge realtime behaviour on p99 with preallocated buffers** — a `[Float]` allocation per buffer or wall-clock timing in a normal-priority process reports phantom overruns. In the app, the overrun watchdog logs render overruns and jawari-web overloads to Console; a run with the parameter motion removed is the control that proves a clean measurement is not measuring an inert path. Not covered: a real iPad over the wire adds link jitter the in-process pump does not have.

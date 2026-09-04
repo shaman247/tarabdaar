@@ -8,13 +8,13 @@ System-level constants live in `Packages/TarabdaarCore/Sources/TarabdaarCore/Con
 |------|------|-----------|
 | Voice parameters (`bow_*`, `tp_*`, `st_*`, `ctl_*`, `fx_*`) | `ParamRegistry` — `.rebuild` values persist as the `StringParamStore` override dict (`tarabdaar.stringOverrides.v1`), `.live`/`.hybrid` resting values as `AppController.paramValues` (`tarabdaar.controlDefaults.v1`) | Parameters tab ⌘5, FX tab ⌘6 |
 | The tarab | the `[StringSpec]` table + chromatic set + follower on `InstrumentState` (`tarabdaar.sarangiState.v8`) | Strings tab ⌘2 |
-| Composite parameters | `CompositeParam` on `AppController.composites` (`tarabdaar.compositeParams.v1`) — named 0–1 macros of parameter members each sweeping lo→hi; defaults Taraf Purity / Taraf Decay / Tone Tilt / Expression on slots 1–4; audition names `stringPurity` / `stringTarafDecay` / `stringToneTilt` + `composite1`–`composite8` | Controls tab ⌘4 |
+| Composite parameters | `CompositeParam` on `AppController.composites` (`tarabdaar.compositeParams.v1`) — named 0–1 macros of parameter members each sweeping lo→hi; defaults Taraf Purity / Taraf Decay / Tone Tilt / Expression on slots 1–4 | Controls tab ⌘4 |
 | Tilt bindings | `tiltMapping` (`MapTarget` per dimension) | Controls tab ⌘4 |
 | Arm / wrist calibration | `tarabdaar.armCal.v2` / `tarabdaar.wristCal.v1` | Setup tab ⌘7 |
 | The playing scale | `PitchScale` via `ScaleStore`; the tonic is not persisted | Fret Pad tab ⌘3 |
 | The whole rig | one `TarabdaarPreset` document per `.tarabdaar` file in `Application Support/Tarabdaar/Presets/` | Parameters tab preset toolbar |
 
-Audition scores reach any parameter via `voiceParam` name `param.<key>` or `string.<key>` ([Simulator](simulator.md)). The registry groups are Bow stroke · Body (formula modes) · Bow & string · Playing ranges · Jawari taraf (modal contact) · Chromatic bridge (jawari taraf) · Liveness · Articulation · Radiation & output · Tanpura · Sitar · Glide · Controller · Strike blend · Fret pad · the four FX points. See [Sound Design](sound-design.md), [Sarangi](sarangi.md) and [FX](fx.md).
+The registry groups are Bow stroke · Body (formula modes) · Bow & string · Playing ranges · Jawari taraf (modal contact) · Chromatic bridge (jawari taraf) · Liveness · Articulation · Radiation & output · Tanpura · Sitar · Glide · Controller · Strike blend · Fret pad · the four FX points. See [Sound Design](sound-design.md), [Sarangi](sarangi.md) and [FX](fx.md).
 
 ## Audio
 
@@ -31,7 +31,7 @@ Audition scores reach any parameter via `voiceParam` name `param.<key>` or `stri
 | `motionUpdateRate` | 200 Hz | CoreMotion sample rate |
 | `accelHistoryLength` | 200 | Display buffer (~1 s at 200 Hz) |
 | `accelBufferDuration` | 100 ms | Ring buffer the strike estimate scans; must exceed `velocityLookback` |
-| `velocityMinG` / `velocityMaxG` | 0.01 g / 0.5 g | Softest / hardest tap on the shared strike law (`StrikeLaw`, log-scale 0…1) — the per-touch strike velocity, the strike envelope, the Joy-Con accel dimension and the audition velocity range all use it |
+| `velocityMinG` / `velocityMaxG` | 0.01 g / 0.5 g | Softest / hardest tap on the shared strike law (`StrikeLaw`, log-scale 0…1) — the per-touch strike velocity, the strike envelope and the Joy-Con accel dimension all use it |
 | `velocityLookback` | 50 ms | The TRAILING window a fret-pad onset scans for its strike spike (`MotionSource.strikeVelocity01`) — backward-looking, so the onset never waits |
 
 ## Fret Pad geometry
@@ -44,17 +44,6 @@ Audition scores reach any parameter via `voiceParam` name `param.<key>` or `stri
 | `fretPadHeightFraction` | 0.5 | The playable band's share of the surface height, vertically centered (`fretPadBandRect`) |
 
 The Snap distance (24 px default, `AppController.init`) and the fret warp are not here — Snap rides the synced arrangement, the warp is the `ctl_fret_warp` registry parameter.
-
-## In-process MIDI vocabulary
-
-These serve the in-process paths only — audition scores, external controllers, the headless simulator's `NoteManager`. Nothing on the TLP wire reads them.
-
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `midiPitchBendRange` | ±48 semitones | Bend range of the in-process MPE vocabulary (`sendHostedMIDI`, `MIDIInput`, the simulator) |
-| `maxPolyVoices` | 16 | Voice-slot capacity of `NoteManager.pitchChannels` and the pitch-history graph — a capacity, not a mode; the played voice's polyphony is `bow_live_poly` strings on one bridge |
-| `glideDistanceExponent` / `glideMidpoint` / `releaseGracePeriod` / `dragSnapDelay` | 0.6 / 0.6 / 50 ms / 60 ms | `NoteManager`'s scripted glide and drag-snap shaping for audition `glide` events |
-| `slider1Default` / `slider2Default` | 0.5 | Rest values of the simulator's two slider dimensions |
 
 ## Display
 

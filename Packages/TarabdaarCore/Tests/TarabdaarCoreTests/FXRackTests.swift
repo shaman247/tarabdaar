@@ -126,7 +126,7 @@ final class FXRackTests: XCTestCase {
 
     /// The point of the refactor: the tab's TOP-LEVEL row count drops by
     /// the 60 knobs the inserts now hide, while `all` still answers every
-    /// key (presets, tilt targets, `param.` audition routes).
+    /// key (presets, tilt targets).
     func testTheRackCostsFourDisplayRowsNotSixtyFour() {
         let rows = ParamRegistry.groups.reduce(0) { n, g in
             let s = ParamRegistry.insertSections(of: g.params)

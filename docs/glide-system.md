@@ -8,9 +8,6 @@ The instrument has two glide layers:
    (`GlideSequencer`). **Off by default** (`ctl_glide_on` 0 = pure
    pass-through).
 
-The legacy keyboard glide in `NoteManager` is off-path, alive only for
-audition `noteOn`/`glide` scripts (end of this page).
-
 ## Direct finger glide
 
 The touch position resolves to a pitch (the fret field / onset snap —
@@ -35,10 +32,8 @@ technique: move the finger.
 `GlideSequencer` (`Packages/TarabdaarCore/.../GlideSequencer.swift`) is
 a control layer in front of the voice routing: `AudioEngine` funnels its
 public `touchOn`/`touchGlide`/`touchOff` through one instance, so every
-touch source — iPad wire, Mac pads, the keyboard player, audition
-`padOn` scores — obeys the same law. The in-process MIDI path
-(`sendHostedMIDI`, auditions' `noteOn`/`glide`/`rawNote`, external
-controllers) bypasses it entirely, so the parity substrate is untouched.
+touch source — the iPad wire, the Mac pads, the Joy-Con strum — obeys
+the same law. It is the only note path there is.
 
 ### The overlap rule
 
@@ -121,32 +116,3 @@ with the toggle off the sequencer is byte-for-byte pass-through (the
 inert-default contract — parity hashes unaffected). The five knobs live
 in the Parameters tab's **Glide** group (all `.live`, per-note scope,
 tilt-bindable). Guards: `GlideSequencerTests`.
-
-## The legacy keyboard glide (`NoteManager`, off-path)
-
-`NoteManager` is not on the playing path: it runs as the iPad's 60 Hz
-tilt sampler and hosts the audition scripts' `noteOn`/`glide` events
-([Architecture](architecture.md)). Its monophonic glide engine is the
-ancestor of the Glide Queue but shares no code with it:
-
-- **Tap glides** — each tapped note appends a `GlideWaypoint` to
-  `PitchChannel.queue`; `advanceQueue` pops the next target with
-  duration = `glideTimePerSemitone · semitones^0.6`
-  (`Config.glideDistanceExponent`; 20–200 ms/st, dimension-mapped); a
-  waypoint arriving mid-glide compresses the current glide to finish
-  within `glideMaxWait`. Easing is a logistic `1/(1+exp(−k(t−m)))`
-  normalized to [0, 1] (`k` = Glide Curve 3–12, `m = Config.glideMidpoint`
-  0.6) in log2-frequency space. `Config.releaseGracePeriod` (50 ms)
-  lets a new touch connect as a glide after all fingers lift.
-- **Drag glides** — past a 1/3 key-width move the target follows the
-  finger's x as fractional MIDI, chased with exponential smoothing in
-  log-frequency space (`dragSmoothingCoeff` 0.3); a direction reversal
-  retargets to the nearest scale tone (white keys only in the bottom
-  40 %); after `Config.dragSnapDelay` (60 ms) idle the target snaps and
-  locks until the finger moves 1/3 key width; lifting mid-drag sets
-  `releaseAfterSnap` so the voice releases only once the snap converges
-  (within 1 ¢).
-
-Polyphony on the instrument is `PitchPadEngine`'s, not this class's —
-every `touchId` is its own wire identity
-([Architecture — Polyphony](architecture.md#polyphony-ipad)).

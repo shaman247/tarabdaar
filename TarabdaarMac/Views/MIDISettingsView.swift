@@ -1,11 +1,9 @@
 import TarabdaarCore
 import SwiftUI
 
-/// MIDI output panel. The Mac publishes a virtual MIDI source named
-/// "Tarabdaar" via CoreMIDI; DAWs and external synths can subscribe to
-/// it. NoteManager's 60 Hz glide loop sends per-voice pitch bend,
-/// channel pressure, and CC values to this source — same code path the
-/// iPad uses.
+/// CoreMIDI status panel. CoreMIDI is the TLP tunnel's TRANSPORT and
+/// nothing else — the only bytes that cross it are SysEx-framed TLP
+/// frames. There is no MIDI note vocabulary to report on.
 struct MIDISettingsView: View {
     @ObservedObject var controller: AppController
     @ObservedObject private var midi: MIDIEngine
@@ -21,13 +19,12 @@ struct MIDISettingsView: View {
                 .font(.padCaption.weight(.bold))
                 .foregroundStyle(.secondary)
             statusPanel
-            configPanel
         }
         .padding(20)
     }
 
     private var statusPanel: some View {
-        Panel(title: "Virtual MIDI source") {
+        Panel(title: "TLP transport") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
                     Circle()
@@ -38,12 +35,11 @@ struct MIDISettingsView: View {
                 }
                 LabeledContent("Status", value: midi.statusMessage)
                 LabeledContent("External destinations", value: "\(midi.destinationCount)")
-                LabeledContent("Pitch bend range", value: "± \(Int(Config.midiPitchBendRange)) semitones")
 
                 HStack {
                     if midi.isActive {
                         HStack(spacing: 4) {
-                            Text("Source name:")
+                            Text("Client:")
                                 .foregroundColor(.secondary)
                             Text("Tarabdaar").bold()
                         }
@@ -61,15 +57,4 @@ struct MIDISettingsView: View {
         }
     }
 
-    private var configPanel: some View {
-        Panel(title: "MPE") {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Per-note channel allocation rotates across MIDI channels 1–15 (channel 0 is the MPE master). Each new note activation gets a fresh channel so its pitch bend doesn't bleed into other voices' reverb tails.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                LabeledContent("Max poly voices", value: "\(Config.maxPolyVoices)")
-                    .font(.system(.body))
-            }
-        }
-    }
 }

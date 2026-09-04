@@ -34,7 +34,7 @@ TarabdaarMacApp.swift
   └── MacMainWindow
         ├── AppController (Mac-side source of truth)
         │     ├── AudioEngine            (TarabdaarCore: hosts the voices,
-        │     │     │                     routes touches + in-process MIDI)
+        │     │     │                     routes touches)
         │     │     ├── StringVoiceSource — SarangiKit.BowEngine + CBowKernel:
         │     │     │     played strings + taraf + body + radiation + room
         │     │     │     in-kernel, 96→48 kHz, node → symGain → mainMixerNode
@@ -71,15 +71,13 @@ The Joy-Con path is split by platform: `JoyConReport`, the `JoyConTransport` pro
 
 `applyParamToVoice` (with its `ctl_*` interceptions) and `applyComposite` stay on `AppController` — they are the routing point where those collaborators, `AudioEngine` and `StringParamStore` meet.
 
-**The headless simulator.** `IPadSimulator` (Mac-only, no tab) holds its own `NoteManager` + `MockMotionSource` so `AuditionRunner` can play notes from a script. Its `MIDIEngine` is constructed with `publishToCoreMIDI: false`; emitted MPE bytes hit the in-process `onLocalEvent` callback, which routes them into `AudioEngine.sendHostedMIDI(...)` and (for CCs) `AppController.handleSimulatorCC`. The simulator never feeds `MIDIInput`, so it coexists with a real iPad. See [Simulator & Audition Loop](simulator.md).
-
-**The iPad has no `AudioEngine`.** `NoteManager.audioEngine` is nil on the iPad; sound comes only from the Mac.
+**The iPad has no `AudioEngine`.** Sound comes only from the Mac.
 
 **Almost no state syncs across devices.** Editing the tarab or the physics on the Mac ships nothing to the iPad. The exceptions are the one-way **pad-sync TLP events** — the playing scale and the Fret Pad layout ([MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad)) — plus the acted-on `JOYCON_STATE` fields (`connected`, `fieldWarp`, `octave`) and the iPad's chord selection riding the state frame. Everything else is performance state on the wire.
 
 ## iPad pipeline
 
-The playing surface is the **Fret Pad** — see [Fret Pad](fret-pad.md). `PitchPadEngine` writes touches into `OutboundPlayState` and is the shared scale/tonic model. `NoteManager` is constructed only as the tilt sampler; its keyboard/glide voice paths sit idle.
+The playing surface is the **Fret Pad** — see [Fret Pad](fret-pad.md). `PitchPadEngine` writes touches into `OutboundPlayState` and is the shared scale/tonic model. `NoteManager` is the 60 Hz tilt sampler and nothing else.
 
 1. **Touch → ratio.** `TouchOverlayView` captures multitouch and reports per-finger `touchBegan` / `touchMoved` / `touchEnded` with normalized x/y. `FretPadSurfaceIOS` maps each to a point in the pad's logical area and resolves the fret field, onset snap and drag assist to a ratio.
 2. **Per-touch state (`PitchPadEngine`).** `noteOn(touchId:ratio:)` writes the touch at full-resolution fractional-MIDI pitch (`tonicFractionalMidi + 12·log2(ratio)`, plus the onset-captured octave shift) — no channel, no note pinning, no bend split. `glide(touchId:ratio:)` updates the pitch (change-gated); the Mac ramps to each update within one render block. `noteOff(touchId:)` removes the touch — its absence from the next frame IS the note-off.
@@ -88,12 +86,12 @@ The playing surface is the **Fret Pad** — see [Fret Pad](fret-pad.md). `PitchP
 
 ## Mac pipeline
 
-1. **Link input.** `MIDIInput` opens a CoreMIDI input port and connects to every visible source on launch and hot-plug. Inbound SysEx is reassembled and handed to `TarabLink`; `LinkIngest` diffs each `PERF_STATE` frame — removals → onsets/retriggers → glides, drone-mask edges, chord-selection edges, change-gated tilt — into `AudioEngine.touchOn/touchGlide/touchOff` (touch-id keyed, full-resolution pitch), `setDronePressed` and `AppController.strumChord`, on the link queue. Link drop or 1.5 s staleness runs the kill path (`touchesAllOff`). Channel-voice MIDI from external controllers forwards into `AudioEngine.sendHostedMIDI(...)` → `routeSarangiModelMIDI` → the mapper's `.midi` slot keys — the same slots and allocation laws as the touch path.
+1. **Link input.** `MIDIInput` opens a CoreMIDI input port and connects to every visible source on launch and hot-plug. Inbound SysEx is reassembled and handed to `TarabLink`; `LinkIngest` diffs each `PERF_STATE` frame — removals → onsets/retriggers → glides, drone-mask edges, chord-selection edges, change-gated tilt — into `AudioEngine.touchOn/touchGlide/touchOff` (touch-id keyed, full-resolution pitch), `setDronePressed` and `AppController.strumChord`, on the link queue. Link drop or 1.5 s staleness runs the kill path (`touchesAllOff`). This is the ONLY way a note reaches the voice: there is no MIDI note path, and channel-voice bytes on the port are skipped.
 2. **AudioEngine.** The signal graph:
 
 ```
 TLP in ──► LinkIngest ──► AudioEngine.touch* ──► GlideSequencer ──► StringVoiceSource ──► symGain ──► mainMixerNode ──► output
-MIDI in ─► sendHostedMIDI / routeSarangiModelMIDI ────────────────┘  (BowEngine + CBowKernel, 96 → 48 kHz)
+                                                                     (BowEngine + CBowKernel, 96 → 48 kHz)
                                               plucked voices ──► TanpuraVoiceSource(s) ──┘ (+ inject ring → String taraf)
 ```
 
@@ -109,24 +107,24 @@ MIDI in ─► sendHostedMIDI / routeSarangiModelMIDI ────────�
 | iPad | Main | NoteManager (Timer) | 60 Hz tilt sampling → `OutboundPlayState` |
 | iPad | tarablink queue | TarabLink (DispatchSourceTimer) | 120 Hz paced sender — state frames onto the wire |
 | iPad | Main | SwiftUI | UI rendering (~15 Hz, throttled) |
-| Mac | CoreMIDI | MIDIInput | SysEx reassembly → TarabLink; external channel-voice → `sendHostedMIDI` |
+| Mac | CoreMIDI | MIDIInput | SysEx reassembly → TarabLink (nothing else) |
 | Mac | tarablink queue | TarabLink + LinkIngest | Frame decode + diff → `AudioEngine.touch*` |
 | Mac | Audio (real-time) | source render blocks | Pull decimated samples from the kernels |
 | Mac | jt worker pool | BowEngine | The async modal-jawari post-pass |
 | Mac | Main | SwiftUI | UI rendering — slider drags push to AudioEngine via `didSet` / the stores; the Scope model polls `scopeSnapshot()` at 30 Hz |
 
-The audio callback pulls from the `BowEngine` kernel (which runs its own async jawari worker pool). Structural edits build a fresh engine off-main (debounced, generation-checked) and swap it lock-free; the runtime taraf axes (purity/decay/tone) are pushed and chunk-rate smoothed inside the engine. The `.live` apply path (`AppController.applyParamToVoice` → `StringVoiceSource.setControl` / `setFXParam`) is entered from the link queue (tilt bindings), the main thread (sliders, composites, preset loads, drone toggles) and the evaluator's timers at once; the source's control and FX caches sit under one lock, and engine pushes read from a snapshot taken inside it (`ControlCacheConcurrencyTests`). The control path (`MIDIInput` → `sendHostedMIDI` → `routeSarangiModelMIDI` → `BowControlMapper`) is control-rate and does no heavy work on the audio thread.
+The audio callback pulls from the `BowEngine` kernel (which runs its own async jawari worker pool). Structural edits build a fresh engine off-main (debounced, generation-checked) and swap it lock-free; the runtime taraf axes (purity/decay/tone) are pushed and chunk-rate smoothed inside the engine. The `.live` apply path (`AppController.applyParamToVoice` → `StringVoiceSource.setControl` / `setFXParam`) is entered from the link queue (tilt bindings), the main thread (sliders, composites, preset loads, drone toggles) and the evaluator's timers at once; the source's control and FX caches sit under one lock, and engine pushes read from a snapshot taken inside it (`ControlCacheConcurrencyTests`). The control path (`MIDIInput` → `TarabLink` → `LinkIngest` → `AudioEngine.touch*` → `BowControlMapper`) is control-rate and does no heavy work on the audio thread.
 
-**Dependency injection.** iPad — managers are `@StateObject` in `ContentView` and wired in `onAppear` (`noteManager.motionSource = motion`, `noteManager.midiEngine = midi`, `midi.start()`). Mac — `AppController` owns audio + midi + midiIn and wires them in `init` (`midiIn.audioEngine = audio`); its `@Published` setters push directly to `audio` via `didSet` hooks.
+**Dependency injection.** iPad — managers are `@StateObject` in `ContentView` and wired in `onAppear` (`noteManager.motionSource = motion`, `noteManager.playState = playState`, `midi.start()`). Mac — `AppController` owns audio + midi + midiIn and wires them in `init`; its `@Published` setters push directly to `audio` via `didSet` hooks.
 
 ## Polyphony
 
-The Fret Pad is inherently polyphonic: each finger (`touchId`) is one wire identity with its own full-resolution pitch, and the Mac's `BowControlMapper` mounts a fresh gut string per onset on one shared bridge (`bow_live_poly` strings — poly-as-physics). There is no mono/poly toggle and no MPE channel rotation. The iPad's display `SoundingState` (Hz readout + glow) is single-valued and reflects whichever touch updated last; the wire carries every touch regardless. With the glide queue armed (`ctl_glide_on`), overlapping onsets become waypoints of one gliding voice instead of new strings — see [Glide System](glide-system.md).
+The Fret Pad is inherently polyphonic: each finger (`touchId`) is one wire identity with its own full-resolution pitch, and the Mac's `BowControlMapper` mounts a fresh gut string per onset on one shared bridge (`bow_live_poly` strings — poly-as-physics). There is no mono/poly toggle. The iPad's display `SoundingState` (Hz readout + glow) is single-valued and reflects whichever touch updated last; the wire carries every touch regardless. With the glide queue armed (`ctl_glide_on`), overlapping onsets become waypoints of one gliding voice instead of new strings — see [Glide System](glide-system.md).
 
 ## Key design decisions
 
 - **No shared state** beyond pad sync and the few acted-on `JOYCON_STATE` fields. If a feature lives on one side, all its state lives on that side.
-- **Mac as the sound source.** The iPad is intentionally silent. MPE and per-message SysEx are off the wire; the MIDI vocabulary survives in-process only (auditions, external controllers, the touch/MIDI parity substrate).
+- **Mac as the sound source.** The iPad is intentionally silent, and nothing but a TLP frame makes the Mac play — there is no MIDI note vocabulary on either side.
 - **Self-contained voices.** `SarangiKit` (`Packages/SarangiKit/`) is Tarabdaar's own Swift/C code: `BowEngine` + `CBowKernel` is the String voice with the whole instrument in-kernel; `TanpuraEngine` + `tanpura_kernel.c` is the plucked voice mounted as the Tanpura and the Sitar. No hosted AU, no upstream; `TarafRemovalParityTests` pins the shipped render's SHA-256.
 - **One registry.** `Config.swift` holds system constants; every instrument parameter is a `ParamSpec` in `ParamRegistry.swift` (key, group, range, scope, apply strategy) — one source of truth for the Parameters tab, the composite/tilt menus and the generated [Parameters](parameters.md) page. Tilt targets are `MapTarget` (`TiltMapping.swift`); composites live on `AppController.composites`.
 - **One scale, one tonic.** `AppController.pitchPad` owns a `PitchScale` of JI ratios, edited on the Fret Pad tab and synced to the iPad; the tarab is a `[StringSpec]` table of scale degrees. See [Scales & Tuning](scales-and-tuning.md).

@@ -43,7 +43,7 @@ Typical readings on the 0–127 display scale: gentle placement ~1–30, medium 
 
 ### Per-onset estimate
 
-The fret-pad onset handler (`FretPadSurfaceIOS.began`) calls `MotionSource.strikeVelocity01(at: now)`, which scans the TRAILING `Config.velocityLookback` window (50 ms, must stay under `accelBufferDuration`) of the ring buffer via `peakAccelSince`. Backward-looking: UIKit delivers a touch ~10–25 ms after the physical impact, so the chassis spike is usually already buffered and **the note-on never waits** (never add an onset delay on the fret path). The result rides the touch's `velocity` byte in every PERF_STATE frame; the Mac mapper stores it per slot for the String voice's `bow_attack_vel` velocity→attack-sharpness law (0 default = inert — see [Sarangi](sarangi.md)). Producers without an accelerometer (Mac pads, keyboard, audition scripts) send their flat constant or the score's MIDI velocity.
+The fret-pad onset handler (`FretPadSurfaceIOS.began`) calls `MotionSource.strikeVelocity01(at: now)`, which scans the TRAILING `Config.velocityLookback` window (50 ms, must stay under `accelBufferDuration`) of the ring buffer via `peakAccelSince`. Backward-looking: UIKit delivers a touch ~10–25 ms after the physical impact, so the chassis spike is usually already buffered and **the note-on never waits** (never add an onset delay on the fret path). The result rides the touch's `velocity` byte in every PERF_STATE frame; the Mac mapper stores it per slot for the String voice's `bow_attack_vel` velocity→attack-sharpness law (0 default = inert — see [Sarangi](sarangi.md)). Producers without an accelerometer (the Mac pads) send a flat constant.
 
 Known limit: a tap whose spike lands later than the lookback window under-reads toward legato — a playable failure mode; widen `velocityLookback` before resorting to onset delays.
 
@@ -95,7 +95,7 @@ The SIGNED second derivative of the newest sounding touch's pitch trajectory, so
 | acceleration | the smoothed velocity's delta through a second ~25 ms smoother |
 | output | a / (\|a\| + 25 000 ¢/s²) — the same half-saturation scale as the kernel slide noise's `bow_slide_acc` default, so the dimension and the noise agree about what a strong gesture is |
 
-Rest AND a constant-rate meend read 0; accelerating upward reads +, braking an upward slide or accelerating downward reads −. No new wire traffic: the Mac derives it from the pitch in every PERF_STATE frame (`LinkIngest.onTouchPitch`/`onTouchGate` → `AppController.fingerEvaluate`; Mac pads and audition scores feed the same tracker through the local-pump ingest) plus a 30 Hz decay tick while bound (frames are change-gated, so a resting finger would otherwise freeze the value). A tracked-finger change or a > 2-semitone per-sample jump is a snap/steal: the chain reseeds without driving. A plain `applyTiltAxis` axis — no blend. Guard: `FingerAccelTests`.
+Rest AND a constant-rate meend read 0; accelerating upward reads +, braking an upward slide or accelerating downward reads −. No new wire traffic: the Mac derives it from the pitch in every PERF_STATE frame (`LinkIngest.onTouchPitch`/`onTouchGate` → `AppController.fingerEvaluate`; the Mac pads feed the same tracker through the local-pump ingest) plus a 30 Hz decay tick while bound (frames are change-gated, so a resting finger would otherwise freeze the value). A tracked-finger change or a > 2-semitone per-sample jump is a snap/steal: the chain reseeds without driving. A plain `applyTiltAxis` axis — no blend. Guard: `FingerAccelTests`.
 
 The iPad toolbar shows a matching **finger-accel scope** beside the strike scope — bipolar, centreline = rest, green trace while a note sounds — from its own display-only instance of the same law (`FingerAccelSampler`, 120 Hz off-main from `OutboundPlayState`). The data's source side draws its own readout; the Mac's evaluation stays the control truth.
 
@@ -142,19 +142,19 @@ The Mac evaluates every binding itself (`AppController.handleRawTilt` → `apply
 - **Editors**: the Controls tab (⌘4, `TiltControlsView`) edits, per axis, an arbitrary set of targets with Lo/Hi endpoints and the "From center" rest-zero shape; the Parameters tab's per-row mapping button makes the same bindings.
 - **Targets**: `MapTarget` — `.composite(slot:)` or `.param(key:)`; endpoints in the target's native units (0–1 for a composite). "Taraf Purity" and "vibrato depth (¢)" bind the same way; there is no "mappable" subset.
 - **Curves**: each `DimensionBinding` holds an `InputDimension` and 2–4 `ControlPoint`s defining a Catmull-Rom spline, output clamped to the endpoint min/max. Many dimensions may bind one target.
-- **Model** (`TiltMapping.swift`): `ParameterMapping` (bindings per target) inside `DimensionMapping`, keyed by the target's `storageKey`, persisted under `tarabdaar_dimensionMapping_v6` (a v5 document migrates, rescaling 0–127 composite endpoints to 0–1). Composite keys keep their legacy spellings (`midiCC71`, `midiCC73`, `midiCC72`, `composite4`…`composite8`); parameter targets store as `param:<key>` and drop on load if the key no longer exists.
+- **Model** (`TiltMapping.swift`): `ParameterMapping` (bindings per target) inside `DimensionMapping`, keyed by the target's `storageKey`, persisted under `tarabdaar_dimensionMapping_v6` (a v5 document migrates, rescaling 0–127 composite endpoints to 0–1). Composite keys keep their legacy spellings (`midiCC71`, `midiCC73`, `midiCC72`, `composite4`…`composite8` — historical strings that persisted bindings depend on, nothing more); parameter targets store as `param:<key>` and drop on load if the key no longer exists.
 - **Threading**: raw tilt reports arrive off-main, so the Mac keeps a lock-protected per-axis snapshot of the bound targets (`tiltEvalByAxis`).
 
 ### Default bindings
 
 | Axis | Target | Curve |
 |---|---|---|
-| Arm ↕ | Expression (CC11 loudness) — rest sends the fitted median, tilt down fades toward silence, up ≈ +8 dB | linear |
+| Arm ↕ | Expression (the bow's loudness axis) — rest sends the fitted median, tilt down fades toward silence, up ≈ +8 dB | linear |
 | Arm ↕ | Taraf Purity (composite slot 1: jt tone LP 16 k → 1.5 kHz, `bow_jt_sel` 0.5 → 0) | 3-point `(0,0) (0.5,0) (1,1)` — sweeps only past neutral |
 | Arm ↔ | Taraf Decay (composite slot 2: taraf damping 0 → 1) | 3-point, as above |
 | Arm ⟲ | Tone Tilt (composite slot 3: tone tilt −1 → 1) | linear, neutral = flat |
 
-Existing installs adopt these once (flags `tarabdaar.tiltAxes.defaultBindings.v1`, `.v2` for the expression default); unbinding afterwards sticks. Composite slots 4–8 are free macros defined in the Controls tab. CC numbers are a transport detail of the in-process MIDI substrate; no user-facing surface shows them.
+Existing installs adopt these once (flags `tarabdaar.tiltAxes.defaultBindings.v1`, `.v2` for the expression default); unbinding afterwards sticks. Composite slots 4–8 are free macros defined in the Controls tab.
 
 ## Vibrato
 

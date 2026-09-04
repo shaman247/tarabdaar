@@ -1,5 +1,11 @@
 # Simulator & Audition Loop
 
+> **Removed 2026-09-03** — `IPadSimulator`, `AuditionScore`,
+> `AuditionRunner`, `MockMotionSource` and the in-process MIDI note
+> vocabulary the scores drove are all deleted; the `tools/audition_*.py`
+> scripts moved to `tools/archive/`. This page is the historical record of
+> how the loop worked, not a description of the current app.
+
 The **audition loop** plays the Mac's own playing pipeline from a JSON
 score dropped into a watched folder and hands back a recorded WAV, so
 sound design can be iterated without an iPad in the loop — a script or a
