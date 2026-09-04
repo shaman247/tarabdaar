@@ -95,8 +95,7 @@ final class RealtimePerformanceTests: XCTestCase {
         var rebuilds = 0
     }
 
-    /// Run one performance scenario. `drive` is called at ~60 Hz with the
-    /// elapsed time and must move whatever the scenario is testing.
+    /// Run one scenario; `drive` is called at ~60 Hz and moves what it tests.
     private func perform(seconds: Double, frames: Int,
                          noteOn: [(at: Double, note: UInt8)],
                          noteOff: [(at: Double, note: UInt8)],
@@ -200,10 +199,8 @@ final class RealtimePerformanceTests: XCTestCase {
             r.worstMs, 100 * r.worstMs / r.budgetMs,
             r.overruns, 100 * Double(r.overruns) / Double(max(r.buffers, 1)),
             r.peak, r.worstStepRatio, r.dropouts))
-        // p99 is the honest realtime bar: this process runs at NORMAL
-        // priority, so isolated maxima include OS scheduling that a
-        // realtime audio thread would not see. A sustained problem shows
-        // up in p99.
+        // p99 is the honest bar: this process runs at NORMAL priority, so
+        // isolated maxima include scheduling a realtime thread would not see.
         XCTAssertLessThan(r.p99Ms, r.budgetMs,
                           "\(name): p99 render exceeds the realtime budget")
         XCTAssertEqual(r.dropouts, 0, "\(name): audio dropped out")
@@ -216,8 +213,8 @@ final class RealtimePerformanceTests: XCTestCase {
 
     private var frames: Int { Int(Config.preferredOutputBufferFrames) }
 
-    /// Everything at once, polyphonic: several notes sounding while a tilt
-    /// drives live axes, in-place physics and the jawari tables together.
+    /// Everything at once: several notes sounding while a tilt drives live
+    /// axes, in-place physics and the jawari tables together.
     func testPolyphonicWithEverythingMoving() throws {
         let r = try perform(
             seconds: 5.0, frames: frames,

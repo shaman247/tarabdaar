@@ -5,8 +5,6 @@ import SarangiKit
 /// The preset document round-trips, partial files apply only what they carry, garbage is rejected.
 final class PresetCodingTests: XCTestCase {
 
-    // MARK: - The document itself
-
     private func fullPreset() -> TarabdaarPreset {
         var p = TarabdaarPreset()
         p.name = "Test rig"
@@ -24,6 +22,8 @@ final class PresetCodingTests: XCTestCase {
         return p
     }
 
+    /// The whole rig round-trips: name, overrides, param values, composites,
+    /// the instrument section and a binding that survives only via its key.
     func testWholeDocumentRoundTrips() throws {
         let a = fullPreset()
         let b = try TarabdaarPreset.decode(a.encoded())
@@ -43,13 +43,9 @@ final class PresetCodingTests: XCTestCase {
                         .controlPoints.last?.y, 1.1)
     }
 
-    /// FX KEYS ARE PRESET KEYS. The rack is now ONE insert definition
-    /// instantiated at four points, but the keys it derives
-    /// (`fx_<point>_<knob>`) are the same strings older `.tarabdaar` files
-    /// already carry — a preset written before the refactor must load
-    /// byte-for-byte, and every key must still resolve in the registry
-    /// (an unknown key would be dropped at apply time and the insert
-    /// would silently rest at its default).
+    /// FX KEYS ARE PRESET KEYS: the derived `fx_<point>_<knob>` keys are the
+    /// strings existing `.tarabdaar` files carry, and every one must still
+    /// resolve — an unknown key is dropped at apply time and rests silently.
     func testFXRackValuesRoundTripAndStillResolve() throws {
         let fx: [String: Double] = [
             "fx_voice_eq_on": 1, "fx_voice_eq_b3": -4.5,
@@ -70,8 +66,9 @@ final class PresetCodingTests: XCTestCase {
         XCTAssertEqual(back.sections(), ["6 parameters"])
     }
 
-    /// A partial preset — say tilt bindings only — must load without
-    /// disturbing anything else. `applyPreset` skips nil sections.
+    /// A partial preset — tilt bindings only — loads without disturbing
+    /// anything else (`applyPreset` skips nil sections), and garbage is
+    /// rejected rather than decoding to a silently empty document.
     func testPartialPresetCarriesOnlyWhatItHas() throws {
         var p = TarabdaarPreset()
         p.name = "Just my tilts"
@@ -81,16 +78,8 @@ final class PresetCodingTests: XCTestCase {
         XCTAssertNil(back.stringOverrides)
         XCTAssertNil(back.paramValues)
         XCTAssertNotNil(back.tiltMapping)
-        // 5  makeDefault seeds the strum-expression
-        // binding (ctl_strum_expr on Stick Y) beside the four classics.
         XCTAssertEqual(back.sections(), ["5 tilt bindings"])
-    }
-
-    func testGarbageIsRejectedRatherThanSilentlyEmpty() {
         XCTAssertThrowsError(try TarabdaarPreset.decode(Data("{}".utf8)))
         XCTAssertThrowsError(try TarabdaarPreset.decode(Data("not json".utf8)))
     }
-
-    // MARK: - Partial and older files
-
 }

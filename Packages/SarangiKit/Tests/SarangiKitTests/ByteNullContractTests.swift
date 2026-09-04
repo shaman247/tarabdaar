@@ -1,12 +1,9 @@
 import XCTest
 @testable import SarangiKit
 
-/// THE BYTE-NULL CONTRACT: every optional path of the String voice, armed
-/// at its resting value, renders bit-identically to an engine that never
-/// heard of it. One phrase, one reference render, one assertion per path.
-/// A failure here means a "0 = off" knob is no longer off — the parity
-/// hash (`TarafRemovalParityTests`) would move too, but this names the
-/// culprit.
+/// THE BYTE-NULL CONTRACT: every optional path of the String voice, armed at
+/// its resting value, renders bit-identically to an engine that never heard of
+/// it. A failure names the "0 = off" knob that is no longer off.
 final class ByteNullContractTests: XCTestCase {
     private func makeEngine() -> BowEngine {
         var bp = BowedStringEngineTests.stringBP()

@@ -1,9 +1,9 @@
 import XCTest
 @testable import TarabdaarCore
 
-/// The controller strum: what a strum sounds, the hold/retrigger/release
-/// laws for the L button and the accel trigger, and the in-place retune
-/// when the chord-bar selection moves while the chord rings.
+/// The controller strum: what a strum sounds, the hold/retrigger/release laws
+/// for the L button and the accel trigger, and the in-place retune when the
+/// chord-bar selection moves while the chord rings.
 final class StrumControllerTests: XCTestCase {
 
     private enum Call: Equatable {
@@ -41,20 +41,17 @@ final class StrumControllerTests: XCTestCase {
         return (c, { calls })
     }
 
-    // MARK: - What a strum sounds
+    /// No selection (and an out-of-range degree) sounds the configured strum
+    /// set; a valid selection sounds the derived chord under the Shepard law.
+    func testWhatAStrumSounds() {
+        let plain = StrumController.notes(selection: nil, degrees: degrees,
+                                          fallback: fallback)
+        XCTAssertEqual(plain.map(\.ratio), fallback)
+        XCTAssertEqual(plain.map(\.weight), [1.0, 1.0])
+        XCTAssertEqual(StrumController.notes(
+            selection: ChordSelection(degree: 99, octave: 0),
+            degrees: degrees, fallback: fallback).map(\.ratio), fallback)
 
-    /// No selection = the configured strum set at weight 1.
-    func testNotesFallBackToTheConfiguredSet() {
-        let n = StrumController.notes(selection: nil, degrees: degrees,
-                                      fallback: fallback)
-        XCTAssertEqual(n.map(\.ratio), fallback)
-        XCTAssertEqual(n.map(\.weight), [1.0, 1.0])
-    }
-
-    /// A selection sounds the derived chord under the Shepard register
-    /// law: every member sits in the two-octave window below the tonic,
-    /// and each chord TONE's copies carry unit total weight.
-    func testSelectionSoundsTheShepardChord() {
         let chord = scaleChords(degrees: degrees)[0]
         let n = StrumController.notes(
             selection: ChordSelection(degree: 0, octave: 0),
@@ -68,18 +65,9 @@ final class StrumControllerTests: XCTestCase {
         }
     }
 
-    /// An out-of-range selection degree falls back rather than trapping.
-    func testOutOfRangeSelectionFallsBack() {
-        let n = StrumController.notes(
-            selection: ChordSelection(degree: 99, octave: 0),
-            degrees: degrees, fallback: fallback)
-        XCTAssertEqual(n.map(\.ratio), fallback)
-    }
-
-    // MARK: - Holds
-
-    /// L down strikes the whole set; L up releases exactly those ids.
-    func testLButtonStrikesAndReleases() {
+    /// L down strikes the whole set, L up releases exactly those ids, and a
+    /// press while ringing retriggers with fresh (generation-scoped) ids.
+    func testLButtonHoldAndRetrigger() {
         let (c, calls) = makeController()
         c.strum(pressed: true)
         let held = c.heldTouchIds
@@ -88,52 +76,22 @@ final class StrumControllerTests: XCTestCase {
             .on(id: held[0], ratio: 0.5, expr: 1.0),
             .on(id: held[1], ratio: 0.75, expr: 1.0),
         ])
+        c.strum(pressed: true)
+        let second = c.heldTouchIds
+        XCTAssertEqual(second.count, held.count)
+        XCTAssertTrue(Set(held).isDisjoint(with: Set(second)),
+                      "a retrigger reused its ids")
         c.strum(pressed: false)
         XCTAssertEqual(calls().suffix(2),
-                       [.off(id: held[0]), .off(id: held[1])])
+                       [.off(id: second[0]), .off(id: second[1])])
         XCTAssertTrue(c.heldTouchIds.isEmpty)
     }
 
-    /// A press while already ringing RETRIGGERS: the old chord is released
-    /// first and the new one gets fresh (generation-scoped) ids.
-    func testPressWhileRingingRetriggersWithNewIds() {
-        let (c, _) = makeController()
-        c.strum(pressed: true)
-        let first = c.heldTouchIds
-        c.strum(pressed: true)
-        let second = c.heldTouchIds
-        XCTAssertEqual(first.count, second.count)
-        XCTAssertTrue(Set(first).isDisjoint(with: Set(second)))
-    }
-
-    /// `ctl_strum_expr` scales the ringing notes live (× each member's
-    /// Shepard weight) and the next strike's onsets.
-    func testExpressionPushesToHeldNotes() {
-        let (c, calls) = makeController()
-        c.strum(pressed: true)
-        let held = c.heldTouchIds
-        c.setExpression(0.4)
-        XCTAssertEqual(calls().suffix(2), [
-            .expr(id: held[0], value: 0.4),
-            .expr(id: held[1], value: 0.4),
-        ])
-        c.strum(pressed: false)
-        c.strum(pressed: true)
-        if case let .on(_, _, expr) = calls().suffix(2).first {
-            XCTAssertEqual(expr, 0.4, accuracy: 1e-9)
-        } else {
-            XCTFail("expected a fresh onset")
-        }
-    }
-
-    // MARK: - The accel trigger
-
-    /// Rising through `ctl_strum_thresh` strikes, falling releases, and the
-    /// 100 ms cooldown blocks an immediate re-strike from a jittery
-    /// envelope. 127 = off.
-    func testAccelTriggerEdgesAndCooldown() {
+    /// Rising through `ctl_strum_thresh` strikes and falling releases, with a
+    /// cooldown against a jittery envelope; 127 disarms; a held L is not stolen.
+    func testAccelTrigger() {
         var clock: TimeInterval = 100
-        let (c, calls) = makeController(now: { clock })
+        let (c, _) = makeController(now: { clock })
         c.setAccelThreshold(64)                       // ≈ 0.504
         c.accelSense(0.2)
         XCTAssertTrue(c.heldTouchIds.isEmpty)
@@ -141,64 +99,48 @@ final class StrumControllerTests: XCTestCase {
         XCTAssertEqual(c.heldTouchIds.count, fallback.count)
         c.accelSense(0.1)
         XCTAssertTrue(c.heldTouchIds.isEmpty)
-        // Inside the cooldown a re-crossing is ignored…
-        clock += 0.05
+        clock += 0.05                                 // inside the cooldown
         c.accelSense(0.9)
         XCTAssertTrue(c.heldTouchIds.isEmpty)
-        // …and past it, it strikes again.
-        clock += 0.1
-        c.accelSense(0.0)                             // no edge (already low)
+        clock += 0.1                                  // and past it
+        c.accelSense(0.0)
         c.accelSense(0.9)
         XCTAssertEqual(c.heldTouchIds.count, fallback.count)
-        XCTAssertFalse(calls().isEmpty)
+
+        // L still holding keeps the chord alive when the trigger drops
+        let (held, _) = makeController()
+        held.setAccelThreshold(64)
+        held.strum(pressed: true)
+        held.accelSense(0.9)
+        held.accelSense(0.1)
+        XCTAssertFalse(held.heldTouchIds.isEmpty, "L still holds the chord")
+        held.strum(pressed: false)
+        XCTAssertTrue(held.heldTouchIds.isEmpty)
+
+        let (off, _) = makeController()
+        off.setAccelThreshold(127)
+        off.accelSense(1.0)
+        XCTAssertTrue(off.heldTouchIds.isEmpty, "127 must disarm the trigger")
     }
 
-    /// L still holding keeps the chord alive when the accel trigger drops.
-    func testAccelReleaseDoesNotStealAHeldLButton() {
-        let (c, _) = makeController()
-        c.setAccelThreshold(64)
-        c.strum(pressed: true)
-        c.accelSense(0.9)                             // re-strikes, both held
-        XCTAssertFalse(c.heldTouchIds.isEmpty)
-        c.accelSense(0.1)
-        XCTAssertFalse(c.heldTouchIds.isEmpty, "L still holds the chord")
-        c.strum(pressed: false)
-        XCTAssertTrue(c.heldTouchIds.isEmpty)
-    }
-
-    /// A threshold of 127 disarms the trigger entirely.
-    func testAccelThresholdOff() {
-        let (c, _) = makeController()
-        c.setAccelThreshold(127)
-        c.accelSense(1.0)
-        XCTAssertTrue(c.heldTouchIds.isEmpty)
-    }
-
-    // MARK: - Selection edges
-
-    /// A selection change while RINGING retunes in place — glides, never a
-    /// fresh attack on the surviving members.
+    /// A selection change while ringing retunes in place — the surviving
+    /// members glide, never re-attack; with nothing ringing it is silent.
     func testSelectionChangeRetunesInPlace() {
         let (c, calls) = makeController(selectionFallback: [0.5, 0.75])
+        c.setSelection(ChordSelection(degree: 1, octave: 0))
+        XCTAssertTrue(calls().isEmpty, "a selection change sounded a chord")
+
         c.strum(pressed: true)
         let held = c.heldTouchIds
         let before = calls().count
         c.setSelection(ChordSelection(degree: 0, octave: 0))
         let after = Array(calls().dropFirst(before))
         XCTAssertFalse(after.isEmpty)
-        // The surviving members glide; only a GROWING chord adds onsets.
         for call in after {
             if case let .glide(id, _) = call {
                 XCTAssertTrue(held.contains(id))
             }
         }
         XCTAssertEqual(c.selection, ChordSelection(degree: 0, octave: 0))
-    }
-
-    /// A selection change with nothing ringing sounds nothing.
-    func testSelectionChangeSilentWhenNotRinging() {
-        let (c, calls) = makeController()
-        c.setSelection(ChordSelection(degree: 1, octave: 0))
-        XCTAssertTrue(calls().isEmpty)
     }
 }

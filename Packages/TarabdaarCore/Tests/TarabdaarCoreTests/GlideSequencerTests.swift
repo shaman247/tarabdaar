@@ -1,7 +1,9 @@
 import XCTest
 @testable import TarabdaarCore
 
-/// The glide queue's rules: off = pass-through, staccato releases immediately, overlap queues and glides, ownership transfer, parked fingers, glide-back cascade, strum exemption.
+/// The glide queue's rules: off = pass-through, staccato releases land
+/// immediately, an overlapping onset queues and glides, ownership transfers on
+/// arrival, parked fingers are silent, releases cascade back, strum is exempt.
 final class GlideSequencerTests: XCTestCase {
 
     enum Call: Equatable {
@@ -41,9 +43,7 @@ final class GlideSequencerTests: XCTestCase {
         }
     }
 
-    /// `over` defaults to 0 here so the trajectory-math tests stay
-    /// exact; the overshoot tests opt in explicitly (the shipped
-    /// registry default is 0.08).
+    /// `over` defaults to 0 so the trajectory math stays exact.
     func enable(rate: Double = 40, held: Double = 0.3,
                 catchup: Double = 4, over: Double = 0) {
         seq.setControl("ctl_glide_on", 1)
@@ -73,10 +73,8 @@ final class GlideSequencerTests: XCTestCase {
         calls.filter { if case .on = $0 { return true }; return false }.count
     }
 
-    // MARK: Pass-through
-
-    /// The parity contract: with the toggle off (the default), every
-    /// event passes through verbatim — overlapping fingers included.
+    /// The parity contract: with the toggle off (the default), every event
+    /// passes through verbatim — overlapping fingers included.
     func testDisabledIsPurePassThrough() {
         seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
         now += 0.01                       // overlapping second finger
@@ -90,8 +88,8 @@ final class GlideSequencerTests: XCTestCase {
         ])
     }
 
-    /// THE STACCATO CONTRACT: a lone tap's release lands immediately —
-    /// no deferral, no sustain (the first cut's regression).
+    /// THE STACCATO CONTRACT: a lone tap's release lands immediately — no
+    /// deferral, no sustain.
     func testStaccatoReleaseIsImmediate() {
         enable()
         seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
@@ -101,10 +99,8 @@ final class GlideSequencerTests: XCTestCase {
                        "off in the release call itself, no tick needed")
     }
 
-    // MARK: Chaining
-
-    /// A second onset while the first is HELD mounts NO note — the
-    /// first voice glides to its pitch and arrives exactly.
+    /// A second onset while the first is HELD mounts NO note — the first
+    /// voice glides to its pitch and arrives exactly.
     func testOverlappingOnsetQueuesAndGlides() {
         enable(rate: 40, held: 1.0)                // held = full rate
         seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
@@ -142,15 +138,9 @@ final class GlideSequencerTests: XCTestCase {
                                         return false })
     }
 
-    // MARK: Overshoot & correction
-
-    // MARK: Parked fingers & glide-back
-
-    /// THE TWO-FINGER OSCILLATION BUG : after ownership
-    /// transfers to the second finger, the still-held FIRST finger's
-    /// wiggles must be ignored — its wire id is the voice's downstream
-    /// id, so letting it fall through to pass-through yanked the pitch
-    /// back on every wiggle. The voice sticks with the owner.
+    /// THE TWO-FINGER OSCILLATION BUG: after ownership transfers, the
+    /// still-held first finger's wiggles must be ignored — its wire id is the
+    /// voice's downstream id, so passing them through yanked the pitch back.
     func testParkedFingerWiggleIsIgnored() {
         enable(rate: 400, held: 1.0)
         seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
@@ -169,35 +159,10 @@ final class GlideSequencerTests: XCTestCase {
         XCTAssertEqual(calls, [.glide(1, 64.3)], "the owner drives")
     }
 
-    /// Releasing the second finger while the first still holds GLIDES
-    /// BACK to the first note; the first finger then owns the voice.
-    func testReleasingOwnerGlidesBackToHeldFirst() {
-        enable(rate: 40, held: 1.0)
-        seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
-        now += 0.05
-        seq.touchOn(2, pitchSemis: 64, velocity: 0.5)
-        advance(0.3)                                    // arrive at 64
-        calls = []
-        seq.touchOff(2)                                 // owner lifts
-        XCTAssertEqual(calls, [], "no bow-up — finger 1 still holds")
-        advance(0.05)
-        guard let mid = lastPitch(1) else { return XCTFail("no glide back") }
-        XCTAssertLessThan(mid, 64)
-        XCTAssertGreaterThan(mid, 60)
-        advance(0.2)
-        XCTAssertEqual(lastPitch(1), 60, "back on the first note")
-        XCTAssertFalse(calls.contains(.off(1)))
-
-        calls = []
-        seq.touchGlide(1, pitchSemis: 60.5)             // 1 owns again
-        XCTAssertEqual(calls, [.glide(1, 60.5)])
-        seq.touchOff(1)
-        XCTAssertEqual(calls.last, .off(1), "last member up = bow up")
-    }
-
-    /// Three held fingers cascade back in most-recent-first order, and
-    /// only the last release lifts the bow.
-    func testThreeFingerCascadeGlidesBackInOrder() {
+    /// Releasing the owner glides BACK to the most recent still-held finger
+    /// and hands it the voice; three fingers cascade in most-recent-first
+    /// order, and only the last release lifts the bow.
+    func testCascadeGlidesBackInOrderAndHandsOverOwnership() {
         enable(rate: 400, held: 1.0)
         seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
         now += 0.05
@@ -215,15 +180,17 @@ final class GlideSequencerTests: XCTestCase {
         advance(0.1)
         XCTAssertEqual(lastPitch(1), 60, "back to the first finger")
         XCTAssertFalse(calls.contains(.off(1)))
-        seq.touchOff(1)
-        XCTAssertEqual(calls.last, .off(1))
         XCTAssertEqual(onCount(), 1, "one voice for the whole episode")
+
+        calls = []
+        seq.touchGlide(1, pitchSemis: 60.5)          // finger 1 owns again
+        XCTAssertEqual(calls, [.glide(1, 60.5)])
+        seq.touchOff(1)
+        XCTAssertEqual(calls.last, .off(1), "last member up = bow up")
     }
 
-    // MARK: Exemption
-
-    /// Exempt touches (the strum chord) pass through even while
-    /// overlapping, and never capture following notes.
+    /// Exempt touches (the strum chord) pass through even while overlapping,
+    /// and never capture following notes.
     func testExemptTouchesBypassTheQueue() {
         enable()
         seq.markExempt(10)
@@ -236,7 +203,4 @@ final class GlideSequencerTests: XCTestCase {
         XCTAssertEqual(calls, [.on(10, 48, 0.9), .on(11, 55, 0.9),
                                .off(10), .off(11)])
     }
-
-    // MARK: Wire plumbing
-
 }

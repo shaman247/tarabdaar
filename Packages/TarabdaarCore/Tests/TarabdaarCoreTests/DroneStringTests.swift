@@ -2,29 +2,11 @@ import XCTest
 import SarangiKit
 @testable import TarabdaarCore
 
-/// Drone buttons map to tarab rows: mapped frequencies resolve to jt rows, decode defaults and prunes stale mappings.
+/// Drone buttons map to tarab rows: every mapped frequency resolves to a jt
+/// row, and the mapping defaults and prunes on decode.
 final class DroneStringTests: XCTestCase {
 
-    private func strings() -> [ResolvedString] {
-        Presets.state(.sarangiPilu).resolvedStrings
-    }
-
-    private func bp() throws -> BowParams {
-        guard let bp = Presets.bowedStringParams() else {
-            throw XCTSkip("bowed_string.json not available in this bundle")
-        }
-        return bp
-    }
-
-    /// The RAGA bridge's rows (the pre-split `jawariRows` input).
-    private func taraf() -> [(f: Double, gain: Double, t60: Double)] {
-        strings().filter { $0.enabled && !$0.chromatic }
-            .map { (f: $0.freq, gain: $0.gain, t60: $0.t60) }
-    }
-
-    /// Every default-mapped string must be found in the BUILT engine's jt
-    /// web by exact nominal Hz — the whole press path (`droneStringFreqs`
-    /// → `droneRow(forExactHz:)`) is an identity chain, so any drift
+    /// The press path is an identity chain on exact nominal Hz, so any drift
     /// between resolve and table build breaks the buttons silently.
     func testMappedFreqsResolveToJtRows() throws {
         let state = Presets.state(.sarangiPilu)
@@ -41,10 +23,8 @@ final class DroneStringTests: XCTestCase {
         }
     }
 
-    /// Documents without `droneStringIds` (including the one-day
-    /// `droneStrings` per-slot-spec era, whose key is ignored) decode to
-    /// the auto-mapping; a mapped id pointing at a deleted string is
-    /// pruned to nil rather than dangling.
+    /// A document without `droneStringIds` decodes to the auto-mapping, and a
+    /// mapped id pointing at a deleted string is pruned rather than dangling.
     func testDecodeDefaultsAndPrunesMapping() throws {
         let state = Presets.state(.sarangiPilu)
         var obj = try JSONSerialization.jsonObject(
@@ -65,7 +45,4 @@ final class DroneStringTests: XCTestCase {
         XCTAssertNil(redecoded.droneStringIds[1])
         XCTAssertEqual(redecoded.droneStringIds[0], state.droneStringIds[0])
     }
-
-    // MARK: - Controller strum set
-
 }

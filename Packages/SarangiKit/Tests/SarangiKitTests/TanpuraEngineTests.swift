@@ -12,6 +12,7 @@ final class TanpuraEngineTests: XCTestCase {
         return p
     }
 
+    /// The table builder is in lockstep with the exporter golden.
     func testTablesLockstepGolden() throws {
         let p = try params()
         guard let gu = Bundle.module.url(forResource: "tanpura_live_golden",
@@ -40,9 +41,8 @@ final class TanpuraEngineTests: XCTestCase {
             let ref = arr(name)
             XCTAssertEqual(mine.count, ref.count, name)
             // per-element scale floored at 1e-6 of the array max: near-
-            // cancelling series entries (dq high-k modes) carry summation-
-            // order noise that reads as huge RELATIVE drift while absolute
-            // error is ~1e-16. Real builder drift lands orders above this.
+            // cancelling series entries carry summation-order noise that
+            // reads as huge relative drift at ~1e-16 absolute error.
             let refMax = ref.reduce(0.0) { max($0, abs($1)) }
             var worst = 0.0
             for i in 0..<min(mine.count, ref.count) {
@@ -55,6 +55,8 @@ final class TanpuraEngineTests: XCTestCase {
         XCTAssertEqual(t.dt, g["dt"] as! Double, accuracy: 1e-18)
     }
 
+    /// The engine mounts an arbitrary JI slot grid, rests silent, and a
+    /// plucked string rings on (no note-off — the string's nature).
     func testEngineSmokeJISlots() throws {
         let p = try params()
         // A JI drone set (low Sa · low Pa · Sa at a 220 Hz tonic) — the
@@ -83,8 +85,6 @@ final class TanpuraEngineTests: XCTestCase {
         render()
         let pre = l.map { abs($0) }.max() ?? 0
         XCTAssertLessThan(pre, 1e-9, "silent engine emitted \(pre)")
-        // pluck Sa, render 2 s: non-silent, finite, still ringing at the
-        // end (no note-off — the string's nature)
         e.pluck(slot: 2, velocity: 100)
         var peak = 0.0
         var lastBlockPeak = 0.0
@@ -100,19 +100,4 @@ final class TanpuraEngineTests: XCTestCase {
                              "string stopped ringing — tanpura strings ring")
         XCTAssertEqual(e.activeStrings, 1)
     }
-
-    /// Dominant pitch by autocorrelation peak over [loHz, hiHz].
-    private func estimateF0(_ x: [Double], sr: Double,
-                            loHz: Double, hiHz: Double) -> Double {
-        let lagLo = max(1, Int(sr / hiHz)), lagHi = Int(sr / loHz)
-        var best = lagLo
-        var bestV = -Double.infinity
-        for lag in lagLo...lagHi {
-            var a = 0.0
-            for i in 0..<(x.count - lag) { a += x[i] * x[i + lag] }
-            if a > bestV { bestV = a; best = lag }
-        }
-        return sr / Double(best)
-    }
-
 }

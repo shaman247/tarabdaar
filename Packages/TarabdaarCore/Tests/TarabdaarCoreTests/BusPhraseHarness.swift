@@ -2,19 +2,10 @@ import XCTest
 import SarangiKit
 @testable import TarabdaarCore
 
-/// Shared render harness for the parity-phrase suites
-/// (TarafRemovalParityTests, BusMeterTests, TarafCapTests): ONE parity
-/// phrase, ONE deterministic build, and — the point —
-/// CACHED neutral baselines. CAUTION: the phrase and build here feed
-/// the PARITY HASH (`TarafRemovalParityTests`) — any edit to the
-/// events, expression, block size or length fails the pinned SHA-256
-/// loudly. That is deliberate: one phrase, one truth. Every suite used
-/// to re-render the identical untouched phrase per test at ~11 s a
-/// render (the deterministic serial-jt path runs ~4–5× slower than
-/// realtime; that is physics, not debug overhead — `-c release`
-/// measured identical). The neutral renders are deterministic by
-/// construction (serial jt is the parity rule), so computing each once
-/// per process is exact, not approximate.
+/// Shared render harness for the parity phrase: ONE phrase, ONE deterministic
+/// build, cached baselines. CAUTION: the events, expression, block size and
+/// length here feed the PARITY HASH (`TarafRemovalParityTests`) — any edit
+/// fails the pinned SHA-256 loudly. That is deliberate: one phrase, one truth.
 enum BusPhrase {
     /// Serial jt (the parity tests' rule): the async pool drops drive
     /// blocks under load, so only the serial path repeats exactly.
@@ -22,22 +13,16 @@ enum BusPhrase {
         "bow_jt_async": 0.0, "bow_jt_threads": 0.0,
     ]
 
-    /// The parity phrase: two overlapping touches with a release tail, so
-    /// the voice bus, the jt bus and the room all carry signal. The
-    /// meter is integrate-and-dump, so two readings come back: `mid` =
-    /// the exact RMS of everything up to 0.9 s (both notes sounding),
-    /// `tail` = 0.9 s → end (releases + the sympathetic ring).
+    /// The parity phrase's output plus, when metered, the integrate-and-dump
+    /// bus RMS up to 0.9 s (`mid`) and from there to the end (`tail`).
     struct Reading {
         let out: [Float]
         let mid: (voice: Double, taraf: Double)
         let tail: (voice: Double, taraf: Double)
     }
 
-    /// Uncached render. `configure` runs after the engine is published —
-    /// the place to arm the balance / comp / cap setters. `overrides`
-    /// exists for TarafRemovalParityTests' reference-capture mode (the
-    /// pre-removal worktree silences the web at build); every normal
-    /// caller keeps the deterministic default.
+    /// Uncached render. `configure` runs after the engine is published;
+    /// `overrides` exists for the reference-capture mode.
     static func render(meter: Bool,
                        overrides: [String: Double] = deterministic,
                        configure: (StringVoiceSource) -> Void = { _ in })

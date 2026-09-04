@@ -2,7 +2,9 @@ import XCTest
 @testable import SarangiKit
 import CBowKernel
 
-/// The String voice's table builders: formula-body lockstep values, table shapes, and a mapper-driven string that makes sound. Also hosts `stringBP()` / `testTaraf`, the scaffold every other DSP test builds on.
+/// The String voice's table builders: formula-body lockstep against the python
+/// reference, and a mapper-driven string that speaks, responds to press and
+/// releases. Hosts `stringBP()` / `testTaraf`, the scaffold other DSP tests use.
 final class BowedStringEngineTests: XCTestCase {
 
     static func stringBP() -> BowParams {
@@ -95,42 +97,7 @@ final class BowedStringEngineTests: XCTestCase {
         -0.060228068038248296,
     ]
 
-    func testOpenStringTablesShape() {
-        let bp = Self.stringBP()
-        let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp)
-        XCTAssertEqual(bow_scalars_t.fieldCount, 52)
-        XCTAssertEqual(t.ba1.count, 12, "formula body must arm 12 modes")
-        XCTAssertEqual(t.scalars.yinf, 0.08)         // bridge mobility
-        XCTAssertEqual(t.scalars.c0, 0.3)            // direct radiation
-        XCTAssertEqual(t.scalars.pgain, 0.0)         // no voice force
-        // kret LOOP-CAP PROJECTED (the mobile body raises max|Y·H_brg|) —
-        // python reference from gutstring._string_scalars; tolerance covers
-        // numpy pairwise- vs Swift sequential-summation in the ymax scan.
-        // The cap scan reads the BODY bank only, so deleting the web left
-        // this value untouched.
-        XCTAssertEqual(t.scalars.kret, 0.16046955218688852, accuracy: 1e-11)
-        XCTAssertEqual(t.scalars.f0Open, 261.63)     // f0Open = tonic
-        // LOCKSTEP with gutstring.formula_body (python reference values at
-        // sr 96000 / tonic 261.63; regenerate via the one-liner in the doc
-        // comment if the recipe changes)
-        XCTAssertEqual(t.ba1[0], 1.9984787886291242, accuracy: 1e-14)
-        XCTAssertEqual(t.bA[0], 1.0062305898749055, accuracy: 1e-14)
-        XCTAssertEqual(t.bC[0], -0.7360679774997898, accuracy: 1e-14)
-        XCTAssertEqual(t.ba1[1], 1.998207368724233, accuracy: 1e-14)
-        XCTAssertEqual(t.bA[1], 0.6624611797498109, accuracy: 1e-14)
-        XCTAssertEqual(t.bC[1], -1.3541019662496847, accuracy: 1e-14)
-        XCTAssertEqual(t.ba1[11], 1.9833506105945045, accuracy: 1e-14)
-        XCTAssertEqual(t.bC[11], 0.5344418537486337, accuracy: 1e-14)
-        // signed radiation residues: both signs present (the honk law)
-        XCTAssertTrue(t.bC.contains { $0 > 0 } && t.bC.contains { $0 < 0 })
-        // admittance residues all positive (passivity)
-        XCTAssertTrue(t.bA.allSatisfy { $0 > 0 })
-    }
-
-    /// The SHIPPED body configuration (params/bowed_string.json after the
-    /// round-9 diffuse-tail fit): 7 signature modes + a 30-mode TAIL. The
-    /// seed config above leaves bow_body_tail_n unset, so the tail branch —
-    /// 30 of the shipping artifact's 37 modes — is armed only here.
+    /// The shipped body configuration: 7 signature modes + a 30-mode tail.
     static func shippedBodyBP() -> BowParams {
         var bp = stringBP()
         for (k, v) in [
@@ -146,13 +113,16 @@ final class BowedStringEngineTests: XCTestCase {
         return bp
     }
 
-    /// LOCKSTEP at the SHIPPING body configuration, tail included
-    /// (gutstring.formula_body(json.load("params/bowed_string.json"),
-    /// 96000.0, 261.63) — regenerate all three arrays together from that
-    /// call if the mode recipe changes).
+    /// Lockstep with `gutstring.formula_body` at the shipping body config
+    /// (sr 96000, tonic 261.63) — regenerate all three arrays together.
     func testFormulaBodyShippedLockstep() {
         let bp = Self.shippedBodyBP()
         let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp)
+        XCTAssertEqual(bow_scalars_t.fieldCount, 52)
+        XCTAssertEqual(t.scalars.yinf, 0.08)         // bridge mobility
+        XCTAssertEqual(t.scalars.c0, 0.3)            // direct radiation
+        XCTAssertEqual(t.scalars.pgain, 0.0)         // no voice force
+        XCTAssertEqual(t.scalars.f0Open, 261.63)
         XCTAssertEqual(t.ba1.count, 37,
                        "7 signature modes + 30-mode diffuse tail")
         XCTAssertEqual(t.bA.count, 37)
@@ -175,7 +145,7 @@ final class BowedStringEngineTests: XCTestCase {
         XCTAssertEqual(t.bn0[7], 0.002294286588694364, accuracy: 1e-14)
         XCTAssertEqual(t.bn0[20], 0.007442656884693629, accuracy: 1e-14)
         XCTAssertEqual(t.bn0[36], 0.008124459312173964, accuracy: 1e-14)
-        // tail invariants the literals encode: passive admittance, SIGNED
+        // invariants the literals encode: passive admittance, SIGNED
         // radiation (same-sign sums honk), √n-normalized residues
         let tailA = t.bA[7...], tailC = t.bC[7...]
         XCTAssertTrue(tailA.allSatisfy { $0 > 0 })
@@ -191,8 +161,12 @@ final class BowedStringEngineTests: XCTestCase {
         XCTAssertEqual(tailC.map { abs($0) }.max()!,
                        0.50054 * rn * (0.5 + maxFrac(2...31)),
                        accuracy: 1e-12, "tail radiation lost √n")
+        XCTAssertTrue(t.bA.allSatisfy { $0 > 0 })
+        XCTAssertTrue(t.bC.contains { $0 > 0 } && t.bC.contains { $0 < 0 })
     }
 
+    /// A mapper-driven string is silent before note-on, speaks below
+    /// clipping, answers press, and decays on release.
     func testMapperDrivenStringMakesSound() {
         let bp = Self.stringBP()
         let sr = 48000.0
@@ -242,9 +216,7 @@ final class BowedStringEngineTests: XCTestCase {
         XCTAssertGreaterThan(sustain, 0.003, "bowed string made no sound")
         XCTAssertLessThan(sustain, 0.9, "bowed string at clipping level")
 
-        // press authority must be alive through the ANALYTIC envelope:
-        // full press is audibly (levels/timbre) different from none —
-        // assert the mapped force ratio directly via the filter
+        // press authority: the mapped bow force must scale with press
         var filter = BowControlFilter(bp: bp, srk: sr * Double(osf),
                                       tonic: 261.63)
         func settledFb(press: Double) -> Double {

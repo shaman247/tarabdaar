@@ -7,12 +7,9 @@ final class BowStereoTests: XCTestCase {
     private func makeEngine(stereo: Bool) -> BowEngine {
         var bp = BowedStringEngineTests.stringBP()
         bp.num["bow_jt_gain"] = 1.0
-        if stereo {
-            // the width law is the WHOLE stereo law: every source stays
-            // centred and the side stream carries only the second
-            // observation point (voice bus + jt-wash bus instances)
-            bp.num["bow_st_width"] = 0.6
-        }
+        // the width law is the whole stereo law: every source stays centred
+        // and the side stream carries only the second observation point
+        if stereo { bp.num["bow_st_width"] = 0.6 }
         let sr = 48000.0
         let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
         let tonic = 261.63
@@ -30,11 +27,8 @@ final class BowStereoTests: XCTestCase {
                                reverbMix: 0.08,
                                reverbWidth: stereo ? 0.6 : 0.0,
                                maxPoly: 8)
-        // headroom: the fold-down invariance below is a BELOW-CEILING
-        // contract — the safety limiter is linked-stereo (one gain from
-        // max(|L|, |R|)), so a render that clips would legitimately fold
-        // down differently from the mono one. 0.07 keeps the armed peak
-        // (~0.6) under the 0.8 ceiling with the pin force radiating.
+        // headroom: fold-down invariance is a BELOW-CEILING contract — the
+        // linked-stereo limiter would legitimately break it above 0.8.
         engine.outGain = 0.07
         return engine
     }
@@ -62,6 +56,8 @@ final class BowStereoTests: XCTestCase {
         return (l, r)
     }
 
+    /// Unarmed the render is L == R; armed it grows a side stream whose
+    /// L+R fold-down is still the mono render.
     func testStereoSidePathAndMonoFoldDownInvariance() {
         let mono = renderSeconds(makeEngine(stereo: false), seconds: 2.0)
         let wide = renderSeconds(makeEngine(stereo: true), seconds: 2.0)
@@ -83,8 +79,7 @@ final class BowStereoTests: XCTestCase {
         XCTAssertGreaterThan(sideRMS / midRMS, 0.02,
                              "armed stereo produced no side energy")
 
-        // 3. fold-down invariance: mid of the armed render == the unarmed
-        //    render (identical deterministic mid path; side cancels)
+        // 3. fold-down invariance: the side cancels, the mid path is identical
         var maxErr = 0.0
         for i in 0..<mono.l.count {
             let sum = 0.5 * (wide.l[i] + wide.r[i])
@@ -92,9 +87,6 @@ final class BowStereoTests: XCTestCase {
         }
         XCTAssertLessThan(maxErr, 1e-9,
                           "armed L+R fold-down diverged from the mono render")
-        print("bow stereo: mid rms \(String(format: "%.5f", midRMS)), " +
-              "side/mid \(String(format: "%.3f", sideRMS / midRMS)), " +
-              "folddown err \(String(format: "%.2e", maxErr))")
     }
 
 }

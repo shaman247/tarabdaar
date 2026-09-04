@@ -18,14 +18,8 @@ final class RebuildCostTests: XCTestCase {
                                       overrides: overrides)
     }
 
-    // MARK: - 1. Wall-clock
-
-    // MARK: - 2. Continuity
-
-    // MARK: - 3. The two fixes
-
-    /// The crossfade renders two engines at once. Confirm that window
-    /// still fits the realtime budget with headroom.
+    /// The crossfade renders two engines at once — that window must still fit
+    /// the realtime budget with headroom.
     func testCrossfadeCpuFitsRealtime() throws {
         let src = StringVoiceSource()
         let mapper = src.mapper
@@ -67,18 +61,10 @@ final class RebuildCostTests: XCTestCase {
                           "the crossfade window overruns the realtime budget")
     }
 
-    /// Publishing a freshly built engine must be SILENT. Historically this
-    /// was a relative A/B (short pre-roll vs the old 6-block one) because
-    /// the chime asymptoted at ~-50 dBFS and no affordable pre-roll could
-    /// do better. The DAMPED SETTLE killed the chime at the
-    /// cause — the taraf is choked while the discarded blocks render, so
-    /// the q0 relax dies inside them and the anchors' 7-9 s tails never
-    /// ride out — which makes an ABSOLUTE bar meaningful for the first
-    /// time: publish peak (both engines idling through the crossfade) at
-    /// or below -80 dBFS. Measured at the bake: -102 dBFS with 5 settle
-    /// blocks, -110 with 6 (noise floor; the old relative 2 dB tolerance
-    /// became a meaningless ratio of two near-zeros and was retired).
-    func testShortPreRollIsNoLouderOnPublishThanTheOldLongOne() throws {
+    /// Publishing a freshly built engine must be SILENT: the settle pre-roll
+    /// chokes the taraf while the discarded blocks render, so the publish peak
+    /// of two idling engines through the crossfade stays under −80 dBFS.
+    func testPublishingAFreshEngineIsSilent() throws {
         func publishPeak(settle: Int) throws -> Double {
             let saved = StringVoiceSource.settleBlocks
             StringVoiceSource.settleBlocks = settle
@@ -102,22 +88,21 @@ final class RebuildCostTests: XCTestCase {
             }
             return peak
         }
-        let long = try publishPeak(settle: 6)        // the old 6-block value
+        let long = try publishPeak(settle: 6)        // a longer pre-roll
         let short = try publishPeak(settle: StringVoiceSource.settleBlocks)
         print(String(format: """
             PUBLISH CHIME (idle, through the crossfade)
-              6-block pre-roll (old)   %.5f  (%.0f dBFS)
-              %d-block pre-roll (now)   %.5f  (%.0f dBFS)
+              6-block pre-roll   %.5f  (%.0f dBFS)
+              %d-block pre-roll   %.5f  (%.0f dBFS)
             """,
             long, 20 * log10(max(long, 1e-9)),
             StringVoiceSource.settleBlocks, short,
             20 * log10(max(short, 1e-9))))
         XCTAssertLessThan(20 * log10(max(long, 1e-9)), -80,
-                          "even the LONG pre-roll publishes audibly — the "
-                          + "damped settle is not choking the chime")
+                          "even the longer pre-roll publishes audibly — the "
+                          + "settle is not choking the taraf")
         XCTAssertLessThan(20 * log10(max(short, 1e-9)), -80,
                           "the shipped pre-roll publishes above -80 dBFS — "
-                          + "the damped settle is not choking the chime "
-                          + "(or settleBlocks fell below what the choke needs)")
+                          + "settleBlocks fell below what the choke needs")
     }
 }

@@ -1,37 +1,18 @@
 import XCTest
 @testable import TarabdaarCore
 
-/// TarabLink: hello brings the link up, echoed own traffic is ignored, dedupe with hello-epoch reset, pad → host end to end.
+/// TarabLink: the hello handshake with its epoch reset, own-echo rejection,
+/// event dedupe, and pad → host end to end.
 final class TarabLinkTests: XCTestCase {
 
     private func envelope(_ frame: TLPFrame, from role: TLPRole = .pad) -> [UInt8] {
         TLPPack.envelope(frame.encode(), role: role)
     }
 
-    func testHelloBringsLinkUpAndGreetsBack() {
-        let host = TarabLink(role: .host)
-        var sent: [[UInt8]] = []
-        host.sendRaw = { bytes, _ in sent.append(bytes) }
-        XCTAssertFalse(host._testStatus.isUp)
-        host._testProcess(envelope(.event(seq: 1, .hello(minVer: TLP.versionMin, maxVer: TLP.versionMax,
-                                                         role: .pad))))
-        XCTAssertTrue(host._testStatus.isUp)
-        // The greet-back went out as a TLP hello, stamped with OUR role.
-        XCTAssertTrue(sent.allSatisfy { TLPPack.unenvelope($0)?.role == .host })
-        let decoded = sent.compactMap { TLPPack.unenvelope($0)?.frame }
-            .compactMap(TLPFrame.decode)
-        XCTAssertTrue(decoded.contains {
-            if case .event(_, .hello(_, _, .host)) = $0 { return true }
-            return false
-        })
-    }
-
+    /// A MIDI loop echoes a side's own frames back at it: a looped hello must
+    /// never mark the link up, and looped events must not consume the
+    /// sequence gate the real peer's low seqs then need.
     func testOwnEchoedTrafficIgnored() {
-        // A MIDI loop (IAC bus, patchbay, USB+BLE double delivery) can
-        // echo a side's own frames back at it. They must be dropped: a
-        // looped hello must never mark the link up (it would arm the
-        // staleness kill path with no peer), and looped events must not
-        // consume the shared sequence gate.
         let host = TarabLink(role: .host)
         host.sendRaw = { _, _ in }
         var events: [TLPEvent] = []
@@ -51,13 +32,26 @@ final class TarabLinkTests: XCTestCase {
         XCTAssertEqual(events, [.resyncRequest])
     }
 
-    func testEventDedupeAndHelloEpochReset() {
+    /// A peer hello brings the link up and is greeted back with our own role;
+    /// duplicate and stale event seqs are dropped, and a peer restart's hello
+    /// re-anchors the epoch so its small seqs are accepted again.
+    func testHelloHandshakeAndEventDedupe() {
         let host = TarabLink(role: .host)
-        host.sendRaw = { _, _ in }
+        var sent: [[UInt8]] = []
+        host.sendRaw = { bytes, _ in sent.append(bytes) }
         var events: [TLPEvent] = []
         host.onEvent = { events.append($0) }
+        XCTAssertFalse(host._testStatus.isUp)
         host._testProcess(envelope(.event(seq: 10, .hello(minVer: TLP.versionMin, maxVer: TLP.versionMax,
                                                           role: .pad))))
+        XCTAssertTrue(host._testStatus.isUp)
+        // the greet-back went out as a TLP hello, stamped with OUR role
+        XCTAssertTrue(sent.allSatisfy { TLPPack.unenvelope($0)?.role == .host })
+        XCTAssertTrue(sent.compactMap { TLPPack.unenvelope($0)?.frame }
+            .compactMap(TLPFrame.decode).contains {
+                if case .event(_, .hello(_, _, .host)) = $0 { return true }
+                return false
+            })
         host._testProcess(envelope(.event(seq: 11, .resyncRequest)))
         host._testProcess(envelope(.event(seq: 11, .resyncRequest)))   // dup (lane overlap)
         host._testProcess(envelope(.event(seq: 5, .panic)))            // stale
@@ -69,8 +63,9 @@ final class TarabLinkTests: XCTestCase {
         XCTAssertEqual(events.count, 2)
     }
 
+    /// The whole tunnel minus CoreMIDI: a real `OutboundPlayState` through the
+    /// pad's paced tick arrives at the host's ingest as one on and one off.
     func testPadToHostEndToEnd() {
-        // Pad side: real OutboundPlayState through the paced tick.
         let pad = TarabLink(role: .pad)
         let state = OutboundPlayState()
         pad.attach(playState: state)

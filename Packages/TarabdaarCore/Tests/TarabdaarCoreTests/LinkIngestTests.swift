@@ -1,7 +1,8 @@
 import XCTest
 @testable import TarabdaarCore
 
-/// LinkIngest / OutboundPlayState lifecycle: onset carries pitch atomically, retrigger via onsetSeq, coalesced releases survive, a link drop kills only its own touches.
+/// LinkIngest / OutboundPlayState touch lifecycle: onsets carry their pitch,
+/// retriggers and releases survive coalescing, and a drop is surgical.
 final class LinkIngestTests: XCTestCase {
 
     private final class RecordingSink: LinkPerformanceSink {
@@ -42,28 +43,21 @@ final class LinkIngestTests: XCTestCase {
         TLPTouch(id: id, onsetSeq: onset, velocity: vel, pitch: pitch)
     }
 
-    func testOnsetCarriesPitchAtomically() {
+    /// An onset arrives as ONE call carrying its exact pitch, and a new
+    /// `onsetSeq` on a live id retriggers even when the off+on collapsed into
+    /// a single coalesced frame.
+    func testOnsetCarriesPitchAndRetriggersViaOnsetSeq() {
         let sink = RecordingSink()
         let ingest = LinkIngest(sink: sink)
-        ingest.apply(frame(seq: 1, touches: [touch(1, pitch: 62.37)]))
-        // ONE call, onset + exact pitch together — the property the MIDI
-        // path's pending-pluck hack existed to fake.
+        ingest.apply(frame(seq: 1, touches: [touch(1, onset: 5, pitch: 62.37)]))
+        XCTAssertEqual(sink.calls, [.on(1, Double(Float(62.37)), 1.0)])
+        sink.calls.removeAll()
+        ingest.apply(frame(seq: 2, touches: [touch(1, onset: 6, pitch: 62.37)]))
         XCTAssertEqual(sink.calls, [.on(1, Double(Float(62.37)), 1.0)])
     }
 
-    func testRetriggerViaOnsetSeqSurvivesCoalescing() {
-        let sink = RecordingSink()
-        let ingest = LinkIngest(sink: sink)
-        ingest.apply(frame(seq: 1, touches: [touch(1, onset: 5, pitch: 60)]))
-        sink.calls.removeAll()
-        // Same id, new onsetSeq = an off+on collapsed into one frame.
-        ingest.apply(frame(seq: 2, touches: [touch(1, onset: 6, pitch: 60)]))
-        XCTAssertEqual(sink.calls, [.on(1, 60, 1.0)])
-    }
-
+    /// Sender-side coalescing plus the receiver diff can never lose a release.
     func testCoalescedReleaseNeverLost() {
-        // Sender-side coalescing (LinkOutbox) + receiver diff: a frame
-        // burst on→(off dropped by coalescing)→empty must still release.
         let box = LinkOutbox()
         box.enqueue(.perfState(frame(seq: 1, touches: [touch(1, pitch: 60)])))
         box.enqueue(.perfState(frame(seq: 2, touches: [])))   // replaces frame 1
@@ -86,6 +80,8 @@ final class LinkIngestTests: XCTestCase {
         XCTAssertEqual(sink2.calls, [.on(1, 60, 1.0), .off(1)])
     }
 
+    /// A drop is SURGICAL: exactly the wire's touches and held drones, never
+    /// a global all-off (which would kill the Mac's own pad notes).
     func testLinkDropKillsOnlyItsOwnTouches() {
         let sink = RecordingSink()
         let ingest = LinkIngest(sink: sink)
@@ -93,8 +89,6 @@ final class LinkIngestTests: XCTestCase {
                            drones: 0b101))
         sink.calls.removeAll()
         ingest.linkDidDrop()
-        // SURGICAL: exactly the wire's touches + held drones, never a
-        // global all-off (which would kill the Mac's local-pad notes).
         XCTAssertFalse(sink.calls.contains(.allOff))
         XCTAssertEqual(Set(sink.calls), Set([.off(1), .off(2),
                                              .drone(0, false), .drone(2, false)]))
@@ -108,8 +102,8 @@ final class LinkIngestTests: XCTestCase {
         XCTAssertEqual(sink.calls.filter { $0 == .off(9) }.count, 1)
     }
 
-    // MARK: OutboundPlayState → frame → ingest, end to end
-
+    /// `OutboundPlayState` → frame → ingest, end to end: on, glide, drone,
+    /// off, and a clean state emits no frame at all.
     func testOutboundLifecycleEndToEnd() {
         let out = OutboundPlayState()
         let sink = RecordingSink()

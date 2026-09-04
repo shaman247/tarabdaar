@@ -13,18 +13,13 @@ final class TarafRemovalParityTests: XCTestCase {
         ProcessInfo.processInfo.environment["TARABDAAR_TARAF_REF"] == "write"
     }
 
-    /// The shipped jawari block runs ASYNC on a worker pool (`bow_jt_async`
-    /// 1, `bow_jt_threads` 8): it is one block late and drops drive blocks
-    /// under load, so a render is NOT reproducible sample-for-sample — that
-    /// is a scheduling property, not a sound change. Both sides of this
-    /// comparison therefore run the SERIAL jt path, which the kernel
-    /// documents as bit-exact.
+    /// The shipped jawari block runs async on a worker pool and drops drive
+    /// blocks under load, so only the serial jt path repeats sample for sample.
     private static let deterministic: [String: Double] = [
         "bow_jt_async": 0.0, "bow_jt_threads": 0.0,
     ]
 
-    /// While capturing, the old build is silenced the way the user had it
-    /// (coupling Z 0); afterwards there is no knob left to silence.
+    /// Reference capture only: the pre-removal worktree silences the web.
     private static var referenceOverrides: [String: Double] {
         var o = deterministic
         if writing {
@@ -46,14 +41,8 @@ final class TarafRemovalParityTests: XCTestCase {
         return u.appendingPathComponent("build/taraf_removal_ref.raw")
     }
 
-    /// The phrase lives in `BusPhrase`: two overlapping notes with
-    /// expression and a release tail, so the string, the body, the
-    /// jawari web and the room all contribute to the comparison. The
-    /// unmetered NEUTRAL render is cached there and rendered at most
-    /// once per process — this suite renders fresh audio exactly once
-    /// (the reproducibility check below), which also proves the cache
-    /// exact. The write path (reference capture in the pre-removal
-    /// worktree) renders fresh with the web-silencing overrides.
+    /// The phrase lives in `BusPhrase`: two overlapping notes with expression
+    /// and a release tail, so string, body, jawari web and room all contribute.
     private func render() throws -> [Float] {
         if Self.writing {
             return try BusPhrase.render(
@@ -62,11 +51,8 @@ final class TarafRemovalParityTests: XCTestCase {
         return try BusPhrase.neutral(metered: false).out
     }
 
-    /// The comparison is only meaningful if the render repeats exactly —
-    /// and every suite leaning on `BusPhrase`'s cached baseline needs
-    /// exactly this guarantee, so the ONE fresh render this suite pays
-    /// is compared against the shared cache rather than a second fresh
-    /// copy.
+    /// The comparison is only meaningful if the render repeats exactly, so the
+    /// one fresh render is checked against the cached baseline.
     func testSerialRenderIsReproducible() throws {
         let fresh = try BusPhrase.render(meter: false).out
         let cached = try BusPhrase.neutral(metered: false).out
@@ -76,15 +62,12 @@ final class TarafRemovalParityTests: XCTestCase {
                        + "BusPhrase baseline) cannot mean anything")
     }
     /// The blessed render's SHA-256. Re-bless DELIBERATELY when the shipped
-    /// sound changes (write mode: `TARABDAAR_TARAF_REF=write`), and say why
-    /// in the commit. Last bless: pin-force radiation baked in — the
-    /// radiated sample is contact force + termination force. (The phrase
-    /// was later re-expressed as touch events when the in-process MIDI
-    /// vocabulary was removed; max sample delta 0.0 — bit-identical, so
-    /// the hash did NOT move.)
+    /// sound changes (write mode: `TARABDAAR_TARAF_REF=write`) and say why in
+    /// the commit.
     private static let referenceSHA256 =
         "b61d3c209868e1875cc3bff79c2d5092f652d4453bf7121796aee570aabf57f4"
 
+    /// The shipped signal path still renders the blessed phrase.
     func testDefaultMatchesTheSilencedWebReference() throws {
         let y = try render()
         XCTAssertGreaterThan(y.map { abs($0) }.max() ?? 0, 1e-4,

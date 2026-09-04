@@ -1,7 +1,9 @@
 import XCTest
 @testable import TarabdaarCore
 
-/// TLP wire format: frames round-trip byte-exactly, truncation never decodes, 7-in-8 packing and the SysEx envelope round-trip, the outbox never drops or reorders events, sequence comparison is wrap-aware.
+/// TLP wire format: frames round-trip byte-exactly, truncation never decodes,
+/// the 7-in-8 SysEx envelope round-trips, sequence comparison is wrap-aware,
+/// and the outbox never drops, reorders or stales an event.
 final class TLPCodecTests: XCTestCase {
 
     private func samplePerf(touches: Int) -> TLPPerfState {
@@ -48,6 +50,7 @@ final class TLPCodecTests: XCTestCase {
         ]
     }
 
+    /// Every frame type survives encode → decode unchanged and fits the cap.
     func testRoundTripAllFrameTypes() {
         for frame in sampleFrames {
             let bytes = frame.encode()
@@ -56,6 +59,7 @@ final class TLPCodecTests: XCTestCase {
         }
     }
 
+    /// A truncated frame decodes to nothing, never to a plausible one.
     func testTruncationNeverDecodes() {
         for frame in sampleFrames {
             let bytes = frame.encode()
@@ -66,6 +70,7 @@ final class TLPCodecTests: XCTestCase {
         }
     }
 
+    /// Sequence comparison is wrap-aware over the 16-bit space.
     func testSeqIsNewerWrapAware() {
         XCTAssertTrue(TLP.isNewer(1, than: 0))
         XCTAssertFalse(TLP.isNewer(0, than: 0))
@@ -75,9 +80,9 @@ final class TLPCodecTests: XCTestCase {
         XCTAssertFalse(TLP.isNewer(65500, than: 100))
     }
 
-    // MARK: 7-in-8 + envelope
-
-    func testPackRoundTripAllLengths() {
+    /// The 7-in-8 packing round-trips at every length and the SysEx envelope
+    /// stamps its sender role, keeping every interior byte 7-bit clean.
+    func testEnvelopeAndPackRoundTrip() {
         for len in 0...64 {
             let payload = (0..<len).map { i in
                 UInt8(truncatingIfNeeded: i &* 37 &+ 129)
@@ -86,9 +91,6 @@ final class TLPCodecTests: XCTestCase {
             XCTAssertTrue(packed.allSatisfy { $0 & 0x80 == 0 }, "len \(len) not 7-bit clean")
             XCTAssertEqual(TLPPack.unpack(packed[...]), payload, "len \(len)")
         }
-    }
-
-    func testEnvelopeRoundTrip() {
         for frame in sampleFrames {
             for role in [TLPRole.pad, .host] {
                 let bytes = frame.encode()
@@ -107,9 +109,10 @@ final class TLPCodecTests: XCTestCase {
         }
     }
 
-    // MARK: outbox discipline
-
-    func testOutboxEventsNeverDropOrReorder() {
+    /// OUTBOX DISCIPLINE: events are never dropped or reordered behind a state
+    /// frame, while state frames coalesce per type, latest wins — so a
+    /// coalesced queue can never lose the release-carrying frame.
+    func testOutboxDiscipline() {
         let box = LinkOutbox()
         box.enqueue(.event(seq: 0, .panic))
         box.enqueue(.perfState(samplePerf(touches: 1)))
@@ -119,25 +122,18 @@ final class TLPCodecTests: XCTestCase {
         while let item = box.dequeue() { seen.append(item.bytes[0]) }
         XCTAssertEqual(seen, [TLP.typePanic, TLP.typePerfState,
                               TLP.typeResyncRequest, TLP.typePing])
-    }
 
-    func testOutboxStateCoalescesPerTypeLatestWins() {
-        let box = LinkOutbox()
+        let box2 = LinkOutbox()
         let old = samplePerf(touches: 2)
         var newer = samplePerf(touches: 0)   // the release-carrying frame
         newer.stateSeq = old.stateSeq &+ 1
-        box.enqueue(.perfState(old))
-        box.enqueue(.joyConState(TLPJoyConState(flags: 0, stateSeq: 0, timestampUs: 0,
-                                                stickX: 0, stickY: 0, wrist1: 0, wrist2: 0)))
-        box.enqueue(.perfState(newer))
-        XCTAssertEqual(box.count, 2)
-        // The surviving perf frame must be the NEWER one — a coalesced
-        // queue can never lose a release.
-        let frames = [box.dequeue()!, box.dequeue()!]
+        box2.enqueue(.perfState(old))
+        box2.enqueue(.joyConState(TLPJoyConState(flags: 0, stateSeq: 0, timestampUs: 0,
+                                                 stickX: 0, stickY: 0, wrist1: 0, wrist2: 0)))
+        box2.enqueue(.perfState(newer))
+        XCTAssertEqual(box2.count, 2)
+        let frames = [box2.dequeue()!, box2.dequeue()!]
         let perf = frames.first { $0.stateType == TLP.typePerfState }!
         XCTAssertEqual(TLPFrame.decode(perf.bytes), .perfState(newer))
     }
-
-    // MARK: clock
-
 }

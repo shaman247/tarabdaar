@@ -531,7 +531,10 @@ per‑string table is not present; the taraf sits on the scale's JI grid.
 
 ## Tests
 
-The guard set is deliberately small; the sound is judged by ear.
+The guard set is deliberately small — about 77 tests. One render hash pins the
+sound; everything else pins a contract that would otherwise break silently, a
+stability bound, or a lockstep with a golden. No calibration numbers live in
+tests; the sound is judged by ear.
 
 - **`TarafRemovalParityTests`** (TarabdaarCore, gated) — the SHA‑256 of one
   rendered phrase pins the whole shipped signal path. Bless deliberately.
@@ -539,11 +542,12 @@ The guard set is deliberately small; the sound is judged by ear.
   resting value renders bit‑identically: scope meters, bus meter, FX rack,
   cap, balance, inject, damp, tilt, body, register, master gain, tone LP
   bypass. Add a case per new "0 = off" knob.
-- **Kernel lockstep** (SarangiKit) — `BowedStringEngineTests` (formula body,
-  table shapes, the shared `stringBP()`/`testTaraf` scaffold), `BowPolyTests`
-  (a chord stays bounded), `BowStereoTests` (fold‑down invariance),
-  `TanpuraEngineTests` (exporter golden), `TouchMapperTests` (touch path ≡
-  MIDI path — the parity substrate).
+- **Kernel lockstep** (SarangiKit) — `BowedStringEngineTests` (formula body
+  against the python reference, plus the shared `stringBP()`/`testTaraf`
+  scaffold and a mapper‑driven string that speaks, answers press and
+  releases), `BowPolyTests` (a max‑force chord stays bounded), `BowStereoTests`
+  (fold‑down invariance), `TanpuraEngineTests` (exporter golden),
+  `TouchMapperTests` (the allocation law on the one note path).
 - **`TarafCoupleTests`** (TarabdaarCore, gated) — two‑way coupling: a
   resting web returns no bridge load, a coupled ring at the top of the range
   goes fully silent with every row asleep, and the heavy chord still decays
@@ -551,11 +555,13 @@ The guard set is deliberately small; the sound is judged by ear.
 - **Realtime / rebuild / in‑place** (TarabdaarCore, gated; phase 2 serial in
   `tools/test-full.sh`) — `RealtimePerformanceTests`, `RebuildCostTests`,
   `ZipperTests`, `LiveParamPushTests`.
-- **Model and wire** (fast) — `ParamUnificationTests`, `PresetCodingTests`,
-  `TarabRatioTests`, `TarabSetTests`, `DroneStringTests`, `ScaleLabelTests`,
-  plus the link/pad/glide suites (`TLPCodecTests`, `TarabLinkTests`,
-  `LinkIngestTests`, `GlideSequencerTests`, `FretLayoutTests`, `FretWarpTests`,
-  `ChordBarTests`, `ScalePresetTests`).
+- **Model, wire and control** (fast) — `ParamUnificationTests`,
+  `FXRackTests`, `PresetCodingTests`, `TarabRatioTests`, `TarabSetTests`,
+  `DroneStringTests`, `ScaleLabelTests`, `ScalePresetTests`,
+  `ControlCacheConcurrencyTests`, plus the link/pad/control suites
+  (`TLPCodecTests`, `TarabLinkTests`, `LinkIngestTests`, `LinkRelayTests`,
+  `GlideSequencerTests`, `StrumControllerTests`, `ControlAxisEvaluatorTests`,
+  `JoyConMapperTests`, `FretLayoutTests`, `FretWarpTests`, `ChordBarTests`).
 
 Run both packages' `swift test` and `tools/test-full.sh` before committing a
 kernel, builder, parameter or levels change.

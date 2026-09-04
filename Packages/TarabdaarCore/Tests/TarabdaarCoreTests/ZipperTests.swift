@@ -10,18 +10,9 @@ final class ZipperTests: XCTestCase {
         Presets.state(.sarangiPilu).resolvedStrings
     }
 
-    /// Render a held note while sweeping `key` from `lo` to `hi`, pushing a
-    /// new value every `stepFrames` samples (the control rate).
-    ///
-    /// The measured signal starts AFTER the settle, and every metric here
-    /// is coarse-vs-fine of the SAME sweep, so the settle only needs the
-    /// tone speaking steadily — 4 blocks (~0.34 s, past the ~130 ms
-    /// liveness settle), not the 8 the first cut rendered. And the jawari
-    /// tables (~4.4 ms per push — the dominant cost of a 64-frame fine
-    /// sweep) are rebuilt only for jt keys, the same rule the realtime
-    /// rig uses; `testNoOpPushIsBitIdentical` proves a push of unchanged
-    /// tables is inert, so skipping them for unrelated keys changes
-    /// nothing but the wall clock.
+    /// Render a held note while sweeping `key` from `lo` to `hi`, pushing a new
+    /// value every `stepFrames` samples. Every metric is coarse-vs-fine of the
+    /// SAME sweep, so the settle only has to leave the tone speaking steadily.
     private func sweep(key: String, lo: Double, hi: Double,
                        stepFrames: Int, seconds: Double) -> [Double]? {
         let src = StringVoiceSource()
@@ -69,9 +60,9 @@ final class ZipperTests: XCTestCase {
         return (sum / Double(max(x.count, 1))).squareRoot()
     }
 
-    /// WORST CASE: a tilt FLICKED — full parameter range in ~150 ms. At
-    /// 60 Hz that is only ~9 updates, so each step is a large fraction of
-    /// the range. A slow sweep hides zipper; this is where it shows.
+    /// WORST CASE: a tilt flicked through its full range in ~150 ms — at 60 Hz
+    /// only ~9 updates, each a large fraction of the range. A slow sweep hides
+    /// zipper; this is where it shows.
     func testFastFlickDoesNotZipper() throws {
         let sr = 48000.0
         let tiltStep = Int(sr / 60.0)

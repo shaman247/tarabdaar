@@ -6,12 +6,8 @@ import SarangiKit
 final class LiveParamPushTests: XCTestCase {
     override func setUpWithError() throws { try skipUnlessSlowTestsEnabled() }
 
-    /// Serial jt (the parity tests' rule): the async dispatcher + worker
-    /// pool are for realtime headroom, not offline pulls — faster-than-
-    /// realtime rendering underruns the web ring constantly, exercising
-    /// the offline-pull fallback against the dispatcher, and the async
-    /// path drops drive blocks under load so nothing repeats exactly
-    /// anyway. Every buildEngine in this suite takes these.
+    /// Serial jt (the parity rule): the async pool drops drive blocks under
+    /// load, so only the serial path repeats exactly.
     private static let deterministic: [String: Double] = [
         "bow_jt_async": 0.0, "bow_jt_threads": 0.0,
     ]
@@ -47,20 +43,10 @@ final class LiveParamPushTests: XCTestCase {
         return out
     }
 
-    /// A pushed edit must land on the same sound a rebuild would have
-    /// produced. Compares the steady state of (a) push-then-settle against
-    /// (b) an engine built with the value baked in from the start.
-    ///
-    /// SETTLE LENGTH MATTERS (the taraf-web removal). This used
-    /// to render 10 blocks and measure the last 8192 samples, which caught
-    /// the bowed tone still on its way to steady state — the two engines
-    /// were compared mid-transient. The linear sympathetic web hid that:
-    /// its ring was a large, history-insensitive share of the total RMS.
-    /// With the web gone the pure string's transient is the whole signal
-    /// and the same window read 2.1 dB (2.3 dB on the pre-removal build
-    /// with the web merely silenced — i.e. the window, not the change).
-    /// Rendering to a genuine steady state instead puts push and rebuild
-    /// within 0.1 dB, which is the claim this test exists to make.
+    /// A pushed edit lands on the same sound a rebuild would have produced:
+    /// the steady state of push-then-settle against an engine built with the
+    /// value baked in. Both sides must reach a genuine steady state — compared
+    /// mid-transient the two legitimately differ.
     func testPushedValueMatchesARebuiltEngine() throws {
         let key = "bow_mu_s", v = 1.1
         guard let (pushed, _) = makeSource() else {
@@ -91,20 +77,15 @@ final class LiveParamPushTests: XCTestCase {
         print(String(format:
             "PUSH vs REBUILD (%@ = %.2f): pushed %.5f, rebuilt %.5f (%+.2f dB)",
             key, v, p, r, db))
-        // Same physics, different history — the friction loop is chaotic,
-        // so demand agreement in level rather than sample identity. The
-        // measured figure is ~0.1 dB; the bar is loose enough to survive a
-        // note landing on a slightly different limit cycle.
+        // Same physics, different history — the friction loop is chaotic, so
+        // demand agreement in level rather than sample identity.
         XCTAssertLessThan(abs(db), 1.5,
                           "a pushed value settles somewhere a rebuild does not")
     }
 
-    /// A push that changes NOTHING must be bit-identical. This caught a
-    /// real bug: arming the ramp caps `render`'s chunk to 256 frames, and
-    /// chunk size sets the control-interpolation grid and the jt block
-    /// boundaries — so a no-op push split a 4096-frame offline render and
-    /// moved a chaotic friction loop by 41% of peak. The ramp is now armed
-    /// only when a ramped quantity actually moved.
+    /// A push that changes NOTHING must be bit-identical: arming the ramp caps
+    /// the render chunk, and chunk size sets the control grid and the jt block
+    /// boundaries, so a no-op push could move a chaotic friction loop.
     func testNoOpPushIsBitIdentical() throws {
         let strings = self.strings()
         func run(push: Bool) -> [Double] {

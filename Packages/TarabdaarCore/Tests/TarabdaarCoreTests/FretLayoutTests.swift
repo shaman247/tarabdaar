@@ -7,16 +7,6 @@ final class FretLayoutTests: XCTestCase {
 
     private let degrees = scaleDegrees(from: PitchScale.defaultJI)
 
-    private func x(of label: String, in a: FretArrangement) -> Double {
-        let i = degrees.firstIndex { $0.label == label }!
-        return a.segments.first { $0.degreeIndex == i }!.x
-    }
-
-    private func segment(_ label: String, in a: FretArrangement) -> FretSegment {
-        let i = degrees.firstIndex { $0.label == label }!
-        return a.segments.first { $0.degreeIndex == i }!
-    }
-
     /// The persisted fields of each segment — `FretSegment.id` is per-process
     /// (minted fresh on decode), so a round trip is compared on these.
     private func layout(_ a: FretArrangement) -> [[Double]] {
@@ -24,13 +14,8 @@ final class FretLayoutTests: XCTestCase {
                           $0.enabled ? 1 : 0] }
     }
 
-    // MARK: - The built-ins
-
-    // MARK: - Saving and loading
-
-    /// A layout round-trips by name: positions, extents, ghost extent and
-    /// drone ratios all survive, the saved name is listed (the live autosave
-    /// never is), and deleting removes it.
+    /// A layout round-trips by name — positions, extents and drone ratios all
+    /// survive, the live autosave is never listed, and deleting removes it.
     func testSaveLoadDeleteRoundTrip() throws {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("FretLayoutTests-\(UUID().uuidString)")

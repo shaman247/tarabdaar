@@ -10,13 +10,9 @@ final class ChordBarTests: XCTestCase {
         pairs.map { (Double($0.0) / Double($0.1), $0.2) }
     }
 
-    // MARK: - Shepard register law
-
-    /// The I chord's construction: every tone lands its main copy in the
-    /// octave below the tonic, Sa itself splits evenly across tonic/2 and
-    /// the tonic (the wrap point), each tone's copies sum to unit weight
-    /// (cos² + sin² across the octave spacing), and a sub-threshold flank
-    /// is dropped (the fifth's two-octaves-down copy).
+    /// THE SHEPARD REGISTER LAW: every tone lands its main copy in the octave
+    /// below the tonic, the wrap point splits evenly, each tone's copies sum
+    /// to unit weight, and a sub-threshold flank is dropped.
     func testShepardChordConstruction() {
         let notes = shepardChordNotes(rootRatio: 1.0,
                                       intervals: [1.0, 5.0 / 4.0, 3.0 / 2.0])
@@ -42,8 +38,8 @@ final class ChordBarTests: XCTestCase {
         XCTAssertEqual(tritone[0].weight, 1.0, accuracy: 1e-9)
     }
 
-    /// The wire carries the selection (TLP v12): codec roundtrip of the
-    /// chord bytes, including a negative octave, and the none default.
+    /// The chord-selection header bytes round-trip, negative octave and the
+    /// none default included.
     func testChordSelectionCodecRoundtrip() throws {
         var s = TLPPerfState(stateSeq: 7, timestampUs: 1,
                              tiltX: 0, tiltY: 0, tiltZ: 0,

@@ -2,27 +2,10 @@ import XCTest
 import SarangiKit
 @testable import TarabdaarCore
 
-/// TWO-WAY BRIDGE COUPLING (`bow_jt_couple`): the guard that the loop
-/// closes without ringing forever.
-///
-/// The knob's first cut had two leaks, both audible as "the instrument
-/// never gets completely silent — it sounds like repeated low-level
-/// strumming":
-///
-/// 1. the return took each row's UN-DC-blocked bridge load, which carries
-///    the row's static wrap preload as a constant term, so a resting web
-///    parked a DC force on the played strings' bridge and then drove
-///    itself with it;
-/// 2. a row the quiescence gate put to sleep dropped out of the sum, so
-///    the returned force STEPPED to zero — a step on the shared bridge
-///    strums the played strings and every other row, which wakes the
-///    sleeper: a limit cycle the gate itself sustained.
-///
-/// Fixed at the cause (DC-blocked pickup; a sleeping row FADES its last
-/// value out on the DC blocker's own rate). These tests pin the outcome:
-/// a resting web returns nothing, a coupled ring goes fully silent with
-/// every row asleep, and the top of the knob's range still decays under
-/// the heavy case the range was measured on.
+/// TWO-WAY BRIDGE COUPLING (`bow_jt_couple`): the stability guard that the
+/// loop closes without ringing forever — a resting web returns nothing, a
+/// coupled ring goes fully silent with every row asleep, and the top of the
+/// knob's range still decays under the heavy case it was measured on.
 final class TarafCoupleTests: XCTestCase {
 
     private struct Rig {
@@ -77,13 +60,9 @@ final class TarafCoupleTests: XCTestCase {
     }
     private static func db(_ v: Double) -> Double { 20 * log10(max(v, 1e-30)) }
 
-    /// A RESTING web must return nothing. Measured with the quiescence gate
-    /// DISARMED (the raw-physics escape hatch), so no row can sleep and the
-    /// return is the web's own standing state: the un-blocked pickup pushed
-    /// the rows' static wrap preload back onto the bridge and self-excited
-    /// the whole web from silence (tail RMS 2.6e-1 — a web nobody played).
-    /// DC-blocked it is 5.7e-3, all of it the contact micro limit-cycle the
-    /// wrap keeps alive, and the DC offset is gone (mean 1.3e-5 → 1.0e-6).
+    /// A resting web returns nothing: measured with the quiescence gate
+    /// disarmed, so no row can sleep and the return is the web's own standing
+    /// state — a DC term there self-excites the whole web from silence.
     func testRestingWebReturnsNoBridgeLoad() throws {
         try skipUnlessSlowTestsEnabled()
         let r = try makeRig(["bow_jt_gate": 0.0])
@@ -96,10 +75,8 @@ final class TarafCoupleTests: XCTestCase {
         XCTAssertLessThan(mean, 1e-5, "the return carries a DC term")
     }
 
-    /// A coupled ring must END. At the TOP of the range a 12 s ring after a
-    /// bowed Sa falls the same way the uncoupled one does (−87 dBFS at 7 s,
-    /// then the gate closes and it truncates), with every row asleep. The
-    /// gate-step bug held this at a low strumming floor instead.
+    /// A coupled ring must END: at the top of the range a bowed Sa's 12 s ring
+    /// falls the way the uncoupled one does, with every row asleep.
     func testCoupledRingGoesFullySilent() throws {
         try skipUnlessSlowTestsEnabled()
         let r = try makeRig()
@@ -118,10 +95,9 @@ final class TarafCoupleTests: XCTestCase {
                        "rows are still awake after a 12 s ring")
     }
 
-    /// The knob's full scale is HALF the measured divergence gain, and the
-    /// gain was measured on the HEAVY case — a hard-bowed three-note chord,
-    /// where the summed return is far larger than under one note. The
-    /// output trim is pulled 60 dB so the safety limiter cannot mask growth.
+    /// The heavy case the range was measured on — a hard-bowed three-note
+    /// chord, where the summed return is far larger than under one note. The
+    /// output trim is pulled down so the safety limiter cannot mask growth.
     func testHeavyChordRingStillDecaysAtTheTop() throws {
         try skipUnlessSlowTestsEnabled()
         let r = try makeRig(["bow_live_trim": 5e-5])
