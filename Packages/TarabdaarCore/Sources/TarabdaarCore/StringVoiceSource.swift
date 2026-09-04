@@ -160,8 +160,7 @@ public final class StringVoiceSource {
                     { $0.setJtToneLp(hz: $1) }),
         ControlKnob("bow_jt_hp", nonNegative, { $0.setJtToneHp(hz: $1) }),
         ControlKnob("bow_jt_body", unit, { $0.setJtBody($1) }),
-        ControlKnob("bow_jt_drive_term", unit, { $0.setJtDriveTerm($1) }),
-        ControlKnob("bow_jt_couple", nonNegative, { $0.setJtCouple($1) }),
+        ControlKnob("bow_jt_couple", unit, { $0.setJtCouple($1) }),
         ControlKnob("bow_jt_damp", unit, { $0.setTarafDamp($1) }),
         ControlKnob("bow_tone_tilt", bipolar, { $0.setToneTilt($1) }),
         // neutral = the calibrated level
@@ -200,11 +199,18 @@ public final class StringVoiceSource {
     /// Runtime playing state (`.live` params), cached here so a rebuild
     /// republishes it onto the fresh engine. Absent = the knob's neutral,
     /// i.e. the fitted sound.
+    ///
+    /// Written from every control thread at once (the link queue's tilt
+    /// bindings, the main thread's sliders/composites/preset loads, the
+    /// evaluator's timers), so every read and write goes under
+    /// `cacheLock`; engine pushes read from a snapshot taken inside it.
     private var controlValues: [String: Double] = [:]
+    private let cacheLock = NSLock()
 
-    /// The cached (clamped) value of one knob, or its neutral.
-    private func controlValue(_ key: String) -> Double {
-        controlValues[key] ?? Self.knobByKey[key]?.neutral ?? 0
+    /// The cached (clamped) value of one knob, or its neutral, from a snapshot.
+    private static func controlValue(_ key: String,
+                                     in values: [String: Double]) -> Double {
+        values[key] ?? knobByKey[key]?.neutral ?? 0
     }
 
     /// True when `setControl` owns `key` (the caller can report success even
@@ -219,18 +225,26 @@ public final class StringVoiceSource {
     public func setControl(_ key: String, _ value: Double) -> Bool {
         guard let knob = Self.knobByKey[key] else { return false }
         let v = knob.clamp(value)
+        cacheLock.lock()
         controlValues[key] = v
+        let snapshot = controlValues
+        cacheLock.unlock()
         if let engine = currentEngine() {
-            knob.push(engine, v, controlValue)
+            knob.push(engine, v) { Self.controlValue($0, in: snapshot) }
         }
         return true
     }
 
     /// Re-publish every non-neutral knob onto a freshly built engine.
     private func republishControls(to engine: BowEngine) {
+        cacheLock.lock()
+        let snapshot = controlValues
+        cacheLock.unlock()
         for knob in Self.controlKnobs where knob.reapply == .whenChanged {
-            let v = controlValue(knob.key)
-            if v != knob.neutral { knob.push(engine, v, controlValue) }
+            let v = Self.controlValue(knob.key, in: snapshot)
+            if v != knob.neutral {
+                knob.push(engine, v) { Self.controlValue($0, in: snapshot) }
+            }
         }
     }
 
@@ -308,6 +322,7 @@ public final class StringVoiceSource {
 
     // The four FX insert points' settings, cached like the runtime state
     // above (tails restart across a rebuild; settings never snap back).
+    // Same writers as `controlValues`, same `cacheLock`.
     private var fxSettings = FXPoint.allCases.map { _ in FXSettings() }
 
     /// Apply one FX registry parameter and push the whole point: ONE
@@ -317,10 +332,13 @@ public final class StringVoiceSource {
     /// key (`FXRackTests` pins the two sides in sync). Control-thread safe.
     @discardableResult
     public func setFXParam(_ key: String, _ value: Double) -> Bool {
-        guard let (point, field) = FXPoint.parse(key: key),
-              fxSettings[point.rawValue].apply(field: field, value: value)
-        else { return false }
-        currentEngine()?.setFX(point, fxSettings[point.rawValue])
+        guard let (point, field) = FXPoint.parse(key: key) else { return false }
+        cacheLock.lock()
+        let applied = fxSettings[point.rawValue].apply(field: field, value: value)
+        let settings = fxSettings[point.rawValue]
+        cacheLock.unlock()
+        guard applied else { return false }
+        currentEngine()?.setFX(point, settings)
         return true
     }
 
@@ -408,9 +426,11 @@ public final class StringVoiceSource {
             republishControls(to: engine)
             if busMeterOn { engine.setBusMeter(true) }
             if scopeOn { engine.setScopeArmed(true) }
-            for point in FXPoint.allCases
-                where fxSettings[point.rawValue] != FXSettings() {
-                engine.setFX(point, fxSettings[point.rawValue])
+            cacheLock.lock()
+            let fx = fxSettings
+            cacheLock.unlock()
+            for point in FXPoint.allCases where fx[point.rawValue] != FXSettings() {
+                engine.setFX(point, fx[point.rawValue])
             }
         }
         let ms = crossfadeMs ?? Self.engineCrossfadeMs
