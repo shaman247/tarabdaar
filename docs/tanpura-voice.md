@@ -52,10 +52,10 @@ buttons and the main-instrument routing use.
 
 `TanpuraVoiceSource` (TarabdaarCore) is a second `AVAudioSourceNode` beside
 the String voice's — `node → symGain → mainMixerNode` — at the artifact's
-native 48 kHz. Same engine-swap discipline as `StringVoiceSource`:
-`os_unfair_lock`-published engine, equal-power ~300 ms crossfade so ringing
-strings decay across a swap, `recentEngines` keeps swapped-out engines off
-the audio-thread dealloc path.
+native 48 kHz. The engine swap is the one `EngineCrossfader` both voice
+sources use: a lock-published engine, an equal-power ~300 ms crossfade so
+ringing strings decay across a swap, swapped-out engines retained off the
+audio-thread dealloc path.
 
 **Builds are ~seconds of CPU** (every slot is mounted and settled onto its
 static wrap through the kernel), so: its own serial queue

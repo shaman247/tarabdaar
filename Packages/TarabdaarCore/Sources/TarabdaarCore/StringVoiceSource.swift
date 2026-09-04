@@ -33,79 +33,14 @@ public final class StringVoiceSource {
 
     private final class State: @unchecked Sendable {
         var lock = os_unfair_lock()
-        var engine: BowEngine?
-        /// The engine being crossfaded out (keeps rendering so its ring decays).
-        var fading: BowEngine?
-        var fadePos = 0
-        var fadeLen = 0
-        let maxFrames = 4096
-        var bufL: [Double]
-        var bufR: [Double]
-        /// Second buffer pair, used only while a crossfade is running.
-        var fadeL: [Double]
-        var fadeR: [Double]
         // render-deadline telemetry (a late callback glitches at the device; a WAV never shows it)
         var maxRenderNs: UInt64 = 0
         var overruns: UInt64 = 0
         var callbacks: UInt64 = 0
-        init() {
-            bufL = [Double](repeating: 0, count: maxFrames)
-            bufR = [Double](repeating: 0, count: maxFrames)
-            fadeL = [Double](repeating: 0, count: maxFrames)
-            fadeR = [Double](repeating: 0, count: maxFrames)
-        }
-
-        /// Render `frames`, equal-power crossfaded with the outgoing engine
-        /// while a fade runs. The audio callback's body; tests share it.
-        func renderMix(engine: BowEngine, fading: BowEngine?, frames n: Int,
-                       outL: UnsafeMutablePointer<Float>,
-                       outR: UnsafeMutablePointer<Float>) {
-            var done = 0
-            while done < n {
-                let m = min(maxFrames, n - done)
-                bufL.withUnsafeMutableBufferPointer { lb in
-                    bufR.withUnsafeMutableBufferPointer { rb in
-                        engine.render(frames: m, outL: lb.baseAddress!,
-                                      outR: rb.baseAddress!)
-                    }
-                }
-                if let fading {
-                    // 2x voice CPU for the fade window only.
-                    fadeL.withUnsafeMutableBufferPointer { lb in
-                        fadeR.withUnsafeMutableBufferPointer { rb in
-                            fading.render(frames: m, outL: lb.baseAddress!,
-                                          outR: rb.baseAddress!)
-                        }
-                    }
-                    let len = max(fadeLen, 1)
-                    for i in 0..<m {
-                        let t = min(Double(fadePos + i) / Double(len), 1.0)
-                        let gIn = sin(t * Double.pi / 2)
-                        let gOut = cos(t * Double.pi / 2)
-                        outL[done + i] = Float(bufL[i] * gIn + fadeL[i] * gOut)
-                        outR[done + i] = Float(bufR[i] * gIn + fadeR[i] * gOut)
-                    }
-                    fadePos += m
-                } else {
-                    for i in 0..<m {
-                        outL[done + i] = Float(bufL[i])
-                        outR[done + i] = Float(bufR[i])
-                    }
-                }
-                done += m
-            }
-            if fading != nil, fadePos >= fadeLen {
-                // Fade finished. `recentEngines` still holds the object, so
-                // this never deallocates on the audio thread.
-                os_unfair_lock_lock(&lock)
-                if self.fading === fading { self.fading = nil }
-                os_unfair_lock_unlock(&lock)
-            }
-        }
     }
     private let state = State()
-    // strong refs keep swapped-out engines alive past any in-flight buffer
-    private var recentEngines: [BowEngine] = []
+    /// The published engine and the crossfade out of its predecessor.
+    private let fader: EngineCrossfader<BowEngine>
 
     // MARK: - Live control knobs (the plumbing table)
 
@@ -314,10 +249,7 @@ public final class StringVoiceSource {
     /// foreign voice's callback appends its mono block to the current
     /// engine's ring (brief state lock). Mid-rebuild it lands on the incoming engine only.
     public func jtInjectWrite(_ x: UnsafePointer<Double>, _ n: Int) {
-        os_unfair_lock_lock(&state.lock)
-        let engine = state.engine
-        os_unfair_lock_unlock(&state.lock)
-        engine?.jtInjectWrite(x, n)
+        fader.current?.jtInjectWrite(x, n)
     }
 
     // The four FX insert points' settings, cached like the runtime state
@@ -355,26 +287,23 @@ public final class StringVoiceSource {
     public init(sr: Double = 48000) {
         modelSR = sr
         let st = state
+        let fader = EngineCrossfader<BowEngine>(sr: sr)
+        self.fader = fader
         let fmt = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 2)!
         node = AVAudioSourceNode(format: fmt) { _, _, frameCount, abl -> OSStatus in
             let out = UnsafeMutableAudioBufferListPointer(abl)
             let n = Int(frameCount)
-            os_unfair_lock_lock(&st.lock)
-            let engine = st.engine
-            let fading = st.fading
-            os_unfair_lock_unlock(&st.lock)
-            guard let engine, out.count > 0, let l0 = out[0].mData else {
+            guard out.count > 0, let l0 = out[0].mData else { return noErr }
+            let outL = l0.assumingMemoryBound(to: Float.self)
+            let outR = (out.count > 1 ? out[1].mData! : l0)
+                .assumingMemoryBound(to: Float.self)
+            let t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            guard fader.render(frames: n, outL: outL, outR: outR) else {
                 for ch in 0..<out.count {
                     if let d = out[ch].mData { memset(d, 0, Int(out[ch].mDataByteSize)) }
                 }
                 return noErr
             }
-            let outL = l0.assumingMemoryBound(to: Float.self)
-            let outR = (out.count > 1 ? out[1].mData! : l0)
-                .assumingMemoryBound(to: Float.self)
-            let t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            st.renderMix(engine: engine, fading: fading, frames: n,
-                         outL: outL, outR: outR)
             let dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0
             let budget = UInt64(Double(n) / sr * 0.9e9)
             os_unfair_lock_lock(&st.lock)
@@ -389,15 +318,10 @@ public final class StringVoiceSource {
     /// Zero-allocation variant for the realtime harness (caller-owned buffers).
     func renderForTesting(frames: Int, into l: inout [Float],
                           _ r: inout [Float]) {
-        os_unfair_lock_lock(&state.lock)
-        let engine = state.engine
-        let fading = state.fading
-        os_unfair_lock_unlock(&state.lock)
-        guard let engine else { return }
         l.withUnsafeMutableBufferPointer { lb in
             r.withUnsafeMutableBufferPointer { rb in
-                state.renderMix(engine: engine, fading: fading, frames: frames,
-                                outL: lb.baseAddress!, outR: rb.baseAddress!)
+                fader.render(frames: frames, outL: lb.baseAddress!,
+                             outR: rb.baseAddress!)
             }
         }
     }
@@ -406,32 +330,14 @@ public final class StringVoiceSource {
     func renderForTesting(frames: Int) -> (l: [Float], r: [Float]) {
         var l = [Float](repeating: 0, count: frames)
         var r = [Float](repeating: 0, count: frames)
-        os_unfair_lock_lock(&state.lock)
-        let engine = state.engine
-        let fading = state.fading
-        os_unfair_lock_unlock(&state.lock)
-        guard let engine else { return (l, r) }
-        l.withUnsafeMutableBufferPointer { lb in
-            r.withUnsafeMutableBufferPointer { rb in
-                state.renderMix(engine: engine, fading: fading, frames: frames,
-                                outL: lb.baseAddress!, outR: rb.baseAddress!)
-            }
-        }
+        renderForTesting(frames: frames, into: &l, &r)
         return (l, r)
     }
 
-    /// Crossfade length when swapping engines (a fresh engine has no ringing
-    /// state, so the outgoing one fades out instead of being cut).
-    public static let engineCrossfadeMs = 300.0
-
     /// Publish a freshly built engine (brief lock; control thread). nil
-    /// silences the node. Swapped-out engines are retained so an in-flight
-    /// buffer never reads a freed one; the outgoing one crossfades out.
+    /// silences the node; the outgoing engine crossfades out.
     public func setEngine(_ engine: BowEngine?, crossfadeMs: Double? = nil) {
         if let engine {
-            // deep enough that a fading engine is never freed under the audio thread
-            recentEngines.append(engine)
-            if recentEngines.count > 8 { recentEngines.removeFirst() }
             // re-apply the runtime playing state (a rebuild must not snap to defaults)
             republishControls(to: engine)
             if busMeterOn { engine.setBusMeter(true) }
@@ -443,44 +349,19 @@ public final class StringVoiceSource {
                 engine.setFX(point, fx[point.rawValue])
             }
         }
-        let ms = crossfadeMs ?? Self.engineCrossfadeMs
-        os_unfair_lock_lock(&state.lock)
-        let outgoing = state.engine
-        // a swap mid-fade restarts the fade from the audible engine
-        if engine != nil, let outgoing, ms > 0 {
-            state.fading = outgoing
-            state.fadeLen = max(1, Int(ms * 0.001 * modelSR))
-            state.fadePos = 0
-        } else {
-            state.fading = nil
-            state.fadeLen = 0
-            state.fadePos = 0
-        }
-        state.engine = engine
-        os_unfair_lock_unlock(&state.lock)
+        fader.publish(engine, crossfadeMs: crossfadeMs ?? EngineCrossfade.defaultMs)
     }
 
-    public var isArmed: Bool {
-        os_unfair_lock_lock(&state.lock)
-        defer { os_unfair_lock_unlock(&state.lock) }
-        return state.engine != nil
-    }
+    public var isArmed: Bool { fader.isArmed }
 
     /// The currently published engine (brief lock); nil unarmed.
-    public func currentEngine() -> BowEngine? {
-        os_unfair_lock_lock(&state.lock)
-        defer { os_unfair_lock_unlock(&state.lock) }
-        return state.engine
-    }
+    public func currentEngine() -> BowEngine? { fader.current }
 
     /// Async-jt overload telemetry (dropped drive blocks, flat-filled samples,
     /// FIFO fill, async flag); growing drops = the web misses realtime. Any thread.
     public func jtStats() -> (drops: Double, flat: Double,
                               fill: Double, on: Double)? {
-        os_unfair_lock_lock(&state.lock)
-        let engine = state.engine
-        os_unfair_lock_unlock(&state.lock)
-        return engine?.jtAsyncStats()
+        fader.current?.jtAsyncStats()
     }
 
     /// Render-deadline telemetry: (worst callback ms since last call, callbacks

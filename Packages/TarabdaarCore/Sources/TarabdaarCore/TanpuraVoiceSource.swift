@@ -15,17 +15,7 @@ public final class TanpuraVoiceSource {
 
     private final class State: @unchecked Sendable {
         var lock = os_unfair_lock()
-        var engine: TanpuraEngine?
-        /// The engine being crossfaded out (a fresh engine starts silent;
-        /// an abrupt swap would cut what is ringing).
-        var fading: TanpuraEngine?
-        var fadePos = 0
-        var fadeLen = 0
         let maxFrames = 4096
-        var bufL: [Double]
-        var bufR: [Double]
-        var fadeL: [Double]
-        var fadeR: [Double]
         /// Voice→taraf tap: each finished block (mono mixdown,
         /// post-crossfade) goes to the sink — the String kernel's jt
         /// inject ring. Published under the state lock; the sink must be
@@ -57,10 +47,6 @@ public final class TanpuraVoiceSource {
             os_unfair_lock_unlock(&lock)
         }
         init() {
-            bufL = [Double](repeating: 0, count: maxFrames)
-            bufR = [Double](repeating: 0, count: maxFrames)
-            fadeL = [Double](repeating: 0, count: maxFrames)
-            fadeR = [Double](repeating: 0, count: maxFrames)
             monoBuf = [Double](repeating: 0, count: maxFrames)
         }
 
@@ -85,53 +71,10 @@ public final class TanpuraVoiceSource {
             }
         }
 
-        func renderMix(engine: TanpuraEngine, fading: TanpuraEngine?,
-                       frames n: Int,
-                       outL: UnsafeMutablePointer<Float>,
-                       outR: UnsafeMutablePointer<Float>) {
-            var done = 0
-            while done < n {
-                let m = min(maxFrames, n - done)
-                bufL.withUnsafeMutableBufferPointer { lb in
-                    bufR.withUnsafeMutableBufferPointer { rb in
-                        engine.render(frames: m, outL: lb.baseAddress!,
-                                      outR: rb.baseAddress!)
-                    }
-                }
-                if let fading {
-                    fadeL.withUnsafeMutableBufferPointer { lb in
-                        fadeR.withUnsafeMutableBufferPointer { rb in
-                            fading.render(frames: m, outL: lb.baseAddress!,
-                                          outR: rb.baseAddress!)
-                        }
-                    }
-                    let len = max(fadeLen, 1)
-                    for i in 0..<m {
-                        let t = min(Double(fadePos + i) / Double(len), 1.0)
-                        let gIn = sin(t * Double.pi / 2)
-                        let gOut = cos(t * Double.pi / 2)
-                        outL[done + i] = Float(bufL[i] * gIn + fadeL[i] * gOut)
-                        outR[done + i] = Float(bufR[i] * gIn + fadeR[i] * gOut)
-                    }
-                    fadePos += m
-                } else {
-                    for i in 0..<m {
-                        outL[done + i] = Float(bufL[i])
-                        outR[done + i] = Float(bufR[i])
-                    }
-                }
-                done += m
-            }
-            if fading != nil, fadePos >= fadeLen {
-                os_unfair_lock_lock(&lock)
-                if self.fading === fading { self.fading = nil }
-                os_unfair_lock_unlock(&lock)
-            }
-        }
     }
     private let state = State()
-    // strong refs keep swapped-out engines alive past any in-flight buffer
-    private var recentEngines: [TanpuraEngine] = []
+    /// The published engine and the crossfade out of its predecessor.
+    private let fader: EngineCrossfader<TanpuraEngine>
 
     /// Output trim override (`tp_gain`): playing state, re-applied after a
     /// structural rebuild. nil = artifact value.
@@ -140,27 +83,26 @@ public final class TanpuraVoiceSource {
     public init(sr: Double = 48000) {
         modelSR = sr
         let st = state
+        let fader = EngineCrossfader<TanpuraEngine>(sr: sr)
+        self.fader = fader
         let fmt = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 2)!
         node = AVAudioSourceNode(format: fmt) { _, _, frameCount, abl -> OSStatus in
             let out = UnsafeMutableAudioBufferListPointer(abl)
             let n = Int(frameCount)
-            os_unfair_lock_lock(&st.lock)
-            let engine = st.engine
-            let fading = st.fading
-            let sink = st.injectSink
-            let injectGain = st.injectGain
-            os_unfair_lock_unlock(&st.lock)
-            guard let engine, out.count > 0, let l0 = out[0].mData else {
+            guard out.count > 0, let l0 = out[0].mData else { return noErr }
+            let outL = l0.assumingMemoryBound(to: Float.self)
+            let outR = (out.count > 1 ? out[1].mData! : l0)
+                .assumingMemoryBound(to: Float.self)
+            guard fader.render(frames: n, outL: outL, outR: outR) else {
                 for ch in 0..<out.count {
                     if let d = out[ch].mData { memset(d, 0, Int(out[ch].mDataByteSize)) }
                 }
                 return noErr
             }
-            let outL = l0.assumingMemoryBound(to: Float.self)
-            let outR = (out.count > 1 ? out[1].mData! : l0)
-                .assumingMemoryBound(to: Float.self)
-            st.renderMix(engine: engine, fading: fading, frames: n,
-                         outL: outL, outR: outR)
+            os_unfair_lock_lock(&st.lock)
+            let sink = st.injectSink
+            let injectGain = st.injectGain
+            os_unfair_lock_unlock(&st.lock)
             if let sink, injectGain != 0.0 {
                 st.feedSink(sink, gain: injectGain,
                             outL: outL, outR: outR, frames: n)
@@ -190,16 +132,13 @@ public final class TanpuraVoiceSource {
         var l = [Float](repeating: 0, count: frames)
         var r = [Float](repeating: 0, count: frames)
         os_unfair_lock_lock(&state.lock)
-        let engine = state.engine
-        let fading = state.fading
         let sink = state.injectSink
         let injectGain = state.injectGain
         os_unfair_lock_unlock(&state.lock)
-        guard let engine else { return (l, r) }
         l.withUnsafeMutableBufferPointer { lb in
             r.withUnsafeMutableBufferPointer { rb in
-                state.renderMix(engine: engine, fading: fading, frames: frames,
-                                outL: lb.baseAddress!, outR: rb.baseAddress!)
+                guard fader.render(frames: frames, outL: lb.baseAddress!,
+                                   outR: rb.baseAddress!) else { return }
                 if let sink, injectGain != 0.0 {
                     state.feedSink(sink, gain: injectGain,
                                    outL: lb.baseAddress!,
@@ -211,34 +150,13 @@ public final class TanpuraVoiceSource {
     }
 
     /// Publish a freshly-built engine (control thread). nil silences the
-    /// node. Swapped-out engines are retained past any in-flight buffer.
+    /// node; the outgoing engine crossfades out.
     public func setEngine(_ engine: TanpuraEngine?, crossfadeMs: Double? = nil) {
-        if let engine {
-            recentEngines.append(engine)
-            if recentEngines.count > 4 { recentEngines.removeFirst() }
-            if let g = outGainOverride { engine.outGain = g }
-        }
-        let ms = crossfadeMs ?? StringVoiceSource.engineCrossfadeMs
-        os_unfair_lock_lock(&state.lock)
-        let outgoing = state.engine
-        if engine != nil, let outgoing, ms > 0 {
-            state.fading = outgoing
-            state.fadeLen = max(1, Int(ms * 0.001 * modelSR))
-            state.fadePos = 0
-        } else {
-            state.fading = nil
-            state.fadeLen = 0
-            state.fadePos = 0
-        }
-        state.engine = engine
-        os_unfair_lock_unlock(&state.lock)
+        if let engine, let g = outGainOverride { engine.outGain = g }
+        fader.publish(engine, crossfadeMs: crossfadeMs ?? EngineCrossfade.defaultMs)
     }
 
-    public var isArmed: Bool {
-        os_unfair_lock_lock(&state.lock)
-        defer { os_unfair_lock_unlock(&state.lock) }
-        return state.engine != nil
-    }
+    public var isArmed: Bool { fader.isArmed }
 
     /// Install/clear the voice→taraf render tap (control thread); wire it
     /// to `StringVoiceSource.jtInjectWrite`.
@@ -257,11 +175,7 @@ public final class TanpuraVoiceSource {
     }
 
     /// The currently-published engine — the pluck target.
-    public func currentEngine() -> TanpuraEngine? {
-        os_unfair_lock_lock(&state.lock)
-        defer { os_unfair_lock_unlock(&state.lock) }
-        return state.engine
-    }
+    public func currentEngine() -> TanpuraEngine? { fader.current }
 
     /// Output trim (`tp_gain`), live; cached across rebuilds.
     public func setOutGain(_ g: Double) {

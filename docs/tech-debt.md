@@ -44,10 +44,6 @@ is re-blessed with a before/after render for an A/B by ear.
     a golden or drop it.
 ## Reuse — the same thing written twice
 
-12. **The engine-swap crossfade** (`State.renderMix`, `setEngine`) is
-    byte-identical in `StringVoiceSource` and `TanpuraVoiceSource` except
-    the engine type and the ring depth (8 vs 4 — already diverged). Change:
-    `EngineCrossfader<Engine>` in TarabdaarCore.
 13. **The fret-pad touch pipeline** (`fretFieldLog` → snap → `noteOn` →
     assist → recorder → 60 Hz settle timer) is written for the Mac in
     `FretPadView` and for the iPad in `PitchPadView_iOS`; the iOS copy alone
