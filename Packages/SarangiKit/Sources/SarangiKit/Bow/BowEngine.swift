@@ -590,6 +590,19 @@ public final class BowEngine {
                                     vib: polySnap.vib,
                                     onVel: slot.onVel)
                                 let o = s * slotStride
+                                // regime grip input: the kernel's running
+                                // fundamental-capture fraction for the slot
+                                if filters[s].gripArmed {
+                                    var rg = (0.0, 0.0, 0.0, 0.0, 0.0)
+                                    withUnsafeMutablePointer(to: &rg) { rp in
+                                        rp.withMemoryRebound(to: Double.self,
+                                                             capacity: 5) { dp in
+                                            if bow_poly_regime_slot(pk, Int32(s), dp) != 0 {
+                                                filters[s].fundamental = dp[4]
+                                            }
+                                        }
+                                    }
+                                }
                                 filters[s].fill(
                                     snapshot: snap, n: nk,
                                     f0: f0.baseAddress! + o,

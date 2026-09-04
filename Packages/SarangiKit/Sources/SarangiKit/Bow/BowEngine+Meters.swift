@@ -104,6 +104,12 @@ extension BowEngine {
         }
     }
 
+    /// The slot's regime-grip amount 0…1 (racy telemetry; UI rate).
+    public func slotGrip(_ s: Int) -> Double {
+        guard s >= 0, s < filters.count else { return 0 }
+        return filters[s].gripAmount
+    }
+
     /// Racy telemetry read of slot `s` (any thread; UI rate).
     public func slotRegime(_ s: Int) -> SlotRegime? {
         guard let pk = pkernel, s >= 0, s < maxPoly else { return nil }

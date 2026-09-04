@@ -39,6 +39,9 @@
 		C1000052 /* SarangiKit in Frameworks */ = {isa = PBXBuildFile; productRef = C2000052 /* SarangiKit */; };
 		C1000055 /* KeyboardNotePlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000055 /* KeyboardNotePlayer.swift */; };
 		C100005C /* JoyConInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200005C /* JoyConInput.swift */; };
+		C1000061 /* JoyConGameControllerTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000061 /* JoyConGameControllerTransport.swift */; };
+		C1000062 /* JoyConHIDTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000062 /* JoyConHIDTransport.swift */; };
+		C1000063 /* JoyConBLE.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000063 /* JoyConBLE.swift */; };
 		C100005D /* Views/JoyConStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200005D /* Views/JoyConStatusView.swift */; };
 		E1000001 /* TarabdaarCore in Frameworks */ = {isa = PBXBuildFile; productRef = E2000001 /* TarabdaarCore */; };
 		E1000002 /* TarabdaarCore in Frameworks */ = {isa = PBXBuildFile; productRef = E2000002 /* TarabdaarCore */; };
@@ -79,6 +82,9 @@
 		C2000055 /* KeyboardNotePlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardNotePlayer.swift; sourceTree = "<group>"; };
 		C2000057 /* StringParamStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StringParamStore.swift; sourceTree = "<group>"; };
 		C200005C /* JoyConInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoyConInput.swift; sourceTree = "<group>"; };
+		C2000061 /* JoyConGameControllerTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoyConGameControllerTransport.swift; sourceTree = "<group>"; };
+		C2000062 /* JoyConHIDTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoyConHIDTransport.swift; sourceTree = "<group>"; };
+		C2000063 /* JoyConBLE.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoyConBLE.swift; sourceTree = "<group>"; };
 		C200005D /* Views/JoyConStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/JoyConStatusView.swift; sourceTree = "<group>"; };
 		C3000001 /* TarabdaarMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TarabdaarMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -142,6 +148,9 @@
 				C2000004 /* AppController.swift */,
 				C2000055 /* KeyboardNotePlayer.swift */,
 				C200005C /* JoyConInput.swift */,
+				C2000061 /* JoyConGameControllerTransport.swift */,
+				C2000062 /* JoyConHIDTransport.swift */,
+				C2000063 /* JoyConBLE.swift */,
 				C200005D /* Views/JoyConStatusView.swift */,
 				C2000005 /* Views/MacMainWindow.swift */,
 				C2000006 /* Views/SetupView.swift */,
@@ -296,6 +305,9 @@
 				C1000004 /* AppController.swift in Sources */,
 				C1000055 /* KeyboardNotePlayer.swift in Sources */,
 				C100005C /* JoyConInput.swift in Sources */,
+				C1000061 /* JoyConGameControllerTransport.swift in Sources */,
+				C1000062 /* JoyConHIDTransport.swift in Sources */,
+				C1000063 /* JoyConBLE.swift in Sources */,
 				C100005D /* Views/JoyConStatusView.swift in Sources */,
 				C1000005 /* Views/MacMainWindow.swift in Sources */,
 				C1000006 /* Views/SetupView.swift in Sources */,

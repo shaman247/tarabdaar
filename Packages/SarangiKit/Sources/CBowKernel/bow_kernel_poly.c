@@ -27,13 +27,14 @@
 #define JT_ARING 8
 #define JT_WEBN 32768
 
+/* n is a power of two (MAXBOW or 64): the wrap is a mask. */
 static double pfrac_read(const double *buf, int n, int w, double delay) {
     double rp = (double)w - delay;
     while (rp < 0) rp += n;
     int i0 = (int)rp;
     double fr = rp - i0;
-    int i1 = (i0 + 1) % n;
-    return buf[i0 % n] * (1.0 - fr) + buf[i1] * fr;
+    const int m = n - 1;
+    return buf[i0 & m] * (1.0 - fr) + buf[(i0 + 1) & m] * fr;
 }
 
 /* per-string cross-sample state */
@@ -99,6 +100,12 @@ typedef struct {
     double lossReg;   /* register damping: loop-corner scaling below f0Open */
     double slideRate, slideDull;         /* slide dulling */
     double slideNoise, slideAcc;         /* accel-driven finger noise */
+    /* --- derived per-sample constants (poly_load_scalars; sr-bound) --- */
+    double nutFc0;                       /* nail-law corner at the open string */
+    double kgAtk, kgRel;                 /* key-gate 3 ms attack / 8 ms release */
+    double slCD, slAtk, slRel;           /* slide tracker: 10 ms smoother, env */
+    double slAAtk, slARel;               /* slide-noise env attack / release */
+    double thLeakPow[3];                 /* thLeak^{0.92, 1, 1.09} per hair group */
     /* --- derived constants --- */
     /* ---- MODAL-JAWARI sympathetic strings: per row a modal-exact stiff
        string (precomputed rotation tables ca/cb + wd, quarter-step ca4/cb4)
@@ -436,6 +443,18 @@ static void poly_load_scalars(bow_poly_state_t *st, const bow_scalars_t *s)
     st->slideDull = s->slideDull;
     st->slideNoise = s->slideNoise;
     st->slideAcc = (s->slideAcc > 1.0 ? s->slideAcc : 25000.0);
+    /* the per-sample constants the string loop reads */
+    const double sr = st->sr;
+    st->nutFc0 = -log(st->nutA) * sr / 6.283185307179586;
+    st->kgAtk = exp(-1.0 / (0.003 * sr));
+    st->kgRel = exp(-1.0 / (0.008 * sr));
+    st->slCD = 1.0 - exp(-1.0 / (0.010 * sr));
+    st->slAtk = exp(-1.0 / (0.015 * sr));
+    st->slRel = exp(-1.0 / (0.120 * sr));
+    st->slAAtk = exp(-1.0 / (0.010 * sr));
+    st->slARel = exp(-1.0 / (0.100 * sr));
+    static const double hl[3] = {0.92, 1.0, 1.09};
+    for (int i = 0; i < 3; i++) st->thLeakPow[i] = pow(st->thLeak, hl[i]);
 }
 
 void *bow_poly_init(int nb, double sr,
@@ -506,15 +525,13 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
     const double torsC = st->torsC;
     const double v0Pow = st->v0Pow, v0Ref = st->v0Ref;
     const double hairHz = st->hairHz, hairRef = st->hairRef;
-    const double nutFc0 = -log(nutA) * sr / 6.283185307179586;
-    const double kg_atk = exp(-1.0 / (0.003 * sr));
-    const double kg_rel = exp(-1.0 / (0.008 * sr));
+    const double nutFc0 = st->nutFc0;
 
     double F = 0.0;
     double o2 = 0.0;
     int bowOn = bowW > 1e-9;
     double bowForce = fbt * gatet;
-    double kga = bowForce > S->kGate ? kg_atk : kg_rel;
+    double kga = bowForce > S->kGate ? st->kgAtk : st->kgRel;
     S->kGate = (1.0 - kga) * bowForce + kga * S->kGate;
     double gk = S->kGate >= 0.10 ? 1.0 : S->kGate * 10.0;
     double rdmp = 1.0 - (0.69 / fmax(f0t, 40.0)) * (1.0 - gk);
@@ -554,24 +571,20 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
             if (S->slFValid) {
                 double d = (f0t - S->slF) / fmax(f0t, 40.0);
                 if (fabs(d) < 0.0012) {
-                    double cD = 1.0 - exp(-1.0 / (0.010 * sr));
+                    const double cD = st->slCD;
                     double slDp = S->slD;
                     S->slD += cD * (d - S->slD);
                     double r = 1731.234 * sr * fabs(S->slD);
                     double tgt = r < 80.0
                         ? 0.0 : r / (r + st->slideRate);
-                    double a = tgt > S->slEnv
-                        ? exp(-1.0 / (0.015 * sr))
-                        : exp(-1.0 / (0.120 * sr));
+                    double a = tgt > S->slEnv ? st->slAtk : st->slRel;
                     S->slEnv = (1.0 - a) * tgt + a * S->slEnv;
                     if (st->slideNoise > 1e-12) {
                         S->slA += cD * ((S->slD - slDp) - S->slA);
                         double acc = 1731.234 * sr * sr * fabs(S->slA);
                         double tgtA = acc < 6000.0
                             ? 0.0 : acc / (acc + st->slideAcc);
-                        double aA = tgtA > S->slEnvA
-                            ? exp(-1.0 / (0.010 * sr))
-                            : exp(-1.0 / (0.100 * sr));
+                        double aA = tgtA > S->slEnvA ? st->slAAtk : st->slARel;
                         S->slEnvA = (1.0 - aA) * tgtA + aA * S->slEnvA;
                     }
                 }
@@ -613,7 +626,6 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
         if (bowCont >= 2.5 && bowWidth >= 2.0) {
             /* three hair-group contacts, own friction solve per group */
             static const double hs2[3] = {0.88, 1.0, 1.12};
-            static const double hl2[3] = {0.92, 1.0, 1.09};
             double wseg = bowWidth * 0.5;
             double inL[3], inR[3], inj[3];
             inL[0] = h1;
@@ -658,7 +670,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                         }
                     }
                     double dvh = (vhg - vbt) + Ffg / (2.0 * Zeff);
-                    double lk = pow(thLeak, hl2[g]);
+                    double lk = st->thLeakPow[g];
                     S->Tr3[g] = lk * S->Tr3[g]
                         + (1.0 - lk) * fabs(Ffg * dvh);
                     if (g == 0) {
@@ -780,17 +792,17 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                     + Ff / (2.0 * (Z / (1.0 + Z / Zt)));
                 double advn = fabs(dvn);
                 double slipg = advn / (advn + v0f);
-                Ff += (nA * pow(Fb, nPow) + nT * S->tEnv) * slipg
+                double FbN = pow(Fb, nPow);
+                Ff += (nA * FbN + nT * S->tEnv) * slipg
                     * (S->nz1 - S->nz2);
-                *noiseDirAcc += nDir * pow(Fb, nPow) * slipg
+                *noiseDirAcc += nDir * FbN * slipg
                     * (S->nz2b - S->nz2);
             }
             {
                 double dvh = (vh - vbt) + Ff / (2.0 * (Z / (1.0 + Z / Zt)));
                 double P = fabs(Ff * dvh);
-                static const double hl[3] = {0.92, 1.0, 1.09};
                 for (int hgi = 0; hgi < 3; hgi++) {
-                    double lk = pow(thLeak, hl[hgi]);
+                    double lk = st->thLeakPow[hgi];
                     S->Tr3[hgi] = lk * S->Tr3[hgi] + (1.0 - lk) * P;
                 }
             }

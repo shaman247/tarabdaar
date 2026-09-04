@@ -27,7 +27,7 @@ ORDER = [
     "overview", "playing-guide", "architecture", "sarangi", "tanpura-voice",
     "sitar-voice", "fret-pad", "glide-system", "scales-and-tuning",
     "midi-and-audio", "sensors", "sound-design", "fx", "ui-layout",
-    "parameters", "config-reference", "packaging",
+    "parameters", "config-reference", "packaging", "tech-debt",
 ]
 
 CSS = """

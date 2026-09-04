@@ -33,6 +33,7 @@ typedef struct {
     float *G2f, *gd2f;             /* dt/2 compliance (= 4x G4) */
     double *phi_o, *dq;
     double kc, alpha, hcB, deep, dt, gain;
+    double svBleed;                /* exp(-dt/1 ms): released-point impulse bleed */
     double cg, sg, av, aw;      /* pol mixing + pluck-angle split */
     double rt;                  /* transverse curvature (0 = off) */
     /* 1-DOF jiva thread under gth; th_f = 0 = rigid bump baked into b */
@@ -337,6 +338,7 @@ void tanpura_mount(void *vc, int slot, int M, int J,
     s->pw = (double *)calloc((size_t)M, sizeof(double));
     s->kc = kc; s->alpha = alpha; s->hcB = hcB;
     s->deep = deep; s->dt = dt; s->gain = gain;
+    s->svBleed = exp(-dt / 1e-3);
     /* SAV tables: exact-response kick + matching compliance */
     s->svKq = (double *)malloc((size_t)M * sizeof(double));
     s->svKp = (double *)malloc((size_t)M * sizeof(double));
@@ -955,7 +957,7 @@ static int tp_sav_contact(tp_slot *s, const float *beff,
     double etaF[TP_MAXJ], g[TP_MAXJ], F[TP_MAXJ];
     int ai[TP_MAXJ];
     int na = 0;
-    const double bleed = exp(-dt / 1e-3);
+    const double bleed = s->svBleed;
     for (int j = 0; j < J; j++) {
         etaF[j] = (double)beff[j] - (double)uf[j];
         double em = 0.5 * (s->svEta[j] + etaF[j]);

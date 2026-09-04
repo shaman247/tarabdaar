@@ -11,10 +11,11 @@ import SwiftUI
 /// is the commanded expression.
 ///
 /// The graphs show a fixed **6-second** window and scroll smoothly: a
-/// 60 Hz timer appends timestamped samples to a ring buffer, and a
-/// `TimelineView(.animation)` redraws every display frame, placing each
-/// sample at an x derived from its age — so the trace slides left
-/// continuously rather than stepping at the sample rate.
+/// 60 Hz timer appends timestamped samples to an unpublished ring buffer
+/// (`TraceBuffer`, a reference the tick mutates without re-evaluating the
+/// view), and a `TimelineView(.animation)` polls it every display frame,
+/// placing each sample at an x derived from its age — so the trace slides
+/// left continuously rather than stepping at the sample rate.
 struct LiveVisualizerView: View {
     @ObservedObject var controller: AppController
     @ObservedObject private var midi: MIDIEngine
@@ -24,13 +25,39 @@ struct LiveVisualizerView: View {
         self.midi = controller.midi
     }
 
-    private struct Sample {
-        let t: Double        // timeIntervalSinceReferenceDate
-        let pitch: Double?   // Hz, nil when silent
-        let vol: Double      // 0…1 (commanded expression)
+    /// The pitch and volume traces in the graphs' own point form, plus the
+    /// pitch axis memoised on the scale and tonic that set it.
+    private final class TraceBuffer {
+        /// log2(Hz); nil when silent.
+        private(set) var pitchPts: [(t: Double, v: Double?)] = []
+        /// 0…1 (commanded expression).
+        private(set) var volPts: [(t: Double, v: Double?)] = []
+        private(set) var latestPitchHz: Double? = nil
+        private(set) var latestVol: Double = 0
+        private var axisKey: (scale: PitchScale, tonicHz: Double)?
+        private var axis: ClosedRange<Double> = 0...1
+
+        func append(t: Double, pitchHz: Double?, vol: Double, window: Double) {
+            pitchPts.append((t: t, v: pitchHz.map { log2($0) }))
+            volPts.append((t: t, v: vol))
+            latestPitchHz = pitchHz
+            latestVol = vol
+            TimeSeries.trim(&pitchPts, now: t, window: window) { $0.t }
+            TimeSeries.trim(&volPts, now: t, window: window) { $0.t }
+        }
+
+        func axisRange(scale: PitchScale, tonicHz: Double,
+                       compute: () -> ClosedRange<Double>) -> ClosedRange<Double> {
+            if let axisKey, axisKey.tonicHz == tonicHz, axisKey.scale == scale {
+                return axis
+            }
+            axis = compute()
+            axisKey = (scale, tonicHz)
+            return axis
+        }
     }
 
-    @State private var samples: [Sample] = []
+    @State private var traces = TraceBuffer()
     @State private var renderTimeMs: Double = 0
     @State private var maxRenderTimeMs: Double = 0
     @State private var sampleCounter = 0
@@ -111,11 +138,15 @@ struct LiveVisualizerView: View {
     }
 
     private func performanceCard(now: Double) -> some View {
-        let curPitch = samples.last?.pitch
-        let curVol = samples.last?.vol ?? 0
-        let pitchPts = samples.map { (t: $0.t, v: $0.pitch.map { log2($0) }) }
-        let volPts = samples.map { (t: $0.t, v: Optional($0.vol)) }
-        let pRange = pitchAxisRange()
+        let curPitch = traces.latestPitchHz
+        let curVol = traces.latestVol
+        let pitchPts = traces.pitchPts
+        let volPts = traces.volPts
+        let scale = controller.pitchPad.scale
+        let tonicHz = controller.pitchPad.tonicHz
+        let pRange = traces.axisRange(scale: scale, tonicHz: tonicHz) {
+            pitchAxisRange(scale: scale, tonicHz: tonicHz)
+        }
         return VStack(alignment: .leading, spacing: 16) {
             TimeSeriesGraph(
                 title: "PITCH",
@@ -157,9 +188,9 @@ struct LiveVisualizerView: View {
     /// side for the octave-repeat ghost frets), so the axis is a stable
     /// reference tied to the instrument's compass rather than drifting with
     /// what's played. Falls back to two octaves around the tonic.
-    private func pitchAxisRange() -> ClosedRange<Double> {
-        let tonicHz = controller.pitchPad.tonicHz
-        let ratios = scaleDegrees(from: controller.pitchPad.scale)
+    private func pitchAxisRange(scale: PitchScale,
+                                tonicHz: Double) -> ClosedRange<Double> {
+        let ratios = scaleDegrees(from: scale)
             .map(\.ratio).filter { $0 > 0 }
         if let mn = ratios.min(), let mx = ratios.max(), mx > mn {
             let lo = log2(mn * tonicHz) - 1
@@ -173,10 +204,11 @@ struct LiveVisualizerView: View {
         let r = controller.audio.performanceReadout()
         let now = Date().timeIntervalSinceReferenceDate
         let pitch: Double? = (r.active && r.pitchHz > 0) ? r.pitchHz : nil
-        samples.append(Sample(t: now, pitch: pitch, vol: r.active ? r.expression : 0))
-        // Keep a little beyond the window so the line enters cleanly from
-        // the left edge (clipped) rather than starting at the first sample.
-        TimeSeries.trim(&samples, now: now, window: window) { $0.t }
+        // The buffer keeps a little beyond the window so the line enters
+        // cleanly from the left edge (clipped) rather than starting at the
+        // first sample.
+        traces.append(t: now, pitchHz: pitch, vol: r.active ? r.expression : 0,
+                      window: window)
         // Render-time readout doesn't need 60 Hz; refresh it ~5×/s.
         sampleCounter += 1
         if sampleCounter % 12 == 0 {

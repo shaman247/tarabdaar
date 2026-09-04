@@ -352,6 +352,15 @@ public struct BowControlFilter: Sendable {
     var driftCents = 0.0, driftDb = 0.0, driftForceDb = 0.0
     var driftHz = 0.0
     var glideDipDb = 0.0, glideDipRate = 0.0
+    // REGIME GRIP (bow_grip_*): a string that lands in an overtone regime
+    // (kernel fundamental fraction under gripThresh once the attack window
+    // gripWaitS has passed) gets gripDb more force and gripVel·gripDb less
+    // bow speed, ~gripAtkS in, released over ~gripRelS once the fundamental
+    // has read captured (fraction above gripRelease) for gripHoldS.
+    // gripDb 0 = bit-null.
+    var gripDb = 0.0, gripThresh = 0.0, gripRelease = 0.0, gripWaitS = 0.0
+    var gripAtkS = 0.0, gripRelS = 0.0, gripHoldS = 0.0, gripVel = 0.0
+    var gripBeta = 0.0           // bow-position lever: β × (1 − gripBeta) at full grip
     var aDrift = 1.0, driftGain = 0.0   // OU pole + unit-variance step gain
     var aDipAtt = 0.0, aDipRel = 0.0    // dip smoother poles
     let pitchKnots: [Double], pitchCentsTab: [Double]
@@ -369,7 +378,23 @@ public struct BowControlFilter: Sendable {
     var rng: UInt64 = 0x9E3779B97F4A7C15
     var ouPitch = 0.0, ouLevel = 0.0, ouForce = 0.0
     var dipDb = 0.0
+    /// The kernel's fundamental-capture fraction for this slot, written by
+    /// the engine before each fill (1 while unmeasured, so a fresh string
+    /// is never gripped before it has spoken).
+    public var fundamental = 1.0
+    var gripCur = 0.0, gripOn = false   // gripCur = grip amount 0…1
+    var gripCapturedS = 0.0      // time the fundamental has read captured
+    var gripCount = 0            // engagements this note (2nd = latched)
+    /// Telemetry: the slot's current grip amount 0…1 (Scope tab).
+    public var gripAmount: Double { gripCur }
+    /// Any grip lever set: the engine feeds `fundamental` only when armed.
+    var gripArmed: Bool { abs(gripDb) > 1e-9 || abs(gripVel) > 1e-9 || gripBeta > 1e-9 }
     var lastLf = 0.0, lastLfValid = false
+    /// The last control-rate law evaluation — the lerp's start for the
+    /// next segment; nil = hold the first evaluation.
+    var lastLaw: (vb: Double, fb: Double, beta: Double)? = nil
+    /// Kernel samples per control-law evaluation (~0.33 ms at 96 kHz).
+    static let controlDiv = 32
     var prev: BowControlMapper.Snapshot?
     var primed = false
     /// Fresh string mounted: the next fill captures its OWN onset sharpness
@@ -446,6 +471,15 @@ public struct BowControlFilter: Sendable {
         driftHz = min(max(bp.v("bow_drift_hz", 1.4), 0.05), 10.0)
         glideDipDb = bp.v("bow_glide_dip_db", 0.0)
         glideDipRate = max(bp.v("bow_glide_dip_rate", 900.0), 1.0)
+        gripDb = min(max(bp.v("bow_grip_db", 0.0), -12.0), 12.0)
+        gripThresh = min(max(bp.v("bow_grip_thresh", 0.3), 0.05), 0.8)
+        gripRelease = min(max(bp.v("bow_grip_release", 0.45), gripThresh), 1.0)
+        gripWaitS = max(bp.v("bow_grip_wait_ms", 120.0), 10.0) / 1000.0
+        gripAtkS = max(bp.v("bow_grip_ms", 30.0), 2.0) / 1000.0
+        gripRelS = max(bp.v("bow_grip_rel_ms", 250.0), 10.0) / 1000.0
+        gripHoldS = max(bp.v("bow_grip_hold_ms", 200.0), 0.0) / 1000.0
+        gripVel = min(max(bp.v("bow_grip_v_db", 0.0), -12.0), 12.0)
+        gripBeta = min(max(bp.v("bow_grip_beta", 0.0), 0.0), 0.6)
         aDrift = exp(-2.0 * Double.pi * driftHz / srk)
         driftGain = sqrt(max(1.0 - aDrift * aDrift, 0.0) * 3.0)
     }
@@ -534,6 +568,12 @@ public struct BowControlFilter: Sendable {
         primed = true
         dipDb = 0.0                  // a pitch SNAP is not a glide
         lastLfValid = false
+        fundamental = 1.0            // a fresh string has not spoken yet
+        gripCur = 0.0
+        gripOn = false
+        gripCapturedS = 0.0
+        gripCount = 0
+        lastLaw = nil
     }
 
     /// Per-slot fill (the slot's f0/gate + the global axes).
@@ -568,109 +608,128 @@ public struct BowControlFilter: Sendable {
         let p = prev ?? snap
         let vRef = 0.75 * vHi
         let dtk = 1.0 / srk
+        // regime grip decision, once per block (the kernel's fraction is a
+        // ~4-period running value): engage under the threshold, release
+        // above 1.25× it, never inside the attack window or off the bow
+        var gripTarget = 0.0
+        if gripArmed {
+            let blockS = Double(n) / srk
+            if snap.gate > 0.5, placeClock > gripWaitS {
+                if fundamental < gripThresh {
+                    if !gripOn { gripCount += 1 }
+                    gripOn = true
+                    gripCapturedS = 0.0
+                } else if fundamental > gripRelease {
+                    // release once the capture has held for gripHoldS — but
+                    // a note that collapsed again after one release is not
+                    // stable at the played force: the second grip latches
+                    gripCapturedS += blockS
+                    if gripCapturedS >= gripHoldS, gripCount < 2 {
+                        gripOn = false
+                    }
+                } else {
+                    gripCapturedS = 0.0
+                }
+            } else {
+                gripOn = false
+                gripCapturedS = 0.0
+                gripCount = 0
+            }
+            gripTarget = gripOn ? 1.0 : 0.0
+        } else {
+            gripOn = false
+            gripCur = 0.0
+        }
         let vibW = 2.0 * Double.pi * vibHz / srk
         // ramp log2 f0 linearly from the last block's end to the target
         let lfStart = lf0
-        for i in 0..<n {
-            let u = Double(i + 1) / Double(n)      // block → kernel-rate lerp
-            let expr = p.expr + u * (snap.expr - p.expr)
-            let press = p.press + u * (snap.press - p.press)
-            let pos = p.pos + u * (snap.pos - p.pos)
-            let tk = p.tiltDb + u * (snap.tiltDb - p.tiltDb)
-            let lf = lfStart + u * (lfTarget - lfStart)
-            lf0 = lf
-            // player vibrato depth on the sounding pitch
-            var vibOct = 0.0
-            if vibCents > 1e-9 {
-                vibPhase += vibW
-                if vibPhase > 2.0 * Double.pi { vibPhase -= 2.0 * Double.pi }
-                let amt = p.vib + u * (snap.vib - p.vib)
-                if amt > 1e-6 {
-                    vibOct = vibCents * amt * sin(vibPhase) / 1200.0
-                }
+        // THE LAW AT CONTROL RATE. The dynamics / wedge / place law — every
+        // transcendental — is evaluated once per `controlDiv` kernel
+        // samples, on the axes lerped to the segment's END and the slow
+        // state (placement clock, drift walks, dip, grip) at its START,
+        // and its (vb, fb, beta) is lerped across the segment from the
+        // previous evaluation. Pitch, the gate, the vibrato phase and the
+        // smoothers advance every sample.
+        var segStart = 0
+        while segStart < n {
+            let segEnd = min(segStart + Self.controlDiv, n)
+            let segLen = Double(segEnd - segStart)
+            let uEnd = Double(segEnd) / Double(n)
+            // grip amount: one-pole toward the block's target, attack /
+            // release time constants, snapped to 0 once released
+            if gripArmed {
+                let tau = gripTarget > gripCur ? gripAtkS : gripRelS
+                let a = exp(-segLen * dtk / tau)
+                gripCur = (1.0 - a) * gripTarget + a * gripCur
+                if gripCur < 1e-4, gripTarget == 0.0 { gripCur = 0.0 }
             }
-            // liveness drift: three OU walks, soft-bounded ±3σ
-            if driftCents > 1e-9 || driftDb > 1e-9 || driftForceDb > 1e-9 {
-                ouPitch = min(max(aDrift * ouPitch + driftGain * nextUniform(), -3.0), 3.0)
-                ouLevel = min(max(aDrift * ouLevel + driftGain * nextUniform(), -3.0), 3.0)
-                ouForce = min(max(aDrift * ouForce + driftGain * nextUniform(), -3.0), 3.0)
-                if driftCents > 1e-9 {
-                    vibOct += driftCents * ouPitch / 1200.0
-                }
-            }
-            // glide lightening drive: sounding-pitch slew in cents/s
-            if glideDipDb > 1e-9 {
-                let r = lastLfValid ? abs(lf - lastLf) * 1200.0 * srk : 0.0
-                let target = glideDipDb * r / (r + glideDipRate)
-                let a = target > dipDb ? aDipAtt : aDipRel
-                dipDb = (1.0 - a) * target + a * dipDb
-                lastLf = lf
-                lastLfValid = true
-            }
-            var corr = pitchCorrection(lf)
-            if let ks = pitchKnotsA, let ps = pitchCentsPress, ps.count == ks.count {
-                let pr = p.press + u * (snap.press - p.press)
-                corr += interpKnots(lf - log2(220.0), ks, ps) * (pr - 0.55)
-            }
-            let f0 = exp2(lf + vibOct + corr / 1200.0)
-            // 25 ms softened gate
-            gateState = (1.0 - aGate) * snap.gate + aGate * gateState
+            let exprE = p.expr + uEnd * (snap.expr - p.expr)
+            let pressE = p.press + uEnd * (snap.press - p.press)
+            let posE = p.pos + uEnd * (snap.pos - p.pos)
+            let tkE = p.tiltDb + uEnd * (snap.tiltDb - p.tiltDb)
+            let lfE = lfStart + uEnd * (lfTarget - lfStart)
+            let f0E = exp2(lfE + pitchCorrection(lfE) / 1200.0)
             // dynamics: expr → dB → v. The law rides [exprLift, 1]; the
             // fade-to-silence zone below the lift must NOT overlap it.
-            var vb: Double
-            let e01 = min(max(expr, 0.0), 1.0)
+            var vbK: Double
+            let e01 = min(max(exprE, 0.0), 1.0)
             let eDyn = exprLift > 1e-6 && exprLift < 1.0
                 ? min(max((e01 - exprLift) / (1.0 - exprLift), 0.0), 1.0)
                 : e01
             if dynP > 0.1 {
                 let rel = -14.0 + 19.0 * eDyn
-                vb = min(max(vRef * pow(10.0, rel / (20.0 * dynP)), vLo),
-                         1.3 * vHi)
+                vbK = min(max(vRef * pow(10.0, rel / (20.0 * dynP)), vLo),
+                          1.3 * vHi)
             } else {
-                vb = vLo + (vHi - vLo) * eDyn
+                vbK = vLo + (vHi - vLo) * eDyn
             }
-            var beta = betaLo + (betaHi - betaLo) * pos
+            var betaK = betaLo + (betaHi - betaLo) * posE
             // tilt → bow position (soft deadband knee)
             if tiltBeta > 1e-9 {
                 let tkb = tiltKnee > 1e-9
-                    ? tk * tk * tk / (tk * tk + tiltKnee * tiltKnee) : tk
-                beta *= exp2(-tiltBeta * tkb / 12.0)
+                    ? tkE * tkE * tkE / (tkE * tkE + tiltKnee * tiltKnee) : tkE
+                betaK *= exp2(-tiltBeta * tkb / 12.0)
             }
             // absolute-distance bowing (β rises as f0 falls)
             if betaF0Gamma > 1e-3 {
-                beta = min(max(beta * pow(466.16 / max(f0, 80.0), betaF0Gamma),
-                               0.04), 0.22)
+                betaK = min(max(betaK * pow(466.16 / max(f0E, 80.0), betaF0Gamma),
+                                0.04), 0.22)
+            }
+            // REGIME GRIP, position lever: the bow moves toward the bridge,
+            // off the quarter-point node a sul-tasto bow sits on (the wedge
+            // below then raises the force with it, as a real bow would)
+            if gripBeta > 1e-9, gripCur > 0.0 {
+                betaK *= 1.0 - gripBeta * gripCur
             }
             // press = log-force position across the analytic Schelleng
             // wedge at this (f0, β, v): fmin = M·C·v/β² (Helmholtz floor),
             // fmax = 2Zv/(β·Δμ) (raucous ceiling). The edges are reachable
             // on purpose: pressUnder·fmin = flautando, pressOver·fmax =
             // pressed grit — force timbre lives at the wedge edges.
-            let lo = schellengMargin * schellengC * vb / max(beta * beta, 1e-6)
-            let hi = max(2.0 * schellengZ * vb / (max(beta, 1e-3) * schellengDmu),
+            let lo = schellengMargin * schellengC * vbK / max(betaK * betaK, 1e-6)
+            let hi = max(2.0 * schellengZ * vbK / (max(betaK, 1e-3) * schellengDmu),
                          lo * 1.05)
             let fMin = pressUnder * lo
             let fMax = max(pressOver * hi, fMin * 1.0001)
-            var fb = fMin * pow(fMax / fMin, press)
+            var fbK = fMin * pow(fMax / fMin, pressE)
             // tilt brightens force; register force (more force to lock a
             // lossy stopped gut string up high)
             if tiltForce > 1e-9 {
-                fb *= exp2(tiltForce * tk / 12.0)
+                fbK *= exp2(tiltForce * tkE / 12.0)
             }
             if fReg > 1e-3 {
-                fb *= pow(max(f0 / tonicHz, 1.0), fReg)
+                fbK *= pow(max(f0E / tonicHz, 1.0), fReg)
             }
-            fb = min(fb, fCap)
+            fbK = min(fbK, fCap)
             // BOW LIFTS TO SILENCE below exprLift: force AND velocity fade
             // to 0 (the wedge floor alone would keep the string speaking).
             if exprLift > 1e-6 {
-                let lift = min(1.0, max(0.0, expr) / exprLift)
-                fb *= lift
-                vb *= lift
+                let lift = min(1.0, max(0.0, exprE) / exprLift)
+                fbK *= lift
+                vbK *= lift
             }
             // PLACE-then-DRAW (+ attack bite): velocity ~0 while the bow is
             // set, then a smoothstep draw; a sharp attack draws fast
-            placeClock += dtk
             if placeS > 0.0 {
                 let drawEff = drawS + (drawMinS - drawS) * attackSharp
                 let ud = min(max((placeClock - placeS) / drawEff, 0.0), 1.0)
@@ -678,15 +737,15 @@ public struct BowControlFilter: Sendable {
                 // sharp attacks lead with velocity (martelé/collé — a moving
                 // bow that grips) and ramp force over attackFms
                 let uf = min(max(placeClock / attackFms, 0.0), 1.0)
-                vb *= (1.0 - attackSharp) * stepSoft + attackSharp
-                fb *= (1.0 - attackSharp)
+                vbK *= (1.0 - attackSharp) * stepSoft + attackSharp
+                fbK *= (1.0 - attackSharp)
                     + attackSharp * (uf * uf * (3.0 - 2.0 * uf))
                 if attackBite > 1e-6, attackSharp > 1e-6 {
-                    fb *= 1.0 + attackBite * attackSharp
+                    fbK *= 1.0 + attackBite * attackSharp
                         * exp(-max(placeClock, 0.0) / attackBiteTau)
                 }
             }
-            // liveness: wander + settle + glide lightening, as dB
+            // liveness: wander + settle + glide lightening + grip, as dB
             var vbDb = driftDb * ouLevel
             var fbDb = driftForceDb * ouForce
             if settleDb > 1e-9 {
@@ -707,13 +766,64 @@ public struct BowControlFilter: Sendable {
                 // light force coupling: a heavy cut slows re-capture
                 fbDb -= 0.3 * dipDb
             }
-            if vbDb != 0.0 { vb *= exp(vbDb * 0.11512925464970229) }
-            if fbDb != 0.0 { fb *= exp(fbDb * 0.11512925464970229) }
-            f0Out[i] = f0
-            vbOut[i] = vb
-            fbOut[i] = fb
-            betaOut[i] = beta
-            gateOut[i] = min(max(gateState, 0.0), 1.0)
+            if gripCur != 0.0 {
+                // force / speed levers (signed dB at full grip)
+                if abs(gripDb) > 1e-9 { fbDb += gripDb * gripCur }
+                if abs(gripVel) > 1e-9 { vbDb += gripVel * gripCur }
+            }
+            if vbDb != 0.0 { vbK *= exp(vbDb * 0.11512925464970229) }
+            if fbDb != 0.0 { fbK *= exp(fbDb * 0.11512925464970229) }
+            let from = lastLaw ?? (vb: vbK, fb: fbK, beta: betaK)
+            for i in segStart..<segEnd {
+                let u = Double(i + 1) / Double(n)      // block → kernel-rate lerp
+                let lf = lfStart + u * (lfTarget - lfStart)
+                lf0 = lf
+                // player vibrato depth on the sounding pitch
+                var vibOct = 0.0
+                if vibCents > 1e-9 {
+                    vibPhase += vibW
+                    if vibPhase > 2.0 * Double.pi { vibPhase -= 2.0 * Double.pi }
+                    let amt = p.vib + u * (snap.vib - p.vib)
+                    if amt > 1e-6 {
+                        vibOct = vibCents * amt * sin(vibPhase) / 1200.0
+                    }
+                }
+                // liveness drift: three OU walks, soft-bounded ±3σ
+                if driftCents > 1e-9 || driftDb > 1e-9 || driftForceDb > 1e-9 {
+                    ouPitch = min(max(aDrift * ouPitch + driftGain * nextUniform(), -3.0), 3.0)
+                    ouLevel = min(max(aDrift * ouLevel + driftGain * nextUniform(), -3.0), 3.0)
+                    ouForce = min(max(aDrift * ouForce + driftGain * nextUniform(), -3.0), 3.0)
+                    if driftCents > 1e-9 {
+                        vibOct += driftCents * ouPitch / 1200.0
+                    }
+                }
+                // glide lightening drive: sounding-pitch slew in cents/s
+                if glideDipDb > 1e-9 {
+                    let r = lastLfValid ? abs(lf - lastLf) * 1200.0 * srk : 0.0
+                    let target = glideDipDb * r / (r + glideDipRate)
+                    let a = target > dipDb ? aDipAtt : aDipRel
+                    dipDb = (1.0 - a) * target + a * dipDb
+                    lastLf = lf
+                    lastLfValid = true
+                }
+                var corr = pitchCorrection(lf)
+                if let ks = pitchKnotsA, let ps = pitchCentsPress, ps.count == ks.count {
+                    let pr = p.press + u * (snap.press - p.press)
+                    corr += interpKnots(lf - log2(220.0), ks, ps) * (pr - 0.55)
+                }
+                let f0 = exp2(lf + vibOct + corr / 1200.0)
+                // 25 ms softened gate
+                gateState = (1.0 - aGate) * snap.gate + aGate * gateState
+                placeClock += dtk
+                let w = Double(i - segStart + 1) / segLen
+                f0Out[i] = f0
+                vbOut[i] = from.vb + w * (vbK - from.vb)
+                fbOut[i] = from.fb + w * (fbK - from.fb)
+                betaOut[i] = from.beta + w * (betaK - from.beta)
+                gateOut[i] = min(max(gateState, 0.0), 1.0)
+            }
+            lastLaw = (vb: vbK, fb: fbK, beta: betaK)
+            segStart = segEnd
         }
         prev = snap
     }
@@ -729,5 +839,11 @@ public struct BowControlFilter: Sendable {
         ouForce = 0.0
         dipDb = 0.0
         lastLfValid = false
+        fundamental = 1.0
+        gripCur = 0.0
+        gripOn = false
+        gripCapturedS = 0.0
+        gripCount = 0
+        lastLaw = nil
     }
 }

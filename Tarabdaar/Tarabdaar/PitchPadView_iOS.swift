@@ -48,15 +48,21 @@ struct PadToolbarIOS: View {
             if let motion {
                 // The onset fade tracks the Mac's blend window
                 // (`ctl_strike_window`, relayed over JOYCON_STATE).
-                StrikeScopePane(motion: motion,
-                                fadeS: scaleSync.joyConTilt.strikeWindowS)
+                ScopeTracePane(width: 150) {
+                    ScopeTraces.strike(motion: motion,
+                                       fadeS: scaleSync.joyConTilt.strikeWindowS)
+                }
             }
             if let fingerAccel {
-                FingerAccelScopePane(history: fingerAccel, motion: motion)
+                ScopeTracePane(width: 150) {
+                    ScopeTraces.fingerAccel(history: fingerAccel, motion: motion)
+                }
             }
             // The Mac's radiated voice/taraf levels (JOYCON_STATE).
-            VolumeScopePane(history: scaleSync.volumeHistory,
-                            motion: motion)
+            ScopeTracePane(width: 120) {
+                ScopeTraces.volume(history: scaleSync.volumeHistory,
+                                   motion: motion)
+            }
             Spacer(minLength: 12)
             SoundingReadout(sounding: engine.sounding,
                             tonicFractionalMidi: engine.tonicFractionalMidi,
@@ -260,254 +266,252 @@ private struct TiltSquare: View {
     }
 }
 
-/// The strike scope: the strike envelope (0–127 wire scale) as a scrolling
-/// trace with the current value at the right; the amber tick holds the last
-/// onset's reading. `ScopePane` carries the polling and the grid.
-private struct StrikeScopePane: View {
-    let motion: MotionManager
-    /// The onset color fade — the Mac's `ctl_strike_window` blend window.
-    let fadeS: Double
-
-    private struct Snapshot {
-        let env: [(t: TimeInterval, level: Double)]
-        let lastStrike: Double
-        let activity: [(t: TimeInterval, active: Int)]
-        let onsets: [TimeInterval]
-        let fadeS: Double
+/// One toolbar scope's frame of data: the traces to decimate, the note
+/// timeline behind them and how the pane reads them out. Built once per poll
+/// by `ScopeTraces.strike` / `.fingerAccel` / `.volume`; `ScopeTracePane`
+/// turns it into pixels.
+private struct ScopeTraceFrame {
+    struct Trace {
+        let samples: [(t: TimeInterval, v: Double)]
+        /// Peak-hold keeps the largest |v| with its sign (a centred trace)
+        /// rather than the largest v.
+        let signedPeak: Bool
+        /// Empty bins repeat the last value — sparse, change-gated feeds.
+        let forwardFill: Bool
+        /// Colour of the segment ending in a bin, from the bin's centre time
+        /// and whether a note was sounding there.
+        let color: (TimeInterval, Bool) -> Color
+    }
+    struct Label {
+        let text: Text
+        let box: CGSize
+        /// Vertical centre; nil = the top-right corner.
+        let y: CGFloat?
+    }
+    /// Which value the labels read per trace.
+    enum Readout {
+        /// The newest sample — dense feeds.
+        case newestSample
+        /// The last bin's held value — sparse, forward-filled feeds.
+        case lastBin
     }
 
-    var body: some View {
-        ScopePane(width: 150, sample: {
-            Snapshot(env: motion.strikeHistory,
-                     lastStrike: motion.lastTouchVelocity,
-                     activity: motion.noteActivity,
-                     onsets: motion.noteOnsets,
-                     fadeS: max(fadeS, 0.05))
-        }, draw: Self.draw)
-    }
-
-    private static func draw(_ ctx: GraphicsContext, size: CGSize,
-                             snap: Snapshot) {
-        let w = size.width, h = size.height
-        // Only the envelope (the control signal the bindings see) is drawn.
-        guard let lastT = snap.env.last?.t else { return }
-        let bins = ScopeTrace.Bins(width: w, endingAt: lastT)
-        var peak = [Double](repeating: -1.0, count: bins.count)
-        var current = 0.0
-        for s in snap.env {
-            guard s.t >= bins.t0 else { continue }
-            current = s.level
-            let b = bins.index(of: s.t)
-            if s.level > peak[b] { peak[b] = s.level }
-        }
-        // Color per bin: pale yellow at onset fading down `ScopeColor.level`
-        // over `fadeS`, dark gray while nothing plays.
-        let soundingArr = ScopeTrace.soundingBins(snap.activity, bins: bins)
-        var oi = -1        // last onset with t <= binT
-        var colorArr = [Color](repeating: .clear, count: bins.count)
-        for b in 0..<bins.count {
-            let binT = bins.center(b)
-            while oi + 1 < snap.onsets.count, snap.onsets[oi + 1] <= binT {
-                oi += 1
-            }
-            if soundingArr[b] {
-                let age = oi >= 0 ? binT - snap.onsets[oi] : snap.fadeS
-                let f = min(max(age / snap.fadeS, 0.0), 1.0)
-                colorArr[b] = ScopeColor.level(1 - f).opacity(0.95)
-            } else {
-                colorArr[b] = Color(white: 0.38).opacity(0.9)
-            }
-        }
-        ScopeTrace.fillActivity(ctx, size: size, sounding: soundingArr)
-        // Guide lines at thirds (≈42 / 85).
-        ScopeTrace.guides(ctx, size: size,
-                          [(1.0 / 3.0, 0.12), (2.0 / 3.0, 0.12)])
-        // The envelope, stroked per-pair with the newer bin's color.
-        var prevPt: CGPoint? = nil
-        for b in 0..<bins.count where peak[b] >= 0 {
-            let pt = CGPoint(x: bins.x(b, width: w),
-                             y: h - CGFloat(peak[b]) * (h - 2) - 1)
-            if let pp = prevPt {
-                var seg = Path()
-                seg.move(to: pp)
-                seg.addLine(to: pt)
-                ctx.stroke(seg, with: .color(colorArr[b]), lineWidth: 1.5)
-            }
-            prevPt = pt
-        }
-        // Last onset's reading: an amber tick at its height, right edge.
-        if snap.lastStrike > 0 {
-            var tick = Path()
-            let y = h - CGFloat(snap.lastStrike) * (h - 2) - 1
-            tick.move(to: CGPoint(x: w - 7, y: y))
-            tick.addLine(to: CGPoint(x: w, y: y))
-            ctx.stroke(tick, with: .color(.orange), lineWidth: 2)
-        }
-        // Live value, wire scale.
-        ScopeTrace.drawValueLabel(
-            ctx,
-            Text("\(Int((current * 127).rounded()))")
-                .font(.padSmall(10).monospacedDigit())
-                .foregroundColor(.white.opacity(0.9)),
-            size: size, measureIn: CGSize(width: 40, height: 16))
-    }
+    /// Drawn in order: the last trace on top.
+    let traces: [Trace]
+    let activity: [(t: TimeInterval, active: Int)]
+    /// The window scrolls with the clock rather than the newest sample.
+    let endsAtNow: Bool
+    let guides: [(fraction: Double, opacity: Double)]
+    /// Value → fraction of the pane height, bottom to top.
+    let y01: (Double) -> Double
+    /// A held reading marked by an amber tick at the right edge.
+    let tick: Double?
+    let readout: Readout
+    /// The value labels, from one readout per trace.
+    let labels: ([Double]) -> [Label]
 }
 
-/// The finger-accel scope: the finger's pitch acceleration on the
-/// `.fingerAccel` −1…+1 scale (centerline = rest or constant-rate meend),
-/// from the iPad's own `FingerAccelSampler` instance of the shared law.
-private struct FingerAccelScopePane: View {
-    let history: FingerAccelSampler
-    let motion: MotionManager?
-
-    private struct Snapshot {
-        let env: [(t: TimeInterval, v: Double)]
-        let activity: [(t: TimeInterval, active: Int)]
-    }
+/// The one toolbar scope view: polls a `ScopeTraceFrame`, decimates each
+/// trace per-bin (peak-hold), and draws the note backdrop, the guides, the
+/// traces, the tick and the labels over `ScopePane`'s grid.
+private struct ScopeTracePane: View {
+    let width: CGFloat
+    let sample: () -> ScopeTraceFrame
 
     var body: some View {
-        ScopePane(width: 150, sample: {
-            Snapshot(env: history.history(),
-                     activity: motion?.noteActivity ?? [])
-        }, draw: Self.draw)
+        ScopePane(width: width, sample: sample, draw: Self.draw)
     }
 
     private static func draw(_ ctx: GraphicsContext, size: CGSize,
-                             snap: Snapshot) {
+                             frame: ScopeTraceFrame) {
         let w = size.width, h = size.height
-        guard let lastT = snap.env.last?.t else { return }
-        let bins = ScopeTrace.Bins(width: w, endingAt: lastT)
-        // Per-bin SIGNED peak-hold (max |v| keeps its sign) so brief bursts
-        // survive decimation.
-        var peak = [Double](repeating: .nan, count: bins.count)
-        var current = 0.0
-        for s in snap.env {
-            guard s.t >= bins.t0 else { continue }
-            current = s.v
-            let b = bins.index(of: s.t)
-            if peak[b].isNaN || abs(s.v) > abs(peak[b]) { peak[b] = s.v }
+        let newest = frame.traces.compactMap { $0.samples.last?.t }.max()
+        guard let newest else { return }
+        let end = frame.endsAtNow ? ProcessInfo.processInfo.systemUptime
+                                  : newest
+        let bins = ScopeTrace.Bins(width: w, endingAt: end)
+        // Per-bin peak-hold, so brief bursts survive decimation; NaN = empty.
+        let held: [[Double]] = frame.traces.map { trace in
+            var peak = [Double](repeating: .nan, count: bins.count)
+            var seed = Double.nan
+            for s in trace.samples {
+                guard s.t >= bins.t0 else { seed = s.v; continue }
+                let b = bins.index(of: s.t)
+                let above = trace.signedPeak ? abs(s.v) > abs(peak[b])
+                                             : s.v > peak[b]
+                if peak[b].isNaN || above { peak[b] = s.v }
+            }
+            if trace.forwardFill {
+                var fill = seed.isNaN ? 0.0 : seed
+                for b in 0..<bins.count {
+                    if peak[b].isNaN { peak[b] = fill } else { fill = peak[b] }
+                }
+            }
+            return peak
         }
-        let soundingArr = ScopeTrace.soundingBins(snap.activity, bins: bins)
+        let soundingArr = ScopeTrace.soundingBins(frame.activity, bins: bins)
         ScopeTrace.fillActivity(ctx, size: size, sounding: soundingArr)
-        // Centerline (rest) bright-ish, ±0.5 guides faint.
-        ScopeTrace.guides(ctx, size: size,
-                          [(0.5, 0.25), (0.25, 0.12), (0.75, 0.12)])
-        // The trace: −1…+1 → bottom…top, colored by playing state.
+        ScopeTrace.guides(ctx, size: size, frame.guides)
         func yFor(_ v: Double) -> CGFloat {
-            h / 2 - CGFloat(v) * (h / 2 - 1)
+            h - CGFloat(frame.y01(v)) * (h - 2) - 1
         }
-        var prevPt: CGPoint? = nil
-        for b in 0..<bins.count where !peak[b].isNaN {
-            let pt = CGPoint(x: bins.x(b, width: w), y: yFor(peak[b]))
-            if let pp = prevPt {
-                var seg = Path()
-                seg.move(to: pp)
-                seg.addLine(to: pt)
-                let c: Color = soundingArr[b]
-                    ? Color(red: 0.55, green: 1.0, blue: 0.55).opacity(0.95)
-                    : Color(white: 0.38).opacity(0.9)
-                ctx.stroke(seg, with: .color(c), lineWidth: 1.5)
-            }
-            prevPt = pt
-        }
-        // Live value on the wire-style ±127 scale, signed.
-        ScopeTrace.drawValueLabel(
-            ctx,
-            Text("\(Int((current * 127).rounded()))")
-                .font(.padSmall(10).monospacedDigit())
-                .foregroundColor(.white.opacity(0.9)),
-            size: size, measureIn: CGSize(width: 44, height: 16))
-    }
-}
-
-/// The volume scope: the Mac's radiated voice and taraf levels on the wire's
-/// 0…1 log scale (−60…0 dBFS, `TLPVolume`; guides = 20 dB) with the current
-/// dB at the right. Samples are unsmoothed RMS, change-gated on the wire, so
-/// bins peak-hold and forward-fill. Voice orange, taraf cyan while a note
-/// sounds.
-private struct VolumeScopePane: View {
-    let history: VolumeHistory
-    /// The surface's note timeline (same clock as the samples); nil = none.
-    let motion: MotionManager?
-
-    private struct Snapshot {
-        let samples: [VolumeHistory.Sample]
-        let activity: [(t: TimeInterval, active: Int)]
-    }
-
-    var body: some View {
-        ScopePane(width: 120, sample: {
-            Snapshot(samples: history.snapshot(),
-                     activity: motion?.noteActivity ?? [])
-        }, draw: Self.draw)
-    }
-
-    private static let voiceColor = Color.orange
-    private static let tarafColor = Color.cyan
-    private static let voiceIdle = Color(white: 0.55).opacity(0.9)
-    private static let tarafIdle = Color(white: 0.35).opacity(0.9)
-
-    private static func draw(_ ctx: GraphicsContext, size: CGSize,
-                             snap: Snapshot) {
-        let w = size.width, h = size.height
-        guard !snap.samples.isEmpty else { return }
-        // The trace scrolls with NOW, not the last (sparse) sample.
-        let now = ProcessInfo.processInfo.systemUptime
-        let bins = ScopeTrace.Bins(width: w, endingAt: now)
-        // Peak-hold; empty bins forward-fill.
-        var voicePk = [Double](repeating: -1.0, count: bins.count)
-        var tarafPk = [Double](repeating: -1.0, count: bins.count)
-        var seedV = 0.0, seedT = 0.0
-        for s in snap.samples {
-            guard s.t >= bins.t0 else {
-                seedV = s.voice; seedT = s.taraf; continue
-            }
-            let b = bins.index(of: s.t)
-            if s.voice > voicePk[b] { voicePk[b] = s.voice }
-            if s.taraf > tarafPk[b] { tarafPk[b] = s.taraf }
-        }
-        var vFill = seedV, tFill = seedT
-        for b in 0..<bins.count {
-            if voicePk[b] < 0 { voicePk[b] = vFill } else { vFill = voicePk[b] }
-            if tarafPk[b] < 0 { tarafPk[b] = tFill } else { tFill = tarafPk[b] }
-        }
-        let soundingArr = ScopeTrace.soundingBins(snap.activity, bins: bins)
-        ScopeTrace.fillActivity(ctx, size: size, sounding: soundingArr)
-        // Guide lines at thirds (20 dB steps).
-        ScopeTrace.guides(ctx, size: size,
-                          [(1.0 / 3.0, 0.12), (2.0 / 3.0, 0.12)])
-        // Traces: colored while a note sounds, gray otherwise. Taraf under.
-        func stroke(_ values: [Double], active: Color, idle: Color) {
+        // Each trace stroked per-pair with the newer bin's colour.
+        for (trace, peak) in zip(frame.traces, held) {
             var prevPt: CGPoint? = nil
-            for b in 0..<bins.count {
-                let pt = CGPoint(x: bins.x(b, width: w),
-                                 y: h - CGFloat(values[b]) * (h - 2) - 1)
+            for b in 0..<bins.count where !peak[b].isNaN {
+                let pt = CGPoint(x: bins.x(b, width: w), y: yFor(peak[b]))
                 if let pp = prevPt {
                     var seg = Path()
                     seg.move(to: pp)
                     seg.addLine(to: pt)
-                    ctx.stroke(seg,
-                               with: .color(soundingArr[b] ? active : idle),
-                               lineWidth: 1.5)
+                    let c = trace.color(bins.center(b), soundingArr[b])
+                    ctx.stroke(seg, with: .color(c), lineWidth: 1.5)
                 }
                 prevPt = pt
             }
         }
-        stroke(tarafPk, active: tarafColor, idle: tarafIdle)
-        stroke(voicePk, active: voiceColor, idle: voiceIdle)
-        // Current dB values, voice above taraf; silence prints nothing.
-        func label(_ v01: Double, _ color: Color, y: CGFloat) {
-            guard v01 > 0 else { return }
-            let db = Int(TLPVolume.db(from01: v01).rounded())
-            ScopeTrace.drawValueLabel(
-                ctx,
-                Text("\(db)")
-                    .font(.padSmall(9).monospacedDigit())
-                    .foregroundColor(color.opacity(0.95)),
-                size: size, measureIn: CGSize(width: 40, height: 14), y: y)
+        if let tick = frame.tick {
+            var path = Path()
+            let y = yFor(tick)
+            path.move(to: CGPoint(x: w - 7, y: y))
+            path.addLine(to: CGPoint(x: w, y: y))
+            ctx.stroke(path, with: .color(.orange), lineWidth: 2)
         }
-        label(voicePk[bins.count - 1], voiceColor, y: 7)
-        label(tarafPk[bins.count - 1], tarafColor, y: h - 7)
+        let readouts: [Double]
+        switch frame.readout {
+        case .newestSample:
+            readouts = frame.traces.map { $0.samples.last?.v ?? 0 }
+        case .lastBin:
+            readouts = held.map { $0[bins.count - 1] }
+        }
+        for label in frame.labels(readouts) {
+            ScopeTrace.drawValueLabel(ctx, label.text, size: size,
+                                      measureIn: label.box, y: label.y)
+        }
+    }
+}
+
+/// The three toolbar scopes as `ScopeTraceFrame` builders.
+private enum ScopeTraces {
+    private static let idleGray = Color(white: 0.38).opacity(0.9)
+
+    /// The strike scope: the strike envelope (0–127 wire scale) with the
+    /// current value at the right; the amber tick holds the last onset's
+    /// reading. Pale yellow at an onset fading down `ScopeColor.level` over
+    /// `fadeS` (the Mac's `ctl_strike_window` blend window), dark gray
+    /// while nothing plays.
+    static func strike(motion: MotionManager, fadeS: Double) -> ScopeTraceFrame {
+        let onsets = motion.noteOnsets
+        let fade = max(fadeS, 0.05)
+        let lastStrike = motion.lastTouchVelocity
+        return ScopeTraceFrame(
+            traces: [.init(
+                samples: motion.strikeHistory.map { (t: $0.t, v: $0.level) },
+                signedPeak: false, forwardFill: false,
+                color: { binT, sounding in
+                    guard sounding else { return idleGray }
+                    let age = lastOnset(in: onsets, atOrBefore: binT)
+                        .map { binT - $0 } ?? fade
+                    let f = min(max(age / fade, 0.0), 1.0)
+                    return ScopeColor.level(1 - f).opacity(0.95)
+                })],
+            activity: motion.noteActivity,
+            endsAtNow: false,
+            // Guide lines at thirds (≈42 / 85).
+            guides: [(1.0 / 3.0, 0.12), (2.0 / 3.0, 0.12)],
+            y01: { $0 },
+            tick: lastStrike > 0 ? lastStrike : nil,
+            readout: .newestSample,
+            labels: { v in [wireLabel(v[0], width: 40)] })
+    }
+
+    /// The finger-accel scope: the finger's pitch acceleration on the
+    /// `.fingerAccel` −1…+1 scale (centerline = rest or constant-rate
+    /// meend), from the iPad's own `FingerAccelSampler` instance of the
+    /// shared law. Green while a note sounds.
+    static func fingerAccel(history: FingerAccelSampler,
+                            motion: MotionManager?) -> ScopeTraceFrame {
+        ScopeTraceFrame(
+            traces: [.init(
+                samples: history.history(),
+                signedPeak: true, forwardFill: false,
+                color: { _, sounding in
+                    sounding
+                        ? Color(red: 0.55, green: 1.0, blue: 0.55).opacity(0.95)
+                        : idleGray
+                })],
+            activity: motion?.noteActivity ?? [],
+            endsAtNow: false,
+            // Centerline (rest) bright-ish, ±0.5 guides faint.
+            guides: [(0.5, 0.25), (0.25, 0.12), (0.75, 0.12)],
+            y01: { ($0 + 1) / 2 },
+            tick: nil,
+            readout: .newestSample,
+            labels: { v in [wireLabel(v[0], width: 44)] })
+    }
+
+    /// The volume scope: the Mac's radiated voice and taraf levels on the
+    /// wire's 0…1 log scale (−60…0 dBFS, `TLPVolume`; guides = 20 dB) with
+    /// the current dB at the right. Samples are unsmoothed RMS, change-gated
+    /// on the wire, so bins peak-hold and forward-fill and the window
+    /// scrolls with NOW rather than the last (sparse) sample. Voice orange
+    /// over taraf cyan while a note sounds.
+    static func volume(history: VolumeHistory,
+                       motion: MotionManager?) -> ScopeTraceFrame {
+        let samples = history.snapshot()
+        let voiceColor = Color.orange, tarafColor = Color.cyan
+        let voiceIdle = Color(white: 0.55).opacity(0.9)
+        let tarafIdle = Color(white: 0.35).opacity(0.9)
+        func trace(_ value: @escaping (VolumeHistory.Sample) -> Double,
+                   active: Color, idle: Color) -> ScopeTraceFrame.Trace {
+            .init(samples: samples.map { (t: $0.t, v: value($0)) },
+                  signedPeak: false, forwardFill: true,
+                  color: { _, sounding in sounding ? active : idle })
+        }
+        // Current dB values, voice above taraf; silence prints nothing.
+        func label(_ v01: Double, _ color: Color,
+                   y: CGFloat) -> ScopeTraceFrame.Label? {
+            guard v01 > 0 else { return nil }
+            let db = Int(TLPVolume.db(from01: v01).rounded())
+            return .init(text: Text("\(db)")
+                            .font(.padSmall(9).monospacedDigit())
+                            .foregroundColor(color.opacity(0.95)),
+                         box: CGSize(width: 40, height: 14), y: y)
+        }
+        return ScopeTraceFrame(
+            traces: [trace({ $0.taraf }, active: tarafColor, idle: tarafIdle),
+                     trace({ $0.voice }, active: voiceColor, idle: voiceIdle)],
+            activity: motion?.noteActivity ?? [],
+            endsAtNow: true,
+            // Guide lines at thirds (20 dB steps).
+            guides: [(1.0 / 3.0, 0.12), (2.0 / 3.0, 0.12)],
+            y01: { $0 },
+            tick: nil,
+            readout: .lastBin,
+            labels: { v in
+                [label(v[1], voiceColor, y: 7),
+                 label(v[0], tarafColor, y: ScopeTrace.paneHeight - 7)]
+                    .compactMap { $0 }
+            })
+    }
+
+    /// The live value on the wire's ±127 scale.
+    private static func wireLabel(_ v: Double, width: CGFloat) -> ScopeTraceFrame.Label {
+        .init(text: Text("\(Int((v * 127).rounded()))")
+                  .font(.padSmall(10).monospacedDigit())
+                  .foregroundColor(.white.opacity(0.9)),
+              box: CGSize(width: width, height: 16), y: nil)
+    }
+
+    /// The newest onset at or before `t` (the onsets are ordered).
+    private static func lastOnset(in onsets: [TimeInterval],
+                                  atOrBefore t: TimeInterval) -> TimeInterval? {
+        var lo = 0, hi = onsets.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if onsets[mid] <= t { lo = mid + 1 } else { hi = mid }
+        }
+        return lo > 0 ? onsets[lo - 1] : nil
     }
 }
 
@@ -677,6 +681,37 @@ struct RawAccelOverlay: View {
     }
 }
 
+/// The surface's layout — the scale degrees, the fret placements and the
+/// chord-bar cells — recomputed only when the arrangement, the scale or the
+/// surface size changes; a touch or a redraw tick reuses the last one. A
+/// class so the surface's body can refresh it without a state write.
+private final class FretLayoutMemo {
+    typealias Layout = (degrees: [(ratio: Double, label: String)],
+                        placements: [FretPlacement],
+                        chordCells: [ChordBarCell])
+    private var key: (arrangement: FretArrangement, scale: PitchScale,
+                      size: CGSize)?
+    private var layout: Layout = ([], [], [])
+
+    func resolve(arrangement: FretArrangement, scale: PitchScale,
+                 size: CGSize) -> Layout {
+        if let key, key.arrangement == arrangement, key.scale == scale,
+           key.size == size {
+            return layout
+        }
+        let band = fretPadBandRect(in: size)
+        let degrees = scaleDegrees(from: scale)
+        layout = (degrees,
+                  fretPlacements(arrangement: arrangement, degrees: degrees,
+                                 size: band.size),
+                  chordBarCells(arrangement: arrangement, degrees: degrees,
+                                chords: scaleChords(degrees: degrees),
+                                size: size))
+        key = (arrangement, scale, size)
+        return layout
+    }
+}
+
 private struct FretPadSurfaceIOS: View {
     @ObservedObject var engine: PitchPadEngine
     let arrangement: FretArrangement
@@ -700,6 +735,8 @@ private struct FretPadSurfaceIOS: View {
     @State private var droneTouches: [Int: Int] = [:]
     /// Per-touch indicator — a class so the settle timer can feed it.
     @StateObject private var indicators = TouchIndicatorModel()
+    /// The fret and chord-bar layout, memoised on what changes it.
+    @State private var layout = FretLayoutMemo()
 
     private let edgePad: CGFloat = 12
     /// Onset-snap half-width in px — the synced `marginPixels`. 0 = fretless.
@@ -711,13 +748,8 @@ private struct FretPadSurfaceIOS: View {
                               height: max(1, geo.size.height - 2 * edgePad))
             // The playable band — the frets' coordinate space.
             let band = fretPadBandRect(in: size)
-            let degrees = scaleDegrees(from: engine.scale)
-            let placements = fretPlacements(arrangement: arrangement,
-                                            degrees: degrees, size: band.size)
-            let chordCells = chordBarCells(arrangement: arrangement,
-                                           degrees: degrees,
-                                           chords: scaleChords(degrees: degrees),
-                                           size: size)
+            let (degrees, placements, chordCells) = layout.resolve(
+                arrangement: arrangement, scale: engine.scale, size: size)
 
             ZStack(alignment: .topLeading) {
                 Color.black

@@ -1,9 +1,7 @@
 import Combine
-import CoreBluetooth
 import Foundation
 import GameController
 import TarabdaarCore
-import IOKit.hid
 import simd
 
 /// Supplemental game-controller input: a Nintendo Switch Joy-Con (L) over
@@ -12,7 +10,7 @@ import simd
 /// axes, drone buttons).
 ///
 /// THE SHAPE (three bearers, one coordinator). Each way a Joy-Con can
-/// reach this app is its own `JoyConTransport` below — the GameController
+/// reach this app is its own `JoyConTransport` (one file each) — the GameController
 /// profile, the raw IOHID side-channel, the Switch 2 vendor GATT — and
 /// each parses its own wire format into the platform-neutral
 /// `JoyConReport`. `JoyConInput` is then a thin coordinator: it hands
@@ -33,7 +31,7 @@ import simd
 /// stick first and binds only a DISTINCT Direction Pad element.
 ///
 /// **Switch 2 Joy-Con:** BLE-only, vendor GATT — macOS cannot pair them
-/// and neither GameController nor IOHID sees them. `JoyCon2BLE` (below)
+/// and neither GameController nor IOHID sees them. `JoyCon2BLE` (`JoyConBLE.swift`)
 /// owns the connection; `JoyConBLETransport` parses report 0x05 from the
 /// standard characteristic …7FD2 into the same funnels. The controller-
 /// specific characteristic CC1BBBB5-… carries report 0x07 (undecoded
@@ -170,71 +168,76 @@ final class JoyConInput: ObservableObject {
 
     // MARK: Trails (Setup panel)
 
-    /// Raw-stream trail for the Setup panel's received-motion view: the
-    /// UNSMOOTHED per-message feature vectors, last ~8 s. Not published —
-    /// the view reads `liveTrace` inside its 60 Hz TimelineView tick.
-    private var rawBuf: [RawTiltSample] = []
+    /// The Setup panel's display trails, last ~8 s each. Not published —
+    /// the views read them inside their 60 Hz TimelineView ticks. Main
+    /// thread only (written on main beside the calibrators).
     private static let traceWindow: CFAbsoluteTime = 8
-    /// Flips once when the first tilt message lands — gates the panel.
-    @Published private(set) var traceActive = false
-    /// Received raw accelerometer trail (g, gravity removed), display only.
-    private var accelBuf: [RawAccelSample] = []
-    /// The Joy-Con's own IMU trails (device frame, ~8 s): gyro in °/s,
-    /// accel in g (INCLUDES gravity — at rest on the 1 g sphere),
-    /// magnetometer in raw i16 (Joy-Con 2 only).
-    private var jcGyroBuf: [RawAccelSample] = []
-    private var jcAccelBuf: [RawAccelSample] = []
-    private var jcMagBuf: [RawAccelSample] = []
-    /// FUSED trails (Joy-Con 2 only — filled by `processIMU`): attitude
+    /// The arm stream: the UNSMOOTHED per-message feature vectors.
+    private var rawBuf = TrailBuffer<RawTiltSample>()
+    /// Received raw accelerometer (g, gravity removed).
+    private var accelBuf = TrailBuffer<RawAccelSample>()
+    /// The Joy-Con's own IMU (device frame): gyro in °/s, accel in g
+    /// (INCLUDES gravity — at rest on the 1 g sphere), magnetometer in
+    /// raw i16 (Joy-Con 2 only).
+    private var jcGyroBuf = TrailBuffer<RawAccelSample>()
+    private var jcAccelBuf = TrailBuffer<RawAccelSample>()
+    private var jcMagBuf = TrailBuffer<RawAccelSample>()
+    /// FUSED (Joy-Con 2 only — filled by `processIMU`): attitude
     /// [pitch, roll, yaw] in radians, and linear acceleration in g with
     /// the gravity estimate subtracted (rests at the origin).
-    private var jcAttitudeBuf: [RawAccelSample] = []
-    private var jcLinAccelBuf: [RawAccelSample] = []
-    /// Flips once when the first fused sample lands — gates the fused
-    /// panels (stays false for classic Joy-Cons).
+    private var jcAttitudeBuf = TrailBuffer<RawAccelSample>()
+    private var jcLinAccelBuf = TrailBuffer<RawAccelSample>()
+    /// The panel gates — each flips once when its stream's first sample
+    /// lands (`gatePanels`) and stays false for a stream the bearer never
+    /// carries: the arm trail; the fused panels (classic Joy-Cons have
+    /// none); the IMU panels (first NON-ZERO sample); the magnetometer
+    /// (Joy-Con 2 only).
+    @Published private(set) var traceActive = false
     @Published private(set) var jcFusedActive = false
-    /// Flip once when the first NON-ZERO IMU / magnetometer sample lands —
-    /// they gate the Setup panels.
     @Published private(set) var jcIMUActive = false
     @Published private(set) var jcMagActive = false
-    /// Live reads for the Setup panel's 60 Hz TimelineViews. Main thread
-    /// only (these buffers and the calibrators are written on main).
-    var liveTrace: [RawTiltSample] { rawBuf }
-    var liveAccelTrace: [RawAccelSample] { accelBuf }
-    var liveJoyConGyro: [RawAccelSample] { jcGyroBuf }
-    var liveJoyConAccel: [RawAccelSample] { jcAccelBuf }
-    var liveJoyConMag: [RawAccelSample] { jcMagBuf }
-    var liveJoyConAttitude: [RawAccelSample] { jcAttitudeBuf }
-    var liveJoyConLinAccel: [RawAccelSample] { jcLinAccelBuf }
+    /// Live reads for the Setup panel's 60 Hz TimelineViews.
+    var liveTrace: [RawTiltSample] { rawBuf.samples }
+    var liveAccelTrace: [RawAccelSample] { accelBuf.samples }
+    var liveJoyConGyro: [RawAccelSample] { jcGyroBuf.samples }
+    var liveJoyConAccel: [RawAccelSample] { jcAccelBuf.samples }
+    var liveJoyConMag: [RawAccelSample] { jcMagBuf.samples }
+    var liveJoyConAttitude: [RawAccelSample] { jcAttitudeBuf.samples }
+    var liveJoyConLinAccel: [RawAccelSample] { jcLinAccelBuf.samples }
     var liveArmPos: SIMD3<Double>? { armCal.livePos }
+
+    /// The one place the panel gates flip: an append site names the
+    /// streams it just fed, and a gate that is still closed opens.
+    private func gatePanels(trace: Bool = false, fused: Bool = false,
+                            imu: Bool = false, mag: Bool = false) {
+        if trace, !traceActive { traceActive = true }
+        if fused, !jcFusedActive { jcFusedActive = true }
+        if imu, !jcIMUActive { jcIMUActive = true }
+        if mag, !jcMagActive { jcMagActive = true }
+    }
 
     /// Append one Joy-Con IMU sample set (main thread).
     private func appendJoyConIMU(t: CFAbsoluteTime,
                                  gyroDps: SIMD3<Double>,
                                  accelG: SIMD3<Double>,
                                  mag: SIMD3<Double>? = nil) {
+        let cutoff = t - Self.traceWindow
         jcGyroBuf.append(RawAccelSample(t: t, a: gyroDps))
         jcAccelBuf.append(RawAccelSample(t: t, a: accelG))
-        if let first = jcGyroBuf.first, first.t < t - Self.traceWindow {
-            jcGyroBuf.removeAll { $0.t < t - Self.traceWindow }
-            jcAccelBuf.removeAll { $0.t < t - Self.traceWindow }
-        }
-        if !jcIMUActive, gyroDps != .zero || accelG != .zero {
-            jcIMUActive = true
-        }
+        jcGyroBuf.trim(before: cutoff)
+        jcAccelBuf.trim(before: cutoff)
         if let mag {
             jcMagBuf.append(RawAccelSample(t: t, a: mag))
-            if let first = jcMagBuf.first, first.t < t - Self.traceWindow {
-                jcMagBuf.removeAll { $0.t < t - Self.traceWindow }
-            }
-            if !jcMagActive, mag != .zero { jcMagActive = true }
+            jcMagBuf.trim(before: cutoff)
         }
+        gatePanels(imu: gyroDps != .zero || accelG != .zero,
+                   mag: mag.map { $0 != .zero } ?? false)
     }
 
     private func clearJoyConIMU() {
-        jcGyroBuf = []
-        jcAccelBuf = []
-        jcMagBuf = []
+        jcGyroBuf.removeAll()
+        jcAccelBuf.removeAll()
+        jcMagBuf.removeAll()
         jcIMUActive = false
         jcMagActive = false
         hid.resetIMUEnableTries()
@@ -242,8 +245,8 @@ final class JoyConInput: ObservableObject {
         let wasSendingAccel = fusion.reset()
         if yawPinned { yawPinned = false }
         fusedAttitude = []
-        jcAttitudeBuf = []
-        jcLinAccelBuf = []
+        jcAttitudeBuf.removeAll()
+        jcLinAccelBuf.removeAll()
         jcFusedActive = false
         onWristAttitude?(nil)
         lastWristAxes = nil
@@ -258,17 +261,13 @@ final class JoyConInput: ObservableObject {
             guard let self else { return }
             let now = CFAbsoluteTimeGetCurrent()
             self.accelBuf.append(RawAccelSample(t: now, a: a))
-            if let first = self.accelBuf.first,
-               first.t < now - Self.traceWindow {
-                self.accelBuf.removeAll { $0.t < now - Self.traceWindow }
-            }
+            self.accelBuf.trim(before: now - Self.traceWindow)
         }
     }
 
     // The ARM input: the iPad's raw tilt report (MIDI thread → main).
     private let armLock = NSLock()
     private var armTilt = SIMD3<Double>(0, 0, 0)
-    private var armTime: CFAbsoluteTime = 0
 
     // MARK: Start — wiring the three bearers
 
@@ -483,13 +482,12 @@ final class JoyConInput: ObservableObject {
     /// iPad raw-tilt in (MIDI thread — the only cross-thread entry). Returns
     /// true when the arm calibration CONSUMES the value (one exists or is
     /// being captured); the caller must then not pass it to the axes.
+    /// One message = one axis = one main hop, carrying the whole vector
+    /// by value (no heap traffic on the MIDI thread).
     func feedArmTilt(_ axis: Int, _ value: Double) -> Bool {
         armLock.lock()
-        if axis >= 0, axis < 3 {
-            armTilt[axis] = value
-            armTime = CFAbsoluteTimeGetCurrent()
-        }
-        let f = [armTilt.x, armTilt.y, armTilt.z]
+        if axis >= 0, axis < 3 { armTilt[axis] = value }
+        let f = armTilt
         armLock.unlock()
         let consumed = armCal.isActive
         DispatchQueue.main.async { [weak self] in self?.armTick(f) }
@@ -499,21 +497,18 @@ final class JoyConInput: ObservableObject {
     /// One arm-stream tick on main: the raw trail (frame-coalesced — the
     /// wire delivers one axis per message; `TiltCalibrator.frameGap`),
     /// then the calibrator (capture or solve → `onArmAxes`).
-    private func armTick(_ f: [Double]) {
+    private func armTick(_ raw: SIMD3<Double>) {
         let now = CFAbsoluteTimeGetCurrent()
-        let raw = SIMD3(f[0], f[1], f[2])
         let newFrame = now - lastArmMsgT >= TiltCalibrator.frameGap
         lastArmMsgT = now
         let sample = RawTiltSample(t: now, raw: raw)
         if newFrame || rawBuf.isEmpty {
             rawBuf.append(sample)
         } else {
-            rawBuf[rawBuf.count - 1] = sample
+            rawBuf.replaceLast(sample)
         }
-        if let first = rawBuf.first, first.t < now - Self.traceWindow {
-            rawBuf.removeAll { $0.t < now - Self.traceWindow }
-        }
-        if !traceActive { traceActive = true }
+        rawBuf.trim(before: now - Self.traceWindow)
+        gatePanels(trace: true)
         armCal.tick(raw, at: now)
     }
 
@@ -559,11 +554,9 @@ final class JoyConInput: ObservableObject {
         wristCal.tick(step.wristFeature, at: now)
         // THE JOY-CON ACCELERATION AXIS, change-gated at 1/256.
         if step.accelChanged { onJoyConAccel?(step.accelEnvelope) }
-        if let first = jcAttitudeBuf.first, first.t < now - Self.traceWindow {
-            jcAttitudeBuf.removeAll { $0.t < now - Self.traceWindow }
-            jcLinAccelBuf.removeAll { $0.t < now - Self.traceWindow }
-        }
-        if !jcFusedActive { jcFusedActive = true }
+        jcAttitudeBuf.trim(before: now - Self.traceWindow)
+        jcLinAccelBuf.trim(before: now - Self.traceWindow)
+        gatePanels(fused: true)
         if now - lastFusedPublish > 0.1 {
             lastFusedPublish = now
             let deg = 180.0 / .pi
@@ -588,1015 +581,52 @@ final class JoyConInput: ObservableObject {
     }
 }
 
-// MARK: - Bearer 1: the GameController profile
+// MARK: - TrailBuffer
 
-/// The framework path: whatever macOS itself presents. Delivers button
-/// EDGES (one callback per element), the stick already in unit range, and
-/// — on pads whose presentation carries one — a motion profile.
-///
-/// Every handler consults `standDown` first: once the raw HID stream is in
-/// full mode it carries the same buttons at higher fidelity, and letting
-/// both through fires each press twice. Motion is exempt — nothing else
-/// delivers it.
-final class JoyConGameControllerTransport: JoyConTransport {
-    var onReport: ((JoyConReport) -> Void)?
-    /// Device name + the alias-grouped element inventory.
-    var onAttach: ((String, [String]) -> Void)?
-    var onDetach: (() -> Void)?
-    /// Raw element traffic for the panel's "last event" line.
-    var onRawEvent: ((GCControllerElement) -> Void)?
-    /// True while the raw HID full-mode stream owns the buttons.
-    var standDown: () -> Bool = { false }
-
-    private var attached: GCController?
-    private var observers: [NSObjectProtocol] = []
-    private var generation = 0
-    /// A LONE Joy-Con is presented SIDEWAYS; held UPRIGHT, stick and face
-    /// buttons rotate 90° back (upright (x, y) → sideways (−y, x)). A
-    /// paired L+R duo ("Joy-Con (L/R)") is a real gamepad — no rotation.
-    private var rotateForUpright = false
-
-    var isAttached: Bool { attached != nil }
-
-    func connect() {
-        GCController.shouldMonitorBackgroundEvents = true
-        let nc = NotificationCenter.default
-        observers.append(nc.addObserver(
-            forName: .GCControllerDidConnect, object: nil, queue: .main
-        ) { [weak self] note in
-            guard let c = note.object as? GCController else { return }
-            self?.attach(c)
-        })
-        observers.append(nc.addObserver(
-            forName: .GCControllerDidDisconnect, object: nil, queue: .main
-        ) { [weak self] note in
-            guard let self, let c = note.object as? GCController,
-                  c === self.attached else { return }
-            self.detach()
-            NSLog("Tarabdaar: game controller disconnected")
-            // Fall over to any other controller still paired.
-            if let next = GCController.controllers().first { self.attach(next) }
-        })
-        if let c = GCController.controllers().first { attach(c) }
-    }
-
-    func disconnect() {
-        observers.forEach(NotificationCenter.default.removeObserver)
-        observers = []
-        detach()
-    }
-
-    deinit {
-        observers.forEach(NotificationCenter.default.removeObserver)
-    }
-
-    /// One controller at a time — the first to appear wins.
-    private func attach(_ c: GCController) {
-        guard attached == nil else { return }
-        attached = c
-        generation += 1
-        let name = c.vendorName ?? c.productCategory
-        c.handlerQueue = .main
-        let profile = c.physicalInputProfile
-
-        var groups: [ObjectIdentifier: [String]] = [:]
-        for (elementName, el) in profile.elements {
-            groups[ObjectIdentifier(el), default: []].append(elementName)
-        }
-        let elements = groups.values
-            .map { $0.sorted().joined(separator: " / ") }.sorted()
-        onAttach?(name, elements)
-        NSLog("Tarabdaar: game controller attached — %@ [%@]",
-              name, elements.joined(separator: ", "))
-
-        profile.valueDidChangeHandler = { [weak self] _, element in
-            self?.onRawEvent?(element)
-        }
-
-        let cat = c.productCategory
-        rotateForUpright = cat.localizedCaseInsensitiveContains("joy-con")
-            && !cat.localizedCaseInsensitiveContains("l/r")
-
-        // The stick: left thumbstick, else right, else a lone Direction Pad.
-        let stick = profile.dpads[GCInputLeftThumbstick]
-            ?? profile.dpads[GCInputRightThumbstick]
-            ?? profile.dpads[GCInputDirectionPad]
-        stick?.valueChangedHandler = { [weak self] _, x, y in
-            guard let self, !self.standDown() else { return }
-            if self.rotateForUpright {
-                // Sideways frame → upright: x = y_os, y = −x_os.
-                self.emit(stick: .unit(Double(y), Double(-x)))
-            } else {
-                self.emit(stick: .unit(Double(x), Double(y)))
-            }
-        }
-
-        // A d-pad element only when DISTINCT from the stick (alias trap)…
-        if let dpad = profile.dpads[GCInputDirectionPad], dpad !== stick {
-            bind(dpad.up, .dpadUp)
-            bind(dpad.down, .dpadDown)
-            bind(dpad.left, .dpadLeft)
-            bind(dpad.right, .dpadRight)
-        }
-        // …and the sideways A/B/X/Y, rotated 90° CCW: A=↓, B=←, X=→, Y=↑.
-        if rotateForUpright {
-            bind(profile.buttons[GCInputButtonA], .dpadDown)
-            bind(profile.buttons[GCInputButtonB], .dpadLeft)
-            bind(profile.buttons[GCInputButtonX], .dpadRight)
-            bind(profile.buttons[GCInputButtonY], .dpadUp)
-        } else {
-            bind(profile.buttons[GCInputButtonA], .dpadRight)
-            bind(profile.buttons[GCInputButtonB], .dpadDown)
-            bind(profile.buttons[GCInputButtonX], .dpadUp)
-            bind(profile.buttons[GCInputButtonY], .dpadLeft)
-        }
-
-        // Shoulder family: L/ZL naming is presentation-dependent, bind all.
-        if rotateForUpright {
-            // Sideways: the rail's SL/SR are Left/Right Shoulder.
-            bind(profile.buttons[GCInputLeftShoulder], .sl)
-            bind(profile.buttons[GCInputRightShoulder], .sr)
-            bind(profile.buttons[GCInputLeftTrigger], .l)
-            bind(profile.buttons[GCInputRightTrigger], .zl)
-        } else {
-            bind(profile.buttons[GCInputLeftShoulder], .l)
-            bind(profile.buttons[GCInputLeftTrigger], .zl)
-            bind(profile.buttons[GCInputRightShoulder], .sr)
-            bind(profile.buttons[GCInputRightTrigger], .sr)
-        }
-        bind(profile.buttons[GCInputButtonOptions], .minus)
-        bind(profile.buttons[GCInputLeftThumbstickButton], .stickClick)
-
-        // GC MOTION (classic-Bluetooth pads: Pro Controller presentations,
-        // multi-mode pads in Switch-1 mode) — same fusion + panels as the
-        // BLE path; acceleration includes gravity, rotation rate in rad/s.
-        if let motion = c.motion {
-            if motion.sensorsRequireManualActivation {
-                motion.sensorsActive = true
-            }
-            NSLog("Tarabdaar: GC motion available (manual activation %@, rotation rate %@)",
-                  motion.sensorsRequireManualActivation ? "yes" : "no",
-                  motion.hasRotationRate ? "yes" : "no")
-            motion.valueChangedHandler = { [weak self] m in
-                guard let self else { return }
-                let a = SIMD3(m.acceleration.x, m.acceleration.y,
-                              m.acceleration.z)
-                let w = m.hasRotationRate
-                    ? SIMD3(m.rotationRate.x, m.rotationRate.y, m.rotationRate.z)
-                    : SIMD3<Double>.zero
-                let now = CFAbsoluteTimeGetCurrent()
-                self.onReport?(JoyConReport(
-                    source: .gameController, timestamp: now,
-                    generation: self.generation,
-                    imu: [JoyConIMUSample(t: now, gyroDps: w * 180 / .pi,
-                                          accelG: a, gyroRadPerSec: w)],
-                    fuseIMU: true))
-            }
-        } else {
-            NSLog("Tarabdaar: GC controller has no motion profile")
-        }
-    }
-
-    private func detach() {
-        attached?.motion?.valueChangedHandler = nil
-        attached = nil
-        onDetach?()
-    }
-
-    private func bind(_ button: GCControllerButtonInput?, _ control: JoyConControl) {
-        button?.pressedChangedHandler = { [weak self] _, _, pressed in
-            guard let self, !self.standDown() else { return }
-            self.onReport?(JoyConReport(
-                source: .gameController, timestamp: CFAbsoluteTimeGetCurrent(),
-                generation: self.generation,
-                buttons: .edge(control, pressed)))
-        }
-    }
-
-    private func emit(stick: JoyConStickValue) {
-        onReport?(JoyConReport(source: .gameController,
-                               timestamp: CFAbsoluteTimeGetCurrent(),
-                               generation: generation, stick: stick))
-    }
+/// A timestamped sample, for `TrailBuffer`'s expiry.
+protocol TrailSample {
+    var t: CFAbsoluteTime { get }
 }
 
-// MARK: - Bearer 2: the raw HID side-channel
+extension JoyConRawTiltSample: TrailSample {}
+extension JoyConVectorSample: TrailSample {}
 
-/// Raw HID listener (see the side-channel note on `JoyConInput`).
-/// Scheduled on the main run loop, so callbacks land on main like the GC
-/// handlers. Read-only — gamecontrollerd keeps the GC profile.
-final class JoyConHIDTransport: JoyConTransport {
-    var onReport: ((JoyConReport) -> Void)?
-    /// "open" / the failing IOReturn / "full mode".
-    var onStatus: ((String) -> Void)?
-    /// Full input mode confirmed — the GC bindings must stand down.
-    var onFullMode: (() -> Void)?
-    var onRemoved: (() -> Void)?
-    /// The host's "IMU has produced non-zero data" flag — the ack the
-    /// IMU-enable retry loop waits for.
-    var imuActive: () -> Bool = { false }
+/// A time-ordered display trail: appends land at the back, expiry leaves
+/// from the front. Samples arrive in time order, so `trim` scans only the
+/// expired prefix and advances a head index over it — no scan of the
+/// window per message and no shuffle of the live samples; the storage is
+/// compacted once the dead prefix outgrows the live tail (amortised
+/// O(1)). `samples` copies the live tail, a cost only the visible panels
+/// pay.
+struct TrailBuffer<Sample: TrailSample> {
+    private var storage: [Sample] = []
+    private var head = 0
 
-    private var hidManager: IOHIDManager?
-    private var hidDevice: IOHIDDevice?
-    private let hidReportBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 512)
-    /// Controls held according to the raw HID reports (the simple-mode
-    /// branch carries the arrows forward from the previous snapshot).
-    private var hidDown: Set<JoyConControl> = []
-    private var generation = 0
-    /// FULL MODE: simple mode (0x3F) sends filler axis fields — real 12-bit
-    /// stick data streams only in full mode (0x30), entered via subcommand
-    /// 0x03/0x30 on output report 0x01; then the GC handlers stand down.
-    private(set) var isFullMode = false
-    private var hidPacketCounter: UInt8 = 0
-    private var modeSwitchTries = 0
-    private var imuEnableTries = 0
+    var isEmpty: Bool { head == storage.count }
+    var samples: [Sample] { Array(storage[head...]) }
 
-    func connect() {
-        let mgr = IOHIDManagerCreate(kCFAllocatorDefault,
-                                     IOHIDOptionsType(kIOHIDOptionsTypeNone))
-        hidManager = mgr
-        // Nintendo VID; the matching callback narrows to Joy-Cons.
-        IOHIDManagerSetDeviceMatching(mgr, [kIOHIDVendorIDKey: 0x057E] as CFDictionary)
-        let ctx = Unmanaged.passUnretained(self).toOpaque()
-        IOHIDManagerRegisterDeviceMatchingCallback(mgr, { ctx, _, _, device in
-            guard let ctx else { return }
-            Unmanaged<JoyConHIDTransport>.fromOpaque(ctx).takeUnretainedValue()
-                .hidDeviceMatched(device)
-        }, ctx)
-        IOHIDManagerRegisterDeviceRemovalCallback(mgr, { ctx, _, _, _ in
-            guard let ctx else { return }
-            Unmanaged<JoyConHIDTransport>.fromOpaque(ctx).takeUnretainedValue()
-                .hidDeviceRemoved()
-        }, ctx)
-        IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetMain(),
-                                        CFRunLoopMode.defaultMode.rawValue)
-        let r = IOHIDManagerOpen(mgr, IOHIDOptionsType(kIOHIDOptionsTypeNone))
-        onStatus?(r == kIOReturnSuccess ? "open"
-                                        : String(format: "open failed 0x%x", r))
-        if r != kIOReturnSuccess {
-            NSLog("Tarabdaar: IOHIDManagerOpen failed (0x%x) — L/ZL unavailable; grant Input Monitoring if prompted", r)
-        }
-    }
+    mutating func append(_ sample: Sample) { storage.append(sample) }
 
-    func disconnect() {
-        if let mgr = hidManager {
-            IOHIDManagerUnscheduleFromRunLoop(mgr, CFRunLoopGetMain(),
-                                              CFRunLoopMode.defaultMode.rawValue)
-            IOHIDManagerClose(mgr, IOHIDOptionsType(kIOHIDOptionsTypeNone))
-        }
-        hidManager = nil
-        hidDevice = nil
-    }
-
-    /// The IMU-enable retry budget is re-armed whenever the host clears
-    /// its IMU state (a reconnect must be able to ask again).
-    func resetIMUEnableTries() { imuEnableTries = 0 }
-
-    private func hidDeviceMatched(_ device: IOHIDDevice) {
-        let pid = IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int ?? 0
-        guard pid == 0x2006 || pid == 0x2007 else { return }   // Joy-Con L/R
-        hidDevice = device
-        generation += 1
-        let ctx = Unmanaged.passUnretained(self).toOpaque()
-        IOHIDDeviceRegisterInputReportCallback(device, hidReportBuffer, 512, {
-            ctx, _, _, _, reportID, report, length in
-            guard let ctx else { return }
-            Unmanaged<JoyConHIDTransport>.fromOpaque(ctx).takeUnretainedValue()
-                .hidReport(id: reportID, report: report, length: Int(length))
-        }, ctx)
-        NSLog("Tarabdaar: raw HID listener on Joy-Con (pid 0x%x)", pid)
-        requestFullMode()
-    }
-
-    /// Ask for full input mode (60 Hz 0x30 reports): output report 0x01,
-    /// neutral rumble bytes, subcommand 0x03, argument 0x30. Retried a few
-    /// times — the arrival of a 0x30 report is the ack.
-    private func requestFullMode() {
-        guard let device = hidDevice, !isFullMode, modeSwitchTries < 4
-        else { return }
-        modeSwitchTries += 1
-        hidPacketCounter = (hidPacketCounter &+ 1) & 0x0F
-        let cmd: [UInt8] = [0x01, hidPacketCounter,
-                            0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40,
-                            0x03, 0x30]
-        let r = cmd.withUnsafeBufferPointer {
-            IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, 0x01,
-                                 $0.baseAddress!, cmd.count)
-        }
-        if r != kIOReturnSuccess {
-            NSLog("Tarabdaar: Joy-Con mode-switch send failed (0x%x)", r)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.requestFullMode()
-        }
-    }
-
-    /// Enable the classic Joy-Con's IMU (subcommand 0x40, argument 0x01)
-    /// once full mode is confirmed; retried until non-zero motion arrives
-    /// (`imuActive` is the ack).
-    private func requestIMUEnable() {
-        guard let device = hidDevice, isFullMode, !imuActive(),
-              imuEnableTries < 4 else { return }
-        imuEnableTries += 1
-        hidPacketCounter = (hidPacketCounter &+ 1) & 0x0F
-        let cmd: [UInt8] = [0x01, hidPacketCounter,
-                            0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40,
-                            0x40, 0x01]
-        let r = cmd.withUnsafeBufferPointer {
-            IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, 0x01,
-                                 $0.baseAddress!, cmd.count)
-        }
-        if r != kIOReturnSuccess {
-            NSLog("Tarabdaar: Joy-Con IMU-enable send failed (0x%x)", r)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.requestIMUEnable()
-        }
-    }
-
-    private func hidDeviceRemoved() {
-        hidDown = []
-        hidDevice = nil
-        isFullMode = false
-        modeSwitchTries = 0
-        onRemoved?()
-    }
-
-    /// Parse one raw input report. Simple mode (0x3F): L/ZL from button
-    /// byte 2 bits 6/7. Full mode (0x30/0x21): the left-side button byte
-    /// (arrows, SL/SR, L/ZL, UPRIGHT frame) and the 12-bit stick at bytes
-    /// 6–8. The report-ID byte may or may not be in the buffer — detected.
-    private func hidReport(id: UInt32, report: UnsafePointer<UInt8>, length: Int) {
-        guard length >= 3 else { return }
-        let base = report[0] == UInt8(id & 0xFF) ? 1 : 0
-        let now = CFAbsoluteTimeGetCurrent()
-        var down: Set<JoyConControl> = []
-        var stick: JoyConStickValue?
-        var imu: [JoyConIMUSample] = []
-        if id == 0x3F, length >= base + 2 {
-            let b2 = report[base + 1]
-            if b2 & 0x40 != 0 { down.insert(.l) }
-            if b2 & 0x80 != 0 { down.insert(.zl) }
-            // Arrows/SL/SR stay with the GC path in simple mode.
-            down.formUnion(hidDown.intersection([.dpadUp, .dpadDown,
-                                                 .dpadLeft, .dpadRight]))
-        } else if id == 0x30 || id == 0x21, length >= base + 8 {
-            if !isFullMode {
-                isFullMode = true
-                onStatus?("full mode")
-                NSLog("Tarabdaar: Joy-Con in full input mode — analog stick live")
-                requestIMUEnable()
-                onFullMode?()
-            }
-            let left = report[base + 4]
-            if left & 0x01 != 0 { down.insert(.dpadDown) }
-            if left & 0x02 != 0 { down.insert(.dpadUp) }
-            if left & 0x04 != 0 { down.insert(.dpadRight) }
-            if left & 0x08 != 0 { down.insert(.dpadLeft) }
-            if left & 0x10 != 0 { down.insert(.sr) }
-            if left & 0x20 != 0 { down.insert(.sl) }
-            if left & 0x40 != 0 { down.insert(.l) }
-            if left & 0x80 != 0 { down.insert(.zl) }
-            // Shared button byte: minus, left-stick click, capture.
-            let shared = report[base + 3]
-            if shared & 0x01 != 0 { down.insert(.minus) }
-            if shared & 0x08 != 0 { down.insert(.stickClick) }
-            if shared & 0x20 != 0 { down.insert(.capture) }
-            let s0 = Double(Int(report[base + 5]) | (Int(report[base + 6] & 0x0F) << 8))
-            let s1 = Double((Int(report[base + 6]) >> 4) | (Int(report[base + 7]) << 4))
-            stick = .raw(s0, s1)
-            // IMU (zeros until subcommand 0x40 enables it): three 12-byte
-            // frames ~5 ms apart at base+12 — accel i16 ×3 (4096 LSB/g)
-            // then gyro i16 ×3 (16.4 LSB per °/s), device frame. NOT fused:
-            // these fill the raw trails only.
-            if id == 0x30, length >= base + 48 {
-                func i16(_ o: Int) -> Double {
-                    Double(Int16(bitPattern: UInt16(report[o])
-                        | (UInt16(report[o + 1]) << 8)))
-                }
-                for f in 0..<3 {
-                    let o = base + 12 + f * 12
-                    imu.append(JoyConIMUSample(
-                        t: now - Double(2 - f) * 0.005,
-                        gyroDps: SIMD3(i16(o + 6), i16(o + 8),
-                                       i16(o + 10)) / 16.4,
-                        accelG: SIMD3(i16(o), i16(o + 2),
-                                      i16(o + 4)) / 4096.0))
-                }
-            }
+    /// Overwrite the newest sample (frame coalescing); appends when empty.
+    mutating func replaceLast(_ sample: Sample) {
+        if isEmpty {
+            storage.append(sample)
         } else {
-            return
-        }
-        hidDown = down
-        let n = min(length, 12)
-        onReport?(JoyConReport(
-            source: .hid, timestamp: now, generation: generation,
-            buttons: .snapshot(down), stick: stick, imu: imu,
-            fuseIMU: false,
-            hexPrefix: "id \(String(format: "%02x", id)): ",
-            hexBytes: Array(UnsafeBufferPointer(start: report, count: n))))
-    }
-}
-
-// MARK: - Bearer 3: the Switch 2 vendor GATT
-
-/// The Joy-Con 2 path: `JoyCon2BLE` owns the CoreBluetooth connection and
-/// the console-style init; this type is only the PARSER, turning the two
-/// notification streams into normalized reports.
-final class JoyConBLETransport: JoyConTransport {
-    var onReport: ((JoyConReport) -> Void)?
-    var onStatus: ((String) -> Void)?
-    var onConnect: ((String) -> Void)?
-    var onDisconnect: (() -> Void)?
-
-    private let ble = JoyCon2BLE()
-    private var generation = 0
-    /// Full-report dump on a button change — the clone-mapping tool.
-    private var lastAltButtons: [UInt8]?
-    private var altMotionLengthLogged = false
-
-    func connect() {
-        ble.onStatus = { [weak self] s in self?.onStatus?(s) }
-        ble.onConnect = { [weak self] name in
-            guard let self else { return }
-            self.generation += 1
-            self.onConnect?(name)
-        }
-        ble.onDisconnect = { [weak self] in
-            guard let self else { return }
-            self.lastAltButtons = nil
-            self.onDisconnect?()
-        }
-        ble.onNotification = { [weak self] data in
-            self?.standardNotification(data)
-        }
-        ble.onAltNotification = { [weak self] data in
-            self?.altNotification(data)
-        }
-        ble.start()
-    }
-
-    func disconnect() {
-        ble.onNotification = nil
-        ble.onAltNotification = nil
-    }
-
-    /// One Joy-Con 2 report-0x05 notification: buttons as a LE u32 at bytes
-    /// 4–7 — left Joy-Con: dpad Down/Up/Right/Left = bits 16–19, SR 20,
-    /// SL 21, L 22, ZL 23; shared: Minus 8, stick click 11, Capture 13 —
-    /// and the 12-bit packed stick at bytes 10–12, device frame.
-    private func standardNotification(_ d: Data) {
-        guard d.count >= 13 else { return }
-        let b = UInt32(d[4]) | (UInt32(d[5]) << 8)
-              | (UInt32(d[6]) << 16) | (UInt32(d[7]) << 24)
-        var down: Set<JoyConControl> = []
-        if b & (1 << 16) != 0 { down.insert(.dpadDown) }
-        if b & (1 << 17) != 0 { down.insert(.dpadUp) }
-        if b & (1 << 18) != 0 { down.insert(.dpadRight) }
-        if b & (1 << 19) != 0 { down.insert(.dpadLeft) }
-        if b & (1 << 21) != 0 { down.insert(.sl) }
-        if b & (1 << 22) != 0 { down.insert(.l) }
-        if b & (1 << 20) != 0 { down.insert(.sr) }
-        if b & (1 << 23) != 0 { down.insert(.zl) }
-        if b & (1 << 8) != 0 { down.insert(.minus) }
-        if b & (1 << 11) != 0 { down.insert(.stickClick) }
-        if b & (1 << 13) != 0 { down.insert(.capture) }
-        let s0 = Double(Int(d[10]) | (Int(d[11] & 0x0F) << 8))
-        let s1 = Double((Int(d[11]) >> 4) | (Int(d[12]) << 4))
-        // IMU (63-byte report): accel i16 LE ×3 at 0x30, gyro ×3 at 0x36,
-        // classic scales (±8 g → /4096, ±2000 °/s → /16.4). Judge axes
-        // against the FUSED panels, not the raw trails; if a 90°-in-1 s
-        // turn reads ~730 °/s the JC2 gyro scale is 133.3 LSB/°/s instead.
-        let now = CFAbsoluteTimeGetCurrent()
-        var imu: [JoyConIMUSample] = []
-        if d.count >= 0x3C {
-            func i16(_ o: Int) -> Double {
-                Double(Int16(bitPattern: UInt16(d[o]) | (UInt16(d[o + 1]) << 8)))
-            }
-            let accelG = SIMD3(i16(0x30), i16(0x32), i16(0x34)) / 4096.0
-            let gyroDps = SIMD3(i16(0x36), i16(0x38), i16(0x3A)) / 16.4
-            // Magnetometer: i16 ×3 at 0x19, raw units; streams only with
-            // FEATURE_MAGNETOMETER (0x80) in the feature-enable flags. The
-            // panel appears only on non-zero data.
-            let mag: SIMD3<Double>? = d.count >= 0x1F
-                ? SIMD3(i16(0x19), i16(0x1B), i16(0x1D)) : nil
-            imu.append(JoyConIMUSample(t: now, gyroDps: gyroDps,
-                                       accelG: accelG, mag: mag))
-        }
-        onReport?(JoyConReport(
-            source: .ble, timestamp: now, generation: generation,
-            buttons: .snapshot(down), stick: .raw(s0, s1), imu: imu,
-            fuseIMU: true, hexPrefix: "ble: ",
-            hexBytes: Array(d.prefix(13))))
-    }
-
-    /// THIRD-PARTY ALTERNATE INPUT: report 0x07 on CC1BBBB5-… (the Mobacon
-    /// clone's stream). Byte 0 = counter; byte 2: Down 0x01, Right 0x02,
-    /// Left 0x04, Up 0x08, L 0x10 (the M2 paddle mirrors it), ZL 0x20,
-    /// Minus 0x40, stick click 0x80; byte 3: Capture 0x01, SR 0x40, SL
-    /// 0x80; 12-bit packed stick at bytes 5–7; byte 4 = constant flags.
-    /// A button change dumps the full report for mapping.
-    private func altNotification(_ d: Data) {
-        guard d.count >= 8 else { return }
-        let btn = [d[2], d[3], d[4]]
-        if let last = lastAltButtons, btn != last {
-            NSLog("Tarabdaar ble: alt buttons %02x %02x %02x → %02x %02x %02x  full [%@]",
-                  last[0], last[1], last[2], btn[0], btn[1], btn[2],
-                  d.map { String(format: "%02x", $0) }.joined(separator: " "))
-        }
-        lastAltButtons = btn
-        var down: Set<JoyConControl> = []
-        if d[2] & 0x01 != 0 { down.insert(.dpadDown) }
-        if d[2] & 0x02 != 0 { down.insert(.dpadRight) }
-        if d[2] & 0x04 != 0 { down.insert(.dpadLeft) }
-        if d[2] & 0x08 != 0 { down.insert(.dpadUp) }
-        if d[2] & 0x10 != 0 { down.insert(.l) }   // L (and the M2 mirror)
-        if d[2] & 0x20 != 0 { down.insert(.zl) }
-        if d[2] & 0x40 != 0 { down.insert(.minus) }
-        if d[2] & 0x80 != 0 { down.insert(.stickClick) }
-        if d[3] & 0x01 != 0 { down.insert(.capture) }
-        if d[3] & 0x80 != 0 { down.insert(.sl) }
-        if d[3] & 0x40 != 0 { down.insert(.sr) }
-        let s0 = Double(Int(d[5]) | (Int(d[6] & 0x0F) << 8))
-        let s1 = Double((Int(d[6]) >> 4) | (Int(d[7]) << 4))
-        // Motion: a LENGTH byte at 0x0E ({0, 30, 40}) + an undecoded packed
-        // blob at 0x0F — not parsed; logged once if a device fills it.
-        if d.count > 0x0E, d[0x0E] != 0, !altMotionLengthLogged {
-            altMotionLengthLogged = true
-            NSLog("Tarabdaar ble: alt report motion length %d — packed format, not decoded",
-                  d[0x0E])
-        }
-        onReport?(JoyConReport(
-            source: .bleAlt, timestamp: CFAbsoluteTimeGetCurrent(),
-            generation: generation,
-            buttons: .snapshot(down), stick: .raw(s0, s1),
-            hexPrefix: "alt: ", hexBytes: Array(d.prefix(13))))
-    }
-}
-
-/// CoreBluetooth client for Switch 2 Joy-Cons: scan broadly, filter on
-/// Nintendo's manufacturer-data company ID, connect, run the console-style
-/// init, subscribe to the input characteristic, forward notifications.
-/// First connection needs the Joy-Con advertising — hold its sync button.
-/// One peripheral at a time; rescans when unconnected. Main-queue delegate.
-final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
-    static let service = CBUUID(string: "AB7DE9BE-89FE-49AD-828F-118F09DF7FD0")
-    static let inputCharacteristic = CBUUID(string: "AB7DE9BE-89FE-49AD-828F-118F09DF7FD2")
-    /// The `0x91`-framed command channel (the classic `30 …` subcommand
-    /// format is IGNORED by Joy-Con 2): commands write here, acks arrive
-    /// on the response characteristic.
-    static let commandWriteCharacteristic =
-        CBUUID(string: "649D4AC9-8EB7-4E6C-AF44-1EA54FE5F005")
-    static let commandResponseCharacteristic =
-        CBUUID(string: "C765A961-D9D8-4D36-A20A-5315B111836A")
-    /// The controller-specific report-0x07 characteristic — where clones
-    /// stream their input (`bleAltNotification`).
-    static let altInputCharacteristic =
-        CBUUID(string: "CC1BBBB5-7354-4D32-A716-A81CB241A32A")
-    /// Nintendo's Bluetooth SIG company identifier — NOT 0x057E (their USB
-    /// vendor ID, which appears further into the payload: a live Joy-Con 2
-    /// (L) advertises `53 05 01 00 03 7e 05 67 20 …`, name empty).
-    private static let nintendoCompanyID: UInt16 = 0x0553
-
-    var onStatus: ((String) -> Void)?
-    var onConnect: ((String) -> Void)?
-    var onDisconnect: (() -> Void)?
-    var onNotification: ((Data) -> Void)?
-    /// Notifications from the alternate input characteristic — forwarded
-    /// only while the standard input characteristic stays silent.
-    var onAltNotification: ((Data) -> Void)?
-
-    private var central: CBCentralManager?
-    private var peripheral: CBPeripheral?
-    /// The command write characteristic.
-    private var outputCharacteristic: CBCharacteristic?
-    private var inputCharacteristic: CBCharacteristic?
-    private var cmdRespCharacteristic: CBCharacteristic?
-    private var ledSent = false
-    private var initStarted = false
-    // Wire diagnostics (Console filter `Tarabdaar ble`): arrival/rate, and
-    // a full hex dump whenever the button word (bytes 4–7) changes.
-    private var notifCount = 0
-    private var lastNotifLog: CFAbsoluteTime = 0
-    private var lastButtonWord: UInt32?
-    /// Per-characteristic log throttle for unknown characteristics.
-    private var lastCharLog: [CBUUID: CFAbsoluteTime] = [:]
-    // MOTION-ENABLE PROBE (clones only): walk every write-capable
-    // characteristic × two command dialects (0x91 feature-enable, classic
-    // subcommand mode+IMU), one per 1.2 s, watching the motion-length byte.
-    private var probeChars: [CBCharacteristic] = []
-    private var probeStarted = false
-    private var probeStep = -1
-    private var altMotionSeen = false
-    /// Notify-capable characteristics other than the standard input and
-    /// command-response ones. Subscribed only by `scheduleAltFallback` — a
-    /// real Joy-Con 2 silences report 0x05 the moment 0x07 is enabled.
-    private var deferredNotifyChars: [CBCharacteristic] = []
-    /// Silence allowed on the standard input characteristic before the
-    /// clone fallback subscribes the rest (a real Joy-Con 2 streams within
-    /// ~100 ms of the CCCD write).
-    static let altFallbackDelay: TimeInterval = 2.0
-
-    func start() {
-        central = CBCentralManager(delegate: self, queue: .main)
-    }
-
-    func centralManagerDidUpdateState(_ c: CBCentralManager) {
-        switch c.state {
-        case .poweredOn: scan()
-        case .unauthorized: onStatus?("Bluetooth permission denied — grant in System Settings ▸ Privacy")
-        case .poweredOff: onStatus?("Bluetooth is off")
-        default: onStatus?("Bluetooth unavailable")
+            storage[storage.count - 1] = sample
         }
     }
 
-    private func scan() {
-        guard let central, central.state == .poweredOn, peripheral == nil
-        else { return }
-        // The advertisement doesn't list the vendor service — scan broadly.
-        central.scanForPeripherals(withServices: nil)
-        onStatus?("scanning — hold the Joy-Con 2 sync button")
-    }
-
-    func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral,
-                        advertisementData ad: [String: Any], rssi: NSNumber) {
-        var nintendo = false
-        if let m = ad[CBAdvertisementDataManufacturerDataKey] as? Data, m.count >= 2 {
-            let bytes = [UInt8](m)
-            let company = UInt16(bytes[0]) | (UInt16(bytes[1]) << 8)
-            nintendo = company == Self.nintendoCompanyID
-        }
-        // Name fallback only — a live Joy-Con 2 advertises an EMPTY name.
-        let name = (ad[CBAdvertisementDataLocalNameKey] as? String ?? p.name ?? "")
-        if !nintendo {
-            nintendo = name.localizedCaseInsensitiveContains("joy-con")
-        }
-        guard nintendo, peripheral == nil else { return }
-        peripheral = p
-        c.stopScan()
-        let mfg = (ad[CBAdvertisementDataManufacturerDataKey] as? Data)?
-            .prefix(12).map { String(format: "%02x", $0) }
-            .joined(separator: " ") ?? "—"
-        NSLog("Tarabdaar ble: discovered \"%@\" rssi %@ mfg [%@]",
-              name.isEmpty ? "(no name)" : name, rssi, mfg)
-        onStatus?("connecting — \(name.isEmpty ? "Joy-Con 2" : name)")
-        c.connect(p)
-    }
-
-    func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
-        p.delegate = self
-        p.discoverServices([Self.service])
-    }
-
-    func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral,
-                        error: Error?) {
-        peripheral = nil
-        onStatus?("connect failed — \(error?.localizedDescription ?? "?")")
-        scan()
-    }
-
-    func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral,
-                        error: Error?) {
-        peripheral = nil
-        outputCharacteristic = nil
-        inputCharacteristic = nil
-        cmdRespCharacteristic = nil
-        ledSent = false
-        initStarted = false
-        lastCharLog = [:]
-        probeChars = []
-        probeStarted = false
-        probeStep = -1
-        altMotionSeen = false
-        NSLog("Tarabdaar ble: disconnected after %d notifications — %@",
-              notifCount, error?.localizedDescription ?? "clean")
-        notifCount = 0
-        lastButtonWord = nil
-        onDisconnect?()
-        onStatus?("disconnected")
-        scan()
-    }
-
-    func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
-        let services = p.services ?? []
-        NSLog("Tarabdaar ble: services [%@]%@",
-              services.map { $0.uuid.uuidString }.joined(separator: ", "),
-              error.map { " error: \($0.localizedDescription)" } ?? "")
-        guard services.contains(where: { $0.uuid == Self.service }) else {
-            // No vendor service — drop it and keep scanning.
-            onStatus?("no Joy-Con 2 input service — skipping \(p.name ?? "device")")
-            central?.cancelPeripheralConnection(p)
-            return
-        }
-        // The command channel may live in another service — sweep all.
-        for s in services { p.discoverCharacteristics(nil, for: s) }
-    }
-
-    func peripheral(_ p: CBPeripheral,
-                    didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        NSLog("Tarabdaar ble: service %@ chars [%@]",
-              service.uuid.uuidString,
-              (service.characteristics ?? []).map {
-                  String(format: "%@ (props 0x%02x)",
-                         $0.uuid.uuidString, $0.properties.rawValue)
-              }.joined(separator: ", "))
-        for ch in service.characteristics ?? [] {
-            switch ch.uuid {
-            case Self.inputCharacteristic:
-                inputCharacteristic = ch
-            case Self.commandResponseCharacteristic:
-                // Subscribe before commanding — acks land here.
-                cmdRespCharacteristic = ch
-                p.setNotifyValue(true, for: ch)
-            case Self.commandWriteCharacteristic:
-                outputCharacteristic = ch
-                ledSent = false
-            default:
-                break
-            }
-        }
-        // Read every readable characteristic: a write-without-response
-        // cannot surface an ATT "insufficient authentication" error, a
-        // READ does — and macOS then pairs itself. Other notify chars are
-        // only COLLECTED here (see `deferredNotifyChars`).
-        for ch in service.characteristics ?? [] {
-            if ch.properties.contains(.read) {
-                p.readValue(for: ch)
-            }
-            if ch.properties.contains(.notify),
-               ch.uuid != Self.inputCharacteristic,
-               ch.uuid != Self.commandResponseCharacteristic,
-               !deferredNotifyChars.contains(where: { $0.uuid == ch.uuid }) {
-                deferredNotifyChars.append(ch)
-            }
-            if ch.properties.contains(.write)
-                || ch.properties.contains(.writeWithoutResponse),
-               !probeChars.contains(where: { $0.uuid == ch.uuid }) {
-                probeChars.append(ch)
-            }
-        }
-        maybeBeginInit(p)
-        // A device exposing the input characteristic without the command
-        // channel: subscribe directly.
-        if inputCharacteristic != nil, !initStarted {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self, self.peripheral === p, !self.initStarted,
-                      let input = self.inputCharacteristic else { return }
-                self.initStarted = true
-                NSLog("Tarabdaar ble: no command channel — subscribing input directly")
-                p.setNotifyValue(true, for: input)
-                self.onConnect?(p.name ?? "Joy-Con 2")
-                self.scheduleAltFallback(p)
-            }
+    /// Drop every sample older than `cutoff`.
+    mutating func trim(before cutoff: CFAbsoluteTime) {
+        while head < storage.count, storage[head].t < cutoff { head += 1 }
+        if head > 0, head * 2 >= storage.count {
+            storage.removeFirst(head)
+            head = 0
         }
     }
 
-    /// CLONE FALLBACK: if no report-0x05 notification has arrived
-    /// `altFallbackDelay` after the standard subscribe, subscribe every
-    /// other notify characteristic (a real Joy-Con 2 never reaches this).
-    private func scheduleAltFallback(_ p: CBPeripheral) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.altFallbackDelay) { [weak self] in
-            guard let self, self.peripheral === p else { return }
-            guard self.notifCount == 0 else { return }
-            NSLog("Tarabdaar ble: standard input silent for %.1f s — subscribing %d alternate characteristic(s) (clone fallback)",
-                  Self.altFallbackDelay, self.deferredNotifyChars.count)
-            for ch in self.deferredNotifyChars {
-                p.setNotifyValue(true, for: ch)
-            }
-        }
-    }
-
-    /// CONSOLE-STYLE INIT: a real Joy-Con 2 streams on subscribe alone, but
-    /// clones wait for the console handshake (and drop the link after
-    /// 60 s). Sequence: controller-info read → player LED → vibration
-    /// preset (tactile proof) → feature init/enable → INPUT subscribe LAST,
-    /// paced by delay rather than acks (a clone that acks nothing stalls).
-    private func maybeBeginInit(_ p: CBPeripheral) {
-        guard !initStarted, let input = inputCharacteristic,
-              outputCharacteristic != nil, cmdRespCharacteristic != nil
-        else { return }
-        initStarted = true
-        let steps: [(Double, String, () -> Void)] = [
-            (0.30, "controller-info read", { [weak self] in self?.readControllerInfo() }),
-            (0.55, "player LED", { [weak self] in self?.setPlayerLED(1) }),
-            (0.80, "vibration preset", { [weak self] in self?.playVibrationPreset(0x03) }),
-            (1.05, "feature enable", { [weak self] in self?.enableFeatures() }),
-            (1.30, "input subscribe", { [weak self] in
-                guard let self, self.peripheral === p else { return }
-                p.setNotifyValue(true, for: input)
-                self.onConnect?(p.name ?? "Joy-Con 2")
-                self.scheduleAltFallback(p)
-            }),
-        ]
-        for (delay, name, action) in steps {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self, self.peripheral === p else { return }
-                NSLog("Tarabdaar ble: init — %@", name)
-                action()
-            }
-        }
-    }
-
-    /// The console's first command: read 0x40 bytes of controller info
-    /// at 0x00013000 (command 0x02 = memory, subcommand 0x04 = read;
-    /// payload = length, 7e 00 00, address little-endian).
-    private func readControllerInfo() {
-        writeCommand(0x02, 0x04,
-                     [0x40, 0x7E, 0x00, 0x00, 0x00, 0x30, 0x01, 0x00])
-    }
-
-    /// Play a built-in rumble preset (command 0x0A, subcommand 0x02);
-    /// 0x03 = soft.
-    private func playVibrationPreset(_ preset: UInt8) {
-        writeCommand(0x0A, 0x02, [preset, 0x00, 0x00, 0x00])
-    }
-
-    /// Assign the player-number LEDs — without this the lights race
-    /// forever. `0x91` framing on the command characteristic: command 0x09
-    /// = LEDs, subcommand 0x07 = set player, pattern 0x01 = player 1.
-    private func setPlayerLED(_ player: Int) {
-        let patterns: [UInt8] = [0x01, 0x03, 0x07, 0x0F, 0x09, 0x05, 0x0D, 0x06]
-        writeCommand(0x09, 0x07,
-                     [patterns[max(0, min(7, player - 1))], 0x00, 0x00, 0x00])
-        ledSent = true
-    }
-
-    /// Feature init + enable: 0x07 = base | FEATURE_MOTION 0x04, 0x80 =
-    /// FEATURE_MAGNETOMETER (the mag block at 0x19). The two commands MUST
-    /// be spaced 150 ms: back to back, the ack returns zeros, motion off.
-    private func enableFeatures() {
-        let flags: [UInt8] = [0x87, 0x00, 0x00, 0x00]
-        writeCommand(0x0C, 0x02, flags)   // SUBCOMMAND_FEATURE_INIT
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.writeCommand(0x0C, 0x04, flags)   // SUBCOMMAND_FEATURE_ENABLE
-        }
-    }
-
-    /// One `0x91`-framed command:
-    /// `<cmd> 91 01 <sub> 00 <len> 00 00 <payload…>`.
-    private func writeCommand(_ command: UInt8, _ subcommand: UInt8,
-                              _ payload: [UInt8]) {
-        guard let p = peripheral, let ch = outputCharacteristic else {
-            NSLog("Tarabdaar ble: command %02x/%02x dropped — no command characteristic",
-                  command, subcommand)
-            return
-        }
-        NSLog("Tarabdaar ble: command %02x/%02x sent", command, subcommand)
-        let cmd: [UInt8] = [command, 0x91, 0x01, subcommand, 0x00,
-                            UInt8(payload.count), 0x00, 0x00] + payload
-        let type: CBCharacteristicWriteType =
-            ch.properties.contains(.writeWithoutResponse) ? .withoutResponse
-                                                          : .withResponse
-        p.writeValue(Data(cmd), for: ch, type: type)
-    }
-
-    /// Motion-probe success detector: report 0x07's motion-length byte at
-    /// 0x0E is 0 with the IMU off, 30 or 40 once enabled.
-    private func checkAltMotion(_ d: Data) {
-        guard !altMotionSeen, d.count > 0x0E else { return }
-        let nonzero = d[0x0E] != 0
-        if nonzero {
-            altMotionSeen = true
-            NSLog("Tarabdaar ble: ALT MOTION LIVE — IMU region nonzero (after probe step %d)",
-                  probeStep)
-        }
-    }
-
-    /// Raw write for the motion probe — any characteristic.
-    private func probeWrite(_ ch: CBCharacteristic, _ bytes: [UInt8]) {
-        guard let p = peripheral else { return }
-        let type: CBCharacteristicWriteType =
-            ch.properties.contains(.writeWithoutResponse) ? .withoutResponse
-                                                          : .withResponse
-        p.writeValue(Data(bytes), for: ch, type: type)
-    }
-
-    /// Walk every write-capable characteristic with both command dialects.
-    /// Steps stop the moment `checkAltMotion` fires.
-    private func startMotionProbe() {
-        guard peripheral != nil, !altMotionSeen, !probeChars.isEmpty else { return }
-        let feat: [[UInt8]] = [
-            [0x0C, 0x91, 0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x87, 0x00, 0x00, 0x00],
-            [0x0C, 0x91, 0x01, 0x04, 0x00, 0x04, 0x00, 0x00, 0x87, 0x00, 0x00, 0x00],
-        ]
-        let classic: [[UInt8]] = [
-            [0x01, 0x01, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40, 0x03, 0x30],
-            [0x01, 0x02, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40, 0x40, 0x01],
-        ]
-        var steps: [(String, CBCharacteristic, [[UInt8]])] = []
-        for ch in probeChars {
-            steps.append(("0x91 feature-enable", ch, feat))
-            steps.append(("classic mode+IMU", ch, classic))
-        }
-        NSLog("Tarabdaar ble: motion probe starting — %d candidates over %d write chars",
-              steps.count, probeChars.count)
-        for (i, step) in steps.enumerated() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 1.2) { [weak self] in
-                guard let self, self.peripheral != nil, !self.altMotionSeen
-                else { return }
-                self.probeStep = i
-                NSLog("Tarabdaar ble: motion probe %d/%d — %@ → %@",
-                      i + 1, steps.count, step.0, step.1.uuid.uuidString)
-                self.probeWrite(step.1, step.2[0])
-                if step.2.count > 1 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                        guard let self, self.peripheral != nil else { return }
-                        self.probeWrite(step.1, step.2[1])
-                    }
-                }
-            }
-        }
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + Double(steps.count) * 1.2 + 1.0
-        ) { [weak self] in
-            guard let self, self.peripheral != nil, !self.altMotionSeen
-            else { return }
-            NSLog("Tarabdaar ble: motion probe exhausted — IMU region still zero")
-        }
-    }
-
-    func peripheral(_ p: CBPeripheral,
-                    didUpdateNotificationStateFor ch: CBCharacteristic,
-                    error: Error?) {
-        NSLog("Tarabdaar ble: notify %@ on %@%@",
-              ch.isNotifying ? "ON" : "OFF", ch.uuid.uuidString,
-              error.map { " error: \($0.localizedDescription)" } ?? "")
-    }
-
-    func peripheral(_ p: CBPeripheral, didWriteValueFor ch: CBCharacteristic,
-                    error: Error?) {
-        if let error {
-            NSLog("Tarabdaar ble: write to %@ FAILED — %@",
-                  ch.uuid.uuidString, error.localizedDescription)
-        }
-    }
-
-    func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic,
-                    error: Error?) {
-        if let error {
-            // An "insufficient authentication" ATT error = a paired link is
-            // wanted; macOS follows up by pairing.
-            NSLog("Tarabdaar ble: read/notify on %@ FAILED — %@",
-                  ch.uuid.uuidString, error.localizedDescription)
-            return
-        }
-        if ch.uuid == Self.commandResponseCharacteristic {
-            let hex = (ch.value ?? Data()).prefix(16)
-                .map { String(format: "%02x", $0) }.joined(separator: " ")
-            NSLog("Tarabdaar ble: command ack [%@]", hex)
-            return
-        }
-        if ch.uuid == Self.altInputCharacteristic {
-            // Report-0x07 stream (clone fallback): forwarded only while the
-            // standard characteristic is silent — never races the 0x05 parse.
-            if notifCount == 0, let d = ch.value {
-                onAltNotification?(d)
-                checkAltMotion(d)
-                if !probeStarted {
-                    probeStarted = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                        self?.startMotionProbe()
-                    }
-                }
-            }
-            return
-        }
-        if ch.uuid != Self.inputCharacteristic {
-            // Reads and unknown-characteristic notifications, throttled.
-            let now = CFAbsoluteTimeGetCurrent()
-            if now - (lastCharLog[ch.uuid] ?? 0) > 1 {
-                lastCharLog[ch.uuid] = now
-                let d = ch.value ?? Data()
-                NSLog("Tarabdaar ble: %@ value, %d bytes [%@]",
-                      ch.uuid.uuidString, d.count, d.prefix(24)
-                          .map { String(format: "%02x", $0) }.joined(separator: " "))
-            }
-            return
-        }
-        // If the LED write raced discovery, re-send once input flows.
-        if !ledSent, outputCharacteristic != nil {
-            setPlayerLED(1)
-            enableFeatures()
-        }
-        guard let d = ch.value else { return }
-        notifCount += 1
-        let now = CFAbsoluteTimeGetCurrent()
-        if notifCount == 1 || now - lastNotifLog > 5 {
-            lastNotifLog = now
-            NSLog("Tarabdaar ble: input #%d, %d bytes [%@]",
-                  notifCount, d.count, d.prefix(16)
-                      .map { String(format: "%02x", $0) }.joined(separator: " "))
-        }
-        if d.count >= 8 {
-            let word = UInt32(d[4]) | (UInt32(d[5]) << 8)
-                     | (UInt32(d[6]) << 16) | (UInt32(d[7]) << 24)
-            if let last = lastButtonWord, word != last {
-                NSLog("Tarabdaar ble: buttons %08x → %08x  full [%@]",
-                      last, word, d.map { String(format: "%02x", $0) }
-                          .joined(separator: " "))
-            }
-            lastButtonWord = word
-        }
-        onNotification?(d)
+    mutating func removeAll() {
+        storage.removeAll()
+        head = 0
     }
 }
