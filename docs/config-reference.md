@@ -6,7 +6,7 @@ System-level constants live in `Packages/TarabdaarCore/Sources/TarabdaarCore/Con
 
 | Kind | Home | Edited in |
 |------|------|-----------|
-| Voice parameters (`bow_*`, `tp_*`, `st_*`, `ctl_*`, `fx_*`) | `ParamRegistry` — `.rebuild` values persist as the `StringParamStore` override dict (`tarabdaar.stringOverrides.v1`), `.live`/`.hybrid` resting values as `AppController.paramValues` (`tarabdaar.controlDefaults.v1`) | Parameters tab ⌘5, FX tab ⌘6 |
+| Voice parameters (`bow_*`, `tp_*`, `st_*`, `ctl_*`, `fx_*`) | `ParamRegistry` — every resting value, whatever its apply strategy, in `AppController.paramValues` (`tarabdaar.paramValues.v2`; the two earlier stores are read once when it is absent); `StringParamStore` holds the physics subset for the engine build | Parameters tab ⌘5, FX tab ⌘6 |
 | FX EQ curves (the points per insert) | `AppController.fxEQCurves` (`tarabdaar.fxCurves.v1`, keyed by the insert's prefix); presets carry them as `fxCurves` | FX tab ⌘6 |
 | The tarab | the `[StringSpec]` table + chromatic set + follower on `InstrumentState` (`tarabdaar.sarangiState.v8`) | Strings tab ⌘2 |
 | Composite parameters | `CompositeParam` on `AppController.composites` (`tarabdaar.compositeParams.v1`) — named 0–1 macros of parameter members each sweeping lo→hi; defaults Taraf Purity / Taraf Decay / Tone Tilt / Expression on slots 1–4 | Controls tab ⌘4 |

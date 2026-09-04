@@ -9,9 +9,11 @@ import SwiftUI
 /// bank itself is `SarangiStore`'s document.
 ///
 /// The bundled artifact IS the Sarangi Live default. Tarabdaar cannot (and
-/// should not) rewrite the bundle, so edits live as a persisted **override
-/// dict** applied over the artifact at every String-engine build
+/// should not) rewrite the bundle, so edits live as an **override dict**
+/// applied over the artifact at every String-engine build
 /// (`AudioEngine.stringVoiceOverrides` → `StringVoiceSource.buildEngine`).
+/// The resting values themselves live in `AppController.paramValues` (the
+/// one store); this holds the physics subset and pushes it.
 /// Every edit applies live via a debounced off-main engine rebuild (the
 /// long-lived mapper keeps held notes across the swap). "Default" = clear
 /// all overrides = exactly the Sarangi Live default instrument.
@@ -31,9 +33,7 @@ final class StringParamStore: ObservableObject {
     /// the running engine.
     private var dirtyKeys: Set<String> = []
 
-    private static let persistKey = "tarabdaar.stringOverrides.v1"
-
-    init(audio: AudioEngine) {
+    init(audio: AudioEngine, overrides: [String: Double]) {
         self.audio = audio
         if let bp = Presets.bowedStringParams() { artifact = bp.num }
         // Tarabdaar live seeds (stereo image + room width): part of the
@@ -42,10 +42,8 @@ final class StringParamStore: ObservableObject {
         // override-dropping on a value that lands back on the default)
         // stay in agreement. An artifact that ever ships a key wins.
         artifact.merge(StringVoiceSource.liveParamSeeds) { a, _ in a }
-        if let ov = DefaultsStore.load([String: Double].self, key: Self.persistKey) {
-            overrides = ov
-        }
-        values = artifact.merging(overrides) { _, o in o }
+        self.overrides = overrides.filter { $0.value != artifact[$0.key] }
+        values = artifact.merging(self.overrides) { _, o in o }
         dirty = !overrides.isEmpty
         // Seed the engine's override dict WITHOUT a rebuild — the String
         // voice isn't armed yet at construction; `applyBaseVoice` builds the
@@ -66,7 +64,6 @@ final class StringParamStore: ObservableObject {
 
     func set(_ key: String, _ value: Double) {
         store(key, value)
-        persist()
         schedulePush()
     }
 
@@ -75,7 +72,6 @@ final class StringParamStore: ObservableObject {
     func setBatch(_ batch: [String: Double]) {
         guard !batch.isEmpty else { return }
         for (key, value) in batch { store(key, value) }
-        persist()
         pushNow()
     }
 
@@ -98,7 +94,6 @@ final class StringParamStore: ObservableObject {
         overrides.removeValue(forKey: key)
         values = artifact.merging(overrides) { _, o in o }
         dirty = !overrides.isEmpty
-        persist()
         schedulePush()
     }
 
@@ -108,12 +103,8 @@ final class StringParamStore: ObservableObject {
         overrides.removeAll()
         values = artifact
         dirty = false
-        persist()
         pushNow()
     }
-
-    /// The override dict as saved into a `.tarabdaar` preset.
-    var overridesSnapshot: [String: Double] { overrides }
 
     /// Replace every override at once (preset load). Rebuilds rather than
     /// pushing in place: a preset can move anything, including the keys
@@ -123,7 +114,6 @@ final class StringParamStore: ObservableObject {
         values = artifact.merging(overrides) { _, o in o }
         dirty = !overrides.isEmpty
         dirtyKeys.removeAll()          // force the rebuild path
-        persist()
         pushNow()
     }
 
@@ -147,9 +137,5 @@ final class StringParamStore: ObservableObject {
             return
         }
         audio.setStringVoiceOverrides(overrides)
-    }
-
-    private func persist() {
-        DefaultsStore.save(overrides, key: Self.persistKey)
     }
 }

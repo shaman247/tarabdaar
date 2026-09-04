@@ -78,10 +78,11 @@ touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (o
   renumber. `BowEngine`'s live ramp walks the struct as
   `sizeof(bow_scalars_t) / sizeof(double)` contiguous doubles (declaration
   order), which is the only place the layout is relied on.
-- **Overrides.** The bundled artifact is read‑only; Parameters‑tab edits
-  persist as an override dict (`tarabdaar.stringOverrides.v1`,
-  `StringParamStore`) applied over `bowed_string.json` at build time; one that
-  lands on the artifact value is dropped (*dirty* = differs from default).
+- **Overrides.** The bundled artifact is read‑only; a Parameters‑tab edit
+  rests in the ONE value store (`AppController.paramValues`) and reaches
+  the engine as `StringParamStore`'s override dict applied over
+  `bowed_string.json` at build time; one that lands on the artifact value
+  is dropped (*dirty* = differs from default).
   Registry defaults for keys the artifact does not carry must equal the
   engine fallbacks (`ParamUnificationTests`).
 - **Controls — `BowControlMapper`**, long‑lived across rebuilds: the 0…1

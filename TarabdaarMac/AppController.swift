@@ -187,27 +187,48 @@ final class AppController: ObservableObject {
     /// into ONE debounced main-thread apply — `DebouncedParamFlush`.
     private var rebuildFlush: DebouncedParamFlush!
 
-    /// RESTING VALUES for every `.live`/`.hybrid` parameter (`.rebuild` ones
-    /// live in `StringParamStore`). Parameters tab; composites and bindings
-    /// modulate ON TOP of these. Persisted as JSON. The store only persists:
-    /// each mutation applies what it changed (one key from a slider, every
-    /// key from a preset or reset-all).
+    /// THE RESTING VALUES — one store for every parameter, whatever its
+    /// apply strategy: a key that is absent rests at its default (the
+    /// artifact's value for a physics scalar, the registry's otherwise, the
+    /// rest fraction of the built headroom for a hybrid). Composites and
+    /// bindings modulate ON TOP of these and never write here. Persisted
+    /// as JSON; the store only persists — each mutation applies what it
+    /// changed (one key from a slider, every key from a preset or
+    /// reset-all) and routes a physics scalar to `stringParams`.
     @Published var paramValues: [String: Double] = AppController.loadParamValues() {
         didSet { AppController.saveParamValues(paramValues) }
     }
 
-    private static let paramValuesKey = "tarabdaar.controlDefaults.v1"
+    private static let paramValuesKey = "tarabdaar.paramValues.v2"
+    /// The two stores this one replaced, read once when v2 is absent.
+    private static let legacyControlKey = "tarabdaar.controlDefaults.v1"
+    private static let legacyOverridesKey = "tarabdaar.stringOverrides.v1"
 
     private static func loadParamValues() -> [String: Double] {
-        var d: [String: Double] = [:]
-        if let saved = DefaultsStore.load([String: Double].self, key: paramValuesKey) {
-            // Only non-rebuild keys the registry still knows; retired keys
-            // in a saved profile drop out here.
-            for (k, v) in saved where ParamRegistry.spec(k)?.apply != .rebuild {
-                if ParamRegistry.spec(k) != nil { d[k] = migrated(k, v) }
+        let saved = DefaultsStore.load([String: Double].self, key: paramValuesKey)
+            ?? (DefaultsStore.load([String: Double].self, key: legacyOverridesKey) ?? [:])
+                .merging(DefaultsStore.load([String: Double].self, key: legacyControlKey) ?? [:]) { _, c in c }
+        return Self.known(saved)
+    }
+
+    /// Only keys the registry still knows (retired keys drop out), on the
+    /// current scale.
+    private static func known(_ d: [String: Double]) -> [String: Double] {
+        d.filter { ParamRegistry.spec($0.key) != nil }
+            .reduce(into: [:]) { $0[$1.key] = migrated($1.key, $1.value) }
+    }
+
+    /// The physics scalars in `values` as `StringParamStore` overrides: every
+    /// `.rebuild` key, plus a hybrid raised above its artifact headroom.
+    private static func physicsOverrides(in values: [String: Double]) -> [String: Double] {
+        values.filter { key, v in
+            guard let spec = ParamRegistry.spec(key) else { return false }
+            switch spec.apply {
+            case .rebuild: return true
+            case .hybrid: return v > (Presets.bowedStringParams()?.num[key] ?? spec.def) + 1e-12
+            case .live: return false
             }
         }
-        return d
     }
 
     /// `ctl_strum_thresh` was 1…127 (≥127 = off) before it became 0…1:
@@ -240,7 +261,7 @@ final class AppController: ObservableObject {
         // First run after the graphic EQ: the saved profile's band values
         // become a curve through the band centres (`loadParamValues` drops
         // the retired keys themselves).
-        if let saved = DefaultsStore.load([String: Double].self, key: paramValuesKey) {
+        if let saved = DefaultsStore.load([String: Double].self, key: legacyControlKey) {
             return TarabdaarPreset.legacyEQCurves(in: saved)
         }
         return [:]
@@ -298,20 +319,10 @@ final class AppController: ObservableObject {
         return h ?? ParamRegistry.spec(key)?.def ?? 0
     }
 
-    /// The resting value of any parameter, native units: `.rebuild` reads
-    /// the physics store, `.live`/`.hybrid` read `paramValues` — a hybrid
-    /// with no stored value rests at `restFraction × headroom`.
+    /// The resting value of any parameter, native units — the store's
+    /// value, else the parameter's default.
     func paramValue(_ key: String) -> Double {
-        guard let spec = ParamRegistry.spec(key) else { return 0 }
-        switch spec.apply {
-        case .rebuild:
-            return stringParams.values[key] ?? spec.def
-        case .live:
-            return paramValues[key] ?? spec.def
-        case .hybrid:
-            if let v = paramValues[key] { return v }
-            return (spec.restFraction ?? 0) * headroom(key)
-        }
+        paramValues[key] ?? paramDefault(key)
     }
 
     /// The value `paramValue` falls back to — what a reset restores.
@@ -328,15 +339,17 @@ final class AppController: ObservableObject {
         abs(paramValue(key) - paramDefault(key)) <= 1e-9
     }
 
-    /// Set a parameter's resting value (the Parameters tab's path).
-    /// Routes to whichever store owns it and applies to the voice.
+    /// Set a parameter's resting value (the Parameters tab's path): the
+    /// store, then the voice — a physics scalar through `stringParams`, a
+    /// live knob straight in, a hybrid both ways when it rises above the
+    /// built headroom.
     func setParamValue(_ key: String, _ value: Double) {
         guard let spec = ParamRegistry.spec(key) else { return }
+        paramValues[key] = value
         switch spec.apply {
         case .rebuild:
             stringParams.set(key, value)
         case .live:
-            paramValues[key] = value
             applyParamToVoice(key, value)
         case .hybrid:
             // Above the built headroom the build scalar must move (rebuild);
@@ -345,7 +358,6 @@ final class AppController: ObservableObject {
                 stringParams.set(key, value)   // raises the headroom
                 refreshHybridHeadroom()
             }
-            paramValues[key] = value
             applyParamToVoice(key, value)
         }
     }
@@ -353,11 +365,11 @@ final class AppController: ObservableObject {
     /// Restore a parameter to its default and re-apply.
     func resetParam(_ key: String) {
         guard let spec = ParamRegistry.spec(key) else { return }
+        paramValues.removeValue(forKey: key)
         switch spec.apply {
         case .rebuild:
             stringParams.reset(key)
         case .live:
-            paramValues.removeValue(forKey: key)
             applyParamToVoice(key, paramValue(key))
         case .hybrid:
             // Drop a RAISED headroom first — but only touch the physics store
@@ -366,17 +378,15 @@ final class AppController: ObservableObject {
                 stringParams.reset(key)
                 refreshHybridHeadroom()
             }
-            paramValues.removeValue(forKey: key)
             applyParamToVoice(key, paramValue(key))
         }
     }
 
-    /// Reset every parameter: clears the physics overrides and every
-    /// resting value.
+    /// Reset every parameter: the store, the physics overrides, the curves.
     func resetAllParams() {
+        paramValues.removeAll()
         stringParams.resetToDefault()
         refreshHybridHeadroom()
-        paramValues.removeAll()
         fxEQCurves.removeAll()
         applyRestingParams()
         applyEQCurves()
@@ -531,7 +541,9 @@ final class AppController: ObservableObject {
         // Loads the persisted/default document and builds the tarab tuning.
         self.sarangi = SarangiStore(audio: audio)
         // Physics overrides — seeds the engine before the first BowEngine.
-        self.stringParams = StringParamStore(audio: audio)
+        self.stringParams = StringParamStore(
+            audio: audio,
+            overrides: Self.physicsOverrides(in: Self.loadParamValues()))
         // The debounced rebuild funnel behind every off-main parameter path.
         self.rebuildFlush = DebouncedParamFlush { [weak self] values in
             guard let self else { return }
@@ -1233,8 +1245,7 @@ final class AppController: ObservableObject {
         p.name = name
         p.savedAt = ISO8601DateFormatter().string(from: Date())
         p.instrument = sarangi.state
-        p.stringOverrides = stringParams.overridesSnapshot
-        p.paramValues = paramValues
+        p.paramValues = paramValues            // every parameter, one section
         p.fxCurves = fxEQCurves.isEmpty ? nil : fxEQCurves
         p.composites = composites
         p.tiltMapping = tiltMapping
@@ -1248,16 +1259,13 @@ final class AppController: ObservableObject {
         if let inst = p.instrument {
             sarangi.replaceState(inst)
         }
-        if let ov = p.stringOverrides {
-            stringParams.replaceOverrides(ov)
+        if p.paramValues != nil || p.stringOverrides != nil {
+            // One section now; a file from the two-store era carries both.
+            let merged = (p.stringOverrides ?? [:])
+                .merging(p.paramValues ?? [:]) { _, pv in pv }
+            paramValues = Self.known(merged)
+            stringParams.replaceOverrides(Self.physicsOverrides(in: paramValues))
             refreshHybridHeadroom()
-        }
-        if let pv = p.paramValues {
-            // Keep only keys this build still knows.
-            paramValues = pv.filter {
-                guard let spec = ParamRegistry.spec($0.key) else { return false }
-                return spec.apply != .rebuild
-            }.reduce(into: [:]) { $0[$1.key] = Self.migrated($1.key, $1.value) }
             applyRestingParams()
         }
         if let c = p.fxCurves {

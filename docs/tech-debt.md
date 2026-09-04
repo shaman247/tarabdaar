@@ -19,10 +19,6 @@ is re-blessed with a before/after render for an A/B by ear.
    `ParamUnificationTests` pins a third copy. Change: `spec.def` and
    `ParamSpec.clamp(_:)` as the single source (the glide queue already
    clamps by the registry).
-7. **Resting values live in three stores selected by apply strategy**
-   (`paramValue` / `setParamValue` / `resetParam` each branch three ways).
-   Change: one value store; `apply` decides only how a value reaches the
-   engine.
 8. **The voices are not behind one protocol**: `inst != .string` at every
    touch entry point, `switch inst` in the scope, `mode ==` for drones, and
    the UI repeats it. Change: a `PlayedVoice` protocol both sources adopt.
