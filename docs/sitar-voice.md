@@ -104,12 +104,12 @@ and artifact — holding a `TanpuraVoiceSource` built with `artifact: .sitar`
 switch. One path serves both voices (`setPluckedVoiceEnabled` /
 `rebuildPlucked` / `setPluckedParam`); the asymmetric parts are explicit
 hooks — the tanpura's drone buttons and its debounced table-shaping rebuild
-(`tp_jiva_comp` / `tp_cascade`), and the sitar's "clear the slot map only
-while it IS the main instrument" (`pluckedEnginePublished`). The whole
-tanpura main-instrument path is shared (exact-pitch wire plucks, the MIDI
-pending pluck, live bends, `tanpura_release` note-offs) via
-`pluckSourceLocked(inst)` / `pluckTrimsLocked(inst)`; slot maps are shared
-(one main instrument at a time, cleared on switch). Scale/tonic changes rebuild the sitar's JI grid on
+(`tp_jiva_comp` / `tp_cascade`). As a played voice each mount is a
+`PlayedVoice` (`PlayedVoice.swift`): exact-pitch wire plucks, live bends
+and `tp_rel_t60` releases, with its own touch→slot map (cleared when a
+fresh engine publishes and on a main-instrument switch); the String bow
+is the third `PlayedVoice`, so `AudioEngine`'s touch entry points speak one
+protocol and never branch on the instrument. Scale/tonic changes rebuild the sitar's JI grid on
 the tanpura's queue and debounce (`rebuildSitar` from
 `AppController.syncTanpuraFromScale`). `TanpuraTables.buildNote` carries
 per-note contact stiffness and transverse curvature

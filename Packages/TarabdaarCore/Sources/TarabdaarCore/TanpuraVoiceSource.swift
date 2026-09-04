@@ -276,6 +276,18 @@ final class PluckedVoice {
     var attached = false
     var connected = false
     var buildGen = 0
+    /// The slot each ringing touch plucked (a glide retunes it, the
+    /// release releases it) — this voice's own, under `touchLock`.
+    let touchLock = NSLock()
+    var touchSlot: [UInt16: Int] = [:]
+
+    /// Forget the held-touch bindings (a fresh engine's slots differ; a
+    /// main-instrument switch drops pending plucks).
+    func clearTouches() {
+        touchLock.lock()
+        touchSlot.removeAll(keepingCapacity: true)
+        touchLock.unlock()
+    }
 
     // `<prefix>_*` live trims; the initial values ARE the registry defaults.
     var gainOverride: Double?
@@ -332,8 +344,4 @@ final class PluckedVoice {
                            : Presets.tanpuraParams() != nil
     }
 
-    /// The pluck trims one `pluckMain` needs. Caller holds `AudioEngine.lock`.
-    var pluckTrims: (level: Double, touch: Double, drive: Double, relT60: Double) {
-        (pluckLevel, pluckTouch, pluckDrive, releaseT60)
-    }
 }

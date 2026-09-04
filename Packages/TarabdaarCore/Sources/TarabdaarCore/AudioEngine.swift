@@ -76,9 +76,6 @@ public class AudioEngine: ObservableObject {
     /// Last structural scale push, retained for BOTH plucked (re)builds. Guarded by `lock`.
     var lastTanpuraTonic: Double = 261.63
     var lastTanpuraRatios: [Double] = []
-    /// The slot each ringing main-instrument touch plucked (glides retune
-    /// it, release releases it). Cleared on instrument switch and rebuild.
-    var tanpuraTouchSlot: [UInt16: Int] = [:]
     /// Per-button generation token for the hold re-pluck cycle. Guarded by `lock`.
     var droneCycleGen = [Int](repeating: 0,
                               count: FretArrangement.droneCount)
@@ -231,20 +228,27 @@ public class AudioEngine: ObservableObject {
         touchPitchSemis[id] = pitchSemis
         heldTouchOrder.removeAll { $0 == id }
         heldTouchOrder.append(id)
-        let inst = mainInstrumentStorage
-        let src = stringVoiceSource
+        let voice = playedVoiceLocked(mainInstrumentStorage)
         let exprScale = touchExprScale[id] ?? 1.0
         let snap = meterSnapshotLocked()
         lock.unlock()
         storeMeter(snap)
-        if inst != .string {
-            let hz = Pitch.hz(fractionalMidi: pitchSemis)
-            pluckMainTouch(inst, hz: hz, velocity: velocity, touch: id,
-                           exprScale: exprScale)
-            return
-        }
-        src?.mapper.touchOn(id, pitchSemis: pitchSemis, velocity: velocity,
-                            exprScale: exprScale)
+        voice?.touchOn(id, pitchSemis: pitchSemis, velocity: velocity,
+                       exprScale: exprScale)
+    }
+
+    /// The voice the fret notes drive right now. Callers hold `lock`.
+    func playedVoiceLocked(_ inst: MainInstrument) -> PlayedVoice? {
+        inst == .string ? stringVoiceSource : pluckVoiceLocked(inst)
+    }
+
+    /// Every voice that can hold a touch — a release reaches all of them,
+    /// so a note begun before an instrument switch still lets go.
+    /// Callers hold `lock`.
+    func allVoicesLocked() -> [PlayedVoice] {
+        var v: [PlayedVoice] = [tanpuraVoice, sitarVoice]
+        if let s = stringVoiceSource { v.insert(s, at: 0) }
+        return v
     }
 
     /// Per-touch expression scale (the strum chord). String touches update
@@ -252,12 +256,9 @@ public class AudioEngine: ObservableObject {
     public func touchExpr(_ id: UInt16, exprScale: Double) {
         lock.lock()
         touchExprScale[id] = exprScale
-        let inst = mainInstrumentStorage
-        let src = stringVoiceSource
+        let voice = playedVoiceLocked(mainInstrumentStorage)
         lock.unlock()
-        if inst == .string {
-            src?.mapper.setExprScale(exprScale, forTouch: id)
-        }
+        voice?.touchExpr(id, exprScale: exprScale)
     }
 
     /// Pitch update, the DIRECT path. String: the mapper tracks the finger
@@ -266,22 +267,11 @@ public class AudioEngine: ObservableObject {
         lock.lock()
         guard touchPitchSemis[id] != nil else { lock.unlock(); return }
         touchPitchSemis[id] = pitchSemis
-        let inst = mainInstrumentStorage
-        let tpSlot = tanpuraTouchSlot[id]
-        let tpSrc = pluckSourceLocked(inst)
-        let src = stringVoiceSource
+        let voice = playedVoiceLocked(mainInstrumentStorage)
         let snap = meterSnapshotLocked()
         lock.unlock()
         storeMeter(snap)
-        if inst != .string {
-            if let slot = tpSlot, let engine = tpSrc?.currentEngine(),
-               slot < engine.slotFrequencies.count {
-                let hz = Pitch.hz(fractionalMidi: pitchSemis)
-                engine.bend(slot: slot, ratio: hz / engine.slotFrequencies[slot])
-            }
-            return
-        }
-        src?.mapper.touchGlide(id, pitchSemis: pitchSemis)
+        voice?.touchGlide(id, pitchSemis: pitchSemis)
     }
 
     /// Touch release, the DIRECT path. String: bow lift. Plucked mains:
@@ -291,20 +281,11 @@ public class AudioEngine: ObservableObject {
         touchPitchSemis.removeValue(forKey: id)
         touchExprScale.removeValue(forKey: id)
         heldTouchOrder.removeAll { $0 == id }
-        let inst = mainInstrumentStorage
-        let tpSlot = tanpuraTouchSlot.removeValue(forKey: id)
-        let tpSrc = pluckSourceLocked(inst)
-        let relT60 = pluckTrimsLocked(inst).relT60
-        let src = stringVoiceSource
+        let voices = allVoicesLocked()
         let snap = meterSnapshotLocked()
         lock.unlock()
         storeMeter(snap)
-        if let slot = tpSlot, let engine = tpSrc?.currentEngine() {
-            engine.release(slot: slot, rate: log(1000.0) / max(0.05, relT60))
-        }
-        if inst == .string {
-            src?.mapper.touchOff(id)
-        }
+        for v in voices { v.touchOff(id) }
     }
 
     /// The link-drop kill path: every bow off, slot released, drone up,
@@ -315,19 +296,11 @@ public class AudioEngine: ObservableObject {
         touchPitchSemis.removeAll(keepingCapacity: true)
         touchExprScale.removeAll(keepingCapacity: true)
         heldTouchOrder.removeAll(keepingCapacity: true)
-        let tpSlots = Array(tanpuraTouchSlot.values)
-        tanpuraTouchSlot.removeAll(keepingCapacity: true)
-        let tpSrc = pluckSourceLocked(mainInstrumentStorage)
-        let relT60 = pluckTrimsLocked(mainInstrumentStorage).relT60
-        let src = stringVoiceSource
+        let voices = allVoicesLocked()
         let snap = meterSnapshotLocked()
         lock.unlock()
         storeMeter(snap)
-        if let engine = tpSrc?.currentEngine() {
-            let rate = log(1000.0) / max(0.05, relT60)
-            for s in tpSlots { engine.release(slot: s, rate: rate) }
-        }
-        src?.mapper.touchAllOff()
+        for v in voices { v.touchAllOff() }
         for i in 0..<FretArrangement.droneCount { setDronePressed(i, false) }
     }
 

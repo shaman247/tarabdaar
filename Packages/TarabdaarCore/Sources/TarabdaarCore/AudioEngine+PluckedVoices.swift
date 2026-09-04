@@ -7,44 +7,12 @@ import SarangiKit
 // instrument selection.
 extension AudioEngine {
     /// The plucked voice a main instrument routes to (nil = String). Callers hold `lock`.
-    private func pluckVoiceLocked(_ inst: MainInstrument) -> PluckedVoice? {
+    func pluckVoiceLocked(_ inst: MainInstrument) -> PluckedVoice? {
         switch inst {
         case .string: return nil
         case .tanpura: return tanpuraVoice
         case .sitar: return sitarVoice
         }
-    }
-
-    /// The plucked source a main instrument routes to (nil = String). Callers hold `lock`.
-    func pluckSourceLocked(_ inst: MainInstrument) -> TanpuraVoiceSource? {
-        pluckVoiceLocked(inst)?.source
-    }
-
-    /// Per-instrument pluck trims. Callers hold `lock`.
-    func pluckTrimsLocked(_ inst: MainInstrument)
-        -> (level: Double, touch: Double, drive: Double, relT60: Double) {
-        (pluckVoiceLocked(inst) ?? tanpuraVoice).pluckTrims
-    }
-
-    /// Touch-keyed twin of `pluckMain`; `exprScale` scales the pluck level
-    /// (the strum chord, onset-only).
-    func pluckMainTouch(_ inst: MainInstrument, hz: Double,
-                        velocity: Double, touch id: UInt16,
-                        exprScale: Double = 1.0) {
-        lock.lock()
-        let (level, fingerTouch, drive, _) = pluckTrimsLocked(inst)
-        let src = pluckSourceLocked(inst)
-        lock.unlock()
-        guard let engine = src?.currentEngine(),
-              let slot = engine.nearestSlot(toHz: hz, toleranceCents: 60)
-        else { return }
-        engine.pluck(slot: slot, velocity01: velocity,
-                     scale: level * exprScale,
-                     bendRatio: hz / engine.slotFrequencies[slot],
-                     touch: fingerTouch, drive: drive)
-        lock.lock()
-        tanpuraTouchSlot[id] = slot
-        lock.unlock()
     }
 
     // MARK: - Plucked voice bridge (tanpura + sitar, one path)
@@ -138,15 +106,10 @@ extension AudioEngine {
     }
 
     /// The per-voice hook after a fresh engine is published (main thread):
-    /// the fresh slots differ, so held notes lose their binding — the sitar
-    /// only owns that map while it IS the main instrument, and the tanpura
-    /// re-strikes its held drone buttons onto the silent new engine.
+    /// the fresh slots differ, so held notes lose their binding, and the
+    /// tanpura re-strikes its held drone buttons onto the silent new engine.
     private func pluckedEnginePublished(_ v: PluckedVoice) {
-        lock.lock()
-        if v !== sitarVoice || mainInstrumentStorage == .sitar {
-            tanpuraTouchSlot.removeAll(keepingCapacity: true)
-        }
-        lock.unlock()
+        v.clearTouches()
         if v === tanpuraVoice { reapplyHeldTanpuraDrones() }
     }
 
@@ -279,9 +242,10 @@ extension AudioEngine {
         guard inst != mainInstrumentStorage else { lock.unlock(); return }
         let old = mainInstrumentStorage
         mainInstrumentStorage = inst
-        tanpuraTouchSlot.removeAll(keepingCapacity: true)
         let strSrc = stringVoiceSource
         lock.unlock()
+        tanpuraVoice.clearTouches()
+        sitarVoice.clearTouches()
         if old == .string { strSrc?.reset() }
         // the sitar arms lazily and stays armed (idle strings are ~free)
         if inst == .sitar { setSitarVoiceEnabled(true) }

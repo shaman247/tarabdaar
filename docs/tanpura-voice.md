@@ -106,7 +106,8 @@ every launch starts on the String voice; presets can switch it;
 - **Wire touches** (`touchOnDirect`): onset and exact pitch arrive in one
   TLP frame, so the pluck fires immediately — the nearest mounted slot
   (60 ¢ tolerance) **bent to the exact Hz**, scaled by `tp_pluck_level`,
-  recorded per touch id (`tanpuraTouchSlot`).
+  recorded per touch id in the voice's own slot map (`PluckedVoice`, a
+  `PlayedVoice` like the String bow).
 - **Glides retune the ringing string** — `TanpuraEngine.bend`, a
   kernel-side live retune (`tp_apply_bend`): each mode's rotation angle is
   rescaled from mount-time base tables (damping, so every t60, preserved)

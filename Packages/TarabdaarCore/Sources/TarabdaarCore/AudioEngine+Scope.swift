@@ -30,20 +30,10 @@ extension AudioEngine {
     public func volumeLevels() -> (voice: Double, taraf: Double) {
         let bus = stringVoiceSource?.busLevels() ?? (voice: 0, taraf: 0)
         lock.lock()
-        let inst = mainInstrumentStorage
-        let tp = tanpuraVoice.source
-        let st = sitarVoice.source
+        let voice = playedVoiceLocked(mainInstrumentStorage)
         lock.unlock()
         var voiceSq = bus.voice * bus.voice
-        switch inst {
-        case .string: break
-        case .tanpura:
-            let l = tp?.outputLevel() ?? 0
-            voiceSq += l * l
-        case .sitar:
-            let l = st?.outputLevel() ?? 0
-            voiceSq += l * l
-        }
+        if let l = voice?.outputLevel() { voiceSq += l * l }
         return (voiceSq.squareRoot(), bus.taraf)
     }
 
@@ -123,31 +113,12 @@ extension AudioEngine {
         lock.lock()
         let inst = mainInstrumentStorage
         let src = stringVoiceSource
-        let pluck = pluckSourceLocked(inst)
-        let heldSlots = Set(tanpuraTouchSlot.values)
+        let voice = playedVoiceLocked(inst)
         lock.unlock()
         var snap = ScopeSnapshot()
         snap.instrument = inst
         snap.taraf = src?.scopeRows() ?? []
-        switch inst {
-        case .string:
-            for (i, s) in (src?.scopeSlots() ?? []).enumerated()
-                where s.level > 0 || s.gated {
-                snap.voices.append(.init(
-                    id: i << 32 | Int(s.serial), pitchHz: s.f0Hz,
-                    held: s.gated, level: Self.bowScopeLevel01(s.level),
-                    capture: s.capture, grip: s.grip))
-            }
-        case .tanpura, .sitar:
-            guard let engine = pluck?.currentEngine() else { break }
-            for (i, s) in engine.scopeSlots().enumerated()
-                where s.level > 0 {
-                snap.voices.append(.init(
-                    id: i, pitchHz: s.hz, held: heldSlots.contains(i),
-                    level: Self.pluckScopeLevel01(s.level),
-                    capture: 0, grip: 0))
-            }
-        }
+        snap.voices = voice?.scopeVoices() ?? []
         return snap
     }
 

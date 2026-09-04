@@ -19,9 +19,6 @@ is re-blessed with a before/after render for an A/B by ear.
    `ParamUnificationTests` pins a third copy. Change: `spec.def` and
    `ParamSpec.clamp(_:)` as the single source (the glide queue already
    clamps by the registry).
-8. **The voices are not behind one protocol**: `inst != .string` at every
-   touch entry point, `switch inst` in the scope, `mode ==` for drones, and
-   the UI repeats it. Change: a `PlayedVoice` protocol both sources adopt.
 10. **`ScaleSync` is a second self-versioned 7-bit codec inside TLP**
     (`version = 4`/`6` on the scale and arrangement blobs). Change: the
     blobs carry TLP's version.
