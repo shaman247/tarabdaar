@@ -91,7 +91,7 @@ gap.
 
 ## Drag assist (magnetic inflections)
 
-**`FretDragAssist`** (TarabdaarCore) handles the stroke after onset.
+**`FretTouchPlayer`** (TarabdaarCore) is the touch pipeline both surfaces play through — onset (snap or field), drag, release and the 60 Hz settle tick, with the per-touch snap offsets, the assist and the stroke recorder behind it; a surface keeps only its pointer model and its overlays. **`FretDragAssist`** (TarabdaarCore) handles the stroke after onset.
 Premise: when the player **stops or changes direction** near a scale pitch,
 that inflection was intended to be *on* the pitch; while the finger is
 moving — at **any** tempo — they're gliding and must be left alone.
@@ -493,6 +493,7 @@ field + a note menu of the surrounding half-octave — see
   (`fretFieldLog`, `fretColumnLog`, `fretWarp`), the contour solver,
   `fretSnap`, `fretGrab`, `fretFillCells`.
 - `.../ChordBar.swift` — chord derivation, numerals, cells, the Shepard law.
+- `.../FretTouchPlayer.swift` — the touch pipeline (onset · drag · settle · release).
 - `.../FretDragAssist.swift` — the drag assist.
 - `.../FretArrangementStore.swift` — `_Current.json` debounced atomic
   autosave, doc **v4** (older rejected → default; retired keys decode

@@ -726,11 +726,8 @@ private struct FretPadSurfaceIOS: View {
     /// Source of the per-onset strike estimate (`strikeVelocity01` → the
     /// onset frame's velocity byte → `bow_attack_vel`). nil = flat constant.
     let motion: MotionManager?
-    /// Per-touch log2 offset captured at a snapped onset (0 if unsnapped).
-    @State private var snapOffsets: [Int: Double] = [:]
-    /// Drag assist; the timer drives the settle while fingers rest.
-    @State private var assist = FretDragAssist()
-    @State private var assistTimer: Timer? = nil
+    /// The touch pipeline (onset, drag, settle tick, release).
+    @State private var player = FretTouchPlayer()
     /// Touches holding a drone button (touchId → button index).
     @State private var droneTouches: [Int: Int] = [:]
     /// Per-touch indicator — a class so the settle timer can feed it.
@@ -809,16 +806,9 @@ private struct FretPadSurfaceIOS: View {
                             }
                             return
                         }
-                        snapOffsets.removeValue(forKey: id)
-                        assist.end(touchId: id)
+                        player.end(touchId: id, time: now)
                         indicators.end(id)
-                        engine.noteOff(touchId: id)
                         motion?.noteEnded(id, at: now)   // scope coloring
-                        recorder.end(touchId: id, time: now)
-                        if assist.isEmpty {
-                            assistTimer?.invalidate()
-                            assistTimer = nil
-                        }
                     }
                 )
                 .padding(edgePad)
@@ -853,25 +843,6 @@ private struct FretPadSurfaceIOS: View {
         guard band.contains(spt) else { return }
         // Band-local coordinates from here on — the frets' space.
         let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
-        guard let fieldLog = fretFieldLog(at: pt, placements: placements,
-                                          warp: fieldWarp)
-        else { return }   // no frets — nothing to play
-        let offset: Double
-        let onsetLog: Double
-        let weights: [String: Double]
-        if snapDistance > 0,
-           let hit = fretSnap(at: pt, placements: placements,
-                              snapDistance: snapDistance) {
-            offset = log2(hit.ratio) - fieldLog
-            onsetLog = log2(hit.ratio)
-            weights = [hit.id: 1.0]
-        } else {
-            offset = 0
-            onsetLog = fieldLog
-            weights = [:]
-        }
-        snapOffsets[ev.touchId] = offset
-
         let now = CACurrentMediaTime()
         // Onset strike velocity from the TRAILING accelerometer window (the
         // impact precedes UIKit's touch delivery, so the onset never waits).
@@ -880,77 +851,47 @@ private struct FretPadSurfaceIOS: View {
             m.lastTouchVelocity = v
             return v
         }
-        engine.noteOn(touchId: ev.touchId, ratio: pow(2.0, onsetLog),
-                      weights: weights,
-                      velocity01: vel01,
-                      radiusPt: ev.radius)
+        bindPlayer()
+        guard player.begin(touchId: ev.touchId, at: pt,
+                           context: playContext(placements: placements, size: band.size),
+                           velocity01: vel01, radiusPt: ev.radius, time: now)
+        else { return }   // no frets — nothing to play
         motion?.noteBegan(ev.touchId, at: now)   // strike-scope coloring
-
-        assist.setContext(placements: placements, snapDistance: snapDistance)
-        assist.begin(touchId: ev.touchId, x: pt.x, y: pt.y,
-                     uncorrectedLog: fieldLog + offset, time: now)
         // Every touch is born stopped — the indicator starts amber.
         indicators.begin(ev.touchId, point: spt, stopGate: 1,
                          radiusPt: ev.radius, at: now)
-        if recorder.isRecording {
-            recorder.begin(touchId: ev.touchId,
-                           context: .snapshot(
-                               placements: placements, size: band.size,
-                               snapDistance: snapDistance,
-                               ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                               fieldWarp: fieldWarp, assist: assist),
-                           offset: offset, x: pt.x, y: pt.y,
-                           u: fieldLog + offset, o: onsetLog, time: now)
-        }
-        startAssistTimerIfNeeded()
     }
 
-    /// Drag: the field pitch plus this touch's onset offset, then the drag
-    /// assist's slewed correction. Never re-snaps mid-drag.
+    /// The player's engine, recorder and settle-tick hook (the indicators).
+    private func bindPlayer() {
+        player.engine = engine
+        player.recorder = recorder
+        let indicators = self.indicators
+        player.onTick = { id, out in indicators.update(id, stopGate: out.stopGate) }
+    }
+
+    private func playContext(placements: [FretPlacement],
+                             size: CGSize) -> FretTouchPlayer.Context {
+        FretTouchPlayer.Context(placements: placements, size: size,
+                                snapDistance: snapDistance,
+                                ghostExtentOctaves: arrangement.ghostExtentOctaves,
+                                warp: fieldWarp)
+    }
+
+    /// Drag: the player glides (field pitch + onset offset + the assist's
+    /// slewed correction; never a re-snap mid-drag); the indicator follows.
     private func moved(_ ev: TouchEvent, placements: [FretPlacement],
                        size: CGSize, band: CGRect) {
         // A finger holding a drone button never glides.
         guard droneTouches[ev.touchId] == nil else { return }
-        // Only touches that began in the band play; a drag may wander out.
-        guard let offset = snapOffsets[ev.touchId] else { return }
         let spt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
         let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
-        guard let fieldLog = fretFieldLog(at: pt, placements: placements,
-                                          warp: fieldWarp)
+        guard let out = player.move(touchId: ev.touchId, at: pt,
+                                    context: playContext(placements: placements, size: band.size),
+                                    radiusPt: ev.radius, time: CACurrentMediaTime())
         else { return }
-        assist.setContext(placements: placements, snapDistance: snapDistance)
-        let now = CACurrentMediaTime()
-        let out = assist.move(touchId: ev.touchId, x: pt.x, y: pt.y,
-                              uncorrectedLog: fieldLog + offset, time: now)
-        engine.glide(touchId: ev.touchId, ratio: pow(2.0, out.log2Pitch),
-                     weights: out.weights)
-        engine.setTouchRadius(touchId: ev.touchId, radiusPt: ev.radius)
         indicators.update(ev.touchId, point: spt, stopGate: out.stopGate,
                           radiusPt: ev.radius)
-        recorder.sample(touchId: ev.touchId, x: pt.x, y: pt.y,
-                        u: fieldLog + offset, o: out.log2Pitch, time: now)
-    }
-
-    /// 60 Hz settle loop while any touch is down. Captures only the class
-    /// objects (never the view struct).
-    private func startAssistTimerIfNeeded() {
-        // The timer self-invalidates when idle (it can't nil this @State).
-        guard assistTimer?.isValid != true else { return }
-        let assist = self.assist
-        let engine = self.engine
-        let recorder = self.recorder
-        let indicators = self.indicators
-        assistTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0,
-                                           repeats: true) { timer in
-            let now = CACurrentMediaTime()
-            for (id, out) in assist.tick(time: now) {
-                engine.glide(touchId: id, ratio: pow(2.0, out.log2Pitch),
-                             weights: out.weights)
-                indicators.update(id, stopGate: out.stopGate)
-                recorder.sampleTick(touchId: id, o: out.log2Pitch, time: now)
-            }
-            if assist.isEmpty { timer.invalidate() }
-        }
     }
 }
 

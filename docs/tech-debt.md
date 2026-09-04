@@ -31,22 +31,11 @@ is re-blessed with a before/after render for an A/B by ear.
 8. **The voices are not behind one protocol**: `inst != .string` at every
    touch entry point, `switch inst` in the scope, `mode ==` for drones, and
    the UI repeats it. Change: a `PlayedVoice` protocol both sources adopt.
-9. **The iPad shapes tilt and strike before the wire** (`MotionManager`'s
-   yaw high-pass with a 60 s leak and drift learner, the peak-hold strike
-   envelope) and the Mac re-envelopes the same byte. Change: stream raw
-   attitude/acceleration; the Mac owns every time constant.
 10. **`ScaleSync` is a second self-versioned 7-bit codec inside TLP**
     (`version = 4`/`6` on the scale and arrangement blobs). Change: the
     blobs carry TLP's version.
-11. **A test that pins table coefficients**: `BowedStringEngineTests`
-    asserts six coefficients to 1e-14 outside `Goldens/`. Change: move it to
-    a golden or drop it.
 ## Reuse — the same thing written twice
 
-13. **The fret-pad touch pipeline** (`fretFieldLog` → snap → `noteOn` →
-    assist → recorder → 60 Hz settle timer) is written for the Mac in
-    `FretPadView` and for the iPad in `PitchPadView_iOS`; the iOS copy alone
-    has `radiusPt`/`velocity01`. Change: `FretTouchPlayer` in TarabdaarCore.
 14. **Three fractional-MIDI carriers still spelled out** instead of
     `SarangiKit.Pitch`: `AudioEngine+Scope.swift`, `ScopeView.swift`, and
     `BowControls.swift:252` (hash-pinned; the same expression).

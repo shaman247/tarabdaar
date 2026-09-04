@@ -394,11 +394,8 @@ private struct FretPadSurface: View {
     /// Pixel delta (segment x/mid-y − click) captured at mouse-down for a move.
     @State private var moveOffsetX: CGFloat = 0
     @State private var moveOffsetY: CGFloat = 0
-    /// Log2 offset captured at a snapped onset (0 if unsnapped).
-    @State private var snapOffsetLog: Double = 0
-    /// Drag assist; the timer drives the settle while the mouse is still.
-    @State private var assist = FretDragAssist()
-    @State private var assistTimer: Timer? = nil
+    /// The touch pipeline (onset, drag, settle tick, release).
+    @State private var player = FretTouchPlayer()
     /// Drone button currently held (hit-tested in `handleDown`).
     @State private var droneDown: Int? = nil
 
@@ -588,7 +585,6 @@ private struct FretPadSurface: View {
                 moveOffsetY = (p.topY + p.bottomY) / 2 - pt.y
             }
             if let p = grabbedPlacement(grab, base: base) {
-                snapOffsetLog = 0
                 beginSounding(weights: [p.id: 1.0], ratio: p.ratio)
             }
             return
@@ -598,66 +594,23 @@ private struct FretPadSurface: View {
         playAt(pt, placements: placements, size: band.size)
     }
 
-    /// Sound the pitch at `pt` (snapped or field), register with the drag
-    /// assist and start the settle timer.
+    /// Sound the pitch at `pt` (snapped or field) through the player.
     private func playAt(_ pt: CGPoint, placements: [FretPlacement], size: CGSize) {
-        guard let fieldLog = fretFieldLog(at: pt, placements: placements,
-                                          warp: warp)
-        else { return }   // no frets — nothing to play
-        let onsetLog: Double
-        let weights: [String: Double]
-        if snapDistance > 0,
-           let hit = fretSnap(at: pt, placements: placements,
-                              snapDistance: snapDistance) {
-            snapOffsetLog = log2(hit.ratio) - fieldLog
-            onsetLog = log2(hit.ratio)
-            weights = [hit.id: 1.0]
-        } else {
-            snapOffsetLog = 0
-            onsetLog = fieldLog
-            weights = [:]
-        }
-
+        player.engine = engine
+        player.recorder = recorder
         let touch = nextTouchId()
+        guard player.begin(touchId: touch, at: pt,
+                           context: playContext(placements: placements, size: size),
+                           time: CACurrentMediaTime()) else { return }
         activeTouchId = touch
-        let now = CACurrentMediaTime()
-        engine.noteOn(touchId: touch, ratio: pow(2.0, onsetLog), weights: weights)
-
-        assist.setContext(placements: placements, snapDistance: snapDistance)
-        assist.begin(touchId: touch, x: pt.x, y: pt.y,
-                     uncorrectedLog: fieldLog + snapOffsetLog, time: now)
-        if recorder.isRecording {
-            recorder.begin(touchId: touch,
-                           context: .snapshot(
-                               placements: placements, size: size,
-                               snapDistance: snapDistance,
-                               ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                               fieldWarp: warp, assist: assist),
-                           offset: snapOffsetLog, x: pt.x, y: pt.y,
-                           u: fieldLog + snapOffsetLog,
-                           o: onsetLog, time: now)
-        }
-        startAssistTimer()
     }
 
-    /// 60 Hz settle loop while a play touch is down. Captures only the class
-    /// objects (never the view struct).
-    private func startAssistTimer() {
-        assistTimer?.invalidate()
-        let assist = self.assist
-        let engine = self.engine
-        let recorder = self.recorder
-        assistTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0,
-                                           repeats: true) { timer in
-            let now = CACurrentMediaTime()
-            for (id, out) in assist.tick(time: now) {
-                engine.glide(touchId: id, ratio: pow(2.0, out.log2Pitch),
-                             weights: out.weights)
-                recorder.sampleTick(touchId: id, o: out.log2Pitch, time: now)
-            }
-            // Nothing sounding — stop ticking.
-            if assist.isEmpty { timer.invalidate() }
-        }
+    private func playContext(placements: [FretPlacement],
+                             size: CGSize) -> FretTouchPlayer.Context {
+        FretTouchPlayer.Context(placements: placements, size: size,
+                                snapDistance: snapDistance,
+                                ghostExtentOctaves: arrangement.ghostExtentOctaves,
+                                warp: warp)
     }
 
     private func handleDrag(at spt: CGPoint, placements: [FretPlacement],
@@ -696,20 +649,12 @@ private struct FretPadSurface: View {
         case .none:
             break
         }
-        // Playing: the field pitch plus the onset offset, then the drag
-        // assist's slewed correction on top. Never re-snaps mid-drag.
+        // Playing: the player glides (field pitch + onset offset + the
+        // assist's slewed correction; never a re-snap mid-drag).
         guard let touch = activeTouchId else { return }
-        guard let fieldLog = fretFieldLog(at: pt, placements: placements,
-                                          warp: warp)
-        else { return }
-        assist.setContext(placements: placements, snapDistance: snapDistance)
-        let now = CACurrentMediaTime()
-        let out = assist.move(touchId: touch, x: pt.x, y: pt.y,
-                              uncorrectedLog: fieldLog + snapOffsetLog, time: now)
-        engine.glide(touchId: touch, ratio: pow(2.0, out.log2Pitch),
-                     weights: out.weights)
-        recorder.sample(touchId: touch, x: pt.x, y: pt.y,
-                        u: fieldLog + snapOffsetLog, o: out.log2Pitch, time: now)
+        player.move(touchId: touch, at: pt,
+                    context: playContext(placements: placements, size: size),
+                    time: CACurrentMediaTime())
     }
 
     private func handleUp() {
@@ -719,18 +664,15 @@ private struct FretPadSurface: View {
             return
         }
         if let touch = activeTouchId {
-            let now = CACurrentMediaTime()
-            engine.noteOff(touchId: touch)
-            assist.end(touchId: touch)
-            recorder.end(touchId: touch, time: now)
+            // an edit-mode sounding never went through `playAt`: bind here too
+            player.engine = engine
+            player.recorder = recorder
+            player.end(touchId: touch, time: CACurrentMediaTime())
         }
-        assistTimer?.invalidate()
-        assistTimer = nil
         activeTouchId = nil
         editGrab = .none
         moveOffsetX = 0
         moveOffsetY = 0
-        snapOffsetLog = 0
     }
 
     /// Right-click deletes a (base) fret. Disabled in perform mode.
