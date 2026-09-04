@@ -5,9 +5,10 @@ import XCTest
 /// its resting value, renders bit-identically to an engine that never heard of
 /// it. A failure names the "0 = off" knob that is no longer off.
 final class ByteNullContractTests: XCTestCase {
-    private func makeEngine() -> BowEngine {
+    private func makeEngine(_ overrides: [String: Double] = [:]) -> BowEngine {
         var bp = BowedStringEngineTests.stringBP()
         bp.num["bow_jt_gain"] = 1.0
+        for (k, v) in overrides { bp.num[k] = v }
         let sr = 48000.0
         let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
         var tables = BowTables.buildOpenString(sr: sr * Double(osf),
@@ -76,6 +77,19 @@ final class ByteNullContractTests: XCTestCase {
             if let i = zip(out, reference).enumerated().first(where: { $0.element.0 != $0.element.1 })?.offset {
                 XCTFail("\(name) is not byte-null: first divergence at sample \(i) (\(out[i]) vs \(reference[i]))")
             }
+        }
+    }
+
+    /// The regime grip never touches a note that captured its fundamental:
+    /// the shipped grip and a fully disarmed one render the healthy phrase
+    /// bit-identically.
+    func testRegimeGripIsByteNullOnACapturedNote() {
+        let armed = phrase(makeEngine())
+        let disarmed = phrase(makeEngine(["bow_grip_beta": 0, "bow_grip_v_db": 0,
+                                          "bow_grip_db": 0]))
+        XCTAssertEqual(armed.count, disarmed.count)
+        if let i = zip(armed, disarmed).enumerated().first(where: { $0.element.0 != $0.element.1 })?.offset {
+            XCTFail("the regime grip engaged on a captured note: first divergence at sample \(i)")
         }
     }
 }

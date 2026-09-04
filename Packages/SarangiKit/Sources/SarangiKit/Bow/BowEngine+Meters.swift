@@ -31,6 +31,11 @@ extension BowEngine {
         /// Ring envelope (relative string units; 0 = skipped as silent).
         public var level: Double
         public var serial: UInt32
+        /// Regime: fundamental dominance P1 / max(P2…P4) (kernel telemetry,
+        /// ~4 periods; Helmholtz motion > 1, an overtone lock < 0.1).
+        public var capture: Double
+        /// Regime grip amount 0…1 (the corrective bowing in force).
+        public var grip: Double
     }
 
     /// Per-mode envelopes kept per row by the kernel's scope meters.
@@ -78,7 +83,9 @@ extension BowEngine {
         return (0..<m).map { i in
             ScopeSlot(f0Hz: snap.slots[i].f0Target,
                       gated: snap.slots[i].gate > 0.5,
-                      level: lv[i], serial: snap.slots[i].serial)
+                      level: lv[i], serial: snap.slots[i].serial,
+                      capture: slotRegime(i)?.capture ?? 0,
+                      grip: slotGrip(i))
         }
     }
 
@@ -93,9 +100,12 @@ extension BowEngine {
         public var slipSamples: Double
         public var bowedSamples: Double
         /// Share of the string's motion at the fundamental (running, ~4
-        /// periods): Helmholtz motion holds it high, an overtone regime
-        /// collapses it.
+        /// periods).
         public var fundamental: Double
+        /// Fundamental DOMINANCE: P1 / max(P2, P3, P4). Helmholtz motion
+        /// keeps it above 1 at any force; an overtone lock drops it under
+        /// 0.1. The grip's input.
+        public var capture: Double
         public var slipsPerPeriod: Double {
             periods > 1e-9 ? slips / periods : 0
         }
@@ -113,10 +123,10 @@ extension BowEngine {
     /// Racy telemetry read of slot `s` (any thread; UI rate).
     public func slotRegime(_ s: Int) -> SlotRegime? {
         guard let pk = pkernel, s >= 0, s < maxPoly else { return nil }
-        var o = [Double](repeating: 0, count: 5)
+        var o = [Double](repeating: 0, count: 6)
         guard bow_poly_regime_slot(pk, Int32(s), &o) != 0 else { return nil }
         return SlotRegime(slips: o[0], periods: o[1], slipSamples: o[2],
-                          bowedSamples: o[3], fundamental: o[4])
+                          bowedSamples: o[3], fundamental: o[4], capture: o[5])
     }
 
     // MARK: - Bus volume meter

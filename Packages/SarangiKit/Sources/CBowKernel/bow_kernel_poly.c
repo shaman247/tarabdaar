@@ -71,12 +71,14 @@ typedef struct {
     double rgPeriods;
     unsigned long long rgSlips, rgSlipSmp, rgSmp;
     int rgSlipping;
-    /* FUNDAMENTAL CAPTURE: a Q=3 band-pass tracking f0 on the bridge-side
-       wave; rgPbp / rgPtot (4-period leaky powers) is the fraction of the
-       string's motion at the fundamental — Helmholtz motion holds it
-       high, an overtone regime (the string locked on H3/H4 below the
-       Schelleng floor) drops it by an order of magnitude. Telemetry only. */
-    double rgIc1, rgIc2, rgPbp, rgPtot;
+    /* FUNDAMENTAL CAPTURE: four Q=3 band-passes tracking f0, 2f0, 3f0 and
+       4f0 on the bridge-side wave, with 4-period leaky powers rgP[0..3]
+       and the whole wave's rgPtot. rgP[0]/rgPtot is the fundamental SHARE;
+       rgP[0]/max(rgP[1..3]) the fundamental DOMINANCE — Helmholtz motion
+       keeps H1 the strongest low partial at any force, an overtone regime
+       (the string locked on H3/H4) drops it 10–30 dB under one of them.
+       Telemetry only. */
+    double rgIc1[4], rgIc2[4], rgP[4], rgPtot;
     int active;
 } bow_pstring_t;
 
@@ -479,23 +481,27 @@ void *bow_poly_init(int nb, double sr,
 }
 
 /* Regime tracker (telemetry, never feeds the audio): TPT state-variable
-   band-pass at f0 (g ~ pi*f0/sr, k = 1/Q, Q = 3, unity peak) on the
-   bridge-side wave, and the two leaky powers over ~4 periods. */
+   band-passes at h*f0, h = 1..4 (g ~ pi*h*f0/sr, k = 1/Q, Q = 3, unity
+   peak) on the bridge-side wave, and the leaky powers over ~4 periods. */
 static inline void rg_track(bow_pstring_t *S, double x, double f0t, double sr)
 {
-    const double g = 3.141592653589793 * fmax(f0t, 40.0) / sr;
+    const double f = fmax(f0t, 40.0);
     const double k = 1.0 / 3.0;
-    const double a1 = 1.0 / (1.0 + g * (g + k));
-    const double a2 = g * a1;
-    const double a3 = g * a2;
-    const double v3 = x - S->rgIc2;
-    const double v1 = a1 * S->rgIc1 + a2 * v3;
-    const double v2 = S->rgIc2 + a2 * S->rgIc1 + a3 * v3;
-    S->rgIc1 = 2.0 * v1 - S->rgIc1;
-    S->rgIc2 = 2.0 * v2 - S->rgIc2;
-    const double band = k * v1;
-    const double c = fmax(f0t, 40.0) / (4.0 * sr);   /* 1 - a, ~4 periods */
-    S->rgPbp += c * (band * band - S->rgPbp);
+    const double c = f / (4.0 * sr);   /* 1 - a, ~4 periods */
+    for (int h = 0; h < 4; h++) {
+        double g = 3.141592653589793 * f * (double)(h + 1) / sr;
+        if (g > 1.0) g = 1.0;
+        const double a1 = 1.0 / (1.0 + g * (g + k));
+        const double a2 = g * a1;
+        const double a3 = g * a2;
+        const double v3 = x - S->rgIc2[h];
+        const double v1 = a1 * S->rgIc1[h] + a2 * v3;
+        const double v2 = S->rgIc2[h] + a2 * S->rgIc1[h] + a3 * v3;
+        S->rgIc1[h] = 2.0 * v1 - S->rgIc1[h];
+        S->rgIc2[h] = 2.0 * v2 - S->rgIc2[h];
+        const double band = k * v1;
+        S->rgP[h] += c * (band * band - S->rgP[h]);
+    }
     S->rgPtot += c * (x * x - S->rgPtot);
 }
 
@@ -2353,11 +2359,11 @@ int bow_poly_scope_slots(void *vst, double *level, int n)
 }
 
 /* Per played-string REGIME read: out = {slip onsets, periods elapsed,
-   samples in slip, bowed samples, fundamental fraction}; the first four
-   are cumulative since the mount (the host diffs two reads), the fraction
-   is the ~4-period running value. Racy telemetry. Returns 0 for a bad
-   slot. */
-int bow_poly_regime_slot(void *vst, int b, double out[5])
+   samples in slip, bowed samples, fundamental share, fundamental
+   dominance}; the first four are cumulative since the mount (the host
+   diffs two reads), the last two are ~4-period running values. Racy
+   telemetry. Returns 0 for a bad slot. */
+int bow_poly_regime_slot(void *vst, int b, double out[6])
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     if (!st || !st->strs || b < 0 || b >= st->nb) return 0;
@@ -2366,7 +2372,11 @@ int bow_poly_regime_slot(void *vst, int b, double out[5])
     out[1] = S->rgPeriods;
     out[2] = (double)S->rgSlipSmp;
     out[3] = (double)S->rgSmp;
-    out[4] = S->rgPtot > 1e-20 ? S->rgPbp / S->rgPtot : 0.0;
+    out[4] = S->rgPtot > 1e-20 ? S->rgP[0] / S->rgPtot : 0.0;
+    double hi = S->rgP[1];
+    if (S->rgP[2] > hi) hi = S->rgP[2];
+    if (S->rgP[3] > hi) hi = S->rgP[3];
+    out[5] = hi > 1e-20 ? S->rgP[0] / hi : (S->rgP[0] > 1e-20 ? 10.0 : 0.0);
     return 1;
 }
 

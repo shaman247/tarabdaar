@@ -521,6 +521,51 @@ public enum ParamRegistry {
                       0.0, 1.0, 0.0,
                       scope: .perNote,
                       help: "How much the ONSET STRIKE VELOCITY sharpens the attack: sharpness = max(press law, this × velocity 0…1). Makes articulation per-note — tap hard = martelé bite, place gently = legato draw. Velocity comes from the iPad's accelerometer strike estimate; 0 = off (the press law alone decides)."),
+            // REGIME GRIP: per-string corrective bowing when the kernel's
+            // fundamental-capture fraction says the string locked on an
+            // overtone (sul tasto + light bow on a low note). Control-side
+            // constants in `BowControlFilter`; the detector is kernel
+            // telemetry (`bow_poly_regime_slot`).
+            ParamSpec("bow_grip_beta", "grip: bow toward bridge", group: "Articulation",
+                      0.0, 0.6, 0.35,
+                      scope: .perNote,
+                      help: "REGIME GRIP, position lever: when a string locks on an overtone (the kernel's fundamental dominance stays under the grip threshold after the attack window), the bow moves this fraction of its distance toward the bridge, scaled by (1 − press) — off the quarter-point node a sul-tasto bow sits on; the Schelleng wedge raises the force with it as a real bow would, which is why a heavy bow is moved less (pulled to the bridge it would choke). 0 = no position lever (all three levers 0 = the grip never runs, bit-exact)."),
+            ParamSpec("bow_grip_v_db", "grip: bow speed (dB)", group: "Articulation",
+                      -12.0, 12.0, -4.0,
+                      scope: .perNote,
+                      help: "REGIME GRIP, speed lever: bow velocity change at full grip. Negative = a slower bow, which lowers the Helmholtz minimum force; a faster bow deepens the overtone lock. 0 = off."),
+            ParamSpec("bow_grip_db", "grip: bow force (dB)", group: "Articulation",
+                      -12.0, 12.0, 0.0,
+                      scope: .perNote,
+                      help: "REGIME GRIP, force lever: bow force change at full grip. Measured: extra force alone makes the overtone lock STRONGER on the low string, so the shipped grip uses position and speed; this is here for the ear. 0 = off."),
+            ParamSpec("bow_grip_thresh", "grip: engage below", group: "Articulation",
+                      0.05, 5.0, 1.0,
+                      scope: .perNote,
+                      help: "Fundamental DOMINANCE (kernel regime telemetry: the string's power at f0 over the strongest of 2f0…4f0, ~4-period running value; Helmholtz motion reads ≈ 2.5–3.5 at any pitch or force, an overtone lock 0.02–0.5) under which the grip engages."),
+            ParamSpec("bow_grip_release", "grip: release above", group: "Articulation",
+                      0.05, 8.0, 1.5,
+                      scope: .perNote,
+                      help: "Fundamental dominance above which the grip releases, once it has held there for the hold time. A note that collapses again after one release is not stable at the played bow: its second grip latches for the note."),
+            ParamSpec("bow_grip_wait_ms", "grip: attack window (ms)", group: "Articulation",
+                      10, 500, 150,
+                      scope: .perNote,
+                      help: "Time after the attack begins before the grip may engage — the place/draw window plus the periods the detector needs to read a low string."),
+            ParamSpec("bow_grip_confirm_ms", "grip: confirm (ms)", group: "Articulation",
+                      0, 500, 60,
+                      scope: .perNote,
+                      help: "How long the dominance must stay under the threshold before the grip engages — a one-window dip in an onset transient is not a lock."),
+            ParamSpec("bow_grip_ms", "grip: engage (ms)", group: "Articulation",
+                      2, 200, 30,
+                      scope: .perNote,
+                      help: "Time constant of the grip's engagement."),
+            ParamSpec("bow_grip_rel_ms", "grip: release (ms)", group: "Articulation",
+                      10, 1000, 250,
+                      scope: .perNote,
+                      help: "Time constant of the grip's release back to the played bow."),
+            ParamSpec("bow_grip_hold_ms", "grip: hold (ms)", group: "Articulation",
+                      0, 1000, 200,
+                      scope: .perNote,
+                      help: "How long the fundamental must read captured before the grip releases."),
             // HYBRID: the vibrato depth in cents. The kernel scales the
             // built depth by a live 0…1 amount — 0…built ¢ is instant,
             // above it the build scalar moves.
@@ -551,7 +596,7 @@ public enum ParamRegistry {
         // live (ride a stick between fretless meend and quantized runs).
         ("Fret pad", [
             ParamSpec("ctl_fret_warp", "pitch warp", group: "Fret pad",
-                      0.0, 1.0, 0.0, apply: .live, target: .glideQueue,
+                      0.0, 1.0, 0.0, apply: .live, target: .fretWarp,
                       help: "How strongly the frets warp the pitch space around them (the Fret Pad's logistic field reshaping): 0 = linear (pitch moves at a constant rate between frets), 1 = pitch plateaus hard around each fret and jumps quickly through the middle of each gap — a straight slide traces a logistic curve, and fast runs land near-quantized. Applies at every touch onset and move on both surfaces (relayed to the iPad over JOYCON_STATE), so a tilt/stick binding morphs the pad mid-phrase between meend-friendly and run-friendly."),
         ]),
 
@@ -563,7 +608,7 @@ public enum ParamRegistry {
         // never deferred. Toggle 0 = off (pure pass-through).
         ("Glide", [
             ParamSpec("ctl_glide_on", "glide enable", group: "Glide",
-                      0.0, 1.0, 0.0, apply: .live, target: .fretWarp,
+                      0.0, 1.0, 0.0, apply: .live, target: .glideQueue,
                       scope: .perNote,
                       help: "The glide queue's on/off toggle (≥ 0.5 = on). On: a note played while another is still HELD does not mount a fresh string — it is QUEUED and the sounding voice glides to it; further overlapping notes join the queue and are hit in sequence, and once every chained touch has lifted the next tap is a fresh attack (staccato is untouched — releases are never deferred). A repeat tap at the sounding pitch still re-attacks. 0 = off — every onset is a fresh note."),
             ParamSpec("ctl_glide_rate", "glide rate (st/s)", group: "Glide",
@@ -592,10 +637,10 @@ public enum ParamRegistry {
         // holds the chord.
         ("Controller", [
             ParamSpec("ctl_strum_expr", "strum expression", group: "Controller",
-                      0.0, 1.0, 1.0, apply: .live, target: .strumThreshold,
+                      0.0, 1.0, 1.0, apply: .live, target: .strumExpression,
                       help: "Loudness of the controller strum's held chord: a per-note expression scale on the chord's notes only. On the String bow voice it multiplies the bow's expression axis for those strings LIVE — a bound stick swells the ringing chord without touching the melody; on the Tanpura/Sitar mains it scales the pluck level at the onset (a sounded pluck can't swell). 1 = the chord follows the global expression untouched; 0 = the bow lifts to silence. Bound to the Joy-Con stick Y by default (rest = 0.5)."),
             ParamSpec("ctl_strum_thresh", "strum accel trigger", group: "Controller",
-                      0.0, 1.0, 1.0, apply: .live, target: .strumExpression,
+                      0.0, 1.0, 1.0, apply: .live, target: .strumThreshold,
                       help: "Accelerometer level that TRIGGERS the strum chord — the iPad's strike envelope (the same measurement the Strike dimension reads), 0…1. Crossing the threshold strikes the chord exactly as an L press does; the chord releases when the envelope falls back below ~60% of the threshold (unless L is holding it). 1 = off (the default — no accel strum). Lower values let a gentler shake strum."),
         ]),
 
@@ -923,6 +968,9 @@ public enum ParamRegistry {
         "bow_slide_acc",
         "bow_attack_bite", "bow_attack_bite_ms", "bow_attack_thresh",
         "bow_attack_fms", "bow_attack_vel",
+        "bow_grip_beta", "bow_grip_v_db", "bow_grip_db", "bow_grip_thresh",
+        "bow_grip_release", "bow_grip_wait_ms", "bow_grip_confirm_ms",
+        "bow_grip_ms", "bow_grip_rel_ms", "bow_grip_hold_ms",
         "bow_vib_cents", "bow_vib_hz",
         // --- output / room / radiation ---
         "bow_live_trim", "bow_rev_mix", "bow_rev_width",

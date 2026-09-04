@@ -593,12 +593,12 @@ public final class BowEngine {
                                 // regime grip input: the kernel's running
                                 // fundamental-capture fraction for the slot
                                 if filters[s].gripArmed {
-                                    var rg = (0.0, 0.0, 0.0, 0.0, 0.0)
+                                    var rg = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
                                     withUnsafeMutablePointer(to: &rg) { rp in
                                         rp.withMemoryRebound(to: Double.self,
-                                                             capacity: 5) { dp in
+                                                             capacity: 6) { dp in
                                             if bow_poly_regime_slot(pk, Int32(s), dp) != 0 {
-                                                filters[s].fundamental = dp[4]
+                                                filters[s].capture = dp[5]
                                             }
                                         }
                                     }

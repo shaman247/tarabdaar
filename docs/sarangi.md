@@ -118,6 +118,36 @@ touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (o
 - **Register damping** (`bow_loss_reg`, shipped 0.7): the nut/bridge/gut loss
   corners scale by (f0/tonic)^γ below the tonic only, so low notes are not
   relatively brighter and hollower than the tonic.
+- **Regime grip** (`bow_grip_*`): a low note bowed sul tasto with a light
+  bow can lock on an OVERTONE instead of Helmholtz motion — the string
+  vibrates on H3/H4 with the fundamental 20–40 dB down (thin, buzzy), and
+  which attractor it lands in depends on the onset history, so the same
+  note comes out right or wrong from one stroke to the next. The kernel
+  measures the regime per string (**fundamental dominance**: Q = 3 bands
+  track f0, 2f0, 3f0 and 4f0 on the bridge-side wave; dominance = P1 over
+  the strongest of P2…P4, ~4 periods. Helmholtz motion keeps H1 the
+  strongest low partial at any pitch or force, ≈ 2.5–3.5; an overtone lock
+  reads 0.02–0.5. The plain fundamental SHARE P1/Ptotal is exported beside
+  it but is NOT the criterion — a healthy pressed note at 494 Hz shares
+  only ≈ 0.35, an overtone-locked low note ≈ 0.2; `bow_poly_regime_slot`,
+  with slip-onset counters beside it), and `BowControlFilter` corrects the
+  BOW, not the string: once the attack window (`bow_grip_wait_ms`) has
+  passed and the dominance has stayed under `bow_grip_thresh` for
+  `bow_grip_confirm_ms` (a one-window dip in an onset transient is not a
+  lock), the bow moves `bow_grip_beta` × (1 − press) of its distance toward
+  the bridge (off the quarter-point node a β ≈ 0.22 bow sits on; the
+  Schelleng wedge raises the force with it, so a heavy bow is moved less —
+  pulled to the bridge it chokes) and slows by `bow_grip_v_db`, in
+  `bow_grip_ms`; it releases over
+  `bow_grip_rel_ms` once the dominance has read above `bow_grip_release`
+  for `bow_grip_hold_ms`, and a note that collapses again after a release
+  latches its second grip for the note.
+  Measured on the shipped physics: extra force alone (`bow_grip_db`) makes
+  the overtone lock STRONGER, which is why the shipped grip is position +
+  speed with the force lever at 0. All three levers at 0 = the grip never
+  runs (bit-exact); a captured note is never touched
+  (`ByteNullContractTests`). The Scope tab prints each held string's
+  dominance and a "grip" tag while the correction is in force.
 - **Slide realism:** the body's diffuse tail is a 32‑mode formant forest
   (`bow_body_tail_*`, 280–6500 Hz); slide dulling follows finger slew, slide
   noise is acceleration‑driven (scrapes at gesture starts/stops, quiet at

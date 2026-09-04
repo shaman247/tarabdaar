@@ -509,9 +509,19 @@ private struct PitchField: View {
             lastY = ly
             let name = scaleLabel(forRatio: v.pitchHz / model.tonicHz,
                                   degrees: model.degrees)
-            let text = Text("\(name) \(Int(v.pitchHz.rounded()))")
+            // Regime readout on a held string: the fundamental dominance
+            // (Helmholtz motion reads above 1, an overtone lock under 0.1)
+            // and a "grip" tag while the corrective bowing is in force.
+            var label = "\(name) \(Int(v.pitchHz.rounded()))"
+            if v.held, v.capture > 0 {
+                label += String(format: " f%.1f", min(v.capture, 9.9))
+                if v.grip > 0.05 { label += " grip" }
+            }
+            let text = Text(label)
                 .font(.padSmall(9, design: .monospaced))
-                .foregroundColor(v.held ? .white : .secondary)
+                .foregroundColor(v.held
+                                 ? (v.grip > 0.05 ? .orange : .white)
+                                 : .secondary)
             ctx.draw(text, at: CGPoint(x: edge + 10, y: ly), anchor: .leading)
         }
         // Taraf row labels ride the right gutter too, below the voice

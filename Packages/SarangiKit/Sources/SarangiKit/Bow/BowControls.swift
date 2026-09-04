@@ -353,14 +353,15 @@ public struct BowControlFilter: Sendable {
     var driftHz = 0.0
     var glideDipDb = 0.0, glideDipRate = 0.0
     // REGIME GRIP (bow_grip_*): a string that lands in an overtone regime
-    // (kernel fundamental fraction under gripThresh once the attack window
-    // gripWaitS has passed) gets gripDb more force and gripVel·gripDb less
-    // bow speed, ~gripAtkS in, released over ~gripRelS once the fundamental
-    // has read captured (fraction above gripRelease) for gripHoldS.
-    // gripDb 0 = bit-null.
+    // (kernel fundamental dominance under gripThresh once the attack window
+    // gripWaitS has passed) has its bow moved gripBeta toward the bridge,
+    // slowed gripVel dB and pressed gripDb dB, ~gripAtkS in, released over
+    // ~gripRelS once the fundamental has read captured (dominance above
+    // gripRelease) for gripHoldS. All levers 0 = bit-null.
     var gripDb = 0.0, gripThresh = 0.0, gripRelease = 0.0, gripWaitS = 0.0
     var gripAtkS = 0.0, gripRelS = 0.0, gripHoldS = 0.0, gripVel = 0.0
-    var gripBeta = 0.0           // bow-position lever: β × (1 − gripBeta) at full grip
+    var gripBeta = 0.0           // bow-position lever: β × (1 − gripBeta·(1 − press)) at full grip
+    var gripConfirmS = 0.0       // the low reading must persist this long
     var aDrift = 1.0, driftGain = 0.0   // OU pole + unit-variance step gain
     var aDipAtt = 0.0, aDipRel = 0.0    // dip smoother poles
     let pitchKnots: [Double], pitchCentsTab: [Double]
@@ -378,16 +379,18 @@ public struct BowControlFilter: Sendable {
     var rng: UInt64 = 0x9E3779B97F4A7C15
     var ouPitch = 0.0, ouLevel = 0.0, ouForce = 0.0
     var dipDb = 0.0
-    /// The kernel's fundamental-capture fraction for this slot, written by
-    /// the engine before each fill (1 while unmeasured, so a fresh string
-    /// is never gripped before it has spoken).
-    public var fundamental = 1.0
+    /// The kernel's fundamental DOMINANCE for this slot (P1 / max(P2…P4);
+    /// Helmholtz motion > 1, an overtone lock < 0.1), written by the engine
+    /// before each fill (10 while unmeasured, so a fresh string is never
+    /// gripped before it has spoken).
+    public var capture = 10.0
     var gripCur = 0.0, gripOn = false   // gripCur = grip amount 0…1
     var gripCapturedS = 0.0      // time the fundamental has read captured
+    var gripLowS = 0.0           // time the dominance has read under the threshold
     var gripCount = 0            // engagements this note (2nd = latched)
     /// Telemetry: the slot's current grip amount 0…1 (Scope tab).
     public var gripAmount: Double { gripCur }
-    /// Any grip lever set: the engine feeds `fundamental` only when armed.
+    /// Any grip lever set: the engine feeds `capture` only when armed.
     var gripArmed: Bool { abs(gripDb) > 1e-9 || abs(gripVel) > 1e-9 || gripBeta > 1e-9 }
     var lastLf = 0.0, lastLfValid = false
     /// The last control-rate law evaluation — the lerp's start for the
@@ -472,14 +475,15 @@ public struct BowControlFilter: Sendable {
         glideDipDb = bp.v("bow_glide_dip_db", 0.0)
         glideDipRate = max(bp.v("bow_glide_dip_rate", 900.0), 1.0)
         gripDb = min(max(bp.v("bow_grip_db", 0.0), -12.0), 12.0)
-        gripThresh = min(max(bp.v("bow_grip_thresh", 0.3), 0.05), 0.8)
-        gripRelease = min(max(bp.v("bow_grip_release", 0.45), gripThresh), 1.0)
-        gripWaitS = max(bp.v("bow_grip_wait_ms", 120.0), 10.0) / 1000.0
+        gripThresh = min(max(bp.v("bow_grip_thresh", 1.0), 0.05), 5.0)
+        gripRelease = min(max(bp.v("bow_grip_release", 1.5), gripThresh), 8.0)
+        gripWaitS = max(bp.v("bow_grip_wait_ms", 150.0), 10.0) / 1000.0
+        gripConfirmS = max(bp.v("bow_grip_confirm_ms", 60.0), 0.0) / 1000.0
         gripAtkS = max(bp.v("bow_grip_ms", 30.0), 2.0) / 1000.0
         gripRelS = max(bp.v("bow_grip_rel_ms", 250.0), 10.0) / 1000.0
         gripHoldS = max(bp.v("bow_grip_hold_ms", 200.0), 0.0) / 1000.0
-        gripVel = min(max(bp.v("bow_grip_v_db", 0.0), -12.0), 12.0)
-        gripBeta = min(max(bp.v("bow_grip_beta", 0.0), 0.0), 0.6)
+        gripVel = min(max(bp.v("bow_grip_v_db", -4.0), -12.0), 12.0)
+        gripBeta = min(max(bp.v("bow_grip_beta", 0.35), 0.0), 0.6)
         aDrift = exp(-2.0 * Double.pi * driftHz / srk)
         driftGain = sqrt(max(1.0 - aDrift * aDrift, 0.0) * 3.0)
     }
@@ -568,10 +572,11 @@ public struct BowControlFilter: Sendable {
         primed = true
         dipDb = 0.0                  // a pitch SNAP is not a glide
         lastLfValid = false
-        fundamental = 1.0            // a fresh string has not spoken yet
+        capture = 10.0               // a fresh string has not spoken yet
         gripCur = 0.0
         gripOn = false
         gripCapturedS = 0.0
+        gripLowS = 0.0
         gripCount = 0
         lastLaw = nil
     }
@@ -615,11 +620,17 @@ public struct BowControlFilter: Sendable {
         if gripArmed {
             let blockS = Double(n) / srk
             if snap.gate > 0.5, placeClock > gripWaitS {
-                if fundamental < gripThresh {
-                    if !gripOn { gripCount += 1 }
-                    gripOn = true
+                if capture < gripThresh {
+                    // a transient dip is not a lock: the reading must stay
+                    // low for gripConfirmS before the grip engages
+                    gripLowS += blockS
+                    if !gripOn, gripLowS >= gripConfirmS {
+                        gripCount += 1
+                        gripOn = true
+                    }
                     gripCapturedS = 0.0
-                } else if fundamental > gripRelease {
+                } else if capture > gripRelease {
+                    gripLowS = 0.0
                     // release once the capture has held for gripHoldS — but
                     // a note that collapsed again after one release is not
                     // stable at the played force: the second grip latches
@@ -628,11 +639,13 @@ public struct BowControlFilter: Sendable {
                         gripOn = false
                     }
                 } else {
+                    gripLowS = 0.0
                     gripCapturedS = 0.0
                 }
             } else {
                 gripOn = false
                 gripCapturedS = 0.0
+                gripLowS = 0.0
                 gripCount = 0
             }
             gripTarget = gripOn ? 1.0 : 0.0
@@ -697,9 +710,12 @@ public struct BowControlFilter: Sendable {
             }
             // REGIME GRIP, position lever: the bow moves toward the bridge,
             // off the quarter-point node a sul-tasto bow sits on (the wedge
-            // below then raises the force with it, as a real bow would)
+            // below then raises the force with it, as a real bow would).
+            // Scaled by (1 − press): the lock is a light-bow fault, and a
+            // heavy bow pulled to the bridge chokes the string instead.
             if gripBeta > 1e-9, gripCur > 0.0 {
                 betaK *= 1.0 - gripBeta * gripCur
+                    * (1.0 - min(max(pressE, 0.0), 1.0))
             }
             // press = log-force position across the analytic Schelleng
             // wedge at this (f0, β, v): fmin = M·C·v/β² (Helmholtz floor),
@@ -839,10 +855,11 @@ public struct BowControlFilter: Sendable {
         ouForce = 0.0
         dipDb = 0.0
         lastLfValid = false
-        fundamental = 1.0
+        capture = 10.0
         gripCur = 0.0
         gripOn = false
         gripCapturedS = 0.0
+        gripLowS = 0.0
         gripCount = 0
         lastLaw = nil
     }

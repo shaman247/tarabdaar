@@ -91,6 +91,11 @@ extension AudioEngine {
             public let held: Bool
             /// 0…1 display level (log-mapped, relative).
             public let level: Double
+            /// String voice only: fundamental dominance P1 / max(P2…P4)
+            /// (Helmholtz motion > 1; an overtone lock reads under 0.1) and
+            /// the regime grip amount 0…1. 0 for the plucked voices.
+            public let capture: Double
+            public let grip: Double
         }
         public var voices: [Voice] = []
         public var taraf: [BowEngine.ScopeRow] = []
@@ -130,7 +135,8 @@ extension AudioEngine {
                 where s.level > 0 || s.gated {
                 snap.voices.append(.init(
                     id: i << 32 | Int(s.serial), pitchHz: s.f0Hz,
-                    held: s.gated, level: Self.bowScopeLevel01(s.level)))
+                    held: s.gated, level: Self.bowScopeLevel01(s.level),
+                    capture: s.capture, grip: s.grip))
             }
         case .tanpura, .sitar:
             guard let engine = pluck?.currentEngine() else { break }
@@ -138,7 +144,8 @@ extension AudioEngine {
                 where s.level > 0 {
                 snap.voices.append(.init(
                     id: i, pitchHz: s.hz, held: heldSlots.contains(i),
-                    level: Self.pluckScopeLevel01(s.level)))
+                    level: Self.pluckScopeLevel01(s.level),
+                    capture: 0, grip: 0))
             }
         }
         return snap
