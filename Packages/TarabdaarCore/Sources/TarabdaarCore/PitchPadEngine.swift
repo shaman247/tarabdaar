@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import QuartzCore
 import SarangiKit
@@ -268,65 +269,48 @@ public final class SoundingState: ObservableObject {
 /// the Mac pumped in-process into `LinkIngest`, on the iPad serialized to
 /// the wire by `TarabLink`. No MIDI vocabulary; CoreMIDI is never touched.
 public final class PitchPadEngine: ObservableObject {
-    /// The active scale, seeded from the bundled `Default.json` (fallback
-    /// `PitchScale.defaultJI`).
-    @Published public var scale: PitchScale = ScaleStore.loadDefault() {
-        didSet {
-            // Clear a chord selection whose degree the new scale lacks.
-            if let sel = chordSelection,
-               sel.degree >= scaleDegrees(from: scale).count {
-                setChordSelection(nil)
-            }
-        }
+    /// THE scale and tonic — `Tuning`, shared by every pad engine on the
+    /// device (the Mac's two engines hold one instance). Forwarded here so
+    /// the surfaces read and edit them through the engine.
+    public let tuning: Tuning
+    public var scale: PitchScale {
+        get { tuning.scale }
+        set { tuning.scale = newValue }
     }
     /// Name of the loaded user scale; `nil` = the default or an unsaved
     /// working scale ("Save" then routes to "Save As…").
     @Published public var currentScaleName: String? = nil
-    /// The tonic's integer note anchor. Not persisted — every launch opens
-    /// on `defaultTonicMidi` (D4) and the session tonic is set from the
-    /// Fret Pad tab.
-    @Published public var tonicMidi: Int = PitchPadEngine.defaultTonicMidi
-    /// Fractional tonic refinement in CENTS (±50) on `tonicMidi`; together
-    /// they are THE app tonic, set in Hz from the Fret Pad tab and
-    /// mirrored everywhere (tarab, drones, iPad sync).
-    @Published public var tonicCents: Double = 0
-
-    /// The tonic as an absolute frequency — the ONE Hz value everything
-    /// else is relative to.
-    public var tonicHz: Double {
-        Pitch.hz(fractionalMidi: tonicFractionalMidi)
+    public var tonicMidi: Int {
+        get { tuning.tonicMidi }
+        set { tuning.tonicMidi = newValue }
     }
-
-    /// Set the tonic from a frequency.
-    public func setTonic(hz: Double) {
-        guard hz > 20, hz < 4000 else { return }
-        setTonic(fractionalMidi: Pitch.fractionalMidi(hz: hz))
+    public var tonicCents: Double {
+        get { tuning.tonicCents }
+        set { tuning.tonicCents = newValue }
     }
+    public var tonicHz: Double { tuning.tonicHz }
+    public var tonicFractionalMidi: Double { tuning.tonicFractionalMidi }
+    public func setTonic(hz: Double) { tuning.setTonic(hz: hz) }
+    public func setTonic(fractionalMidi m: Double) { tuning.setTonic(fractionalMidi: m) }
+    public func setTonic(midi: Int) { tuning.setTonic(midi: midi) }
+    public static var tonicNoteRange: ClosedRange<Int> { Tuning.tonicNoteRange }
+    public static var defaultTonicMidi: Int { Tuning.defaultTonicMidi }
+    private var tuningSinks: Set<AnyCancellable> = []
 
-    /// Set the tonic from a fractional MIDI note: integer anchor + ±50¢
-    /// remainder (the range the sync blob encodes).
-    public func setTonic(fractionalMidi: Double) {
-        let clamped = max(Double(Self.tonicNoteRange.lowerBound),
-                          min(Double(Self.tonicNoteRange.upperBound), fractionalMidi))
-        let note = Int(clamped.rounded())
-        tonicMidi = note
-        tonicCents = (clamped - Double(note)) * 100.0
+    /// The engine's observers see the tuning move, and a chord selection
+    /// whose degree the new scale lacks is cleared.
+    private func bindTuning() {
+        tuning.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &tuningSinks)
+        tuning.$scale.dropFirst()
+            .sink { [weak self] new in
+                guard let self, let sel = self.chordSelection,
+                      sel.degree >= scaleDegrees(from: new).count else { return }
+                self.setChordSelection(nil)
+            }
+            .store(in: &tuningSinks)
     }
-
-    /// Set the integer note anchor, KEEPING the cents offset (the Fret
-    /// Pad's note menu).
-    public func setTonic(midi: Int) {
-        tonicMidi = max(Self.tonicNoteRange.lowerBound,
-                        min(Self.tonicNoteRange.upperBound, midi))
-    }
-
-    /// The MIDI notes the tonic anchor may take (C1…B7).
-    public static let tonicNoteRange = 24...107
-
-    /// The tonic every launch opens on: **D4** (293.665 Hz).
-    public static let defaultTonicMidi = 62
-
-    public var tonicFractionalMidi: Double { Double(tonicMidi) + tonicCents / 100.0 }
 
     /// Playing-range octave shift, ±3 (Joy-Con dpad on the Mac; relayed
     /// to the iPad as the JOYCON_STATE `octave` byte). Applied at the ONE
@@ -405,20 +389,24 @@ public final class PitchPadEngine: ObservableObject {
     /// Mac path: the pad drives the local `AudioEngine` through its own
     /// `OutboundPlayState` → `LinkIngest` pump — the wire's frame-diff path,
     /// in-process. Coexists with a linked iPad (distinct id namespaces).
-    public init(audio: AudioEngine) {
+    public init(audio: AudioEngine, tuning: Tuning = Tuning()) {
         self.audio = audio
+        self.tuning = tuning
         let state = OutboundPlayState()
         self.playState = state
         self.localPump = LocalLinkPump(state: state,
                                        ingest: LinkIngest(sink: audio))
+        bindTuning()
     }
 
     /// iPad path: writes into the app-wide `OutboundPlayState` that
     /// `TarabLink` paces onto the wire. No local audio.
-    public init(state: OutboundPlayState) {
+    public init(state: OutboundPlayState, tuning: Tuning = Tuning()) {
         self.audio = nil
+        self.tuning = tuning
         self.playState = state
         self.localPump = nil
+        bindTuning()
     }
 
     /// The performance-expression level the Mac pads hold (0…1, applied

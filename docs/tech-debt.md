@@ -13,11 +13,6 @@ is re-blessed with a before/after render for an A/B by ear.
 
 ## Altitude — special cases on shared mechanisms
 
-3. **Two tonics on the Mac.** `pitchPad` and `fretPad` are two
-   `PitchPadEngine`s each with `tonicMidi`/`tonicCents`, mirrored by Combine,
-   with five separate `(scale, tonic)` subscriptions at four debounce times
-   (400/250/750/300 ms) plus `pushCurrentState`'s own rate limiter. Change:
-   one `Tuning` value (scale + tonic Hz) owned once, one change publisher.
 6. **Knob neutrals re-declared outside the registry**
    (`StringVoiceSource.ControlKnob` neutrals and clamps, 157 literal
    `bp.v(key, default)` fallbacks in the SarangiKit builders) and

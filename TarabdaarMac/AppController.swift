@@ -25,6 +25,8 @@ final class AppController: ObservableObject {
     let joyCon = JoyConInput()
     /// The shared scale/tonic model — the Fret Pad reads from it; the
     /// keyboard player and the strum play through it.
+    /// THE scale and tonic, shared by `pitchPad` and `fretPad`.
+    let tuning: Tuning
     let pitchPad: PitchPadEngine
     /// The Fret Pad engine — the sole playing surface (fret segments whose
     /// x-position is their pitch, onset-only snapping).
@@ -512,9 +514,11 @@ final class AppController: ObservableObject {
         self.midi = midi
         self.midiIn = midiIn
         self.ingest = LinkIngest(sink: audio)
-        self.pitchPad = PitchPadEngine(audio: audio)
-        self.fretPad = PitchPadEngine(audio: audio)
-        self.fretPad.tonicMidi = self.pitchPad.tonicMidi
+        // ONE scale, ONE tonic: both pad engines share the instance.
+        let tuning = Tuning()
+        self.tuning = tuning
+        self.pitchPad = PitchPadEngine(audio: audio, tuning: tuning)
+        self.fretPad = PitchPadEngine(audio: audio, tuning: tuning)
         // Fret Pad Snap: 24 px (not the shared 16), fitted to real iPad
         // onsets — ≈43¢, under the 40 px minimum fret gap. Synced to the iPad.
         self.fretPad.marginPixels = 24
@@ -866,21 +870,10 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// Everything that follows the ONE scale/tonic: the Fret Pad's tonic
-    /// lock, the arrangement autosave, the drone-button display ratios, the
-    /// tarab document and the tanpura grid.
+    /// Everything that follows the ONE scale/tonic (`tuning.didChange`,
+    /// each with its own debounce): the arrangement autosave, the
+    /// drone-button display ratios, the tarab document and the tanpura grid.
     private func wireTuningFollowers() {
-        // Keep the Fret Pad engine's tonic locked to the scale engine's.
-        pitchPad.$tonicMidi
-            .sink { [weak self] in self?.fretPad.tonicMidi = $0 }
-            .store(in: &cancellables)
-        pitchPad.$tonicCents
-            .sink { [weak self] in self?.fretPad.tonicCents = $0 }
-            .store(in: &cancellables)
-
-        // The tonic starts at D4 every launch — DELIBERATELY not persisted: a
-        // stale restored tonic silently retunes the whole instrument.
-
         // Auto-save the Fret Pad arrangement (debounced).
         $fretArrangement
             .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
@@ -890,13 +883,12 @@ final class AppController: ObservableObject {
         // Drone-button DISPLAY ratios: the buttons pluck MAPPED tarab strings,
         // so `droneRatios` are purely visual (labels/colors on both surfaces).
         // An unmapped slot keeps its last ratio and is inert.
-        Publishers.CombineLatest3(
+        Publishers.CombineLatest(
             sarangi.$state.map(\.droneStringFreqs).removeDuplicates(),
-            pitchPad.$tonicMidi.removeDuplicates(),
-            pitchPad.$tonicCents.removeDuplicates()
+            tuning.didChange
         )
         .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
-        .sink { [weak self] freqs, _, _ in
+        .sink { [weak self] freqs, _ in
             guard let self else { return }
             let tonic = self.pitchPad.tonicHz
             var ratios = self.fretArrangement.droneRatios
@@ -913,25 +905,17 @@ final class AppController: ObservableObject {
 
         // Push the scale into the tarab document. Pitches ALWAYS follow; the
         // row LAYOUT regenerates only when the degree count changes.
-        Publishers.MergeMany([
-            pitchPad.$scale.map { _ in () }.eraseToAnyPublisher(),
-            pitchPad.$tonicMidi.map { _ in () }.eraseToAnyPublisher(),
-            pitchPad.$tonicCents.map { _ in () }.eraseToAnyPublisher(),
-        ])
-        .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
-        .sink { [weak self] in self?.syncTarabFromScale() }
+        tuning.didChange
+            .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
+            .sink { [weak self] in self?.syncTarabFromScale() }
         .store(in: &cancellables)
         syncTarabFromScale()        // match the scale on launch
 
         // Rebuild the tanpura's JI slot grid on a scale/tonic change. Heavier
         // debounce than the tarab push — a tanpura build is ~seconds of CPU.
-        Publishers.MergeMany([
-            pitchPad.$scale.map { _ in () }.eraseToAnyPublisher(),
-            pitchPad.$tonicMidi.map { _ in () }.eraseToAnyPublisher(),
-            pitchPad.$tonicCents.map { _ in () }.eraseToAnyPublisher(),
-        ])
-        .debounce(for: .milliseconds(750), scheduler: RunLoop.main)
-        .sink { [weak self] in self?.syncTanpuraFromScale() }
+        tuning.didChange
+            .debounce(for: .milliseconds(750), scheduler: RunLoop.main)
+            .sink { [weak self] in self?.syncTanpuraFromScale() }
         .store(in: &cancellables)
         syncTanpuraFromScale()      // arm the drone voice on launch
     }
@@ -1008,9 +992,7 @@ final class AppController: ObservableObject {
     /// the only cross-device state.
     private func startScaleSync() {
         let triggers: [AnyPublisher<Void, Never>] = [
-            pitchPad.$scale.map { _ in () }.eraseToAnyPublisher(),
-            pitchPad.$tonicMidi.map { _ in () }.eraseToAnyPublisher(),
-            pitchPad.$tonicCents.map { _ in () }.eraseToAnyPublisher(),
+            tuning.didChange,
             pitchPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             fretPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             $fretArrangement.map { _ in () }.eraseToAnyPublisher(),
