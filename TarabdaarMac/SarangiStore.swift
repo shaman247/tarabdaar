@@ -15,8 +15,8 @@ final class SarangiStore: ObservableObject {
 
 
     private let audio: AudioEngine
-    private var rebuildWork: DispatchWorkItem?
-    private var saveWork: DispatchWorkItem?
+    private let rebuildDebounce = Debouncer(delay: 0.05)
+    private let saveDebounce = Debouncer(delay: 0.4)
 
     /// A bump discards the user's tarab edits (a stale copy is ignored and the
     /// default loads), so schema changes migrate the stored blob in place on
@@ -192,27 +192,21 @@ final class SarangiStore: ObservableObject {
 
     /// Debounced structural rebuild (coalesces rapid slider drags / string edits).
     private func scheduleRebuild() {
-        rebuildWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.rebuildNow() }
-        rebuildWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+        rebuildDebounce.schedule { [weak self] in self?.rebuildNow() }
     }
 
     /// Immediate structural rebuild (scale/preset switches).
     private func rebuildNow() {
-        rebuildWork?.cancel()
+        rebuildDebounce.cancel()
         audio.rebuildSarangi(strings: state.resolvedStrings, tonic: state.tonicHz,
                              droneFreqs: state.droneStringFreqs,
                              follower: state.resolvedFollower)
     }
 
     private func scheduleSave() {
-        saveWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
+        saveDebounce.schedule { [weak self] in
             guard let self, let data = try? JSONEncoder().encode(self.state) else { return }
             UserDefaults.standard.set(data, forKey: Self.persistKey)
         }
-        saveWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 }

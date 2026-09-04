@@ -324,21 +324,14 @@ extension AudioEngine {
     /// Debounced table-build rebuild: a slider drag settles (750 ms) before
     /// one seconds-long build runs; the generation guard supersedes in-flight ones.
     private func scheduleTanpuraTableRebuild() {
-        DispatchQueue.main.async { [weak self] in
+        tanpuraTableRebuild.schedule { [weak self] in
             guard let self else { return }
-            self.tanpuraTableRebuildWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                self.lock.lock()
-                let tonic = self.lastTanpuraTonic
-                let ratios = self.lastTanpuraRatios
-                self.lock.unlock()
-                guard !ratios.isEmpty else { return }
-                self.rebuildTanpura(tonic: tonic, scaleRatios: ratios)
-            }
-            self.tanpuraTableRebuildWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75,
-                                          execute: work)
+            self.lock.lock()
+            let tonic = self.lastTanpuraTonic
+            let ratios = self.lastTanpuraRatios
+            self.lock.unlock()
+            guard !ratios.isEmpty else { return }
+            self.rebuildTanpura(tonic: tonic, scaleRatios: ratios)
         }
     }
 

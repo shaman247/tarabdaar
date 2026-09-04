@@ -541,9 +541,7 @@ final class AppController: ObservableObject {
         // The debounced rebuild funnel behind every off-main parameter path.
         self.rebuildFlush = DebouncedParamFlush { [weak self] values in
             guard let self else { return }
-            for (key, v) in values {
-                self.stringParams.setRawScalar(key, v)
-            }
+            self.stringParams.setBatch(values)
             self.refreshHybridHeadroom()
         }
         // The controller strum sounds ordinary notes in the MAIN voice

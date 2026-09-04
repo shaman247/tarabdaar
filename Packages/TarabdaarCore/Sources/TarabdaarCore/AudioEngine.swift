@@ -87,7 +87,7 @@ public class AudioEngine: ObservableObject {
     var tanpuraDroneLevel = 1.0
     var tanpuraDroneCycleSec = 2.5
     /// Pending debounced table rebuild (main-thread mutate only).
-    var tanpuraTableRebuildWork: DispatchWorkItem?
+    let tanpuraTableRebuild = Debouncer(delay: 0.75)
 
     /// A plucked build is seconds of CPU — one shared utility-QoS serial queue.
     let tanpuraBuildQueue = DispatchQueue(label: "tarabdaar.tanpura.build",

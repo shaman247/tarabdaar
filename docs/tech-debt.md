@@ -18,10 +18,6 @@ is re-blessed with a before/after render for an A/B by ear.
    with five separate `(scale, tonic)` subscriptions at four debounce times
    (400/250/750/300 ms) plus `pushCurrentState`'s own rate limiter. Change:
    one `Tuning` value (scale + tonic Hz) owned once, one change publisher.
-4. **Six hand-rolled debounces** beside `DebouncedParamFlush`
-   (`StringParamStore` 60 ms, `SarangiStore` 50 ms + 400 ms, the tanpura
-   table 750 ms, `pushCurrentState` 300 ms, the MIDI retry). The rebuild path
-   is debounced twice in series (250 ms → 60 ms). Change: one `Debouncer`.
 6. **Knob clamps and neutrals re-declared outside the registry**
    (`StringVoiceSource.ControlKnob`, `GlideSequencer` clamps that disagree
    with the registry ranges, 157 literal `bp.v(key, default)` fallbacks) and

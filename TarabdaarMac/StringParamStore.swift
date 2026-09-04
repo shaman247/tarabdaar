@@ -25,7 +25,7 @@ final class StringParamStore: ObservableObject {
     /// The artifact's own scalars (the Sarangi Live default values).
     private var artifact: [String: Double] = [:]
     private var overrides: [String: Double] = [:]
-    private var pushWork: DispatchWorkItem?
+    private let pushDebounce = Debouncer(delay: 0.06)
     /// Keys touched since the last engine push — lets `pushNow` try the
     /// IN-PLACE path (no rebuild) when every one of them can be applied to
     /// the running engine.
@@ -66,6 +66,21 @@ final class StringParamStore: ObservableObject {
     }
 
     func set(_ key: String, _ value: Double) {
+        store(key, value)
+        persist()
+        schedulePush()
+    }
+
+    /// A settled batch (the bindings' rebuild funnel): every key lands,
+    /// then ONE push right away — the funnel already waited.
+    func setBatch(_ batch: [String: Double]) {
+        guard !batch.isEmpty else { return }
+        for (key, value) in batch { store(key, value) }
+        persist()
+        pushNow()
+    }
+
+    private func store(_ key: String, _ value: Double) {
         values[key] = value
         dirtyKeys.insert(key)
         // An override that lands back ON the artifact value is dropped, so
@@ -76,8 +91,6 @@ final class StringParamStore: ObservableObject {
             overrides[key] = value
         }
         dirty = !overrides.isEmpty
-        persist()
-        schedulePush()
     }
 
     /// Reset ONE key to the Sarangi Live default (double-click a slider row).
@@ -115,26 +128,16 @@ final class StringParamStore: ObservableObject {
         pushNow()
     }
 
-    /// Raw artifact-scalar hook for a key the registry does not know:
-    /// the same path as the sliders, so it shows in the UI and persists
-    /// like a hand edit.
-    func setRawScalar(_ key: String, _ value: Double) {
-        set(key, value)
-    }
-
     // MARK: - Engine push / persistence
 
     /// Debounced push (coalesces slider drags — each push rebuilds the
     /// String engine off-main; the generation check discards stale builds).
     private func schedulePush() {
-        pushWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.pushNow() }
-        pushWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
+        pushDebounce.schedule { [weak self] in self?.pushNow() }
     }
 
     private func pushNow() {
-        pushWork?.cancel()
+        pushDebounce.cancel()
         // IN-PLACE FAST PATH : most parameters can be pushed
         // onto the RUNNING engine — no rebuild, no ~0.2 s latency, no
         // crossfade, and a sounding note/ring is untouched. Falls back to
