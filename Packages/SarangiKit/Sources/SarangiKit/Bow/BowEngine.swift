@@ -300,7 +300,7 @@ public final class BowEngine {
                                  jt.ca, jt.cb, jt.ca4, jt.cb4, jt.wd,
                                  jt.rowForceScale, jt.rowPinScale,
                                  jt.rowCplScale,
-                                 jt.phiD, jt.phiDT, jt.phiU, jt.phiF,
+                                 jt.phiD, jt.phiU, jt.phiF,
                                  jt.b, jt.G, jt.G4, jt.gd, jt.gd4,
                                  jt.phys, jt.q0)
                 // pool spawn happens at build, never on the audio thread
@@ -380,15 +380,11 @@ public final class BowEngine {
             if bodyMix > 0, let pk = pkernel {
                 bow_poly_jt_set_body(pk, min(bodyMix, 1.0))
             }
-            // termination drive morph: same arming rule. 0 = byte-null.
-            let drvTerm = bp.v("bow_jt_drive_term", 0.0)
-            if drvTerm > 0, let pk = pkernel {
-                bow_poly_jt_set_drive_term(pk, min(drvTerm, 1.0))
-            }
             // two-way bridge coupling: same arming rule. 0 = byte-null.
+            // The key is 0…1 of the safe range (see setJtCouple).
             let couple = bp.v("bow_jt_couple", 0.0)
-            if couple > 0, let pk = pkernel {
-                bow_poly_jt_set_couple(pk, couple)
+            if couple > 0, pkernel != nil {
+                setJtCouple(couple)
             }
             tiltPureLpHiHz = jt.lpA > 0
                 ? -log(1.0 - min(jt.lpA, 0.999999)) * jtTickRate
@@ -593,27 +589,35 @@ public final class BowEngine {
         bow_poly_jt_set_body(pk, min(max(mix01, 0.0), 1.0))
     }
 
-    /// TERMINATION DRIVE morph 0…1 (`bow_jt_drive_term`): where the played
-    /// string's bridge force enters each sympathetic row. 0 = the fitted
-    /// 0.90 L tap, whose |sin(kπ·0.9)| comb never charges modes 10/20;
-    /// 1 = the pin's own mode slope (∝ (−1)^k·k, energy-matched per row to
-    /// the tap, same sign convention as the pin-force radiation). 0 =
-    /// bit-exact. Kernel scalar write, slewed ~40 ms per row.
-    public func setJtDriveTerm(_ w01: Double) {
-        guard let pk = pkernel else { return }
-        bow_poly_jt_set_drive_term(pk, min(max(w01, 0.0), 1.0))
-    }
+    /// The kernel coupling gain the knob's FULL SCALE maps to: half the
+    /// measured divergence gain. `bow_jt_couple` is expressed 0…1 of this
+    /// safe range, so the knob's top is a bound, not a cliff.
+    ///
+    /// Measured on the shipped Pilu bank (34 rows), serial jt, the HEAVY
+    /// case — a Sa/Pa/Sa′ chord at CC11 127 held 1 s, then a 4 s ring, the
+    /// output trim pulled 60 dB so the safety limiter never masks growth.
+    /// The ring's decay from +1 s to +4 s: 31 dB uncoupled, 23 dB at 0.6,
+    /// and at **0.8** it stops decaying and GROWS +6 dB through the last
+    /// second — the web feeding itself. So the divergence gain is 0.8 and
+    /// the knob's full scale is 0.4. (A single bowed note is far more
+    /// forgiving, which is exactly why the bound is set on the chord.)
+    public static let jtCoupleFullScale = 0.4
 
-    /// TWO-WAY BRIDGE COUPLING gain (`bow_jt_couple`): how much of the
-    /// sympathetic rows' OWN summed bridge force (contact + termination, in
+    /// TWO-WAY BRIDGE COUPLING (`bow_jt_couple`), **0…1 of the safe range**
+    /// (`jtCoupleFullScale`): how much of the sympathetic rows' OWN summed
+    /// bridge force (contact + termination, DC-blocked, in bank-normalized
     /// newtons) returns into the played strings' bridge force — the bridge
     /// load the one-way drive leaves out. It reaches the body, every played
     /// string's return, and the next tick's drive of every row, so the web
-    /// also exchanges energy with itself through the bridge. 0 = bypass
-    /// (bit-exact). Kernel scalar write, slewed ~40 ms in the render loop.
-    public func setJtCouple(_ g: Double) {
+    /// also exchanges energy with itself through the bridge. The bank
+    /// normalization (`JtTables.rowCplScale` ÷ Σ gout) is what makes one
+    /// knob position mean one loop gain whatever the document holds.
+    /// 0 = bypass (bit-exact). Kernel scalar write, slewed ~40 ms in the
+    /// render loop.
+    public func setJtCouple(_ k01: Double) {
         guard let pk = pkernel else { return }
-        bow_poly_jt_set_couple(pk, min(max(g, 0.0), 4.0))
+        let k = min(max(k01, 0.0), 1.0)
+        bow_poly_jt_set_couple(pk, k * Self.jtCoupleFullScale)
     }
 
     /// HARMONIC EVOLUTION 0…1 (`bow_jt_evolve`): a SIGNED bone offset,
@@ -1261,7 +1265,6 @@ public final class BowEngine {
         jt.rowPinScale.withUnsafeBufferPointer { pinScale in
         jt.rowCplScale.withUnsafeBufferPointer { cplScale in
         jt.phiD.withUnsafeBufferPointer { phiD in
-        jt.phiDT.withUnsafeBufferPointer { phiDT in
         jt.phiU.withUnsafeBufferPointer { phiU in
         jt.phiF.withUnsafeBufferPointer { phiF in
         jt.b.withUnsafeBufferPointer { b in
@@ -1275,7 +1278,7 @@ public final class BowEngine {
                 ca.baseAddress, cb.baseAddress, ca4.baseAddress,
                 cb4.baseAddress, wd.baseAddress, radScale.baseAddress,
                 pinScale.baseAddress, cplScale.baseAddress,
-                phiD.baseAddress, phiDT.baseAddress,
+                phiD.baseAddress,
                 phiU.baseAddress, phiF.baseAddress,
                 b.baseAddress, G.baseAddress, G4.baseAddress,
                 gd.baseAddress, gd4.baseAddress, phys.baseAddress)
@@ -1289,7 +1292,7 @@ public final class BowEngine {
                 pushJtRowContact(jt)
                 pushJtEvolveOffsets()
             }
-        }}}}}}}}}}}}}}}}}}}
+        }}}}}}}}}}}}}}}}}}
         // Melody follower: refresh the retune-law constants; re-arming the
         // SAME row keeps its current pitch
         if jt.trackRow >= 0, Int(jt.trackRow) < jt.rowFreqs.count {

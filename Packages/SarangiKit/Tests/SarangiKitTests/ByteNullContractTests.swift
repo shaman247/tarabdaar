@@ -66,7 +66,6 @@ final class ByteNullContractTests: XCTestCase {
             ("taraf damp 0", { $0.setTarafDamp(0) }),
             ("tone tilt 0", { $0.setToneTilt(0) }),
             ("jt body 0", { $0.setJtBody(0) }),
-            ("termination drive 0", { $0.setJtDriveTerm(0) }),
             ("bridge coupling 0", { $0.setJtCouple(0) }),
             ("evolve register 0", { $0.setJtEvolveRegister(0) }),
             ("master gain 1", { $0.setMasterGain(1) }),

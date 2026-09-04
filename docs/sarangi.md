@@ -199,31 +199,11 @@ when constant; an instant bone move radiates a real thump, which the 40 ms
 bone slew keeps out of tilt sweeps. The 0.90 L velocity pickup is not
 present — see `docs/history/`.
 
-### Where the drive enters (`bow_jt_drive_term`)
+### Where the drive enters
 
-The played string's bridge force enters each row at a fixed **0.90 L tap**
-(`phiD` = gdrv·amp2·sin(kπ·0.9)/mu), so the drive carries a |sin(kπ·0.9)|
-comb: modes 10 and 20 are never charged, and that null combines with the old
-pickup's. Physically the rows share the BRIDGE with the played string, and a
-moving termination excites mode k through the mode slope at the end,
-φ′_k(L) ∝ (−1)^k·k — no null anywhere. `bow_jt_drive_term` (0…1, `.live`,
-**0 = byte‑exact**) morphs per row per mode between the two tables (`phiD`
-and the builder's `phiDT`, both in the load ABI; the kernel keeps both and
-blends with a per‑row scalar slewed on the radiation's ~40 ms law, so a swept
-knob never steps the drive). Its sign convention is the pin‑force radiation
-term's own (Σ(−1)^k·k·q_k) — by reciprocity the same weighting drives and
-radiates, so a positive bridge force makes a positive radiated pin force. The
-quiescence gate's wake bound follows the effective shape.
-
-**Normalisation is an ENERGY match, per row**: `cTerm` is chosen so
-Σ_k phiDT_k² = Σ_k phiD_k² over the row's built modes (the shared
-gdrv·amp2/mu factors cancel, leaving cTerm = √(Σ sin²(kπ·0.9) / Σ k²) ≈
-1.22/M). Each row therefore keeps the FITTED total drive energy of the tap and
-the slope weighting only REDISTRIBUTES it up the mode stack — mode 1 falls,
-the high cluster rises. It replaced a mode‑1 match (× sin(0.9π) = 0.309),
-which multiplied every mode above the first by ≈ 1.4·k and simply added level.
-Neither normalisation lands on the fitted loudness — see roadmap item 2 for
-both measurements and why the knob still rests at 0.
+The played string's bridge force enters each row at the fitted **0.90 L tap**
+(`phiD` = gdrv·amp2·sin(kπ·0.9)/mu) — the one drive shape, and the shape the
+gate's per‑row wake bound is metered on.
 
 ### Two‑way coupling (`bow_jt_couple`)
 
@@ -232,69 +212,56 @@ never feels one back. On the instrument the rows sit on the SAME bridge, so
 their own bridge forces load it too — energy returns to the played string,
 and the rows feel each other through the shared termination.
 
-`bow_jt_couple` (0…0.15, `.live`, **0 = byte‑exact**) closes that loop. Each
-row already computes its whole bridge load in the tick: `radScale`·fsum
-(contact) + `pinScale`·Σ(−1)^k·k·q_k (termination) — the pair it radiates.
-Both halves carry the SAME force→radiated factor gout·π/(mu·L·wd1), so ONE
-per‑row reciprocal, `JtTables.rowCplScale` = mu·L·wd1/(gout·π) (load ABI
-`cplScale`), turns that un‑DC‑blocked sum back into NEWTONS — a gain of 1 is
-the row's actual physical load at the calibrated level. The rows' summed
-force joins the played strings' bridge force `F` **before** the body solve,
-so it (a) moves the bridge every played string takes back through its kret
-return, (b) radiates through the body, and (c) lands in the drive record,
-which is what charges every row on the NEXT tick — that last part is the
-row‑to‑row exchange: the web feeds itself through the bridge.
+`bow_jt_couple` (0…1, `.live`, **0 = byte‑exact**) closes that loop. Each row
+already computes its whole bridge load in the tick: `radScale`·fsum (contact)
++ `pinScale`·Σ(−1)^k·k·q_k (termination), **DC‑blocked** — the same `fr − lp`
+it radiates. Both halves carry the SAME force→radiated factor
+gout·π/(mu·L·wd1), so ONE per‑row reciprocal, `JtTables.rowCplScale` =
+mu·L·wd1/(gout·π), turns that back into NEWTONS. The rows' summed force joins
+the played strings' bridge force `F` **before** the body solve, so it (a)
+moves the bridge every played string takes back through its kret return, (b)
+radiates through the body, and (c) lands in the drive record, which is what
+charges every row on the NEXT tick — that last part is the row‑to‑row
+exchange: the web feeds itself through the bridge.
 
-**The lag.** The web is a DEFERRED post‑pass (the worker pool, the async
-dispatcher and the block‑level drive‑FX / sitar‑inject hooks all need the
-whole block's drive before a row ticks), so the return cannot be a single
-sample: the post‑pass holds its summed force per jt tick, emits it per output
-sample into a FIFO, and the NEXT render block pops it into `F`. Same
-no‑algebraic‑loop rule the drive's `jtFprev` follows, one post‑pass block
-out. A dry FIFO fades the held force out rather than parking a DC load on the
-bridge; a fresh arm starts from the writer, never a stale backlog. The gain
-slews ~40 ms in the render loop on `radScaleCur`'s law.
+**The pickup must be DC‑BLOCKED, and that was the whole never‑silent bug.**
+The raw per‑row load carries the row's static wrap preload as a constant
+term, so the first cut of this knob parked a DC force on the played strings'
+bridge — which then fed the drive record and charged every row with it. It
+self‑excited from silence: a web nobody played, gate disarmed, settled to a
+tail RMS of **2.6e‑1** at the top of the range (DC‑blocked: **5.7e‑3**, all
+of it the wrap's contact micro limit‑cycle, DC offset 1.3e‑5 → 1.0e‑6). With
+the gate armed and a real note it read as the instrument never going quiet: a
+bowed Sa's 12 s ring parked at a constant **−42 dBFS with 0 of 34 rows
+asleep**. Blocked, the same ring reads −49 / −65 / −87 dBFS at 3 / 5 / 7 s and
+then truncates as the gate closes, **34 of 34 asleep** — the uncoupled ring's
+own curve (−49 / −66 / −87). A row the gate puts to sleep also FADES its last
+returned value out on the blocker's own rate instead of stepping to 0 (a step
+on the shared bridge strums every other row); with the DC term gone that step
+is small, so this is continuity insurance, not the fix.
 
-**The range is a MEASURED stability bound.** A 4 s ring after a 1 s bowed
-tonic at CC11 **127** (shipped Pilu bank, serial jt), taraf bus, dB relative
-to the moment of release: 0 → −10 / −16 / −23 / −31 at +1/2/3/4 s; **0.20** →
-−2 / −3 / −1 / −2 (finite, still decaying); **0.22** → −1 / +1 / +4 / +5;
-**0.25** → +3 / +5 / +9 / +11; 0.5 and above overflow to NaN inside 4 s. So
-the loop turns divergent between 0.20 and 0.22, and the registry stops at
-**0.15**. `bow_jt_evolve` 1 (the hot bone) does not move it — 0.15 there
-reads −3.1 / −2.8 / −3.4 / −3.2 dB.
+**The bank normalization.** The kernel SUMS the rows into one return, so the
+loop gain scales with how many rows the document holds and how loud they are —
+the shipped Pilu bank is 34 rows. `rowCplScale` is therefore divided by the
+bank's total row gain **Σ gout**, and one knob position means one loop gain
+whatever the bank. Without it the knob's stable range was a property of the
+document, which is why real playing diverged at ~0.04 where a single‑note
+bench sweep said 0.2.
 
-**What it does**, shipped Pilu bank, serial jt, a bowed note at CC11 32 /
-press 0.56 for 0.6 s after a 1.5 s settle, then a 3 s ring (per‑row figures
-from the 0.8 s ring, where the uncoupled rows are still above the scope
-floor):
-
-- **The voice bus stops decaying.** Its level at +0.5 / 1 / 2 s after release,
-  against +0.1 s: Sa **−7.4 / −15.9 / −32.1 dB** at 0 → **−0.7 / −0.8 / −0.9**
-  at 0.02 → **−0.1 / −0.1 / +0.0** at 0.05; a non‑kin note −10.0 / −22.0 /
-  −45.6 → −0.8 / −0.9 / −0.9 → ~0.0. Ring RMS **+14.5 dB** (Sa) / +15.8
-  (non‑kin) at 0.02. Read it honestly: at 0.02 the TARAF bus is unchanged
-  (−0.1 / +0.8 dB), so what fills the voice bus is the web's own bridge force
-  radiating through the body — the physical route `bow_jt_body` fakes. It is
-  not the gut string's own ring lengthening; the two cannot be separated on
-  that bus.
-- **The taraf bus** needs more than 0.02 to move: **−0.1 / +0.8 dB** there,
-  **+18.5 / +17.9 dB** at 0.05, **+20.0 / +19.6 dB** at 0.15.
-- **Per‑row spread** is a REDISTRIBUTION at the bottom and a lift above it:
-  0.02 → **−3.0 … +6.4 dB** (median +0.1) on Sa, −4.4 … +5.4 (median +2.3)
-  non‑kin; 0.05 → +4.1 … +45.0 (median +23.1) / −7.9 … +48.8 (median +19.1);
-  0.15 → +25.7 … +68.8 (median +44.7) / +7.7 … +71.5 (median +47.1), n = 34.
-- **The web bloom is real and it starts between 0.02 and 0.05.** A NON‑KIN
-  note's taraf bus, last ring window against just after release: **−49.7 dB**
-  at 0 (a decaying haze) → −29.1 at 0.02 → **+7.8 dB at 0.05** — the web
-  GROWS through the ring on a note none of its rows are tuned to, which is
-  what row‑to‑row exchange through the bridge is for. Sa reads −40.6 → −29.5
-  → +5.5 dB.
+**The range is 0…1 of a MEASURED safe range** (`BowEngine.jtCoupleFullScale`
+= 0.4 kernel gain — half the divergence gain). Measured on the HEAVY case,
+because one note is far more forgiving than a chord: shipped Pilu bank, serial
+jt, **Sa + Pa + Sa′ at CC11 127** held 1 s then a 4 s ring, output trim pulled
+60 dB so the safety limiter cannot mask growth. The ring's fall from +1 s to
++4 s: **31 dB** uncoupled, 31 / 27 / 28 / 18 / 23 dB at 0.2 / 0.3 / 0.4 / 0.5
+/ 0.6 — and at **0.8** it stops decaying and GROWS +6 dB through the last
+second. Above that it only flattens (2.0 and up hold a plateau for the whole
+ring; the kernel clamps the gain at 4). So 0.8 is the divergence gain, full
+scale is 0.4, and the knob's top still decays 28 dB over that ring.
 
 Not baked, deliberately: this is a sound‑design lever and it is judged by
-ear. Above ~0.05 the peak sample runs into the safety limiter (0.37 → 0.89 at
-0.05, → 1.00 at 0.15), so the top of the range is a very long ring, not a
-free setting — pull `bow_jt_gain` / `bow_bal` / `bow_jt_cap` with it.
+ear. It is LOUD well before the top — the web bloom is the point — so pull
+`bow_jt_gain` / `bow_bal` / `bow_jt_cap` with it.
 
 ### Evolution and register
 
@@ -523,38 +490,20 @@ Improvements proposed for the modal‑jawari rows, in the order worth doing.
    radiated sample is the bone contact force plus the pin force
    `rowPinScale`·Σ(−1)^k·k·q_k, ahead of the DC blocker; no knob (the
    `bow_jt_rad_pin` mix it shipped as was judged at 1 and folded in).
-2. **Drive from the termination too — shipped as an OPTION, default off.**
-   `bow_jt_drive_term` (above) is the 0…1 morph; it is NOT baked, because no
-   normalisation of the slope shape lands on the fitted loudness. Measured
-   twice on the shipped Pilu bank, serial jt, a bowed note (0.6 s at CC11 32 /
-   press 0.56 + 0.8 s ring) after a 1.5 s settle pre‑roll, scope peak‑held
-   over the RING only, morph 1 vs 0:
-   - **Mode‑1 match** (`× sin(0.9π)`, the first cut): ring RMS **+7.1 dB** on
-     Sa / **+10.7 dB** on a non‑kin note, per‑row levels **−1.4 … +12.6 dB**
-     and **−1.1 … +20.0 dB** — every mode above the first gains ≈ 1.4·k, so
-     the shape adds level the fit never had. (An earlier, hotter scaffold read
-     this as +17.5 dB / +0.6 … +27.0 dB.)
-   - **Energy match** (the current table: Σ phiDT² = Σ phiD² per row): ring
-     RMS **−12.6 dB** on Sa / **−8.5 dB** non‑kin (taraf bus alone −15.7 /
-     −10.7 dB), per‑row levels **−23.0 … −7.7 dB** (median −12.1) and
-     **−26.6 … −0.9 dB** (median −9.0); the Sa row's modal centroid rises
-     **2.6 → 3.5** (mode index). Holding the drive ENERGY does not hold the
-     RING: the energy lands on high modes that the f² loss and the tone LP
-     eat within the note.
-   Stable either way — a 4 s ring at CC11 127 stays finite and decays
-   monotonically (energy match peaks 0.64 against the tap's 1.69). So the
-   shape is right and the LEVEL is not, under either law: taking it means
-   re‑fitting recruitment (`bow_jt_gain` / `bow_jt_norm` / `bow_jt_sel`)
-   around it, not flipping the default. A/B it with the knob first.
+2. **Drive from the termination too — tried, rejected.** The pin's
+   mode‑slope drive shape was built as a 0…1 morph and normalised two ways
+   (mode‑1 match, then an energy match); by ear neither changed the
+   character — it read as a taraf loudness knob and 0 sounded best.
+   Removed: the knob, its `phiDT` table and its ABI are gone and the fitted
+   0.90 L tap is the only drive (git history carries both measurements).
 3. **Two‑way coupling among the rows — shipped as a KNOB, default off.**
-   `bow_jt_couple` (above) feeds the rows' summed bridge force back into `F`
-   one post‑pass block out (the deferred web forbids a literal one‑sample
-   return). Stability WAS the risk: the loop diverges between 0.20 and 0.22
-   at full expression, so the range stops at 0.15. The bloom is real from
-   ~0.05 up — a non‑kin note's taraf GROWS +7.8 dB through a 3 s ring where
-   the uncoupled web falls 49.7 — but so is the level, and the voice bus
-   stops decaying because the web now radiates through the body. Not baked:
-   taking it means re‑fitting levels around it, exactly as with item 2.
+   `bow_jt_couple` (above) feeds the rows' summed, DC‑blocked bridge force
+   back into `F` one post‑pass block out (the deferred web forbids a literal
+   one‑sample return). The first cut returned the UN‑blocked load, whose
+   static‑wrap DC term made the instrument ring forever at a low strumming
+   floor; blocked, normalized by the bank's Σ gout and expressed as 0…1 of
+   half the measured divergence gain, the loop is bounded and the ring ends.
+   Not baked: taking it means re‑fitting levels around it.
 4. **Bone profile.** A real jawari is an asymmetric arc with a gentler slope
    toward the nut, lengthening the cascade rather than deepening it.
    Build‑time table, cheap to try.
@@ -590,6 +539,10 @@ The guard set is deliberately small; the sound is judged by ear.
   (a chord stays bounded), `BowStereoTests` (fold‑down invariance),
   `TanpuraEngineTests` (exporter golden), `TouchMapperTests` (touch path ≡
   MIDI path — the parity substrate).
+- **`TarafCoupleTests`** (TarabdaarCore, gated) — two‑way coupling: a
+  resting web returns no bridge load, a coupled ring at the top of the range
+  goes fully silent with every row asleep, and the heavy chord still decays
+  there.
 - **Realtime / rebuild / in‑place** (TarabdaarCore, gated; phase 2 serial in
   `tools/test-full.sh`) — `RealtimePerformanceTests`, `RebuildCostTests`,
   `ZipperTests`, `LiveParamPushTests`.

@@ -26,13 +26,6 @@ public struct JtTables: Sendable {
     public var ca: [Double] = [], cb: [Double] = []
     public var ca4: [Double] = [], cb4: [Double] = []
     public var wd: [Double] = [], phiD: [Double] = []
-    /// TERMINATION drive shape, the comb-free sibling of `phiD`: the
-    /// bridge force enters through the mode SLOPE at the pin,
-    /// ∝ (−1)^k·k, ENERGY-matched per row against the 0.90 L tap
-    /// (Σ_k phiDT_k² == Σ_k phiD_k²) so the row keeps its fitted total
-    /// drive energy and the slope only redistributes it up the modes.
-    /// Load-ABI `phiDT`; blended against `phiD` by `bow_jt_drive_term`.
-    public var phiDT: [Double] = []
     public var phiU: [Double] = [], phiF: [Double] = []
     public var b: [Double] = [], G: [Double] = [], G4: [Double] = []
     public var gd: [Double] = [], gd4: [Double] = []
@@ -55,11 +48,16 @@ public struct JtTables: Sendable {
     /// tick adds Σ_k (−1)^k·k·q_k straight into the radiated sample. Load-ABI
     /// `pinScale`, beside `radScale`.
     public var rowPinScale: [Double] = []
-    /// TWO-WAY COUPLING unit match, mu·L·wd1/(gout·π): the reciprocal of the
-    /// force→radiated factor `rowForceScale` and `rowPinScale` SHARE, so the
-    /// tick's un-DC-blocked radiated sum converts back to the row's physical
-    /// bridge force in NEWTONS. Load-ABI `cplScale`; a silent row (gout 0)
-    /// gets 0. Only `bow_jt_couple` reads it.
+    /// TWO-WAY COUPLING unit match, mu·L·wd1/(gout·π) ÷ Σ gout: the
+    /// reciprocal of the force→radiated factor `rowForceScale` and
+    /// `rowPinScale` SHARE, so the tick's DC-BLOCKED radiated sum converts
+    /// back to the row's physical bridge force in NEWTONS — then divided by
+    /// the BANK's total row gain, because the kernel SUMS the rows into one
+    /// return and a 34-row document would otherwise present a very different
+    /// loop gain from a 6-row one. With the normalization `bow_jt_couple`
+    /// means the same loop gain whatever the bank holds. Load-ABI
+    /// `cplScale`; a silent row (gout 0) gets 0. Only `bow_jt_couple` reads
+    /// it.
     public var rowCplScale: [Double] = []
     /// One-pole tone-LP coefficient on the radiated jt sum (`bow_jt_lp`;
     /// 0 = bypass). Applied via bow_jt_set_lp — not part of the load ABI.
@@ -175,6 +173,12 @@ public enum BowTables {
         let dt = Double(div) / srk
         let dt4 = dt / 4.0
         var T = JtTables()
+        // BANK NORMALIZATION for the two-way coupling return: the kernel
+        // sums every row's load into ONE force, so the loop gain scales with
+        // how many rows the document holds and how loud they are. Σ gout
+        // over the bank divides it back out, so `bow_jt_couple` means one
+        // fixed loop gain regardless of the bank.
+        var goutSum = 0.0
         T.J = Int32(J)
         T.hasChromatic = hasChrom
         T.apexRef = apexR
@@ -256,34 +260,9 @@ public enum BowTables {
             var gdrv = row.gain
             // raga rows stay multiply-free — the render hash depends on it
             if chrom { gout *= gainMulC; gdrv *= driveMulC }
-            // TERMINATION drive: a moving bridge pushes mode k through the
-            // mode SLOPE at the pin, φ'_k(L) ∝ (−1)^k·k — no comb, and by
-            // reciprocity the SAME sign convention as the pin-force
-            // radiation term Σ(−1)^k·k·q_k in the tick.
-            // NORMALISATION LAW — ENERGY MATCH, not mode-1 match: cTerm is
-            // chosen per row so Σ_k phiDT_k² == Σ_k phiD_k² over the row's
-            // built modes (the shared gdrv·amp2/mu factors cancel, so
-            // cTerm = √(Σ sin²(kπ·0.9) / Σ k²)). Each row keeps the FITTED
-            // total drive energy of the 0.90 L tap and the slope weighting
-            // only REDISTRIBUTES it: mode 1 falls, the high cluster rises.
-            // Matching mode 1 instead (× sin(0.9π)) multiplied every mode
-            // above the first by ≈ 1.4·k and rang the web ~17 dB hot.
-            var cTerm = 0.0
-            do {
-                var eTap = 0.0, eSlope = 0.0
-                for k in 0..<M {
-                    let sD = sin(Double(k + 1) * Double.pi * xD / L)
-                    eTap += sD * sD
-                    eSlope += Double(k + 1) * Double(k + 1)
-                }
-                cTerm = eSlope > 0 ? (eTap / eSlope).squareRoot() : 0.0
-            }
             for k in 0..<M {
                 let pd = amp2 * sin(Double(k + 1) * Double.pi * xD / L)
                 T.phiD.append(gdrv * pd / mu)
-                let kk = Double(k + 1)
-                let sgn = (k & 1) == 0 ? -1.0 : 1.0   // (−1)^k, k 1-based
-                T.phiDT.append(gdrv * amp2 * sgn * kk * cTerm / mu)
             }
             T.phiU.append(contentsOf: phi)
             T.phiF.append(contentsOf: phi.map { $0 * wj / mu })
@@ -299,8 +278,9 @@ public enum BowTables {
             T.rowPinScale.append(gout * amp2 * wd[0])
             // TWO-WAY COUPLING: undo the shared force→radiated factor
             // gout·π/(mu·L·wd1) so the kernel's summed radiated force reads
-            // back in newtons — a couple gain of 1 is then the row's own
-            // physical load on the bridge at the calibrated level.
+            // back in newtons. The BANK normalization (÷ Σ gout) is applied
+            // after the loop.
+            goutSum += gout
             T.rowCplScale.append(gout > 1e-12
                                  ? mu * L * wd[0] / (gout * Double.pi)
                                  : 0.0)
@@ -326,6 +306,9 @@ public enum BowTables {
             }
             T.q0.append(contentsOf: q0)
             T.M.append(Int32(M))
+        }
+        if goutSum > 1e-12 {
+            for i in T.rowCplScale.indices { T.rowCplScale[i] /= goutSum }
         }
         T.phys = [kc, alphaR, hcBR, 2.5 * apexR, gain, drive, Double(div)]
         T.threads = Int32(bp.v("bow_jt_threads", 0.0).rounded())
