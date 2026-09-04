@@ -47,7 +47,7 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     /// TOUCH SIZE: the newest sounding touch's fingertip contact radius
     /// (`UITouch.majorRadius`, the PERF_STATE `radius` byte) mapped
     /// 31.3 → 73.0 pt onto 0…1 and RATE-LIMITED to a linear 0.5 s ramp
-    /// (`TouchSizeTracker`) — normal playing rests near 0, a deliberately
+    /// (`TouchSizeTracker`'s finger estimate) — normal playing rests near 0, a deliberately
     /// flattened fingertip sweeps the range. UNIPOLAR like `.strike`:
     /// rest is the curve's LEFT end (x 0), so a binding reads silence
     /// with the finger relaxed. Mac-evaluated from the wire radius

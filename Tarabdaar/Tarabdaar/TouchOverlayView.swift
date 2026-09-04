@@ -15,8 +15,8 @@ struct TouchEvent {
     let yFraction: Double  // 0-1 across view height (0 = top)
     let timestamp: TimeInterval
     /// `UITouch.majorRadius` in POINTS — the fingertip-size signal behind
-    /// the `.touchSize` control dimension (`TouchSizeTracker`, which maps
-    /// and rate-limits it; Apple quantises the raw reading into coarse
+    /// the `.touchSize` control dimension (`TouchSizeTracker`, which reads
+    /// the finger behind it; Apple quantises the raw reading into coarse
     /// steps).
     let radius: Double
 }

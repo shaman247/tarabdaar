@@ -927,7 +927,7 @@ private struct FretPadSurfaceIOS: View {
 // MARK: - Per-touch indicator overlay
 
 /// Live per-touch indicator state: the stop gate, the RAW FINGERTIP
-/// RADIUS (`UITouch.majorRadius`) and the rate-limited `.touchSize` axis
+/// RADIUS (`UITouch.majorRadius`) and the estimated `.touchSize` axis
 /// the Mac derives from it. A class so the settle-timer closure can feed
 /// it; no-op updates are skipped.
 ///
@@ -941,7 +941,7 @@ private final class TouchIndicatorModel: ObservableObject {
         /// `UITouch.majorRadius` in points, as reported (0 = unknown).
         var radiusPt: Double = 0
         /// The `.touchSize` axis for THIS finger, 0…1 — the same mapping
-        /// and rate limit the Mac's bindings run.
+        /// and finger estimator the Mac's bindings run.
         var axis: Double = 0
     }
 
@@ -953,7 +953,7 @@ private final class TouchIndicatorModel: ObservableObject {
     /// NEWEST touch, but on screen every finger shows its own value.
     private var size: [Int: TouchSizeTracker] = [:]
 
-    /// The rate limiter needs regular time steps and UIKit only reports a
+    /// The estimator needs regular time steps and UIKit only reports a
     /// finger that MOVES, so a ~30 Hz ticker advances every tracker while
     /// anything is down. `.common` mode so touch tracking can't starve it.
     private var ticker: Timer?
@@ -969,7 +969,8 @@ private final class TouchIndicatorModel: ObservableObject {
     }
 
     /// `radiusPt` nil = a settle tick (the finger has not moved, so UIKit
-    /// reported no new size); the last radius stands as the ramp's target.
+    /// reported no new size); the last radius stands, and the estimator
+    /// reads the silence as "no crossing yet".
     func update(_ id: Int, point: CGPoint? = nil, stopGate: Double,
                 radiusPt: Double? = nil) {
         guard var info = infos[id] else { return }
@@ -1023,7 +1024,7 @@ private final class TouchIndicatorModel: ObservableObject {
 /// One ring per touch, SIZED BY THE RAW FINGERTIP RADIUS (cyan gliding →
 /// amber stopped), with the radius in points printed beside it and the
 /// **`.touchSize` axis drawn as an arc** just outside the ring — a full
-/// circle at 1, nothing at 0 — so the smoothed 0…1 value the Mac's
+/// circle at 1, nothing at 0 — so the estimated 0…1 value the Mac's
 /// bindings actually see is visible while playing.
 private struct TouchIndicatorLayerIOS: View {
     @ObservedObject var model: TouchIndicatorModel
@@ -1063,7 +1064,7 @@ private struct TouchIndicatorLayerIOS: View {
         drawRadiusNumber(info, radius: radius, in: &ctx, size: size)
     }
 
-    /// The rate-limited `.touchSize` value as an arc outside the ring,
+    /// The estimated `.touchSize` value as an arc outside the ring,
     /// clockwise from 12 o'clock: 0 draws nothing, 1 closes the circle.
     private func drawSizeArc(_ info: TouchIndicatorModel.Info,
                              radius: CGFloat,

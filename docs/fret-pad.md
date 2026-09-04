@@ -174,14 +174,15 @@ judged by eye while playing. Colour is playing state: cyan while the
 finger glides, amber whenever the stop detector holds
 (`FretDragAssist.Output.stopGate`, and every touch is born stopped).
 Outside the ring, a **violet arc** draws that finger's **`.touchSize`
-axis** — the mapped, rate-limited 0…1 value the Mac's bindings see —
-clockwise from 12 o'clock: nothing at rest, a closed circle at full. The
-iPad runs its own display-only `TouchSizeTracker` for it (see
-[sensors.md](sensors.md)), so no wire traffic is added.
+axis** — the 0…1 value the Mac's bindings see, the finger the estimator
+reads behind the quantised radius — clockwise from 12 o'clock: nothing at
+rest, a closed circle at full. The iPad runs its own display-only
+`TouchSizeTracker` for it (see [sensors.md](sensors.md)), so no wire
+traffic is added.
 
 Display-only (`TouchIndicatorModel` + `TouchIndicatorLayerIOS`); the Mac
 preview pad has no such overlay. A ~30 Hz ticker advances every touch's
-rate limiter while anything is down, because UIKit only reports a finger
+estimator while anything is down, because UIKit only reports a finger
 that moves.
 
 **Not on this overlay** (removed 2026-09-04): the `original → corrected`

@@ -1,14 +1,18 @@
 import XCTest
 @testable import TarabdaarCore
 
-/// The `.touchSize` law: the measured points → 0…1 window, its clamps, the
-/// LINEAR rate limit in both directions, and the newest-sounding-touch rule
-/// the `ControlAxisEvaluator` drives it under.
+/// The `.touchSize` law: the measured points → 0…1 window and its clamps,
+/// the finger-motion estimator that reads the quantised radius staircase
+/// as position fixes, and the newest-sounding-touch rule the
+/// `ControlAxisEvaluator` drives it under.
 final class TouchSizeTests: XCTestCase {
 
     private let lo = Config.touchSizeLoPt      // 31.3 — normal fingertip
     private let hi = Config.touchSizeHiPt      // 73.0 — deliberately flattened
-    private let rampS = Config.touchSizeRampS  // 0.5 s for the full range
+    private let trueVel = Config.touchSizeDefaultVelPtS   // 83.4 pt/s
+
+    /// The reported levels: multiples of the ≈10.42 pt quantum.
+    private let steps = [31.3, 41.7, 52.1, 62.5, 73.0]
 
     // MARK: - The mapping
 
@@ -27,56 +31,112 @@ final class TouchSizeTests: XCTestCase {
                        accuracy: 1e-12)
     }
 
-    // MARK: - The rate limiter
+    // MARK: - The estimator
 
-    /// A step to fully flattened ramps LINEARLY (not exponentially) and
-    /// takes exactly `touchSizeRampS`, then stops dead on the target.
-    func testRampUpIsLinearAndTakesTheRampTime() {
+    /// Run a quantised staircase at 120 Hz: `levels[i]` from `i · stepS`.
+    private func staircase(_ levels: [Double], stepS: Double,
+                           forS: Double) -> [(t: Double, v: Double)] {
         var tr = TouchSizeTracker()
-        var t = 10.0
-        tr.sample(radiusPt: lo, at: t)                 // seeds the clock at 0
-        XCTAssertEqual(tr.value, 0, accuracy: 1e-12)
-
-        let dt = rampS / 20.0                          // 20 ticks = one ramp
-        // A quarter of the ramp: a one-pole would be at ~0.39 here.
-        for _ in 0..<5 { t += dt; tr.sample(radiusPt: hi, at: t) }
-        XCTAssertEqual(tr.value, 0.25, accuracy: 1e-12)
-        // Half: still exactly on the straight line.
-        for _ in 0..<5 { t += dt; tr.sample(radiusPt: hi, at: t) }
-        XCTAssertEqual(tr.value, 0.5, accuracy: 1e-12)
-        // The whole ramp time lands on 1 and stays there (no overshoot).
-        for _ in 0..<20 { t += dt; tr.sample(radiusPt: hi, at: t) }
-        XCTAssertEqual(tr.value, 1.0, accuracy: 1e-12)
-        t += dt
-        XCTAssertEqual(tr.sample(radiusPt: hi, at: t), 1.0, accuracy: 1e-12)
+        var out: [(t: Double, v: Double)] = []
+        let n = Int(forS * 120)
+        for i in 0...n {
+            let t = Double(i) / 120.0
+            let k = min(Int(t / stepS + 1e-9), levels.count - 1)
+            out.append((t, tr.sample(radiusPt: levels[k], at: t)))
+        }
+        return out
     }
 
-    /// The same rate applies DOWNWARD, and "no touch" (nil) targets 0.
-    func testRampDownAtTheSameRateAndNoTouchRestsAtZero() {
-        var tr = TouchSizeTracker()
-        var t = 0.0
-        tr.sample(radiusPt: hi, at: t)
-        let dt = rampS / 20.0                          // 20 ticks = one ramp
-        for _ in 0..<22 { t += dt; tr.sample(radiusPt: hi, at: t) }
-        XCTAssertEqual(tr.value, 1.0, accuracy: 1e-12)
-
-        // Finger relaxes to a normal size: down the same straight line.
-        for _ in 0..<10 { t += dt; tr.sample(radiusPt: lo, at: t) }
-        XCTAssertEqual(tr.value, 0.5, accuracy: 1e-12)
-        // Finger lifts: nil targets rest, at the same rate, and stops at 0.
-        for _ in 0..<22 { t += dt; tr.sample(radiusPt: nil, at: t) }
-        XCTAssertEqual(tr.value, 0.0, accuracy: 1e-12)
+    /// Axis velocity over `[a, b]`, back in points per second.
+    private func velocityPtS(_ o: [(t: Double, v: Double)],
+                             _ a: Double, _ b: Double) -> Double {
+        func at(_ t: Double) -> Double {
+            o.min { abs($0.t - t) < abs($1.t - t) }!.v
+        }
+        return (at(b) - at(a)) / (b - a) * (hi - lo)
     }
 
-    /// A step SMALLER than one tick's allowance arrives exactly, in one
-    /// step — the limiter caps the rate, it does not filter the value.
-    func testASmallStepArrivesExactly() {
+    /// A flatten at the measured speed: the estimator reads the staircase
+    /// as a continuous 83 pt/s finger, monotone, with no plateau between
+    /// crossings — a rate limiter stalls at each level until the next lands.
+    func testStaircaseTracksTheFingerWithoutPlateaus() {
+        let o = staircase(steps, stepS: 0.125, forS: 1.0)
+
+        for i in 1..<o.count {
+            XCTAssertGreaterThanOrEqual(o[i].v, o[i - 1].v - 1e-9,
+                                        "output must not reverse")
+        }
+        let v = velocityPtS(o, 0.25, 0.45)
+        XCTAssertEqual(v, trueVel, accuracy: 0.3 * trueVel,
+                       "mid-gesture speed within ±30 % of the real finger")
+
+        // Longest run of a standing output while crossings keep arriving.
+        var run = 0, worst = 0
+        var prev: Double?
+        for s in o where s.t >= 0.13 && s.t <= 0.5 {
+            if let p = prev {
+                if abs(s.v - p) < 1e-4 { run += 1; worst = max(worst, run) }
+                else { run = 0 }
+            }
+            prev = s.v
+        }
+        XCTAssertLessThan(Double(worst) / 120.0, 0.040,
+                          "no plateau longer than 40 ms mid-gesture")
+        XCTAssertEqual(o.last!.v, 1.0, accuracy: 1e-9)
+    }
+
+    /// The SAME staircase walked half as fast tracks at half the speed:
+    /// two consecutive crossings measure the finger, they do not assume it.
+    func testHalfSpeedStaircaseTracksAtHalfTheVelocity() {
+        let o = staircase(steps, stepS: 0.25, forS: 1.6)
+        let v = velocityPtS(o, 0.55, 0.95)
+        XCTAssertEqual(v, trueVel / 2, accuracy: 0.3 * trueVel / 2)
+    }
+
+    /// One step and then silence: the estimate coasts to the bin edge, the
+    /// finger is judged stopped, and it settles on the level's centre.
+    func testASingleStepSettlesOnTheLevel() {
         var tr = TouchSizeTracker()
-        tr.sample(radiusPt: lo, at: 0)
-        let target = lo + 0.02 * (hi - lo)          // 2 % of the range
-        // One rampS/20 tick allows 5 % of the range, so 2 % arrives whole.
-        let v = tr.sample(radiusPt: target, at: rampS / 20.0)
-        XCTAssertEqual(v, 0.02, accuracy: 1e-12)
+        for i in 0...15 { tr.sample(radiusPt: 31.3, at: Double(i) / 120.0) }
+        let target = TouchSizeTracker.mapped(radiusPt: 41.7)
+        var at06 = 0.0
+        for i in 16...240 {
+            let t = Double(i) / 120.0
+            let v = tr.sample(radiusPt: 41.7, at: t)
+            if abs(t - (0.125 + 0.6)) < 1.0 / 240.0 { at06 = v }
+        }
+        XCTAssertEqual(at06, target, accuracy: 0.03)      // ~0.6 s
+        XCTAssertEqual(tr.value, target, accuracy: 0.01)  // ~1.9 s, settled
+    }
+
+    /// A fresh finger reads its OWN size at once — the level is the whole
+    /// estimate — instead of sweeping there from whatever the last one left.
+    func testAFreshTouchReadsItsLevelImmediately() {
+        var curled = TouchSizeTracker()
+        XCTAssertEqual(curled.sample(radiusPt: lo, at: 0), 0, accuracy: 1e-12)
+        XCTAssertEqual(curled.sample(radiusPt: lo, at: 1 / 120.0), 0,
+                       accuracy: 1e-12)
+
+        var flat = TouchSizeTracker()
+        XCTAssertEqual(flat.sample(radiusPt: hi, at: 0), 1, accuracy: 1e-12)
+        XCTAssertEqual(flat.sample(radiusPt: hi, at: 1 / 120.0), 1,
+                       accuracy: 1e-12)
+
+        // And a lift relaxes to EXACT rest, not to a creep at the clamp.
+        var t = 1 / 120.0
+        for _ in 0..<120 { t += 1 / 120.0; flat.sample(radiusPt: nil, at: t) }
+        XCTAssertEqual(flat.value, 0, accuracy: 1e-12)
+    }
+
+    /// Un-flattening walks the staircase back down and tracks downward.
+    func testReverseStaircaseTracksDownward() {
+        let o = staircase(steps.reversed(), stepS: 0.125, forS: 1.0)
+        for i in 1..<o.count {
+            XCTAssertLessThanOrEqual(o[i].v, o[i - 1].v + 1e-9)
+        }
+        XCTAssertEqual(velocityPtS(o, 0.25, 0.45), -trueVel,
+                       accuracy: 0.3 * trueVel)
+        XCTAssertEqual(o.last!.v, 0, accuracy: 1e-9)
     }
 
     // MARK: - The newest-touch rule
@@ -115,9 +175,9 @@ final class TouchSizeTests: XCTestCase {
             lock.lock(); defer { lock.unlock() }; return last ?? 0
         }
         func settle() {
-            // The 30 Hz tick advances the limiter; the full ramp is 0.5 s.
-            let deadline = Date().addingTimeInterval(rampS + 0.2)
-            RunLoop.current.run(until: deadline)
+            // The 30 Hz tick advances the estimator; a whole-window
+            // traverse plus the settle is well under a second.
+            RunLoop.current.run(until: Date().addingTimeInterval(1.0))
         }
 
         // One flattened finger drives the axis to the top.
@@ -138,7 +198,7 @@ final class TouchSizeTests: XCTestCase {
         settle()
         XCTAssertEqual(read(), 1.0, accuracy: 0.02)
 
-        // Everything lifts: the axis ramps to rest.
+        // Everything lifts: the axis relaxes to rest.
         e.touchGate(lane: .wire, id: 1, on: false)
         settle()
         XCTAssertEqual(read(), 0.0, accuracy: 0.02)

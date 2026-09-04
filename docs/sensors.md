@@ -69,7 +69,7 @@ Known limit: a tap whose spike lands later than the lookback window under-reads 
 | 7 | Finger Accel (`fingerAccel`) | the playing finger's signed pitch acceleration (below) | bipolar, rest 0 |
 | 8–10 | Wrist ↕ / ↔ / ⟲ (`tilt4`, `wrist2`, `wrist3`) | the Joy-Con's fused attitude through the wrist calibration; silent until calibrated | bipolar, rest 0 |
 | 11 | Joy-Con Accel (`jcAccel`) | the Joy-Con's gravity-removed acceleration magnitude through `StrikeLaw` (same log map + 150 ms envelope), every IMU packet, change-gated at 1/256, 0 on detach; no calibration needed | UNIPOLAR |
-| 12 | Touch Size (`touchSize`) | the newest sounding touch's fingertip contact radius (the PERF_STATE `radius` byte) mapped 31.3 → 73.0 pt and rate-limited to a linear 0.5 s ramp (below) | UNIPOLAR, rest at curve x 0 |
+| 12 | Touch Size (`touchSize`) | the newest sounding touch's fingertip contact radius (the PERF_STATE `radius` byte) mapped 31.3 → 73.0 pt through the finger-motion estimator (below) | UNIPOLAR, rest at curve x 0 |
 
 `InputDimension` also carries `accelPressure`, `keyY`, `slider1`, `slider2` — retired cases kept so saved bindings decode; nothing emits them (see docs/history/).
 
@@ -172,14 +172,26 @@ the `FingerAccelTracker` pattern):
 | Stage | Law |
 |---|---|
 | map | `clamp((r − Config.touchSizeLoPt) / (Config.touchSizeHiPt − touchSizeLoPt), 0, 1)` — **31.3 → 73.0 pt**, so ordinary playing rests at 0 and flattening sweeps the range; both ends clamp, and an unknown radius (0, a producer with no touchscreen) reads rest |
-| rate limit | the output moves toward the mapped value by at most `1 / Config.touchSizeRampS` per second (**0.5 s** for the whole 0…1 range), in BOTH directions |
-| rest | no touch down targets 0, at the same rate |
+| fix | a level TRANSITION q_old → q_new is an exact POSITION fix: the true radius crossed `(q_old + q_new) / 2`, at that instant. The bin half-width becomes `|q_new − q_old| / 2` |
+| velocity | two consecutive fixes inside one gesture (`Config.touchSizeGestureGapS`, **0.4 s**) measure the finger's speed in pt/s. A gesture's FIRST crossing has no predecessor, so it assumes `Config.touchSizeDefaultVelPtS` (**83.4 pt/s** = the whole window in `touchSizeRampS`, the measured 0.5 s flatten) in the direction of the step |
+| coast | between fixes the estimate runs `p += v · dt`, CLAMPED to the current bin in the direction of travel — it may not pass `q ± h`, the next midpoint, because that crossing has not been reported |
+| stop | pinned against that edge, or a whole `touchSizeGestureGapS` with no crossing: the velocity decays (`Config.touchSizeVelDecayS`, **0.1 s**) and the estimate relaxes to the level's CENTRE (`Config.touchSizeSettleS`, **0.25 s**) — the best static guess when motion says nothing |
+| output | a CRITICALLY DAMPED second-order tracker on the estimate (`Config.touchSizeSmoothS`, **0.08 s** settle), integrated in closed form so any control rate is stable, then mapped |
+| rest | no touch relaxes toward one quantum BELOW the window (the measured curled-finger 20.9 pt), which the map clamps to exact 0; a finger arriving afterwards initialises position, level and tracker AT its own level with zero velocity, so a fresh curled finger reads 0 and a fresh flat one reads 1, neither sweeping |
 
-**Why a rate limiter, not a filter.** Apple quantises `majorRadius` hard,
-so the mapped value arrives as a staircase of jumps. A one-pole would
-round every step into an exponential nudge and creep at the target
-forever; the limiter turns each step into a straight half-second ramp that
-lands exactly on the value and stops.
+**Why an estimator, not a filter or a limiter.** Apple quantises
+`majorRadius` to multiples of `Config.touchRadiusQuantumPt` (**≈10.42 pt**
+— 20.8, 31.3, 41.7, 52.1, 62.5, 73.0 are 2…7 quanta), so anything fed the
+quantised value can only chase each step after it lands: it ramps, STALLS
+at the level, ramps again — kinks and plateaus. The quanta carry more than
+that. A level is only a ±half-quantum bracket, but the MOMENT it changes
+is a precise measurement, and two of those give a velocity. Coasting on
+that velocity, bracketed by the bin the silence proves, reconstructs the
+continuous finger the sensor is too coarse to report; the critically
+damped output tracker then gives the axis continuous velocity, so the
+motion starts and stops as an S-curve with no corner at a crossing and no
+overshoot. The estimator LEARNS the speed — the same staircase walked half
+as fast tracks at half the rate, which no fixed ramp can do.
 
 **UNIPOLAR** like `.strike`: rest is the curve's LEFT end (x 0), so a
 binding reads silence with the finger relaxed — unlike the tilts, whose
@@ -191,12 +203,12 @@ The axis follows the **newest sounding touch** (the `.fingerAccel` rule):
 both ingest lanes feed one registry — `LinkIngest.onTouchRadius` for the
 wire and the local pump for the Mac pads/auditions — and a release falls
 back to the surviving touch. A 30 Hz tick runs while the dimension is
-bound, because the limiter needs time steps between change-gated wire
+bound, because the estimator needs time steps between change-gated wire
 frames (and after the last finger lifts). Nothing is bound = nothing is
 tracked. Guard: `TouchSizeTests`.
 
 The iPad shows it on the **per-touch indicator ring**: the ring is sized
-by the raw radius with the points printed beside it, and the rate-limited
+by the raw radius with the points printed beside it, and the estimated
 0…1 value is drawn as an arc just outside the ring — from its own
 display-only `TouchSizeTracker`, no extra wire traffic (see
 [Fret Pad](fret-pad.md)).

@@ -117,7 +117,7 @@ public final class ControlAxisEvaluator {
     // MARK: - Bindings
 
     /// Re-snapshot the per-axis bindings and re-arm the three auxiliary
-    /// timers (blend weight, finger decay, touch-size ramp). Call on every
+    /// timers (blend weight, finger decay, touch-size estimate). Call on every
     /// mapping edit.
     public func setMapping(_ mapping: DimensionMapping) {
         var snapshot: [[(target: MapTarget, binding: DimensionBinding)]] =
@@ -364,9 +364,9 @@ public final class ControlAxisEvaluator {
         }
     }
 
-    /// Rate-limit the newest sounding touch's fingertip radius and drive
-    /// the axis on change. No touch down = target 0, so the tick alone
-    /// ramps the axis back to rest.
+    /// Estimate the finger behind the newest sounding touch's quantised
+    /// radius and drive the axis on change. No touch down = no finger, so
+    /// the tick alone relaxes the axis back to rest.
     private func sizeEvaluate() {
         fingerLock.lock()
         guard sizeActive else { fingerLock.unlock(); return }

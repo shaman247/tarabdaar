@@ -69,10 +69,42 @@ public enum Config {
     public static let touchSizeLoPt: Double = 31.3
     public static let touchSizeHiPt: Double = 73.0
 
-    /// The `.touchSize` RATE LIMIT: seconds for the axis to traverse its
-    /// whole 0…1 range, in both directions. Apple quantises the radius
-    /// into coarse steps, so the mapped value arrives as a staircase; a
-    /// linear ramp (not a one-pole) turns each step into a constant-slope
-    /// glide that lands exactly on the target instead of creeping at it.
+    /// How long a deliberate flatten takes: seconds for the finger to
+    /// cross the whole `lo…hi` window. **Measured on the instrument** —
+    /// it is the source of `touchSizeDefaultVelPtS`, the speed the
+    /// estimator assumes for a gesture's FIRST level crossing, before two
+    /// crossings have measured the real one.
     public static let touchSizeRampS: TimeInterval = 0.5
+
+    /// The `majorRadius` QUANTUM in points. **Measured on the instrument**:
+    /// Apple reports the radius only at multiples of ≈10.42 pt (20.8, 31.3,
+    /// 41.7, 52.1, 62.5, 73.0 = 2…7 quanta), so a level's true radius lies
+    /// within ±half a quantum of it — the default bin half-width before a
+    /// transition has measured one.
+    public static let touchRadiusQuantumPt: Double = 10.42
+
+    /// The estimator's default finger speed (points/second) for the first
+    /// crossing of a gesture: the whole window in `touchSizeRampS`.
+    public static let touchSizeDefaultVelPtS: Double =
+        (touchSizeHiPt - touchSizeLoPt) / touchSizeRampS
+
+    /// Longest gap between two level crossings that still counts as ONE
+    /// continuous gesture. Beyond it the previous crossing is stale, so
+    /// its velocity is not carried over and a still finger has stopped.
+    public static let touchSizeGestureGapS: TimeInterval = 0.4
+
+    /// Time constant for the velocity estimate to decay to 0 once the
+    /// finger has stopped (pinned against a bin edge, or no crossing
+    /// inside `touchSizeGestureGapS`).
+    public static let touchSizeVelDecayS: TimeInterval = 0.1
+
+    /// Time constant for a stopped estimate to relax to the CENTRE of the
+    /// current level — the best static guess once motion tells us nothing.
+    public static let touchSizeSettleS: TimeInterval = 0.25
+
+    /// The output tracker's ~2 % settle time: a CRITICALLY DAMPED
+    /// second-order spring–damper on the position estimate, so the axis
+    /// has continuous velocity (an S-shaped start and stop, no kink at a
+    /// crossing) rather than the estimator's cornered ramp.
+    public static let touchSizeSmoothS: TimeInterval = 0.08
 }
