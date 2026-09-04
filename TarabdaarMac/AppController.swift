@@ -167,17 +167,14 @@ final class AppController: ObservableObject {
     private static let compositesKey = "tarabdaar.compositeParams.v1"
 
     private static func loadComposites() -> [CompositeParam] {
-        if let data = UserDefaults.standard.data(forKey: compositesKey),
-           let c = try? JSONDecoder().decode([CompositeParam].self, from: data) {
+        if let c = DefaultsStore.load([CompositeParam].self, key: compositesKey) {
             return c
         }
         return CompositeParam.defaults()
     }
 
     private static func saveComposites(_ c: [CompositeParam]) {
-        if let data = try? JSONEncoder().encode(c) {
-            UserDefaults.standard.set(data, forKey: compositesKey)
-        }
+        DefaultsStore.save(c, key: compositesKey)
     }
 
     /// Off-main-readable snapshot of the composite member sets, keyed by
@@ -201,8 +198,7 @@ final class AppController: ObservableObject {
 
     private static func loadParamValues() -> [String: Double] {
         var d: [String: Double] = [:]
-        if let data = UserDefaults.standard.data(forKey: paramValuesKey),
-           let saved = try? JSONDecoder().decode([String: Double].self, from: data) {
+        if let saved = DefaultsStore.load([String: Double].self, key: paramValuesKey) {
             // Only non-rebuild keys the registry still knows; retired keys
             // in a saved profile drop out here.
             for (k, v) in saved where ParamRegistry.spec(k)?.apply != .rebuild {
@@ -219,9 +215,7 @@ final class AppController: ObservableObject {
     }
 
     private static func saveParamValues(_ d: [String: Double]) {
-        if let data = try? JSONEncoder().encode(d) {
-            UserDefaults.standard.set(data, forKey: paramValuesKey)
-        }
+        DefaultsStore.save(d, key: paramValuesKey)
     }
 
     /// THE FX RACK'S EQ CURVES: each insert point's control points, keyed by
@@ -238,24 +232,20 @@ final class AppController: ObservableObject {
     private static let eqCurvesKey = "tarabdaar.fxCurves.v1"
 
     private static func loadEQCurves() -> [String: [EQPoint]] {
-        if let data = UserDefaults.standard.data(forKey: eqCurvesKey),
-           let saved = try? JSONDecoder().decode([String: [EQPoint]].self, from: data) {
+        if let saved = DefaultsStore.load([String: [EQPoint]].self, key: eqCurvesKey) {
             return saved.mapValues(EQCurve.normalize).filter { !$0.value.isEmpty }
         }
         // First run after the graphic EQ: the saved profile's band values
         // become a curve through the band centres (`loadParamValues` drops
         // the retired keys themselves).
-        if let data = UserDefaults.standard.data(forKey: paramValuesKey),
-           let saved = try? JSONDecoder().decode([String: Double].self, from: data) {
+        if let saved = DefaultsStore.load([String: Double].self, key: paramValuesKey) {
             return TarabdaarPreset.legacyEQCurves(in: saved)
         }
         return [:]
     }
 
     private static func saveEQCurves(_ d: [String: [EQPoint]]) {
-        if let data = try? JSONEncoder().encode(d) {
-            UserDefaults.standard.set(data, forKey: eqCurvesKey)
-        }
+        DefaultsStore.save(d, key: eqCurvesKey)
     }
 
     /// One insert point's EQ curve (empty = flat).

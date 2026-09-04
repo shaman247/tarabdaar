@@ -18,11 +18,12 @@ is re-blessed with a before/after render for an A/B by ear.
    with five separate `(scale, tonic)` subscriptions at four debounce times
    (400/250/750/300 ms) plus `pushCurrentState`'s own rate limiter. Change:
    one `Tuning` value (scale + tonic Hz) owned once, one change publisher.
-6. **Knob clamps and neutrals re-declared outside the registry**
-   (`StringVoiceSource.ControlKnob`, `GlideSequencer` clamps that disagree
-   with the registry ranges, 157 literal `bp.v(key, default)` fallbacks) and
-   `ParamUnificationTests` pins a third copy. Change: `ParamSpec.clamp(_:)`
-   and `spec.def` as the single source.
+6. **Knob neutrals re-declared outside the registry**
+   (`StringVoiceSource.ControlKnob` neutrals and clamps, 157 literal
+   `bp.v(key, default)` fallbacks in the SarangiKit builders) and
+   `ParamUnificationTests` pins a third copy. Change: `spec.def` and
+   `ParamSpec.clamp(_:)` as the single source (the glide queue already
+   clamps by the registry).
 7. **Resting values live in three stores selected by apply strategy**
    (`paramValue` / `setParamValue` / `resetParam` each branch three ways).
    Change: one value store; `apply` decides only how a value reaches the
@@ -69,8 +70,6 @@ is re-blessed with a before/after render for an A/B by ear.
 22. **Sample rate** is `Config.sampleRate` 44100 for the graph and a 48000
     literal default in both sources, `BowEngine.init` and the tanpura
     kernel's cost budget. Change: pass `Config.sampleRate` explicitly.
-23. **The UserDefaults-JSON idiom** is repeated 11×. Change:
-    `DefaultsStore.load/save`.
 24. **Minor:** `ParametersView.row` hand-rolls `ParamSliderRow`'s shape; 138
     inline `min(max())` clamps; the fret-line stroke loop in both pad
     canvases; `ParametersView`/`FXView` compose FX keys by string prefix.
@@ -89,9 +88,8 @@ is re-blessed with a before/after render for an A/B by ear.
 31. **Oversized seams:** `AppController.start()` (~300 lines of independent
     wiring); `bow_kernel_poly.c` (the jt/taraf half is separable into
     `bow_jt.c`).
-32. **Leftovers:** `SarangiEditorView.swift` holds only `PresetToolbar`;
-    `Preset` is a one-case `CaseIterable` driving a one-button `ForEach`;
-    `tlpsim` is referenced by nothing and undocumented.
+32. **`tlpsim`** (`Packages/TarabdaarCore/Sources/tlpsim`) is referenced by
+    nothing and undocumented — keep deliberately or delete.
 ## Efficiency — wasted work by thread
 
 35. **`tp_sav_contact`** does two `pow`s per contact point (`pow(em, α+1)`
@@ -104,11 +102,10 @@ is re-blessed with a before/after render for an A/B by ear.
 37. **`applyLiveParams` rebuilds every open-string table** (body filter
     design, 6×6 loops) when only a scalar moved; `TanpuraVoiceSource.
     isAvailable` decodes a 25 KB artifact to test non-nil.
-38. **`TiltCalibrator.tick`** allocates three arrays and does an array `!=`
-    per tick at IMU rate.
-39. **Per-frame heap traffic on both 120 Hz paths**: ingest builds a `Set`, a
-    dictionary and an array per frame; the sender allocates five buffers per
-    frame. Change: pooled scratch per stage.
+39. **Per-frame heap traffic on the 120 Hz sender**: `touches.map` →
+    `encode()` → `pack` → `envelope` → a `MIDIPacketList` allocation, five
+    buffers per frame. Change: pooled scratch per stage (the send runs on
+    more than one queue, so the scratch needs an owner per queue).
 40. **String-dispatched bindings per wire frame** (`ParamRegistry.spec`
     hash, four `==` and a `hasPrefix`, a string `switch`, `knobByKey`,
     `FXPoint.allCases` scan). Change: `ParamSpec` carries a pre-resolved

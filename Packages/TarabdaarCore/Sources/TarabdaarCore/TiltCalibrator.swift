@@ -181,7 +181,7 @@ public final class TiltCalibrator: ObservableObject {
     private var samples: [[[Double]]] = []
     private var dirs: [[Double]?] = [nil, nil, nil]
     private var restMean: [Double]?
-    private var lastSent: [Double]?
+    private var lastSent: SIMD3<Double>?
     private var lastPublish: TimeInterval = 0
     private var lastCloudPublish: TimeInterval = 0
     private var smooth: SIMD3<Double>?
@@ -205,8 +205,7 @@ public final class TiltCalibrator: ObservableObject {
     public init(config: Config, defaults: UserDefaults = .standard) {
         self.config = config
         self.defaults = defaults
-        if let data = defaults.data(forKey: config.key),
-           let cal = try? JSONDecoder().decode(Model.self, from: data),
+        if let cal = DefaultsStore.load(Model.self, key: config.key, from: defaults),
            cal.f0.count == Self.dims, cal.m.count == Self.dims {
             model = cal
             info = "Calibrated"
@@ -232,8 +231,8 @@ public final class TiltCalibrator: ObservableObject {
         let base = smoothPrev ?? raw
         let sm = base + (raw - base) * config.smoothAlpha
         smooth = sm
-        let fs = [sm.x, sm.y, sm.z]
         if let step {
+            let fs = [sm.x, sm.y, sm.z]
             if newFrame || samples[step].isEmpty {
                 samples[step].append(fs)
             } else {
@@ -254,21 +253,21 @@ public final class TiltCalibrator: ObservableObject {
         }
         guard let cal = model else { return }
         let n = Self.dims
-        var out = [Double](repeating: 0, count: n)
+        // the solve, allocation-free: it runs per IMU sample
+        var q = SIMD3<Double>(repeating: 0)
         for k in 0..<n {
             var c = 0.0
-            for i in 0..<n { c += cal.m[k][i] * (fs[i] - cal.f0[i]) }
-            out[k] = c >= 0 ? min(c / cal.hi[k], 1)
-                            : -min(c / cal.lo[k], 1)
+            for i in 0..<n { c += cal.m[k][i] * (sm[i] - cal.f0[i]) }
+            let o = c >= 0 ? min(c / cal.hi[k], 1) : -min(c / cal.lo[k], 1)
+            q[k] = (o * 256).rounded() / 256
         }
-        let q = out.map { ($0 * 256).rounded() / 256 }
         if q != lastSent {
             lastSent = q
-            onAxes?(q[0], q[1], q[2])
+            onAxes?(q.x, q.y, q.z)
         }
         if now - lastPublish > 0.1 {
             lastPublish = now
-            axes = q
+            axes = [q.x, q.y, q.z]
         }
     }
 
@@ -374,9 +373,7 @@ public final class TiltCalibrator: ObservableObject {
     }
 
     private func persist() {
-        if let cal = model, let data = try? JSONEncoder().encode(cal) {
-            defaults.set(data, forKey: config.key)
-        }
+        if let cal = model { DefaultsStore.save(cal, key: config.key, to: defaults) }
     }
 
     // MARK: Verdicts + fit

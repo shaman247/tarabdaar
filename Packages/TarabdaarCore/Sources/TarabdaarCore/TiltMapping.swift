@@ -373,13 +373,11 @@ public struct DimensionMapping: Codable, Equatable {
     private static let storageKey = "tarabdaar_dimensionMapping_v6"
 
     public func save() {
-        guard let data = try? JSONEncoder().encode(self) else { return }
-        UserDefaults.standard.set(data, forKey: Self.storageKey)
+        DefaultsStore.save(self, key: Self.storageKey)
     }
 
     public static func load() -> DimensionMapping {
-        if let data = UserDefaults.standard.data(forKey: storageKey),
-           let mapping = try? JSONDecoder().decode(DimensionMapping.self, from: data) {
+        if let mapping = DefaultsStore.load(DimensionMapping.self, key: storageKey) {
             return mapping.pruned()
         }
         return makeDefault()

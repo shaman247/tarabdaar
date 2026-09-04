@@ -29,15 +29,14 @@ struct PresetToolbar: View {
             Text("Sarangi — String instrument").font(.headline)
             HStack(spacing: 8) {
                 Menu {
-                    ForEach(Preset.allCases, id: \.self) { p in
-                        // The factory default, as a FULL rig: the generated
-                        // bank + untouched bowed_string.json physics (every
-                        // override and resting value cleared) + the default
-                        // composites and tilt bindings.
-                        Button(p.displayName) {
-                            controller.loadFactoryPreset(p)
-                            status = "Loaded \(p.displayName)"
-                        }
+                    // The factory default, as a FULL rig: the generated
+                    // bank + untouched bowed_string.json physics (every
+                    // override and resting value cleared) + the default
+                    // composites and tilt bindings.
+                    let factory = Preset.sarangiPilu
+                    Button(factory.displayName) {
+                        controller.loadFactoryPreset(factory)
+                        status = "Loaded \(factory.displayName)"
                     }
                     if !controller.savedPresetNames.isEmpty {
                         Divider()

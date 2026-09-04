@@ -77,18 +77,14 @@ public final class LinkIngest {
         guard let sink else { return }
 
         // Touches: removals → additions/retriggers → glides.
+        // A hand of touches at most: linear scans, no per-frame hashing.
         let prevTouches = prev?.touches ?? []
-        var newIds = Set<UInt16>()
-        newIds.reserveCapacity(frame.touches.count)
-        for t in frame.touches { newIds.insert(t.id) }
-        for t in prevTouches where !newIds.contains(t.id) {
+        for t in prevTouches where !frame.touches.contains(where: { $0.id == t.id }) {
             sink.touchOff(t.id)
             onTouchGate?(t.id, false)
         }
-        var prevById = [UInt16: TLPTouch](minimumCapacity: prevTouches.count)
-        for t in prevTouches { prevById[t.id] = t }
         for t in frame.touches {
-            if let p = prevById[t.id] {
+            if let p = prevTouches.first(where: { $0.id == t.id }) {
                 if p.onsetSeq != t.onsetSeq {
                     // expr before the onset so the pluck level sees it
                     if t.exprScale != 1.0 || p.exprScale != 1.0 {

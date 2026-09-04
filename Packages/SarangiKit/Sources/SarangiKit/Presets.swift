@@ -9,7 +9,7 @@ import Foundation
 ///
 /// (Strings sit exactly on the scale's JI grid — there is no per-string
 /// detune table; see docs/history/ for the retired fitted table.)
-public enum Preset: String, CaseIterable, Sendable {
+public enum Preset: String, Sendable {
     case sarangiPilu = "sarangi_pilu"
 
     public var ragaId: Int { 3 }

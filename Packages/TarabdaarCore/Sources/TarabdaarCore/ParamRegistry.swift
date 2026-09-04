@@ -224,6 +224,9 @@ public struct ParamSpec: Identifiable {
 
     public var id: String { key }
 
+    /// The value held to the registry's range — the ONE clamp for a knob.
+    public func clamp(_ v: Double) -> Double { min(max(v, lo), hi) }
+
     public init(_ key: String, _ label: String, group: String,
                 _ lo: Double, _ hi: Double, _ def: Double,
                 step: Double? = nil, apply: ParamApply = .rebuild,

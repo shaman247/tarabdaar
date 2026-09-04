@@ -25,8 +25,7 @@ final class SarangiStore: ObservableObject {
 
     init(audio: AudioEngine) {
         self.audio = audio
-        if let data = UserDefaults.standard.data(forKey: Self.persistKey),
-           let s = try? JSONDecoder().decode(InstrumentState.self, from: data) {
+        if let s = DefaultsStore.load(InstrumentState.self, key: Self.persistKey) {
             self.state = s
         } else {
             // Fresh install: the Pilu-scale seed. On launch AppController
@@ -205,8 +204,8 @@ final class SarangiStore: ObservableObject {
 
     private func scheduleSave() {
         saveDebounce.schedule { [weak self] in
-            guard let self, let data = try? JSONEncoder().encode(self.state) else { return }
-            UserDefaults.standard.set(data, forKey: Self.persistKey)
+            guard let self else { return }
+            DefaultsStore.save(self.state, key: Self.persistKey)
         }
     }
 }

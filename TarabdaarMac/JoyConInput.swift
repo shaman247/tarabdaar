@@ -272,8 +272,7 @@ final class JoyConInput: ObservableObject {
     // MARK: Start — wiring the three bearers
 
     func start() {
-        if let data = UserDefaults.standard.data(forKey: Self.calKey),
-           let cal = try? JSONDecoder().decode(StickCal.self, from: data) {
+        if let cal = DefaultsStore.load(StickCal.self, key: Self.calKey) {
             mapper.stickCal = cal
         }
 
@@ -468,9 +467,7 @@ final class JoyConInput: ObservableObject {
             calInfo = "Discarded — \(missing) rim segments unswept; do a full circle"
             NSLog("Tarabdaar: Joy-Con stick calibration discarded (%d empty rim bins)", missing)
         case .accepted(let d):
-            if let data = try? JSONEncoder().encode(d) {
-                UserDefaults.standard.set(data, forKey: Self.calKey)
-            }
+            DefaultsStore.save(d, key: Self.calKey)
             calInfo = ""
             NSLog("Tarabdaar: Joy-Con stick calibrated — rest (%.0f, %.0f), rim %.0f…%.0f",
                   d.cx, d.cy, d.rim.min() ?? 0, d.rim.max() ?? 0)

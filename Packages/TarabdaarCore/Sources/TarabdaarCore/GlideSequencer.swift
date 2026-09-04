@@ -129,13 +129,15 @@ public final class GlideSequencer {
 
     /// One setter for the `ctl_glide_*` family; unknown keys are ignored.
     public func setControl(_ key: String, _ value: Double) {
+        // the registry's range is the one clamp
+        let v = ParamRegistry.spec(key)?.clamp(value) ?? value
         lock.lock()
         switch key {
-        case "ctl_glide_on":      enabled = value >= 0.5
-        case "ctl_glide_rate":    rateStPerS = max(0.1, value)
-        case "ctl_glide_held":    heldMul = min(max(value, 0.01), 1)
-        case "ctl_glide_catchup": catchUpMul = max(1, value)
-        case "ctl_glide_over":    overFrac = min(max(value, 0), 0.3)
+        case "ctl_glide_on":      enabled = v >= 0.5
+        case "ctl_glide_rate":    rateStPerS = v
+        case "ctl_glide_held":    heldMul = v
+        case "ctl_glide_catchup": catchUpMul = v
+        case "ctl_glide_over":    overFrac = v
         default: break
         }
         lock.unlock()
@@ -144,7 +146,7 @@ public final class GlideSequencer {
     /// `ctl_fret_warp` (0…1) — the segment shape.
     public func setWarp(_ amount: Double) {
         lock.lock()
-        warpAmount = min(max(amount, 0), 1)
+        warpAmount = ParamRegistry.spec("ctl_fret_warp")?.clamp(amount) ?? amount
         lock.unlock()
     }
 

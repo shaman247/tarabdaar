@@ -42,8 +42,7 @@ final class StringParamStore: ObservableObject {
         // override-dropping on a value that lands back on the default)
         // stay in agreement. An artifact that ever ships a key wins.
         artifact.merge(StringVoiceSource.liveParamSeeds) { a, _ in a }
-        if let data = UserDefaults.standard.data(forKey: Self.persistKey),
-           let ov = try? JSONDecoder().decode([String: Double].self, from: data) {
+        if let ov = DefaultsStore.load([String: Double].self, key: Self.persistKey) {
             overrides = ov
         }
         values = artifact.merging(overrides) { _, o in o }
@@ -151,8 +150,6 @@ final class StringParamStore: ObservableObject {
     }
 
     private func persist() {
-        if let data = try? JSONEncoder().encode(overrides) {
-            UserDefaults.standard.set(data, forKey: Self.persistKey)
-        }
+        DefaultsStore.save(overrides, key: Self.persistKey)
     }
 }
