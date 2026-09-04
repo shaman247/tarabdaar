@@ -7,9 +7,8 @@ change lands — git holds the story, this page holds only what is still open.
 Items are ordered by value within each section; the **Decisions** are the
 owner's, taken 2026-09-04, and bound the work.
 
-**Decisions.** Migrations: delete all four (single developer, one device
-each; a stale install re-defaults). `ctl_strum_thresh`: becomes 0…1 with
-saved values migrated (÷127) on load. Kernel: hash-changing efficiency work
+**Decisions.** One-shot migrations are deleted, not kept (single developer,
+one device each; a stale install re-defaults). Hash-changing efficiency work
 is re-blessed with a before/after render for an A/B by ear.
 
 ## Altitude — special cases on shared mechanisms
@@ -21,11 +20,6 @@ is re-blessed with a before/after render for an A/B by ear.
    `.live` but has no notion of *where* a live value goes. Change: a routing
    `target` on `ParamSpec` (`.stringVoice`, `.strike`, `.strum`, `.glide`,
    `.fretWarp`) so the apply is a pure switch.
-2. **The bow axes still speak CC numbers** (`cc: 11/1/74/75` in
-   `AudioEngine+StringVoice`, switched back into `mapper.setAxis`), and
-   `ctl_strum_thresh` is 1…127 with ≥126.5 = off, `macExpressionLevel` is a
-   `UInt8` /127, and velocity goes ×127 → clamp → /127 into `TanpuraEngine`.
-   Change: name the four axes, 0…1 everywhere the wire byte is not involved.
 3. **Two tonics on the Mac.** `pitchPad` and `fretPad` are two
    `PitchPadEngine`s each with `tonicMidi`/`tonicCents`, mirrored by Combine,
    with five separate `(scale, tonic)` subscriptions at four debounce times
@@ -113,9 +107,6 @@ is re-blessed with a before/after render for an A/B by ear.
 
 ## Simplification — dead paths and seams
 
-25. **Migrations (decided: delete):** `DimensionMapping.load` v5→v6,
-    `TiltCalibrator` `legacyKey01`, `TarabdaarPreset.decode`'s `.sarangi`
-    fallback, `FretArrangementStore`'s 4-slot drone migration.
 26. **Dead two-component pitch-correction path** (`pitchKnotsRel/CentsRel/
     KnotsAbs/CentsAbs/CentsPress` in `BowConfig`, the branch in
     `BowControls`): the shipped artifact carries only `pitch_knots_oct`.

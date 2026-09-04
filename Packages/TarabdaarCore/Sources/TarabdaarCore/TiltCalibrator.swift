@@ -48,9 +48,6 @@ public final class TiltCalibrator: ObservableObject {
         public var streamHint: String
         /// UserDefaults key of the persisted model.
         public var key: String
-        /// A 0…1-era record to migrate exactly (f0′ = 2·f0−1, extents
-        /// ×2 — the solve matrix is feature-scale-free). nil = none.
-        public var legacyKey01: String?
         /// Per-frame EMA constant for the feature vector.
         public var smoothAlpha: Double
         /// ORTHOGONAL MODE (the wrist): TWO sweeps, not three. Sweep 1's
@@ -71,8 +68,7 @@ public final class TiltCalibrator: ObservableObject {
 
         public init(name: String, stepNames: [String], sweepNames: [String],
                     featureNames: [String], markerName: String,
-                    streamHint: String, key: String,
-                    legacyKey01: String? = nil, smoothAlpha: Double,
+                    streamHint: String, key: String, smoothAlpha: Double,
                     orthogonal: Bool = false) {
             self.name = name
             self.stepNames = stepNames
@@ -81,7 +77,6 @@ public final class TiltCalibrator: ObservableObject {
             self.markerName = markerName
             self.streamHint = streamHint
             self.key = key
-            self.legacyKey01 = legacyKey01
             self.smoothAlpha = smoothAlpha
             self.orthogonal = orthogonal
         }
@@ -104,7 +99,6 @@ public final class TiltCalibrator: ObservableObject {
             markerName: "Arm now",
             streamHint: "the iPad tilt stream isn't flowing",
             key: "tarabdaar.armCal.v2",
-            legacyKey01: "tarabdaar.armCal.v1",
             smoothAlpha: 0.25)
 
         /// The Joy-Con WRIST calibration : feature = the
@@ -211,18 +205,6 @@ public final class TiltCalibrator: ObservableObject {
     public init(config: Config, defaults: UserDefaults = .standard) {
         self.config = config
         self.defaults = defaults
-        // One-time 0…1 → −1…+1 migration (exact affine).
-        if let legacy = config.legacyKey01,
-           defaults.data(forKey: config.key) == nil,
-           let old = defaults.data(forKey: legacy),
-           var cal = try? JSONDecoder().decode(Model.self, from: old) {
-            cal.f0 = cal.f0.map { $0 * 2 - 1 }
-            cal.lo = cal.lo.map { $0 * 2 }
-            cal.hi = cal.hi.map { $0 * 2 }
-            if let data = try? JSONEncoder().encode(cal) {
-                defaults.set(data, forKey: config.key)
-            }
-        }
         if let data = defaults.data(forKey: config.key),
            let cal = try? JSONDecoder().decode(Model.self, from: data),
            cal.f0.count == Self.dims, cal.m.count == Self.dims {

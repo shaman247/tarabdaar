@@ -381,7 +381,7 @@ the stick swells the ringing chord without touching the melody.
 **`ctl_strum_thresh`** adds an accel trigger: the iPad's strike envelope
 crossing the threshold strikes the chord exactly as L does and releases
 below the SAME threshold, with a 100 ms retrigger cooldown against jitter
-(default 127 = off; L ignores the cooldown). The configured set defaults to
+(default 1 = off; L ignores the cooldown). The configured set defaults to
 low Sa · low Pa, remappable since members are scale-degree references. The
 strum is exempt from the glide queue (`TLPTouch.glideExempt`).
 

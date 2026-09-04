@@ -225,7 +225,7 @@ its range widens the slider rather than being clamped.
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
 | `ctl_strum_expr` | strum expression | 0 … 1 | 1 | global | live | Loudness of the controller strum's held chord: a per-note expression scale on the chord's notes only. On the String bow voice it multiplies the bow's expression axis for those strings LIVE — a bound stick swells the ringing chord without touching the melody; on the Tanpura/Sitar mains it scales the pluck level at the onset (a sounded pluck can't swell). 1 = the chord follows the global expression untouched; 0 = the bow lifts to silence. Bound to the Joy-Con stick Y by default (rest = 0.5). |
-| `ctl_strum_thresh` | strum accel trigger | 1 … 127 | 127 | global | live | Accelerometer level that TRIGGERS the strum chord — the iPad's strike envelope (the same measurement the Strike dimension reads), on a 0–127 scale. Crossing the threshold strikes the chord exactly as an L press does; the chord releases when the envelope falls back below ~60% of the threshold (unless L is holding it). 127 = off (the default — no accel strum). Lower values let a gentler shake strum. |
+| `ctl_strum_thresh` | strum accel trigger | 0 … 1 | 1 | global | live | Accelerometer level that TRIGGERS the strum chord — the iPad's strike envelope (the same measurement the Strike dimension reads), 0…1. Crossing the threshold strikes the chord exactly as an L press does; the chord releases when the envelope falls back below ~60% of the threshold (unless L is holding it). 1 = off (the default — no accel strum). Lower values let a gentler shake strum. |
 
 ### Liveness
 

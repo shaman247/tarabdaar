@@ -86,27 +86,10 @@ public struct TarabdaarPreset: Codable {
         return try enc.encode(self)
     }
 
-    /// Decode a preset file. Falls back to the LEGACY `.sarangi` format (a
-    /// bare `InstrumentState`), so files saved before this existed still
-    /// open — they simply carry only the instrument section.
+    /// Decode a preset file. A file with no section decodes fine and
+    /// reports `isEmpty`.
     public static func decode(_ data: Data) throws -> TarabdaarPreset {
-        let dec = JSONDecoder()
-        if let p = try? dec.decode(TarabdaarPreset.self, from: data),
-           p.version > 0, p.hasAnySection {
-            return p
-        }
-        // legacy: the whole file IS the instrument document
-        let state = try dec.decode(InstrumentState.self, from: data)
-        var p = TarabdaarPreset()
-        p.name = "Imported instrument"
-        p.instrument = state
-        return p
-    }
-
-    private var hasAnySection: Bool {
-        instrument != nil || stringOverrides != nil || paramValues != nil
-            || fxCurves != nil || composites != nil || tiltMapping != nil
-            || mainInstrument != nil || droneVoice != nil
+        try JSONDecoder().decode(TarabdaarPreset.self, from: data)
     }
 
     // MARK: - The graphic-EQ bands of older files

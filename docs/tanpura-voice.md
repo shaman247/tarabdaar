@@ -43,7 +43,7 @@ drone-ratio wire range; a 12-degree scale ≈ 49 slots). The per-note
 `pitchCents` wrap correction (the static jawari wrap pulls pitch sharp; the
 builder pre-compensates) is **interpolated in log-pitch space**
 (`TanpuraEngine.centsCorrection`; the +5…+9 ¢ curve is smooth, error
-sub-cent, ends clamped). `pluck(slot:velocity:scale:)` applies role pluck ×
+sub-cent, ends clamped). `pluck(slot:velocity01:scale:)` applies role pluck ×
 high-note softening × the velocity curve (0.3 floor) × a caller scale;
 `nearestSlot(toHz:toleranceCents:)` is the log-space lookup the drone
 buttons and the main-instrument routing use.

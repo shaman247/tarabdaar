@@ -92,7 +92,7 @@ final class StrumControllerTests: XCTestCase {
     func testAccelTrigger() {
         var clock: TimeInterval = 100
         let (c, _) = makeController(now: { clock })
-        c.setAccelThreshold(64)                       // ≈ 0.504
+        c.setAccelThreshold(0.504)
         c.accelSense(0.2)
         XCTAssertTrue(c.heldTouchIds.isEmpty)
         c.accelSense(0.7)
@@ -109,7 +109,7 @@ final class StrumControllerTests: XCTestCase {
 
         // L still holding keeps the chord alive when the trigger drops
         let (held, _) = makeController()
-        held.setAccelThreshold(64)
+        held.setAccelThreshold(0.504)
         held.strum(pressed: true)
         held.accelSense(0.9)
         held.accelSense(0.1)
@@ -118,7 +118,7 @@ final class StrumControllerTests: XCTestCase {
         XCTAssertTrue(held.heldTouchIds.isEmpty)
 
         let (off, _) = makeController()
-        off.setAccelThreshold(127)
+        off.setAccelThreshold(1)
         off.accelSense(1.0)
         XCTAssertTrue(off.heldTouchIds.isEmpty, "127 must disarm the trigger")
     }

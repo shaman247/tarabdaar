@@ -30,7 +30,7 @@
 		C100000E /* CoreAudioDevices.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000E /* CoreAudioDevices.swift */; };
 		C100000F /* Views/MIDISettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200000F /* Views/MIDISettingsView.swift */; };
 		C1000010 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C2000010 /* Assets.xcassets */; };
-		C1000012 /* Views/SarangiEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000012 /* Views/SarangiEditorView.swift */; };
+		C1000012 /* Views/PresetToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000012 /* Views/PresetToolbar.swift */; };
 		C100001C /* Default.json in Resources */ = {isa = PBXBuildFile; fileRef = C200001C /* Default.json */; };
 		C1000056 /* Views/FretPadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000056 /* Views/FretPadView.swift */; };
 		C1000057 /* StringParamStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000057 /* StringParamStore.swift */; };
@@ -72,7 +72,7 @@
 		C200000E /* CoreAudioDevices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreAudioDevices.swift; sourceTree = "<group>"; };
 		C200000F /* Views/MIDISettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MIDISettingsView.swift; sourceTree = "<group>"; };
 		C2000010 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		C2000012 /* Views/SarangiEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SarangiEditorView.swift; sourceTree = "<group>"; };
+		C2000012 /* Views/PresetToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/PresetToolbar.swift; sourceTree = "<group>"; };
 		C200001C /* Default.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Default.json; sourceTree = "<group>"; };
 		C2000020 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		C2000021 /* TarabdaarMac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TarabdaarMac.entitlements; sourceTree = "<group>"; };
@@ -167,7 +167,7 @@
 				C200000E /* CoreAudioDevices.swift */,
 				C200000F /* Views/MIDISettingsView.swift */,
 				C2000010 /* Assets.xcassets */,
-				C2000012 /* Views/SarangiEditorView.swift */,
+				C2000012 /* Views/PresetToolbar.swift */,
 				C2000051 /* SarangiStore.swift */,
 				C2000057 /* StringParamStore.swift */,
 				C2000056 /* Views/FretPadView.swift */,
@@ -323,7 +323,7 @@
 				C1000060 /* Views/BodyView.swift in Sources */,
 				C100000E /* CoreAudioDevices.swift in Sources */,
 				C100000F /* Views/MIDISettingsView.swift in Sources */,
-				C1000012 /* Views/SarangiEditorView.swift in Sources */,
+				C1000012 /* Views/PresetToolbar.swift in Sources */,
 				C1000051 /* SarangiStore.swift in Sources */,
 				C1000056 /* Views/FretPadView.swift in Sources */,
 				C1000057 /* StringParamStore.swift in Sources */,

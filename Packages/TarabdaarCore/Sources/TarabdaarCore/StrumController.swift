@@ -85,7 +85,7 @@ public final class StrumController {
     private var lHeld = false
     private var accelHeld = false
     private var expr = 1.0                        // ctl_strum_expr
-    /// `ctl_strum_thresh` in the 0…1 strike domain; ≥127 = off (.infinity).
+    /// `ctl_strum_thresh` in the 0…1 strike domain; 1 = off (.infinity).
     private var thresh01 = Double.infinity
     /// Accel-trigger cooldown deadline: 100 ms after each accel release so
     /// a jittery envelope can't re-strike. Main-queue only.
@@ -145,9 +145,9 @@ public final class StrumController {
         }
     }
 
-    /// `ctl_strum_thresh` (0–127; ≥127 = off) in the strike domain.
-    public func setAccelThreshold(_ ccValue: Double) {
-        thresh01 = ccValue >= 126.5 ? .infinity : ccValue / 127.0
+    /// `ctl_strum_thresh` (0…1; 1 = off) in the strike domain.
+    public func setAccelThreshold(_ value01: Double) {
+        thresh01 = value01 >= 0.995 ? .infinity : value01
     }
 
     /// The accel trigger's edge detector (link receive queue): rising

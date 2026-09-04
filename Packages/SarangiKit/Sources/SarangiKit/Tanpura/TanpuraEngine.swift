@@ -133,15 +133,15 @@ public final class TanpuraEngine: @unchecked Sendable {
     /// scaled by `touch`) so each pluck is a SEPARATE STRING; 0 = rides
     /// the ring. `drive` (1 = fitted) plucks `drive`-times harder with
     /// output gain 1/drive — the mellow↔buzzy axis at constant level.
-    public func pluck(slot: Int, velocity: Int, scale: Double = 1.0,
+    public func pluck(slot: Int, velocity01: Double, scale: Double = 1.0,
                       bendRatio: Double = 1.0, touch: Double = 0.0,
                       drive: Double = 1.0) {
         guard slot >= 0, slot < slotFrequencies.count else { return }
         let f0 = slotFrequencies[slot]
-        let v = max(1, min(127, velocity))
+        let v = max(0.0, min(1.0, velocity01))
         let basePluck = TanpuraTables.role(for: f0, in: p).pluck
         let hi = min(1.0, pow(p.pluckRefF / f0, p.pluckExp))
-        let amp = basePluck * hi * (0.3 + 0.7 * Double(v) / 127.0)
+        let amp = basePluck * hi * (0.3 + 0.7 * v)
             * max(0.0, scale)
         guard amp > 0 else { return }
         scopeRatio.withLock { if slot < $0.count { $0[slot] = bendRatio } }

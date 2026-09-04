@@ -37,7 +37,7 @@ extension FretSegment: Codable {
 /// below v4 carry pitch-derived positions instead of the free per-segment
 /// `x`, so they are **rejected** on load (the caller rebuilds the default).
 /// `ghostExtentOctaves` and `droneRatios` are optional and default when
-/// absent; a 4-slot `droneRatios` is migrated to the 3-slot layout on read.
+/// absent.
 struct FretArrangementDocument: Codable {
     var version: Int = 4
     var segments: [FretSegment]
@@ -164,25 +164,10 @@ public enum FretArrangementStore {
         // Pre-v4 layouts had no per-segment x (positions were pitch-derived);
         // treat them as absent so the caller rebuilds the new default.
         guard doc.version >= 4 else { throw CocoaError(.coderReadCorrupt) }
-        var drones = doc.droneRatios ?? FretArrangement.defaultDroneRatios
-        // 4-slot-era migrations : both historical defaults —
-        // the first revision's Sa·Ma·Pa·Sa′ and the octave-lowered
-        // ,Sa·,Ma·,Pa·Sa — become the current 3-slot default; a
-        // hand-picked 4-slot set keeps its choices minus the second
-        // (,Ma-era) slot. Any other count falls back in the initializer.
-        if drones.count == 4 {
-            let oldDefaults = [[1.0, 4.0 / 3.0, 3.0 / 2.0, 2.0],
-                               [0.5, 2.0 / 3.0, 3.0 / 4.0, 1.0]]
-            if oldDefaults.contains(where: {
-                zip(drones, $0).allSatisfy { abs($0 - $1) < 1e-6 } }) {
-                drones = FretArrangement.defaultDroneRatios
-            } else {
-                drones.remove(at: 1)
-            }
-        }
+        // any drone count but the current one falls back in the initializer
         return FretArrangement(
             segments: doc.segments,
             ghostExtentOctaves: doc.ghostExtentOctaves ?? 0.5,
-            droneRatios: drones)
+            droneRatios: doc.droneRatios ?? FretArrangement.defaultDroneRatios)
     }
 }

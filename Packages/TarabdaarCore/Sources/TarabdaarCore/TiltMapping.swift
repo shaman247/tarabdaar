@@ -369,10 +369,8 @@ public struct DimensionMapping: Codable, Equatable {
     // MARK: - Persistence
 
     /// v6: arbitrary targets (composites AND single parameters) with
-    /// endpoints in native units. v5 stored only the 8 composite slots
-    /// with 0…127 endpoints — migrated on first load.
+    /// endpoints in native units.
     private static let storageKey = "tarabdaar_dimensionMapping_v6"
-    private static let legacyStorageKey = "tarabdaar_dimensionMapping_v5"
 
     public func save() {
         guard let data = try? JSONEncoder().encode(self) else { return }
@@ -383,25 +381,6 @@ public struct DimensionMapping: Codable, Equatable {
         if let data = UserDefaults.standard.data(forKey: storageKey),
            let mapping = try? JSONDecoder().decode(DimensionMapping.self, from: data) {
             return mapping.pruned()
-        }
-        // Migrate the v5 document: same composite slots, endpoints scaled
-        // from the old 0…127 transport units into the composite's 0…1.
-        if let data = UserDefaults.standard.data(forKey: legacyStorageKey),
-           var mapping = try? JSONDecoder().decode(DimensionMapping.self, from: data) {
-            for (key, var pm) in mapping.mappings {
-                guard let target = MapTarget.from(storageKey: key),
-                      target.compositeSlot != nil else { continue }
-                for i in pm.bindings.indices {
-                    for j in pm.bindings[i].controlPoints.indices {
-                        pm.bindings[i].controlPoints[j].y /= 127.0
-                    }
-                }
-                pm.defaultValue = target.midpointValue
-                mapping.mappings[key] = pm
-            }
-            let migrated = mapping.pruned()
-            migrated.save()
-            return migrated
         }
         return makeDefault()
     }

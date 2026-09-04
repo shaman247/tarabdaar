@@ -205,10 +205,16 @@ final class AppController: ObservableObject {
             // Only non-rebuild keys the registry still knows; retired keys
             // in a saved profile drop out here.
             for (k, v) in saved where ParamRegistry.spec(k)?.apply != .rebuild {
-                if ParamRegistry.spec(k) != nil { d[k] = v }
+                if ParamRegistry.spec(k) != nil { d[k] = migrated(k, v) }
             }
         }
         return d
+    }
+
+    /// `ctl_strum_thresh` was 1…127 (≥127 = off) before it became 0…1:
+    /// a stored value above 1 is the old scale.
+    private static func migrated(_ key: String, _ v: Double) -> Double {
+        key == "ctl_strum_thresh" && v > 1.0 ? min(1.0, v / 127.0) : v
     }
 
     private static func saveParamValues(_ d: [String: Double]) {
@@ -406,7 +412,7 @@ final class AppController: ObservableObject {
             return nil
         }
         // Control-layer keys: the strum chord's expression (pushed live to
-        // the held notes) and the accel-trigger threshold (0–127; ≥127 = off).
+        // the held notes) and the accel-trigger threshold (0…1; 1 = off).
         if key == "ctl_strum_expr" {
             strumming.setExpression(value)
             return nil
@@ -581,8 +587,6 @@ final class AppController: ObservableObject {
         // Arm the String voice. The Mac pads hold a flat CC11 per note; 32 ≈
         // the fitted expression median (the surfaces span ~16 dB around it).
         audio.setSarangiModelVoiceEnabled(true)
-        pitchPad.macExpressionLevel = 32
-        fretPad.macExpressionLevel = 32
 
         // The tanpura voice is always armed beside the String voice; its JI
         // slot grid builds off-main in `start()`. Restore the routing choices.
@@ -598,6 +602,35 @@ final class AppController: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     func start() {
+        wireControlSinks()
+        midi.start()
+        midiIn.start()
+        pitchPad.start()
+        fretPad.start()
+        startScaleSync()
+        // Snapshots for the off-main deliveries, then the baseline values.
+        rebuildCompositeSnapshot()
+        axes.setMapping(tiltMapping)
+        refreshHybridHeadroom()      // build depths behind the hybrid knobs
+        applyRestingParams()         // resting values for every live param
+        applyEQCurves()              // the FX rack's EQ curves
+        // A physics edit can move a hybrid's headroom — keep the cache in step
+        // (`@Published` fires before the property updates: use the sink value).
+        stringParams.$values
+            .sink { [weak self] v in self?.refreshHybridHeadroom(from: v) }
+            .store(in: &cancellables)
+        wireIngest()
+        wireLink()
+        wireJoyCon()
+        // Voice/taraf volume readout → iPad (JOYCON_STATE vol bytes).
+        startVolMeterRelay()
+        startEngineWatchdog()
+        wireTuningFollowers()
+    }
+
+    /// The control-axis evaluator's sinks and the JOYCON_STATE mirror's
+    /// field readers — wired before anything can drive them.
+    private func wireControlSinks() {
         // The control-axis evaluator's sinks, before anything can drive it
         // (`setMapping` below arms its timers).
         axes.onApply = { [weak self] apps in self?.applyControlBatch(apps) }
@@ -616,22 +649,11 @@ final class AppController: ObservableObject {
         joyConDisplay.octaveShift = { [weak self] in
             self?.pitchPad.octaveShift ?? 0
         }
-        midi.start()
-        midiIn.start()
-        pitchPad.start()
-        fretPad.start()
-        startScaleSync()
-        // Snapshots for the off-main deliveries, then the baseline values.
-        rebuildCompositeSnapshot()
-        axes.setMapping(tiltMapping)
-        refreshHybridHeadroom()      // build depths behind the hybrid knobs
-        applyRestingParams()         // resting values for every live param
-        applyEQCurves()              // the FX rack's EQ curves
-        // A physics edit can move a hybrid's headroom — keep the cache in step
-        // (`@Published` fires before the property updates: use the sink value).
-        stringParams.$values
-            .sink { [weak self] v in self?.refreshHybridHeadroom(from: v) }
-            .store(in: &cancellables)
+    }
+
+    /// The wire's inbound frames: raw tilt, accelerometer, strike, touch
+    /// gates / pitches / radii and chord edges, on both lanes.
+    private func wireIngest() {
         // The iPad's raw tilt, off the TarabLink state frame (change-gated
         // in LinkIngest).
         ingest.onTiltAxis = { [weak self] axis, value in
@@ -685,6 +707,10 @@ final class AppController: ObservableObject {
         }
         ingest.onChordSelect = chordEdge
         pitchPad.localIngest?.onChordSelect = chordEdge
+    }
+
+    /// TarabLink: SysEx transport in and out, state frames, events, status.
+    private func wireLink() {
         // TarabLink: inbound TLP SysEx from MIDIInput's reassembler; outbound via
         // the wired-first SysEx send ("iPad" name match; BLE bypasses the
         // filter). Events fall back to send-to-all; state frames just drop.
@@ -730,6 +756,10 @@ final class AppController: ObservableObject {
             .sink { [weak self] _ in self?.link.kick() }
             .store(in: &cancellables)
         link.start()
+    }
+
+    /// The Joy-Con's axes, buttons and connection edge.
+    private func wireJoyCon() {
         // Joy-Con. Control axes: arm 0–2 (the iPad's tilts), stick 3/4, wrist
         // + acceleration (`wristAxisIndices` / `jcAccelAxisIndex`).
         joyCon.onArmAxes = { [weak self] t1, t2, t3 in
@@ -805,8 +835,11 @@ final class AppController: ObservableObject {
             .sink { [weak self] _ in self?.sendJoyConDisplay(force: true) }
             .store(in: &cancellables)
         joyCon.start()
-        // Voice/taraf volume readout → iPad (JOYCON_STATE vol bytes).
-        startVolMeterRelay()
+    }
+
+    /// The 5 s engine watchdog: jt overload, the quiescence-gate probe and
+    /// render overruns, logged when their counters grow.
+    private func startEngineWatchdog() {
         // jt overload watchdog: the async jawari web drops blocks / flat-fills
         // past its realtime budget (audible clicking). Log when counters GROW.
         jtStatsTimer = Timer.scheduledTimer(withTimeInterval: 5.0,
@@ -851,6 +884,12 @@ final class AppController: ObservableObject {
                 self.lastRenderOverruns = r.overruns
             }
         }
+    }
+
+    /// Everything that follows the ONE scale/tonic: the Fret Pad's tonic
+    /// lock, the arrangement autosave, the drone-button display ratios, the
+    /// tarab document and the tanpura grid.
+    private func wireTuningFollowers() {
         // Keep the Fret Pad engine's tonic locked to the scale engine's.
         pitchPad.$tonicMidi
             .sink { [weak self] in self?.fretPad.tonicMidi = $0 }
@@ -1256,7 +1295,7 @@ final class AppController: ObservableObject {
             paramValues = pv.filter {
                 guard let spec = ParamRegistry.spec($0.key) else { return false }
                 return spec.apply != .rebuild
-            }
+            }.reduce(into: [:]) { $0[$1.key] = Self.migrated($1.key, $1.value) }
             applyRestingParams()
         }
         if let c = p.fxCurves {

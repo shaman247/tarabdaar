@@ -54,18 +54,6 @@ extension AudioEngine {
     }
 
 
-    /// Drive one control axis from the UI (0..1): CC11 expr · CC1 press · CC74 pos · CC2/75 tilt.
-    public func setSarangiModelVoiceAxis(cc: UInt8, value01: Double) {
-        guard let m = stringVoiceSource?.mapper else { return }
-        switch cc {
-        case 11: m.setAxis(expr: value01)
-        case 1: m.setAxis(press: value01)
-        case 74: m.setAxis(pos: value01)
-        case 2, 75: m.setAxis(tilt: value01)
-        default: break
-        }
-    }
-
     /// Player vibrato depth 0..1 (the vibrato axis).
     public func setStringVibrato(_ v01: Double) {
         stringVoiceSource?.mapper.setVibrato(v01)
@@ -89,11 +77,11 @@ extension AudioEngine {
     @discardableResult
     public func setStringControlParam(_ key: String, _ value: Double) -> Bool {
         switch key {
-        // the bow-control axes: the mapper, not the engine
-        case "bow_expr":      setSarangiModelVoiceAxis(cc: 11, value01: value)
-        case "bow_press":     setSarangiModelVoiceAxis(cc: 1, value01: value)
-        case "bow_pos":       setSarangiModelVoiceAxis(cc: 74, value01: value)
-        case "bow_tilt":      setSarangiModelVoiceAxis(cc: 75, value01: value)
+        // the bow-control axes (0…1): the mapper, not the engine
+        case "bow_expr":      stringVoiceSource?.mapper.setAxis(expr: value)
+        case "bow_press":     stringVoiceSource?.mapper.setAxis(press: value)
+        case "bow_pos":       stringVoiceSource?.mapper.setAxis(pos: value)
+        case "bow_tilt":      stringVoiceSource?.mapper.setAxis(tilt: value)
         default:
             // the knob plumbing table (clamp + cache + push, and re-applied
             // across a rebuild); it owns the key even with no voice armed yet

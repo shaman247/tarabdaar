@@ -570,8 +570,8 @@ public enum ParamRegistry {
                       0.0, 1.0, 1.0, apply: .live,
                       help: "Loudness of the controller strum's held chord: a per-note expression scale on the chord's notes only. On the String bow voice it multiplies the bow's expression axis for those strings LIVE — a bound stick swells the ringing chord without touching the melody; on the Tanpura/Sitar mains it scales the pluck level at the onset (a sounded pluck can't swell). 1 = the chord follows the global expression untouched; 0 = the bow lifts to silence. Bound to the Joy-Con stick Y by default (rest = 0.5)."),
             ParamSpec("ctl_strum_thresh", "strum accel trigger", group: "Controller",
-                      1.0, 127.0, 127.0, apply: .live,
-                      help: "Accelerometer level that TRIGGERS the strum chord — the iPad's strike envelope (the same measurement the Strike dimension reads), on a 0–127 scale. Crossing the threshold strikes the chord exactly as an L press does; the chord releases when the envelope falls back below ~60% of the threshold (unless L is holding it). 127 = off (the default — no accel strum). Lower values let a gentler shake strum."),
+                      0.0, 1.0, 1.0, apply: .live,
+                      help: "Accelerometer level that TRIGGERS the strum chord — the iPad's strike envelope (the same measurement the Strike dimension reads), 0…1. Crossing the threshold strikes the chord exactly as an L press does; the chord releases when the envelope falls back below ~60% of the threshold (unless L is holding it). 1 = off (the default — no accel strum). Lower values let a gentler shake strum."),
         ]),
 
         // SUSTAIN LIVENESS: the post-onset settle, the slow sustain

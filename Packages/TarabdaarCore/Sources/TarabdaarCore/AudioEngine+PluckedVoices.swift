@@ -38,8 +38,7 @@ extension AudioEngine {
         guard let engine = src?.currentEngine(),
               let slot = engine.nearestSlot(toHz: hz, toleranceCents: 60)
         else { return }
-        let vel = Int((velocity * 127.0).rounded())
-        engine.pluck(slot: slot, velocity: min(max(vel, 0), 127),
+        engine.pluck(slot: slot, velocity01: velocity,
                      scale: level * exprScale,
                      bendRatio: hz / engine.slotFrequencies[slot],
                      touch: fingerTouch, drive: drive)
@@ -356,7 +355,7 @@ extension AudioEngine {
         guard let hz, let engine = src?.currentEngine(),
               let slot = engine.nearestSlot(toHz: hz, toleranceCents: 50)
         else { return }
-        engine.pluck(slot: slot, velocity: 100, scale: level,
+        engine.pluck(slot: slot, velocity01: 100.0 / 127.0, scale: level,
                      touch: touch, drive: drive)
     }
 

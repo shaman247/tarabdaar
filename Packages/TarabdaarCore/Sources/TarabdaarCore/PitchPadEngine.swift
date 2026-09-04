@@ -420,12 +420,12 @@ public final class PitchPadEngine: ObservableObject {
         self.localPump = nil
     }
 
-    /// The performance-expression level the Mac pads hold (0–127, applied
+    /// The performance-expression level the Mac pads hold (0…1, applied
     /// in `start()`) — the pads have no tilt source, so the axis is pinned.
-    public var macExpressionLevel: UInt8 = 100
+    public var macExpression01: Double = 32.0 / 127.0
 
     public func start() {
-        audio?.setPerformanceExpression(Double(macExpressionLevel) / 127.0)
+        audio?.setPerformanceExpression(macExpression01)
     }
 
     // MARK: - Touch API
