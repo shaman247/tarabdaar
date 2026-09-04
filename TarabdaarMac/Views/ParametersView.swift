@@ -1,144 +1,297 @@
 import TarabdaarCore
 import SarangiKit
 import SwiftUI
-// NOTE: deliberately does NOT import SarangiKit — its dormant coupled-network
-// `ParamSpec` would collide with the registry's.
 
-/// The Parameters tab (unification) — **the** parameter surface.
+/// The Parameters tab — **the** parameter surface.
 /// Every parameter of the String instrument lives here in one list: the
-/// bow-stroke axes, the `bowed_string.json` physics scalars (formerly a
-/// separate Sarangi tab), and the live taraf/tone axes. Each row shows the
-/// parameter's value in native units and a mapping menu that binds it to a
-/// tilt or drops it into a composite — no parameter is special.
+/// bow-stroke axes, the `bowed_string.json` physics scalars, the live
+/// taraf/tone axes and the FX rack. Each row shows the parameter's value
+/// in native units and a mapping button that binds it to a tilt or drops
+/// it into a composite — no parameter is special.
 ///
 /// Apply semantics come from `ParamRegistry`, and each row's description
 /// states the SHARED scope/timing vocabulary (`ParamScope`/`ParamTiming`
-/// — the same strings paramdoc renders into docs/parameters.md): live
-/// (instant everywhere), in-place (running kernel, ~0.2 s debounce),
-/// rebuild (crossfaded), hybrid (instant up to the built depth). The
-/// unification is what collapsed the old duplicate pairs — "web buzz" vs
-/// "jawari buzz", two "vibrato depth" knobs — into one row each.
+/// — the same strings paramdoc renders into docs/parameters.md).
+///
+/// Built for ~200 rows. The list is a `LazyVStack` with pinned group
+/// headers, so only the rows on screen exist; each row is an `Equatable`
+/// view fed a value snapshot (`ParamRowModel`) instead of the controller,
+/// so a slider tick or a binding edit re-renders the one row it touched;
+/// and the mapping menu is a popover built on demand rather than a
+/// resident `Menu` per row (AppKit menus are the most expensive widget on
+/// the tab, and 200 of them made the old tab take seconds to appear).
 struct ParametersView: View {
     @ObservedObject var controller: AppController
+    /// Observed so `.rebuild` rows (whose values live in the physics
+    /// store) redraw when the store changes.
     @ObservedObject var stringStore: StringParamStore
-    @ObservedObject var sarangiStore: SarangiStore
 
     init(controller: AppController) {
         self.controller = controller
         self.stringStore = controller.stringParams
-        self.sarangiStore = controller.sarangi
     }
 
     @State private var search = ""
-    /// Every group starts open — the tab is a reference surface, and hunting
-    /// for a knob behind a collapsed header costs more than the scroll does.
-    @State private var expanded: Set<String> = Set(ParamRegistry.groups.map(\.name))
-    /// Insert sections (the FX rack's four points) start CLOSED: the 16
-    /// knobs of an untouched insert are 16 zeros, and 40 of the rack's 64
-    /// EQ bands are inert while the point's EQ is off. The header row
-    /// carries the state worth seeing at a glance.
+    @State private var filter: RowFilter = .all
+    /// Groups start OPEN — the tab is a reference surface, and with pinned
+    /// headers and lazy rows a long list costs only the scroll.
+    @State private var collapsed: Set<String> = []
+    /// Insert sections (the FX rack's four points) start CLOSED: the knobs
+    /// of an untouched insert are all zeros. The header row carries the
+    /// state worth seeing at a glance.
     @State private var openInserts: Set<String> = []
+    @State private var confirmResetAll = false
+    @FocusState private var searchFocused: Bool
 
-    /// Groups filtered by the search box (empty groups drop out).
-    private var groups: [(name: String, params: [ParamSpec])] {
-        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return ParamRegistry.groups }
+    enum RowFilter: String, CaseIterable, Identifiable {
+        case all = "All", changed = "Changed", mapped = "Mapped"
+        var id: String { rawValue }
+    }
+
+    // MARK: - Sections
+
+    private struct GroupSection: Identifiable {
+        let name: String
+        let flat: [ParamSpec]
+        let inserts: [(point: FXInsertPoint, params: [ParamSpec])]
+        let count: Int
+        let changed: Int
+        var id: String { name }
+    }
+
+    private var query: String {
+        search.trimmingCharacters(in: .whitespaces).lowercased()
+    }
+    private var searching: Bool { !query.isEmpty }
+
+    /// Groups after the search box and the filter chip (empty groups
+    /// drop out). Cheap enough to recompute per render: a few dictionary
+    /// lookups per parameter.
+    private var sections: [GroupSection] {
+        let q = query
         return ParamRegistry.groups.compactMap { g in
-            let hits = g.params.filter {
-                $0.label.lowercased().contains(q)
-                    || $0.key.lowercased().contains(q)
-                    || $0.help.lowercased().contains(q)
-            }
-            return hits.isEmpty ? nil : (name: g.name, params: hits)
+            let hits = g.params.filter { matches($0, q) }
+            guard !hits.isEmpty else { return nil }
+            let split = ParamRegistry.insertSections(of: hits)
+            return GroupSection(
+                name: g.name, flat: split.flat, inserts: split.inserts,
+                count: hits.count,
+                changed: hits.filter { !controller.paramIsDefault($0.key) }.count)
         }
     }
 
-    private var searching: Bool {
-        !search.trimmingCharacters(in: .whitespaces).isEmpty
+    private func matches(_ spec: ParamSpec, _ q: String) -> Bool {
+        switch filter {
+        case .all: break
+        case .changed:
+            guard !controller.paramIsDefault(spec.key) else { return false }
+        case .mapped:
+            guard isMapped(spec.key) else { return false }
+        }
+        guard !q.isEmpty else { return true }
+        return spec.label.lowercased().contains(q)
+            || spec.key.lowercased().contains(q)
+            || spec.help.lowercased().contains(q)
     }
 
+    private func isMapped(_ key: String) -> Bool {
+        !controller.tiltDimensions(for: MapTarget(paramKey: key)).isEmpty
+            || !controller.compositesContaining(key).isEmpty
+    }
+
+    private func isOpen(_ group: String) -> Bool {
+        searching || !collapsed.contains(group)
+    }
+
+    // MARK: - Body
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
                 PresetToolbar(controller: controller)
                 Divider()
-                Text("PARAMETERS")
-                    .font(.padCaption.weight(.bold))
+                filterBar
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 8)
+            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: .infinity)
+            Divider()
+            list
+        }
+    }
+
+    private var filterBar: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 4) {
+                Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
-                Text("Every parameter of the String instrument, in native units. A value here is where the parameter rests when nothing is driving it; tilts and composites modulate on top. Use the mapping button on a row to bind it to a tilt or add it to a composite. Click a row label to show its description — it states the parameter's scope (global vs per-note) and timing: live (instant everywhere — the kind to bind for continuous control), in-place (lands on the running kernel ~0.2 s after the value settles), rebuild (crossfaded engine rebuild), or hybrid (instant up to the built depth). Double-click a label to reset it.")
+                TextField("Filter parameters (⌘F)", text: $search)
+                    .textFieldStyle(.plain)
+                    .focused($searchFocused)
+                if searching {
+                    Button { search = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.12)))
+            .frame(maxWidth: 300)
+            // ⌘F lands in the filter box from anywhere on the tab.
+            .background(
+                Button("") { searchFocused = true }
+                    .keyboardShortcut("f", modifiers: .command)
+                    .opacity(0).frame(width: 0, height: 0))
+            Picker("", selection: $filter) {
+                ForEach(RowFilter.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .help("All rows; only rows moved off their default; only rows driven by a tilt or a composite")
+            Spacer()
+            Button(collapsed.isEmpty ? "Collapse all" : "Expand all") {
+                collapsed = collapsed.isEmpty
+                    ? Set(ParamRegistry.groups.map(\.name)) : []
+            }
+            .disabled(searching)
+            Button("Reset all…") { confirmResetAll = true }
+                .help("Back to the shipped default: the Sarangi Live artifact physics and every resting value")
+                .confirmationDialog(
+                    "Reset every parameter to the shipped default?",
+                    isPresented: $confirmResetAll, titleVisibility: .visible) {
+                    Button("Reset all", role: .destructive) {
+                        controller.resetAllParams()
+                    }
+                } message: {
+                    Text("Clears every physics override, resting value and FX curve. Composites and tilt bindings are kept.")
+                }
+        }
+        .font(.padCaption)
+    }
+
+    private var list: some View {
+        ScrollView {
+            let sections = self.sections
+            LazyVStack(alignment: .leading, spacing: 2,
+                       pinnedViews: [.sectionHeaders]) {
+                Text("Values are where a parameter rests when nothing drives it; tilts and composites modulate on top. Click a label for its description, scope and timing; double-click it to reset. Click a readout to type a value.")
                     .font(.padCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("Filter parameters", text: $search)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 260)
-                    Spacer()
-                    Button("Reset all") { controller.resetAllParams() }
-                        .help("Back to the shipped default: the Sarangi Live artifact physics and every resting value")
-                }
-                ForEach(groups, id: \.name) { group in
-                    DisclosureGroup(isExpanded: Binding(
-                        get: { searching || expanded.contains(group.name) },
-                        set: { on in
-                            if on { expanded.insert(group.name) }
-                            else { expanded.remove(group.name) }
-                        })) {
-                        groupBody(group.params)
-                    } label: {
-                        Text(group.name).font(.padSubheadline).bold()
+                    .padding(.bottom, 6)
+                ForEach(sections) { section in
+                    Section {
+                        if isOpen(section.name) {
+                            ForEach(section.flat) { spec in
+                                row(spec, label: nil)
+                            }
+                            ForEach(section.inserts, id: \.point.id) { ins in
+                                insertHeader(ins.point)
+                                if searching
+                                    || openInserts.contains(ins.point.keyPrefix) {
+                                    ForEach(ins.params) { spec in
+                                        // inside the point's own section the
+                                        // row drops the point qualifier the
+                                        // menus need
+                                        row(spec, label: spec.insert?.knobLabel)
+                                    }
+                                }
+                            }
+                            Color.clear.frame(height: 10)
+                        }
+                    } header: {
+                        groupHeader(section)
                     }
                 }
+                if sections.isEmpty {
+                    Text("No parameters match.")
+                        .foregroundStyle(.secondary)
+                        .font(.padCaption)
+                        .padding(.top, 12)
+                }
             }
-            .padding(20)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 20)
             .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
     }
 
-    /// A group's rows. A group built from an INSERT DEFINITION
-    /// instantiated at several points (the FX rack: one insert, four
-    /// points) renders as one collapsible section per point instead of
-    /// N × 16 flat rows — the registry marks the derived specs, so this
-    /// stays generic (`ParamRegistry.insertSections`).
-    @ViewBuilder
-    private func groupBody(_ params: [ParamSpec]) -> some View {
-        let split = ParamRegistry.insertSections(of: params)
-        VStack(spacing: 2) {
-            ForEach(split.flat) { spec in
-                ParamRow(controller: controller, stringStore: stringStore,
-                         spec: spec)
-            }
-            ForEach(split.inserts, id: \.point.id) { section in
-                insertSection(section.point, section.params)
-            }
-        }
-        .padding(.top, 2)
+    private func row(_ spec: ParamSpec, label: String?) -> some View {
+        ParamRow(controller: controller, spec: spec, label: label,
+                 model: model(spec))
+            .equatable()
     }
 
-    /// One insert point: a header row (name, what it processes, and what
-    /// it is currently doing) that opens onto the point's own knobs.
-    private func insertSection(_ point: FXInsertPoint,
-                               _ params: [ParamSpec]) -> some View {
-        DisclosureGroup(isExpanded: Binding(
-            get: { searching || openInserts.contains(point.keyPrefix) },
-            set: { on in
-                if on { openInserts.insert(point.keyPrefix) }
-                else { openInserts.remove(point.keyPrefix) }
-            })) {
-            VStack(spacing: 2) {
-                ForEach(params) { spec in
-                    // inside the point's own section the row drops the
-                    // point qualifier the menus need
-                    ParamRow(controller: controller, stringStore: stringStore,
-                             spec: spec, label: spec.insert?.knobLabel)
-                }
-            }
-            .padding(.top, 2)
+    /// The row's value snapshot — computed only for rows on screen (the
+    /// lazy stack calls this from its cell builder).
+    private func model(_ spec: ParamSpec) -> ParamRowModel {
+        ParamRowModel(
+            value: controller.paramValue(spec.key),
+            def: controller.paramDefault(spec.key),
+            tilts: controller.tiltDimensions(for: MapTarget(paramKey: spec.key)),
+            composites: controller.compositesContaining(spec.key)
+                .map { CompositeChip(id: $0.id, name: $0.name) })
+    }
+
+    // MARK: - Headers
+
+    /// A group's header: name, row count, how many rows sit off their
+    /// default. Click to collapse; it pins to the top while scrolling.
+    private func groupHeader(_ s: GroupSection) -> some View {
+        let open = isOpen(s.name)
+        return Button {
+            if collapsed.contains(s.name) { collapsed.remove(s.name) }
+            else { collapsed.insert(s.name) }
         } label: {
             HStack(spacing: 8) {
+                Image(systemName: "chevron.right")
+                    .font(.padCaption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    .frame(width: 10)
+                Text(s.name).font(.padSubheadline).bold()
+                Text("\(s.count)")
+                    .font(.padCaption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if s.changed > 0 {
+                    Text("\(s.changed) changed")
+                        .font(.padCaption2.monospacedDigit())
+                        .foregroundStyle(Color.accentColor)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(searching)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    /// One insert point: a header row (name, what it is currently doing,
+    /// what it processes) that opens onto the point's own knobs.
+    private func insertHeader(_ point: FXInsertPoint) -> some View {
+        let open = searching || openInserts.contains(point.keyPrefix)
+        return Button {
+            if openInserts.contains(point.keyPrefix) {
+                openInserts.remove(point.keyPrefix)
+            } else {
+                openInserts.insert(point.keyPrefix)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.right")
+                    .font(.padCaption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    .frame(width: 10)
                 Text(point.name).font(.padCaption).bold()
                 Text(insertState(point))
                     .font(.padCaption2.monospacedDigit())
@@ -150,8 +303,12 @@ struct ParametersView: View {
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
+            .padding(.vertical, 4)
+            .padding(.leading, 4)
+            .contentShape(Rectangle())
         }
-        .padding(.leading, 4)
+        .buttonStyle(.plain)
+        .disabled(searching)
     }
 
     private func insertIsActive(_ point: FXInsertPoint) -> Bool {
@@ -180,44 +337,63 @@ struct ParametersView: View {
 
 // MARK: - One parameter row
 
-/// Label · slider (native range) · readout · mapping menu · binding chips.
-/// The value is read and written through `AppController`'s unified
-/// accessors, so the row never needs to know which store owns the
-/// parameter or how it reaches the engine.
-private struct ParamRow: View {
-    @ObservedObject var controller: AppController
-    /// Observed so `.rebuild` rows (whose values live in the physics
-    /// store) redraw when the store changes.
-    @ObservedObject var stringStore: StringParamStore
+/// What a row shows, as plain values: comparing two of these is what lets
+/// an unchanged row skip its body when the controller publishes.
+private struct CompositeChip: Equatable, Identifiable {
+    let id: CompositeParam.ID
+    let name: String
+}
+
+private struct ParamRowModel: Equatable {
+    let value: Double
+    let def: Double
+    let tilts: [InputDimension]
+    let composites: [CompositeChip]
+    var isDefault: Bool { abs(value - def) <= 1e-9 }
+    var isMapped: Bool { !tilts.isEmpty || !composites.isEmpty }
+}
+
+/// Label · slider (native range) · readout · mapping chips · mapping
+/// button · reset. The row holds the controller for its ACTIONS only — it
+/// deliberately does not observe it; its inputs are the snapshot.
+private struct ParamRow: View, Equatable {
+    let controller: AppController
     let spec: ParamSpec
     /// Row label override — an insert section names its own point, so the
     /// rows inside it show the bare knob label (see `ParamInsert`).
-    var label: String? = nil
+    let label: String?
+    let model: ParamRowModel
 
     /// Tooltips are unreliable, so a single click on the label expands the
     /// help text inline under the row instead.
     @State private var showHelp = false
+    @State private var showMapping = false
+    @State private var editing = false
+    @State private var draft = ""
+    @FocusState private var draftFocused: Bool
 
-    private var value: Double { controller.paramValue(spec.key) }
+    static func == (a: ParamRow, b: ParamRow) -> Bool {
+        a.spec.key == b.spec.key && a.label == b.label && a.model == b.model
+    }
 
     /// The authored range is an AUTHORING HINT, the artifact is truth: a
     /// fit round moves values wherever the physics wants them, so a loaded
     /// value outside [lo, hi] widens the slider instead of being
     /// snap-clamped by the first drag.
     private var bounds: ClosedRange<Double> {
-        let v = value
+        let v = model.value
         guard v < spec.lo || v > spec.hi else { return spec.lo...spec.hi }
         let pad = max((spec.hi - spec.lo) * 0.25, abs(v) * 0.25)
         return min(spec.lo, v - pad)...max(spec.hi, v + pad)
     }
 
+    private func set(_ v: Double) {
+        let stepped = spec.step.map { (v / $0).rounded() * $0 } ?? v
+        controller.setParamValue(spec.key, stepped)
+    }
+
     private var binding: Binding<Double> {
-        let base = Binding(
-            get: { controller.paramValue(spec.key) },
-            set: { controller.setParamValue(spec.key, $0) })
-        guard let step = spec.step else { return base }
-        return Binding(get: { base.wrappedValue },
-                       set: { base.wrappedValue = ($0 / step).rounded() * step })
+        Binding(get: { model.value }, set: { set($0) })
     }
 
     /// Stepped params read as whole numbers, and so do the ranges that run
@@ -227,13 +403,15 @@ private struct ParamRow: View {
                           integerAbove: spec.hi >= 100 ? 0 : .infinity)
     }
 
-    private var boundTilts: [InputDimension] {
-        controller.tiltDimensions(for: MapTarget(paramKey: spec.key))
+    /// Scope + timing come from the SHARED vocabulary in `ParamRegistry`
+    /// (`ParamScope`/`ParamTiming.summary`) — the same strings paramdoc
+    /// renders into docs/parameters.md, so this description can never
+    /// tell a different story than the documentation.
+    private var helpText: String {
+        spec.help
+            + "\n\nScope: \(spec.scope.label) — \(spec.scope.summary)."
+            + "\nTiming: \(spec.timing.label) — \(spec.timing.summary)."
     }
-    private var memberOf: [CompositeParam] {
-        controller.compositesContaining(spec.key)
-    }
-    private var isMapped: Bool { !boundTilts.isEmpty || !memberOf.isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -252,7 +430,6 @@ private struct ParamRow: View {
                 .padding(.bottom, 4)
             }
         }
-        .help("\(spec.key)\n\n\(helpText)")
     }
 
     private var row: some View {
@@ -260,8 +437,10 @@ private struct ParamRow: View {
             Text(label ?? spec.label)
                 .font(.padCaption)
                 .foregroundStyle(showHelp ? Color.accentColor : Color.primary)
+                .lineLimit(1)
                 .frame(width: Typography.scaledWidth(150), alignment: .leading)
                 .contentShape(Rectangle())
+                .help(spec.help)
                 // The single tap must fire immediately — an exclusive
                 // double/single composition holds it for the double-click
                 // window, which reads as lag. Simultaneous recognition
@@ -274,12 +453,19 @@ private struct ParamRow: View {
                     showHelp = true
                 })
             Slider(value: binding, in: bounds)
-            Text(format(value))
-                .frame(width: Typography.scaledWidth(54), alignment: .trailing)
-                .font(.padCaption.monospacedDigit())
-                .foregroundStyle(.secondary)
+            readout
             mappingChips
-            mappingMenu
+            Button { showMapping = true } label: {
+                Image(systemName: model.isMapped
+                      ? "slider.horizontal.below.square.filled.and.square"
+                      : "slider.horizontal.3")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(model.isMapped ? Color.accentColor : .secondary)
+            .help("Bind this parameter to a tilt, or add it to a composite")
+            .popover(isPresented: $showMapping, arrowEdge: .trailing) {
+                MappingPopover(controller: controller, spec: spec)
+            }
             Button {
                 controller.resetParam(spec.key)
             } label: {
@@ -287,30 +473,58 @@ private struct ParamRow: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .help("Reset to \(format(controller.paramDefault(spec.key)))")
-            .opacity(controller.paramIsDefault(spec.key) ? 0.25 : 1)
-            .disabled(controller.paramIsDefault(spec.key))
+            .help("Reset to \(format(model.def))")
+            .opacity(model.isDefault ? 0.25 : 1)
+            .disabled(model.isDefault)
         }
     }
 
-    /// Scope + timing come from the SHARED vocabulary in `ParamRegistry`
-    /// (`ParamScope`/`ParamTiming.summary`) — the same strings paramdoc
-    /// renders into docs/parameters.md, so this description can never
-    /// tell a different story than the documentation. (fix:
-    /// the old text derived timing from the apply STRATEGY alone and
-    /// claimed "crossfaded engine rebuild" for every in-place key.)
-    private var helpText: String {
-        spec.help
-            + "\n\nScope: \(spec.scope.label) — \(spec.scope.summary)."
-            + "\nTiming: \(spec.timing.label) — \(spec.timing.summary)."
+    /// The value, or a field to type one — any finite number is accepted,
+    /// and the slider widens to reach it.
+    @ViewBuilder private var readout: some View {
+        if editing {
+            TextField("", text: $draft)
+                .textFieldStyle(.plain)
+                .font(.padCaption.monospacedDigit())
+                .multilineTextAlignment(.trailing)
+                .frame(width: Typography.scaledWidth(64))
+                .padding(.horizontal, 3)
+                .background(RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.accentColor.opacity(0.15)))
+                .focused($draftFocused)
+                .onSubmit { commitDraft() }
+                .onExitCommand { editing = false }
+                .onChange(of: draftFocused) { focused in
+                    if !focused && editing { commitDraft() }
+                }
+        } else {
+            Text(format(model.value))
+                .font(.padCaption.monospacedDigit())
+                .foregroundStyle(model.isDefault ? .secondary : .primary)
+                .frame(width: Typography.scaledWidth(64), alignment: .trailing)
+                .padding(.horizontal, 3)
+                .contentShape(Rectangle())
+                .help("Click to type a value")
+                .onTapGesture {
+                    draft = "\(model.value)"
+                    editing = true
+                    DispatchQueue.main.async { draftFocused = true }
+                }
+        }
+    }
+
+    private func commitDraft() {
+        editing = false
+        let text = draft.trimmingCharacters(in: .whitespaces)
+        guard let v = Double(text), v.isFinite else { return }
+        set(v)
     }
 
     /// Compact read-out of what drives this parameter: tilt chips + the
     /// composites it belongs to.
-    @ViewBuilder
     private var mappingChips: some View {
         HStack(spacing: 3) {
-            ForEach(boundTilts, id: \.rawValue) { d in
+            ForEach(model.tilts, id: \.rawValue) { d in
                 Text(d.shortLabel)
                     .font(.padCaption2.weight(.semibold))
                     .padding(.horizontal, 4)
@@ -318,7 +532,7 @@ private struct ParamRow: View {
                     .background(Color.accentColor.opacity(0.25),
                                 in: RoundedRectangle(cornerRadius: 3))
             }
-            ForEach(memberOf) { c in
+            ForEach(model.composites) { c in
                 Text(c.name)
                     .font(.padCaption2)
                     .lineLimit(1)
@@ -330,50 +544,58 @@ private struct ParamRow: View {
         }
         .frame(width: Typography.scaledWidth(130), alignment: .leading)
     }
+}
 
-    private var mappingMenu: some View {
-        Menu {
-            Menu("Bind to tilt") {
+
+// MARK: - Mapping popover
+
+/// Where a parameter's drive comes from, as checkboxes: every dimension,
+/// every composite, and a button to start a composite from this one.
+/// Built only while shown; observes the controller so ticks update live.
+private struct MappingPopover: View {
+    @ObservedObject var controller: AppController
+    let spec: ParamSpec
+
+    private var target: MapTarget { MapTarget(paramKey: spec.key) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(spec.label).font(.headline)
+            Text("Drive with a dimension")
+                .font(.padCaption).foregroundStyle(.secondary)
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading),
+                                GridItem(.flexible(), alignment: .leading)],
+                      alignment: .leading, spacing: 4) {
                 ForEach(ControlAxes.dims, id: \.rawValue) { dim in
-                    Button {
-                        controller.toggleTiltBinding(
-                            MapTarget(paramKey: spec.key), dim: dim)
-                    } label: {
-                        Text(boundTilts.contains(dim)
-                             ? "\u{2713} \(dim.label)" : dim.label)
-                    }
+                    Toggle(dim.label, isOn: Binding(
+                        get: { controller.tiltMapping.isConnected(target, dim) },
+                        set: { _ in controller.toggleTiltBinding(target, dim: dim) }))
                 }
             }
-            Menu("Add to composite") {
-                if controller.composites.isEmpty {
-                    Text("No composites yet")
-                }
-                ForEach(controller.composites) { c in
-                    Button {
-                        controller.toggleCompositeMember(c.id, key: spec.key)
-                    } label: {
-                        Text(memberOf.contains { $0.id == c.id }
-                             ? "\u{2713} \(c.name)" : c.name)
-                    }
-                }
-                Divider()
-                Button("New composite from this") {
-                    if let c = controller.addComposite() {
-                        controller.renameComposite(c.id, to: spec.label)
-                        controller.addCompositeMember(c.id, key: spec.key)
-                    }
-                }
-                .disabled(controller.composites.count >= CompositeParam.maxSlots)
+            Divider()
+            Text("Composites")
+                .font(.padCaption).foregroundStyle(.secondary)
+            if controller.composites.isEmpty {
+                Text("No composites yet")
+                    .font(.padCaption).foregroundStyle(.tertiary)
             }
-        } label: {
-            Image(systemName: isMapped
-                  ? "slider.horizontal.below.square.filled.and.square"
-                  : "slider.horizontal.3")
+            ForEach(controller.composites) { c in
+                Toggle(c.name, isOn: Binding(
+                    get: { c.members.contains { $0.key == spec.key } },
+                    set: { _ in controller.toggleCompositeMember(c.id, key: spec.key) }))
+            }
+            Button("New composite from this") {
+                if let c = controller.addComposite() {
+                    controller.renameComposite(c.id, to: spec.label)
+                    controller.addCompositeMember(c.id, key: spec.key)
+                }
+            }
+            .disabled(controller.composites.count >= CompositeParam.maxSlots)
+            .font(.padCaption)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .foregroundStyle(isMapped ? Color.accentColor : .secondary)
-        .help("Bind this parameter to a tilt, or add it to a composite")
+        .toggleStyle(.checkbox)
+        .font(.padCaption)
+        .padding(14)
+        .frame(width: 320, alignment: .leading)
     }
 }
