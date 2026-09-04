@@ -64,21 +64,12 @@ final class BowPolyTests: XCTestCase {
 
     private func initPoly(_ nb: Int, tables t: BowKernelTables)
         -> UnsafeMutableRawPointer {
-        let s = t.scalars
-        return bow_poly_init(
-            Int32(nb), t.sr,
-            Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC,
-            s[0], s[1], s[2],
-            s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11],
-            s[12], s[13], s[14],
-            s[15], s[16], s[17], s[18], s[19], s[20], s[21],
-            s[22], s[23], s[24], s[25],
-            s[26], s[27],
-            s[28], s[29], s[30], s[31], s[32],
-            s[33], s[34],
-            s[35], s[36], s[37], s[38], s[39],
-            s[40], s[41], s[42], s[43], s[44], s[45], s[46],
-            s[47], s[48], s[49], s[50], s[51])!
+        var s = t.scalars
+        return withUnsafePointer(to: &s) { sp in
+            bow_poly_init(
+                Int32(nb), t.sr,
+                Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC, sp)!
+        }
     }
 
     /// Render `d` on slot 0 of an `nb`-slot poly kernel. With `prelude`, the

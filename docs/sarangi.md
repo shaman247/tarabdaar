@@ -63,11 +63,16 @@ touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (o
 - **In‑place push.** A `.live`/`.hybrid` edit recomputes the kernel's scalar
   vector and hands it to `BowEngine.setLiveParams` — no reset, no pre‑roll,
   no crossfade (`inPlaceKeys`; see [Sound Design](sound-design.md)).
-- **The scalar vector** is 52 doubles in ONE order, documented once in the
-  `bow_poly_init` comment in `bow_kernel.h`. `BowTables.buildOpenString`
-  writes it; `bow_poly_init` and `bow_poly_set_scalars` read it in lockstep,
-  and `BowEngine` preconditions the count. Renumbering means editing all
-  four together.
+- **The scalar block** is `bow_scalars_t`, a NAMED C struct of 52 doubles
+  declared (and documented field by field) in `bow_kernel.h`.
+  `BowTables.buildOpenString` fills it BY NAME; `bow_poly_init` takes a
+  pointer to it and `bow_poly_set_scalars` replaces the whole block on a
+  live state, both through the one `poly_load_scalars` helper. There is no
+  positional vector and no optional tail — every field is always present, so
+  adding a scalar is one field plus one assignment, with nothing to
+  renumber. `BowEngine`'s live ramp walks the struct as
+  `sizeof(bow_scalars_t) / sizeof(double)` contiguous doubles (declaration
+  order), which is the only place the layout is relied on.
 - **Overrides.** The bundled artifact is read‑only; Parameters‑tab edits
   persist as an override dict (`tarabdaar.stringOverrides.v1`,
   `StringParamStore`) applied over `bowed_string.json` at build time; one that

@@ -21,23 +21,88 @@
  * allocate or spawn threads: call them OFF the audio thread. Every optional
  * block is byte-null while unarmed (never loaded / 0 / NULL).
  *
- * Body: K modal sections. Then the 52 per-sample scalars, in THIS order —
- * the one layout, shared by bow_poly_init's arguments, the indices
- * bow_poly_set_scalars reads and BowTables.buildOpenString's array:
- *
- *    0 yinf        1 c0        2 dcRho      3 pgain      4 pA
- *    5 bowW        6 kret      7 retA       8 retMode    9 rb0
- *   10 ra1        11 ra2      12 kdisp     13 bowWidth  14 bowCont
- *   15 Z          16 Zt       17 mu_s      18 mu_d      19 v0f
- *   20 nutA       21 brA      22 thLeak    23 thA       24 thD
- *   25 thFloor    26 bowDisp  27 zload     28 nA        29 nT
- *   30 nPow       31 nzHi     32 nzLo      33 nDir      34 nzHiD
- *   35 gutG       36 dispN    37 nailK     38 f0Open    39 gutA2
- *   40 torsRatio  41 torsG    42 torsC     43 v0Pow     44 v0Ref
- *   45 hairHz     46 hairRef  47 lossReg   48 slideRate 49 slideDull
- *   50 slideNoise 51 slideAcc
+ * Body: K modal sections. Then the per-sample scalars: ONE NAMED STRUCT,
+ * `bow_scalars_t` below. bow_poly_init takes a pointer to it and
+ * bow_poly_set_scalars replaces the whole set on a live state; every field
+ * is always present (no positional vector, no optional tail), and
+ * BowTables.buildOpenString fills it BY NAME.
  */
-void *bow_poly_init(int nb, double sr, /* body */ int K, const double *ba1, const double *ba2, const double *bn0, const double *bA, const double *bC, double yinf, double c0, double dcRho, /* voice-force path + bow */ double pgain, double pA, double bowW, double kret, double retA, double retMode, double rb0, double ra1, double ra2, double kdisp, double bowWidth, double bowCont, double Z, double Zt, double mu_s, double mu_d, double v0f, double nutA, double brA, double thLeak, double thA, double thD, double thFloor, double bowDisp, double zload, double nA, double nT, double nPow, double nzHi, double nzLo, double nDir, double nzHiD, double gutG, double dispN, double nailK, double f0Open, double gutA2, double torsRatio, double torsG, double torsC, double v0Powp, double v0Refp, double hairHzp, double hairRefp, double lossRegp, double slideRatep, double slideDullp, double slideNoisep, double slideAccp);
+
+/* The played string's per-sample scalars: friction, terminations, bow
+   contact, torsion, contact noise and the slide trackers. Plain doubles in
+   a fixed layout — a host may also walk it as
+   `sizeof(bow_scalars_t) / sizeof(double)` contiguous doubles (BowEngine's
+   live-parameter ramp interpolates it that way). The kernel applies the
+   SAME derivations from init and from set_scalars. */
+typedef struct {
+    /* --- body / radiation --- */
+    double yinf;       /* bridge-mobility floor added to the modal body */
+    double c0;         /* direct radiation gain of the bridge force */
+    double dcRho;      /* 25 Hz DC-block pole (init also seeds hpG from it) */
+    /* --- voice-force path (inert in the shipping build: pgain 0) --- */
+    double pgain;      /* external voice-force drive gain */
+    double pA;         /* its one-pole smoothing coefficient */
+    /* --- bow / bridge return --- */
+    double bowW;       /* bow contact weight (<= 1e-9 = no bow) */
+    double kret;       /* bridge return into the string (loop-capped) */
+    double retA;       /* one-pole return coefficient (retMode < 0.5) */
+    double retMode;    /* >= 0.5 = the 2-pole bridge filter rb0/ra1/ra2 */
+    double rb0;        /* bridge biquad: gain */
+    double ra1;        /* bridge biquad: a1 */
+    double ra2;        /* bridge biquad: a2 */
+    double kdisp;      /* bow-side displacement feedback into the delay split */
+    double bowWidth;   /* finite bow width, in samples of the delay line */
+    double bowCont;    /* number of bow contacts (>= 2.5 arms the wide pair) */
+    /* --- string impedances + friction law --- */
+    double Z;          /* transverse wave impedance */
+    double Zt;         /* torsional wave impedance */
+    double mu_s;       /* static friction coefficient */
+    double mu_d;       /* dynamic friction coefficient */
+    double v0f;        /* Stribeck velocity (m/s) */
+    /* --- terminations --- */
+    double nutA;       /* nut one-pole loss coefficient */
+    double brA;        /* bridge-side one-pole loss coefficient */
+    /* --- thermal (friction aging) --- */
+    double thLeak;     /* per-sample leak of the aging deficit */
+    double thA;        /* aging amount */
+    double thD;        /* aging decay rate */
+    double thFloor;    /* aging floor */
+    /* --- dispersion + bridge load --- */
+    double bowDisp;    /* all-pass dispersion coefficient */
+    double zload;      /* fraction of the -Z*V bridge load each string takes */
+    /* --- contact noise --- */
+    double nA;         /* slip-noise amplitude into the string */
+    double nT;         /* thermal-envelope noise amplitude */
+    double nPow;       /* bow-force exponent of the noise laws */
+    double nzHi;       /* noise band: high one-pole coefficient */
+    double nzLo;       /* noise band: low one-pole coefficient */
+    double nDir;       /* DIRECT-radiated (bow-side) noise amplitude */
+    double nzHiD;      /* its two-pole smoothing coefficient */
+    /* --- gut string / register laws --- */
+    double gutG;       /* per-round-trip gut loop gain */
+    double dispN;      /* all-pass dispersion sections (rounded, 1..4) */
+    double nailK;      /* nut-corner pitch exponent (finger-nail law) */
+    double f0Open;     /* THE TUNING TONIC (Hz): open-string reference for
+                          the nail, register-damping and gut-corner laws */
+    double gutA2;      /* second gut one-pole coefficient (0 = bit-null) */
+    /* --- torsional loop --- */
+    double torsRatio;  /* torsional / transverse wave-speed ratio */
+    double torsG;      /* torsional loop gain */
+    double torsC;      /* torsional feed into the contact velocity (0 = null) */
+    /* --- Cremer corner rounding + hair compliance --- */
+    double v0Pow;      /* bow-force exponent on the Stribeck velocity */
+    double v0Ref;      /* its reference force */
+    double hairHz;     /* hair-compliance corner (Hz; <= 1e-6 = off) */
+    double hairRef;    /* its reference force (<= 1e-6 -> 1.0) */
+    /* --- register damping + slide trackers --- */
+    double lossReg;    /* register damping exponent (0 = bit-null) */
+    double slideRate;  /* slide-dulling half-rate (cents/s; <= 1 -> 900) */
+    double slideDull;  /* slide dulling depth (0 = bit-null) */
+    double slideNoise; /* acceleration-driven finger-slide noise (0 = null) */
+    double slideAcc;   /* its half-acceleration (cents/s^2; <= 1 -> 25000) */
+} bow_scalars_t;
+
+void *bow_poly_init(int nb, double sr, /* body */ int K, const double *ba1, const double *ba2, const double *bn0, const double *bA, const double *bC, /* per-sample scalars */ const bow_scalars_t *s);
 
 void bow_poly_process(void *vst, int n, int stride, const double *f0, const double *vb, const double *fb, const double *beta, const double *gate, const double *xv, double *out);
 
@@ -201,12 +266,12 @@ void bow_poly_jt_drive_weights(void *vst, const double *w, int n);
    [0, 4]; 1 / never calling = byte-null. Drone-setter contract. */
 void bow_poly_jt_set_gain_mul(void *vst, double m);
 
-/* LIVE PARAMETERS, no rebuild. set_scalars replaces the 52 scalars
-   (bow_poly_init order; a shorter block leaves the tail inert), tables and
+/* LIVE PARAMETERS, no rebuild. set_scalars replaces the whole
+   `bow_scalars_t` (the same derivations bow_poly_init applies), tables and
    running state untouched. set_body / jt_set_coeffs replace coefficient
    ARRAYS keeping every history; return 1 on success, 0 when the shape
    moved (caller rebuilds). */
-void bow_poly_set_scalars(void *vst, const double *s, int n);
+void bow_poly_set_scalars(void *vst, const bow_scalars_t *s);
 int bow_poly_set_body(void *vst, int K, const double *ba1, const double *ba2,
                       const double *bn0, const double *bA, const double *bC);
 int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,

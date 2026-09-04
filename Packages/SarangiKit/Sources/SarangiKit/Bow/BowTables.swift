@@ -1,20 +1,66 @@
 import Foundation
+import CBowKernel
 
 /// The complete marshaled input set of the C bow kernel, in C-signature
-/// order: the 5 modal-body arrays and the 52 scalars.
+/// order: the 5 modal-body arrays and the `bow_scalars_t` scalar block.
 public struct BowKernelTables: Sendable {
     public var sr: Double
     // body modal sections
     public var ba1: [Double] = [], ba2: [Double] = [], bn0: [Double] = []
     public var bA: [Double] = [], bC: [Double] = []
-    /// The 52 per-sample scalars, in the order of `bow_poly_init`'s
-    /// signature — the layout table in bow_kernel.h.
-    public var scalars: [Double] = []
+    /// The per-sample scalars, one NAMED field each — the `bow_scalars_t`
+    /// struct declared in bow_kernel.h, filled by name (no positional
+    /// vector, no optional tail).
+    public var scalars = bow_scalars_t()
     /// Modal-jawari table block — nil = no taraf (byte-null, never loaded).
     public var jt: JtTables? = nil
 
     public init(sr: Double) {
         self.sr = sr
+    }
+}
+
+/// The kernel scalar block is a fixed-layout struct of plain doubles, so it
+/// can also be walked as `fieldCount` contiguous doubles — which is how the
+/// live-parameter ramp interpolates it (field by field, in declaration
+/// order) and how two blocks are compared.
+extension bow_scalars_t {
+    /// Number of double fields (`sizeof / sizeof(double)`).
+    public static let fieldCount =
+        MemoryLayout<bow_scalars_t>.size / MemoryLayout<Double>.size
+
+    /// Read the fields as one contiguous double buffer.
+    public func withDoubles<R>(
+        _ body: (UnsafeBufferPointer<Double>) -> R) -> R {
+        withUnsafePointer(to: self) { p in
+            p.withMemoryRebound(to: Double.self,
+                                capacity: Self.fieldCount) { d in
+                body(UnsafeBufferPointer(start: d, count: Self.fieldCount))
+            }
+        }
+    }
+
+    /// Mutate the fields as one contiguous double buffer.
+    public mutating func withMutableDoubles<R>(
+        _ body: (UnsafeMutableBufferPointer<Double>) -> R) -> R {
+        withUnsafeMutablePointer(to: &self) { p in
+            p.withMemoryRebound(to: Double.self,
+                                capacity: Self.fieldCount) { d in
+                body(UnsafeMutableBufferPointer(start: d,
+                                                count: Self.fieldCount))
+            }
+        }
+    }
+
+    /// Field-by-field `==` (NOT a byte compare — the doubles compare as
+    /// doubles).
+    public func equalsFieldwise(_ o: bow_scalars_t) -> Bool {
+        withDoubles { a in
+            o.withDoubles { b in
+                for i in 0..<Self.fieldCount where a[i] != b[i] { return false }
+                return true
+            }
+        }
     }
 }
 
@@ -445,59 +491,64 @@ public enum BowTables {
             let cap = bp.v("bow_loop_max", 0.5)
             if loop > cap { kret = kret * cap / loop }
         }
-        t.scalars = [
-            yinf,                                      // body admittance floor
-            bp.v("bow_body_c0", 1.0),                  // direct radiation
-            dc,
-            0.0,                                       // pgain: no voice force
-            exp(-2.0 * Double.pi * 12000.0 / sr),      // aP (inert)
-            bp.v("bow_w", 1.0),                        // bowW (nBow = 1)
-            kret,                                      // bridge return (capped)
-            exp(-2.0 * Double.pi * 600.0 / sr),        // retA (retMode-1 inert)
-            1.0,                                       // retMode: 2-pole brg
-        ]
-        t.scalars += [bc.rb0, bc.ra1, bc.ra2]
-        t.scalars += [
-            bp.v("bow_kdisp", 0.0),                    // needs yinf > 0
-            bp.v("bow_width_smp", 0.0),
-            bp.v("bow_contacts", 2.0),
-            Z, bp.v("bow_Zt", 5.5) * Z, bp.v("bow_mu_s", 0.8),
-            bp.v("bow_mu_d", 0.3),
-            bp.v("bow_v0", 0.15),
-            exp(-2.0 * Double.pi * bp.v("bow_nut_fc", 5000.0) / sr),
-            exp(-2.0 * Double.pi * bp.v("bow_br_fc", 6000.0) / sr),
-            exp(-1.0 / (bp.v("bow_th_tau", 0.012) * sr)),
-            bp.v("bow_th_a", 0.0),
-            bp.v("bow_th_drate", 0.0),
-            bp.v("bow_th_floor", 0.15),
-            bp.v("bow_disp", 0.0),
-            bp.v("bow_zload", 1.0),
-            bp.v("bow_noise", 0.0),
-            bp.v("bow_tnoise", 0.0),
-            bp.v("bow_noise_pow", 1.0),
-            1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_hi", 8590.0) / sr),
-            1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_lo", 402.0) / sr),
-            bp.v("bow_noise_dir", 0.0),
-            1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_dir_hi", 6000.0) / sr),
-            bp.v("bow_gut_g", 1.0),
-            bp.v("bow_disp_n", 1.0),
-            bp.v("bow_nail_k", 0.0),
-            tonic,                                     // f0Open
-            bp.v("bow_gut_fc2", 0.0) > 0.0
-                ? exp(-2.0 * Double.pi * bp.v("bow_gut_fc2", 0.0) / sr) : 0.0,
-            bp.v("bow_tors_ratio", 5.2),               // torsional loop
-            bp.v("bow_tors_g", 0.85),
-            bp.v("bow_tors_c", 0.0),                   // 0 = bit-null
-            bp.v("bow_v0_fpow", 0.0),                  // Cremer corner rounding
-            bp.v("bow_v0_fref", 1.0),
-            bp.v("bow_hair_hz", 0.0),                  // hair compliance
-            bp.v("bow_hair_ref", 1.0),
-            bp.v("bow_loss_reg", 0.0),                 // register damping (0 = bit-null)
-            bp.v("bow_slide_rate", 900.0),             // slide dulling
-            bp.v("bow_slide_dull", 0.0),               // (dull 0 = bit-null)
-            bp.v("bow_slide_noise", 0.0),              // accel-driven finger
-            bp.v("bow_slide_acc", 25000.0),            // noise (0 = bit-null)
-        ]
+        // Filled BY NAME — the kernel struct is the layout, there is no
+        // positional vector to keep in lockstep any more.
+        var s = bow_scalars_t()
+        s.yinf = yinf                                  // body admittance floor
+        s.c0 = bp.v("bow_body_c0", 1.0)                // direct radiation
+        s.dcRho = dc
+        s.pgain = 0.0                                  // no voice force
+        s.pA = exp(-2.0 * Double.pi * 12000.0 / sr)    // inert at pgain 0
+        s.bowW = bp.v("bow_w", 1.0)                    // bowW (nBow = 1)
+        s.kret = kret                                  // bridge return (capped)
+        s.retA = exp(-2.0 * Double.pi * 600.0 / sr)    // retA (retMode-1 inert)
+        s.retMode = 1.0                                // 2-pole bridge
+        s.rb0 = bc.rb0
+        s.ra1 = bc.ra1
+        s.ra2 = bc.ra2
+        s.kdisp = bp.v("bow_kdisp", 0.0)               // needs yinf > 0
+        s.bowWidth = bp.v("bow_width_smp", 0.0)
+        s.bowCont = bp.v("bow_contacts", 2.0)
+        s.Z = Z
+        s.Zt = bp.v("bow_Zt", 5.5) * Z
+        s.mu_s = bp.v("bow_mu_s", 0.8)
+        s.mu_d = bp.v("bow_mu_d", 0.3)
+        s.v0f = bp.v("bow_v0", 0.15)
+        s.nutA = exp(-2.0 * Double.pi * bp.v("bow_nut_fc", 5000.0) / sr)
+        s.brA = exp(-2.0 * Double.pi * bp.v("bow_br_fc", 6000.0) / sr)
+        s.thLeak = exp(-1.0 / (bp.v("bow_th_tau", 0.012) * sr))
+        s.thA = bp.v("bow_th_a", 0.0)
+        s.thD = bp.v("bow_th_drate", 0.0)
+        s.thFloor = bp.v("bow_th_floor", 0.15)
+        s.bowDisp = bp.v("bow_disp", 0.0)
+        s.zload = bp.v("bow_zload", 1.0)
+        s.nA = bp.v("bow_noise", 0.0)
+        s.nT = bp.v("bow_tnoise", 0.0)
+        s.nPow = bp.v("bow_noise_pow", 1.0)
+        s.nzHi = 1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_hi", 8590.0) / sr)
+        s.nzLo = 1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_lo", 402.0) / sr)
+        s.nDir = bp.v("bow_noise_dir", 0.0)
+        s.nzHiD = 1.0 - exp(-2.0 * Double.pi
+                            * bp.v("bow_noise_dir_hi", 6000.0) / sr)
+        s.gutG = bp.v("bow_gut_g", 1.0)
+        s.dispN = bp.v("bow_disp_n", 1.0)
+        s.nailK = bp.v("bow_nail_k", 0.0)
+        s.f0Open = tonic
+        s.gutA2 = bp.v("bow_gut_fc2", 0.0) > 0.0
+            ? exp(-2.0 * Double.pi * bp.v("bow_gut_fc2", 0.0) / sr) : 0.0
+        s.torsRatio = bp.v("bow_tors_ratio", 5.2)      // torsional loop
+        s.torsG = bp.v("bow_tors_g", 0.85)
+        s.torsC = bp.v("bow_tors_c", 0.0)              // 0 = bit-null
+        s.v0Pow = bp.v("bow_v0_fpow", 0.0)             // Cremer corner rounding
+        s.v0Ref = bp.v("bow_v0_fref", 1.0)
+        s.hairHz = bp.v("bow_hair_hz", 0.0)            // hair compliance
+        s.hairRef = bp.v("bow_hair_ref", 1.0)
+        s.lossReg = bp.v("bow_loss_reg", 0.0)          // register damping
+        s.slideRate = bp.v("bow_slide_rate", 900.0)    // slide dulling
+        s.slideDull = bp.v("bow_slide_dull", 0.0)      // (dull 0 = bit-null)
+        s.slideNoise = bp.v("bow_slide_noise", 0.0)    // accel-driven finger
+        s.slideAcc = bp.v("bow_slide_acc", 25000.0)    // noise (0 = bit-null)
+        t.scalars = s
         return t
     }
 }

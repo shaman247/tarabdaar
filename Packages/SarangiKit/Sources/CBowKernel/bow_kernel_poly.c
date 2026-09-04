@@ -19,6 +19,7 @@
 #ifdef __APPLE__
 #include <pthread/qos.h>
 #endif
+#include "bow_kernel.h"   /* bow_scalars_t + the public prototypes */
 
 #define MAXBOW 4096
 /* async jt ring sizes (also the two-way-coupling FIFO's) */
@@ -390,27 +391,44 @@ static double *pdup_d(const double *a, int n) {
     return b;
 }
 
+/* Adopt the per-sample scalars onto a live state: plain scalar writes with
+   the three guarded defaults. Shared by bow_poly_init and
+   bow_poly_set_scalars so the two can never drift. Every field is always
+   present. Does NOT touch hpG — that is an init-time derivation. */
+static void poly_load_scalars(bow_poly_state_t *st, const bow_scalars_t *s)
+{
+    st->yinf = s->yinf; st->c0 = s->c0; st->dcRho = s->dcRho;
+    st->pgain = s->pgain; st->pA = s->pA; st->bowW = s->bowW;
+    st->kret = s->kret;
+    st->retA = s->retA; st->retMode = s->retMode; st->rb0 = s->rb0;
+    st->ra1 = s->ra1; st->ra2 = s->ra2; st->kdisp = s->kdisp;
+    st->bowWidth = s->bowWidth; st->bowCont = s->bowCont;
+    st->Z = s->Z; st->Zt = s->Zt;
+    st->mu_s = s->mu_s; st->mu_d = s->mu_d; st->v0f = s->v0f;
+    st->nutA = s->nutA; st->brA = s->brA;
+    st->thLeak = s->thLeak; st->thA = s->thA; st->thD = s->thD;
+    st->thFloor = s->thFloor;
+    st->bowDisp = s->bowDisp; st->zload = s->zload;
+    st->nA = s->nA; st->nT = s->nT; st->nPow = s->nPow;
+    st->nzHi = s->nzHi; st->nzLo = s->nzLo; st->nDir = s->nDir;
+    st->nzHiD = s->nzHiD;
+    st->gutG = s->gutG; st->dispN = s->dispN; st->nailK = s->nailK;
+    st->f0Open = s->f0Open; st->gutA2 = s->gutA2;
+    st->torsRatio = s->torsRatio; st->torsG = s->torsG; st->torsC = s->torsC;
+    st->v0Pow = s->v0Pow; st->v0Ref = s->v0Ref;
+    st->hairHz = s->hairHz;
+    st->hairRef = (s->hairRef > 1e-6 ? s->hairRef : 1.0);
+    st->lossReg = s->lossReg;
+    st->slideRate = (s->slideRate > 1.0 ? s->slideRate : 900.0);
+    st->slideDull = s->slideDull;
+    st->slideNoise = s->slideNoise;
+    st->slideAcc = (s->slideAcc > 1.0 ? s->slideAcc : 25000.0);
+}
+
 void *bow_poly_init(int nb, double sr,
                     int K, const double *ba1, const double *ba2,
                     const double *bn0, const double *bA, const double *bC,
-                    double yinf, double c0, double dcRho,
-                    double pgain, double pA, double bowW, double kret,
-                    double retA, double retMode, double rb0, double ra1,
-                    double ra2, double kdisp, double bowWidth, double bowCont,
-                    double Z, double Zt,
-                    double mu_s, double mu_d, double v0f, double nutA,
-                    double brA, double thLeak, double thA, double thD,
-                    double thFloor, double bowDisp,
-                    double zload,
-                    double nA, double nT, double nPow, double nzHi,
-                    double nzLo, double nDir, double nzHiD,
-                    double gutG, double dispN, double nailK, double f0Open,
-                    double gutA2,
-                    double torsRatio, double torsG, double torsC,
-                    double v0Powp, double v0Refp,
-                    double hairHzp, double hairRefp,
-                    double lossRegp, double slideRatep, double slideDullp,
-                    double slideNoisep, double slideAccp)
+                    const bow_scalars_t *s)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)calloc(1, sizeof(bow_poly_state_t));
     st->sr = sr;
@@ -419,31 +437,8 @@ void *bow_poly_init(int nb, double sr,
     st->ba1 = pdup_d(ba1, K);   st->ba2 = pdup_d(ba2, K);
     st->bn0 = pdup_d(bn0, K);   st->bA = pdup_d(bA, K);
     st->bC = pdup_d(bC, K);
-    st->yinf = yinf; st->c0 = c0; st->dcRho = dcRho;
-    st->pgain = pgain; st->pA = pA; st->bowW = bowW; st->kret = kret;
-    st->retA = retA; st->retMode = retMode; st->rb0 = rb0;
-    st->ra1 = ra1; st->ra2 = ra2; st->kdisp = kdisp;
-    st->bowWidth = bowWidth; st->bowCont = bowCont;
-    st->Z = Z; st->Zt = Zt;
-    st->mu_s = mu_s; st->mu_d = mu_d; st->v0f = v0f;
-    st->nutA = nutA; st->brA = brA;
-    st->thLeak = thLeak; st->thA = thA; st->thD = thD;
-    st->thFloor = thFloor;
-    st->bowDisp = bowDisp; st->zload = zload;
-    st->nA = nA; st->nT = nT; st->nPow = nPow;
-    st->nzHi = nzHi; st->nzLo = nzLo; st->nDir = nDir; st->nzHiD = nzHiD;
-    st->gutG = gutG; st->dispN = dispN; st->nailK = nailK;
-    st->f0Open = f0Open; st->gutA2 = gutA2;
-    st->torsRatio = torsRatio; st->torsG = torsG; st->torsC = torsC;
-    st->v0Pow = v0Powp; st->v0Ref = v0Refp;
-    st->hairHz = hairHzp;
-    st->hairRef = (hairRefp > 1e-6 ? hairRefp : 1.0);
-    st->lossReg = lossRegp;
-    st->slideRate = (slideRatep > 1.0 ? slideRatep : 900.0);
-    st->slideDull = slideDullp;
-    st->slideNoise = slideNoisep;
-    st->slideAcc = (slideAccp > 1.0 ? slideAccp : 25000.0);
-    st->hpG = 0.5 * (1.0 + dcRho);
+    poly_load_scalars(st, s);
+    st->hpG = 0.5 * (1.0 + s->dcRho);
     st->lcg = 0x9E3779B97F4A7C15ULL;
     st->strs = (bow_pstring_t *)calloc(st->nb, sizeof(bow_pstring_t));
     for (int b = 0; b < st->nb; b++) poly_mount_string(st, &st->strs[b]);
@@ -2294,39 +2289,14 @@ int bow_poly_scope_slots(void *vst, double *level, int n)
     return st->nb;
 }
 
-/* LIVE PARAMETERS: replace the 52 scalars on a live state (same order
-   and derivations as bow_poly_init); tables and all running state are left
-   alone. Plain scalar writes. Order MUST stay in lockstep with init. */
-void bow_poly_set_scalars(void *vst, const double *s, int n)
+/* LIVE PARAMETERS: replace the per-sample scalars on a live state (the
+   same derivations bow_poly_init applies); tables and all running state are
+   left alone. Plain scalar writes. */
+void bow_poly_set_scalars(void *vst, const bow_scalars_t *s)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
-    if (!st || !s || n < 47) return;
-    st->yinf = s[0]; st->c0 = s[1]; st->dcRho = s[2];
-    st->pgain = s[3]; st->pA = s[4]; st->bowW = s[5]; st->kret = s[6];
-    st->retA = s[7]; st->retMode = s[8]; st->rb0 = s[9];
-    st->ra1 = s[10]; st->ra2 = s[11]; st->kdisp = s[12];
-    st->bowWidth = s[13]; st->bowCont = s[14];
-    st->Z = s[15]; st->Zt = s[16];
-    st->mu_s = s[17]; st->mu_d = s[18]; st->v0f = s[19];
-    st->nutA = s[20]; st->brA = s[21];
-    st->thLeak = s[22]; st->thA = s[23]; st->thD = s[24];
-    st->thFloor = s[25];
-    st->bowDisp = s[26]; st->zload = s[27];
-    st->nA = s[28]; st->nT = s[29]; st->nPow = s[30];
-    st->nzHi = s[31]; st->nzLo = s[32]; st->nDir = s[33];
-    st->nzHiD = s[34];
-    st->gutG = s[35]; st->dispN = s[36]; st->nailK = s[37];
-    st->f0Open = s[38]; st->gutA2 = s[39];
-    st->torsRatio = s[40]; st->torsG = s[41]; st->torsC = s[42];
-    st->v0Pow = s[43]; st->v0Ref = s[44];
-    st->hairHz = s[45]; st->hairRef = (s[46] > 1e-6 ? s[46] : 1.0);
-    /* scalars 47-51: register damping, slide dulling, finger noise — absent =
-       inert */
-    st->lossReg = (n >= 48) ? s[47] : 0.0;
-    st->slideRate = (n >= 49 && s[48] > 1.0) ? s[48] : 900.0;
-    st->slideDull = (n >= 50) ? s[49] : 0.0;
-    st->slideNoise = (n >= 51) ? s[50] : 0.0;
-    st->slideAcc = (n >= 52 && s[51] > 1.0) ? s[51] : 25000.0;
+    if (!st || !s) return;
+    poly_load_scalars(st, s);
 }
 
 /* Overwrite the BODY modal bank's coefficients on a live state; the

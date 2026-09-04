@@ -173,10 +173,9 @@ public final class BowEngine {
         self.tables = tables
         self.mapper = mapper
         self.maxPoly = min(max(maxPoly, 1), BowControlMapper.maxSlots)
-        // scalars[38] = f0Open = the tuning tonic (register-force reference)
+        // f0Open = the tuning tonic (register-force reference)
         filter = BowControlFilter(bp: bp, srk: srk,
-                                  tonic: tables.scalars.count > 38
-                                      ? tables.scalars[38] : 261.63)
+                                  tonic: tables.scalars.f0Open)
         dec = HalfBandDecimator()
         if !rfir.isEmpty { radFIR = FIRFilter(taps: rfir) }
         // bow_rad_lp_ord < 2 selects a one-pole rolloff; absent → 2nd order
@@ -229,26 +228,14 @@ public final class BowEngine {
 
         let t = tables
         let s = t.scalars
-        precondition(s.count == 52, "bow tables: expected 52 scalars, got \(s.count)")
         // Starting point for the live-parameter ramp (see applyPendingLive).
         liveScalarsCur = s
         liveScalarsTarget = s
-        pkernel = bow_poly_init(
-            Int32(nPoly), t.sr,
-            Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC,
-            s[0], s[1], s[2],
-            s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11],
-            s[12], s[13], s[14],
-            s[15], s[16], s[17], s[18], s[19], s[20], s[21],
-            s[22], s[23], s[24], s[25],
-            s[26], s[27],
-            s[28], s[29], s[30], s[31], s[32],
-            s[33], s[34],
-            s[35], s[36], s[37], s[38], s[39],
-            s[40], s[41], s[42],
-            s[43], s[44],
-            s[45], s[46],
-            s[47], s[48], s[49], s[50], s[51])
+        pkernel = withUnsafePointer(to: s) { sp in
+            bow_poly_init(
+                Int32(nPoly), t.sr,
+                Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC, sp)
+        }
         // drone-row excitation scalars (bp defaults, overridable via string.*)
         droneLevel = bp.v("bow_drone_level", 0.026)
         droneOnset = bp.v("bow_drone_onset", 0.052)
@@ -357,8 +344,7 @@ public final class BowEngine {
                     bow_poly_jt_track_config(pk, jt.trackRow,
                                              jt.rowFreqs[row], jt.trackT60,
                                              jt.trackFhf, jt.trackBst)
-                    let tonic = tables.scalars.count > 38
-                        ? tables.scalars[38] : 261.63
+                    let tonic = tables.scalars.f0Open
                     bow_poly_jt_track_target(pk, tonic)
                     trackHzPushed = tonic
                     trackArmed = true
@@ -445,10 +431,8 @@ public final class BowEngine {
     /// The jt row fundamentals (Hz) in kernel order — empty without a jt block.
     public var jtRowFreqs: [Double] { tables.jt?.rowFreqs ?? [] }
 
-    /// The tuning tonic (scalars[38] = f0Open — the open-string reference).
-    public var tonicHz: Double {
-        tables.scalars.count > 38 ? tables.scalars[38] : 261.63
-    }
+    /// The tuning tonic (`f0Open` — the open-string reference).
+    public var tonicHz: Double { tables.scalars.f0Open }
 
     /// Drone excitation scalars (set at build, applied per press). The drive
     /// is slewed filtered noise: swells toward `droneLevel + droneOnset` over
@@ -1166,9 +1150,10 @@ public final class BowEngine {
     // MARK: - Live parameters
 
     /// A parameter edit staged by the control thread, applied at the next
-    /// chunk boundary on the render thread: the 52 kernel scalars, `bp` for
-    /// the Swift-side constants and output/radiation/room. Under `tiltLock`.
-    private var pendingLive: (bp: BowParams, scalars: [Double],
+    /// chunk boundary on the render thread: the kernel scalar struct, `bp`
+    /// for the Swift-side constants and output/radiation/room. Under
+    /// `tiltLock`.
+    private var pendingLive: (bp: BowParams, scalars: bow_scalars_t,
                               tables: BowKernelTables?)?
 
     /// Seed the gain ramp from the engine's output settings; called once
@@ -1208,9 +1193,8 @@ public final class BowEngine {
     /// chunk. Covers only what does not resize a table
     /// (`ParamRegistry.inPlaceKeys`). `tables` also reloads the body modal
     /// bank + jawari coefficients in place; a shape change is refused.
-    public func setLiveParams(bp: BowParams, scalars: [Double],
+    public func setLiveParams(bp: BowParams, scalars: bow_scalars_t,
                               tables: BowKernelTables? = nil) {
-        guard scalars.count == 52 else { return }
         // Arm the RAMP only when a ramped quantity moved: the ramp caps the
         // render chunk to 256 frames, and chunk size perturbs the chaotic
         // friction loop, so a no-op push must not arm it. Coefficient
@@ -1219,7 +1203,7 @@ public final class BowEngine {
                      width: bp.v("bow_rev_width", reverb.width))
         os_unfair_lock_lock(&tiltLock)
         let baseTrim = bp.v("bow_live_trim", trimBase)
-        let ramped = scalars != liveScalarsTarget
+        let ramped = !scalars.equalsFieldwise(liveScalarsTarget)
             || abs(baseTrim - trimBase) > 1e-12
             || abs(gains.mix - liveGainTarget.mix) > 1e-12
             || abs(gains.width - liveGainTarget.width) > 1e-12
@@ -1302,11 +1286,12 @@ public final class BowEngine {
         }
     }
 
-    /// Current / target kernel scalar vectors. Pushes are RAMPED (~25 ms)
+    /// Current / target kernel scalar blocks. Pushes are RAMPED (~25 ms)
     /// rather than stepped: several scalars multiply the signal, so a step
-    /// would be a click. Everything ramps together for simplicity.
-    private var liveScalarsCur: [Double] = []
-    private var liveScalarsTarget: [Double] = []
+    /// would be a click. Everything ramps together for simplicity — the
+    /// struct is interpolated FIELD BY FIELD in declaration order.
+    private var liveScalarsCur = bow_scalars_t()
+    private var liveScalarsTarget = bow_scalars_t()
     private var liveGainCur = (trim: 1.0, mix: 0.0, width: 0.0)
     private var liveGainTarget = (trim: 1.0, mix: 0.0, width: 0.0)
     private var liveRamping = false
@@ -1335,9 +1320,6 @@ public final class BowEngine {
 
         if let (bp, scalars, tables) = pending {
             liveScalarsTarget = scalars
-            if liveScalarsCur.count != scalars.count {
-                liveScalarsCur = scalars          // first push: no history
-            }
             // Control-side constants step immediately: they shape the
             // mapping into the friction loop, which absorbs a step.
             for i in filters.indices { filters[i].updateLiveParams(bp: bp) }
@@ -1380,15 +1362,21 @@ public final class BowEngine {
         // ~25 ms one-pole glide, same shape as the taraf-axis smoother.
         let a = 1.0 - exp(-Double(n48) / (0.025 * sr))
         var settled = true
-        for i in liveScalarsCur.indices {
-            let d = liveScalarsTarget[i] - liveScalarsCur[i]
-            if abs(d) > 1e-12 {
-                liveScalarsCur[i] += a * d
-                if abs(liveScalarsTarget[i] - liveScalarsCur[i])
-                    > 1e-9 * max(abs(liveScalarsTarget[i]), 1.0) {
-                    settled = false
-                } else {
-                    liveScalarsCur[i] = liveScalarsTarget[i]
+        // Field-by-field over the struct's contiguous doubles, in
+        // declaration order — the same order (and the same formula) the
+        // positional vector was interpolated in.
+        liveScalarsCur.withMutableDoubles { cur in
+            liveScalarsTarget.withDoubles { tgt in
+                for i in 0..<bow_scalars_t.fieldCount {
+                    let d = tgt[i] - cur[i]
+                    if abs(d) > 1e-12 {
+                        cur[i] += a * d
+                        if abs(tgt[i] - cur[i]) > 1e-9 * max(abs(tgt[i]), 1.0) {
+                            settled = false
+                        } else {
+                            cur[i] = tgt[i]
+                        }
+                    }
                 }
             }
         }
@@ -1405,12 +1393,8 @@ public final class BowEngine {
         outGain = liveGainCur.trim
         reverb.mix = liveGainCur.mix
         reverb.width = liveGainCur.width
-        if !liveScalarsCur.isEmpty {
-            liveScalarsCur.withUnsafeBufferPointer { sp in
-                if let pk = pkernel {
-                    bow_poly_set_scalars(pk, sp.baseAddress!, Int32(sp.count))
-                }
-            }
+        if let pk = pkernel {
+            withUnsafePointer(to: liveScalarsCur) { bow_poly_set_scalars(pk, $0) }
         }
         if settled {
             liveRamping = false

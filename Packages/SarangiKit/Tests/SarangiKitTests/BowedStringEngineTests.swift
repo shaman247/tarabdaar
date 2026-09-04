@@ -1,5 +1,6 @@
 import XCTest
 @testable import SarangiKit
+import CBowKernel
 
 /// The String voice's table builders: formula-body lockstep values, table shapes, and a mapper-driven string that makes sound. Also hosts `stringBP()` / `testTaraf`, the scaffold every other DSP test builds on.
 final class BowedStringEngineTests: XCTestCase {
@@ -97,18 +98,18 @@ final class BowedStringEngineTests: XCTestCase {
     func testOpenStringTablesShape() {
         let bp = Self.stringBP()
         let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp)
-        XCTAssertEqual(t.scalars.count, 52)
+        XCTAssertEqual(bow_scalars_t.fieldCount, 52)
         XCTAssertEqual(t.ba1.count, 12, "formula body must arm 12 modes")
-        XCTAssertEqual(t.scalars[0], 0.08)           // yinf: bridge mobility
-        XCTAssertEqual(t.scalars[1], 0.3)            // c0: direct radiation
-        XCTAssertEqual(t.scalars[3], 0.0)            // pgain: no voice force
+        XCTAssertEqual(t.scalars.yinf, 0.08)         // bridge mobility
+        XCTAssertEqual(t.scalars.c0, 0.3)            // direct radiation
+        XCTAssertEqual(t.scalars.pgain, 0.0)         // no voice force
         // kret LOOP-CAP PROJECTED (the mobile body raises max|Y·H_brg|) —
         // python reference from gutstring._string_scalars; tolerance covers
         // numpy pairwise- vs Swift sequential-summation in the ymax scan.
         // The cap scan reads the BODY bank only, so deleting the web left
         // this value untouched.
-        XCTAssertEqual(t.scalars[6], 0.16046955218688852, accuracy: 1e-11)
-        XCTAssertEqual(t.scalars[38], 261.63)        // f0Open = tonic
+        XCTAssertEqual(t.scalars.kret, 0.16046955218688852, accuracy: 1e-11)
+        XCTAssertEqual(t.scalars.f0Open, 261.63)     // f0Open = tonic
         // LOCKSTEP with gutstring.formula_body (python reference values at
         // sr 96000 / tonic 261.63; regenerate via the one-liner in the doc
         // comment if the recipe changes)
