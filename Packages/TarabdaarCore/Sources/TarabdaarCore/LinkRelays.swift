@@ -10,11 +10,12 @@ import Foundation
 /// supplies those four as providers and the send as a closure, so nothing
 /// here needs `TarabLink` itself.
 ///
-/// Main queue only (the link paces the sends); `force` skips the pacing
-/// for the STATE fields, whose edges must arrive even when no axis moves.
+/// Main queue only. The link paces axis motion; an EDGE on one of the
+/// acted-on fields goes out immediately — the relay compares them against
+/// the last frame it sent, so no caller decides.
 public final class JoyConDisplayRelay {
 
-    /// `(display, force)` → `TarabLink.setJoyConState`.
+    /// `(display, immediate)` → `TarabLink.setJoyConState`.
     public var send: (JoyConTiltDisplay, Bool) -> Void = { _, _ in }
     public var connected: () -> Bool = { false }
     public var strikeWindowS: () -> Double = { 2.0 }
@@ -26,6 +27,8 @@ public final class JoyConDisplayRelay {
     public private(set) var stick: (Double, Double) = (0, 0)
     public private(set) var wrist: (Double, Double, Double)?
     public private(set) var arm: (Double, Double, Double)?
+    /// The last frame handed to `send` — the edge detector's reference.
+    private var lastSent: JoyConTiltDisplay?
 
     public init() {}
 
@@ -65,8 +68,27 @@ public final class JoyConDisplayRelay {
             octaveShift: octaveShift())
     }
 
-    public func push(force: Bool = false) {
-        send(frame(), force)
+    /// Assemble and send. Paced, unless an acted-on field changed since the
+    /// last send (or nothing has been sent yet) — then immediate.
+    public func push() {
+        let f = frame()
+        let edge = lastSent.map { !Self.sameActedOnFields($0, f) } ?? true
+        lastSent = f
+        send(f, edge)
+    }
+
+    /// Send the current frame immediately regardless of edges — for a peer
+    /// that has just (re)appeared and holds no state yet.
+    public func resend() {
+        let f = frame()
+        lastSent = f
+        send(f, true)
+    }
+
+    private static func sameActedOnFields(_ a: JoyConTiltDisplay,
+                                          _ b: JoyConTiltDisplay) -> Bool {
+        a.connected == b.connected && a.strikeWindowS == b.strikeWindowS
+            && a.fieldWarp == b.fieldWarp && a.octaveShift == b.octaveShift
     }
 }
 

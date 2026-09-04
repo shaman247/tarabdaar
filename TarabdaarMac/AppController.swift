@@ -104,9 +104,10 @@ final class AppController: ObservableObject {
     }
 
     /// Relay the axis values to the iPad as the latest-wins JOYCON_STATE
-    /// frame (link-paced); `force` skips pacing for the STATE fields.
-    private func sendJoyConDisplay(force: Bool = false) {
-        joyConDisplay.push(force: force)
+    /// frame; the relay sends an acted-on field's edge immediately and paces
+    /// the rest.
+    private func sendJoyConDisplay() {
+        joyConDisplay.push()
     }
 
     /// Dpad ←/→: step the playing range one octave (clamped). The shift
@@ -118,7 +119,7 @@ final class AppController: ObservableObject {
                        PitchPadEngine.octaveShiftRange.upperBound)
         guard next != pitchPad.octaveShift else { return }
         pitchPad.octaveShift = next
-        sendJoyConDisplay(force: true)
+        sendJoyConDisplay()
     }
 
     /// The iPad raw-tilt funnel: an arm calibration consumes the report and
@@ -407,7 +408,7 @@ final class AppController: ObservableObject {
         if key == "ctl_strike_window" {
             axes.setStrikeWindow(value)
             DispatchQueue.main.async { [weak self] in
-                self?.sendJoyConDisplay(force: true)
+                self?.sendJoyConDisplay()
             }
             return nil
         }
@@ -636,8 +637,8 @@ final class AppController: ObservableObject {
         axes.onApply = { [weak self] apps in self?.applyControlBatch(apps) }
         axes.paramDefault = { [weak self] key in self?.paramDefault(key) ?? 0 }
         // The JOYCON_STATE mirror: the send plus the four acted-on fields.
-        joyConDisplay.send = { [weak self] display, force in
-            self?.link.setJoyConState(display, force: force)
+        joyConDisplay.send = { [weak self] display, immediate in
+            self?.link.setJoyConState(display, immediate: immediate)
         }
         joyConDisplay.connected = { [weak self] in
             self?.joyCon.connectedName != nil
@@ -827,12 +828,12 @@ final class AppController: ObservableObject {
             }
         }
         // The `connected` bit hides the drone buttons on both surfaces, so
-        // its edges must arrive even when no axis moves: force a push.
+        // its edges must arrive even when no axis moves: push on each.
         joyCon.$connectedName
             .map { $0 != nil }
             .removeDuplicates()
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.sendJoyConDisplay(force: true) }
+            .sink { [weak self] _ in self?.sendJoyConDisplay() }
             .store(in: &cancellables)
         joyCon.start()
     }
@@ -1081,7 +1082,7 @@ final class AppController: ObservableObject {
                 blob: FretArrangementSysEx.encodeBlob(fretArrangement)))
         }
         // A freshly-linked iPad must also learn the JOYCON_STATE fields.
-        sendJoyConDisplay(force: true)
+        joyConDisplay.resend()
     }
 
     // MARK: - Composite parameters

@@ -29,10 +29,6 @@ is re-blessed with a before/after render for an A/B by ear.
    (`StringParamStore` 60 ms, `SarangiStore` 50 ms + 400 ms, the tanpura
    table 750 ms, `pushCurrentState` 300 ms, the MIDI retry). The rebuild path
    is debounced twice in series (250 ms → 60 ms). Change: one `Debouncer`.
-5. **The `force:` pacing bypass** threaded `AppController` → `LinkRelays` →
-   `TarabLink` lets callers decide whether a `JOYCON_STATE` is state or
-   display. Change: the relay compares the acted-on fields against the last
-   emitted frame and sends immediately on change.
 6. **Knob clamps and neutrals re-declared outside the registry**
    (`StringVoiceSource.ControlKnob`, `GlideSequencer` clamps that disagree
    with the registry ranges, 157 literal `bp.v(key, default)` fallbacks) and
@@ -54,11 +50,9 @@ is re-blessed with a before/after render for an A/B by ear.
     `TarabLink`; `ScaleSync` is a second self-versioned 7-bit codec inside
     TLP. Change: the codec exposes encode/decode pairs; the blobs carry TLP's
     version.
-11. **Tests that pin setter pass-through**: `LinkRelayTests` "each setter
-    pushes"; `BowedStringEngineTests` asserts six table coefficients to
-    1e-14 outside `Goldens/`. Change: drop the first; move the second to a
-    golden or drop it.
-
+11. **A test that pins table coefficients**: `BowedStringEngineTests`
+    asserts six coefficients to 1e-14 outside `Goldens/`. Change: move it to
+    a golden or drop it.
 ## Reuse — the same thing written twice
 
 12. **The engine-swap crossfade** (`State.renderMix`, `setEngine`) is

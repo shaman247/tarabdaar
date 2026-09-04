@@ -5,8 +5,8 @@ import XCTest
 /// and the debounced rebuild funnel.
 final class LinkRelayTests: XCTestCase {
 
-    /// An axis that has never reported reads as absent; a report both stores
-    /// and pushes; the fields the iPad ACTS on ride every frame.
+    /// An axis that has never reported reads as absent; axis motion is
+    /// link-paced while an acted-on field's edge goes out immediately.
     func testDisplayFrameReportsLivenessPerAxisGroup() {
         let relay = JoyConDisplayRelay()
         var sent: [(JoyConTiltDisplay, Bool)] = []
@@ -34,10 +34,13 @@ final class LinkRelayTests: XCTestCase {
         XCTAssertTrue(f.stickLive)
         XCTAssertEqual(f.wrist3, 0.3, accuracy: 1e-12)
         XCTAssertEqual(f.arm2, 0.5, accuracy: 1e-12)
-        XCTAssertEqual(sent.count, 3, "each setter pushes")
-        XCTAssertFalse(sent.allSatisfy { $0.1 }, "axis pushes are link-paced")
-        relay.push(force: true)
-        XCTAssertTrue(sent.last?.1 ?? false)
+        XCTAssertTrue(sent.first?.1 ?? false, "the first frame is immediate")
+        XCTAssertFalse(sent.dropFirst().contains { $0.1 }, "axis pushes are link-paced")
+        relay.octaveShift = { -1 }
+        relay.setStick(0.6, 0)
+        XCTAssertTrue(sent.last?.1 ?? false, "an acted-on edge is immediate")
+        relay.setStick(0.7, 0)
+        XCTAssertFalse(sent.last?.1 ?? true, "and the next axis push is paced again")
 
         // a stick inside the dead zone does not read as live
         let rest = JoyConDisplayRelay()

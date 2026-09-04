@@ -121,11 +121,11 @@ public final class TarabLink {
 
     /// Host role: latest Joy-Con display state, emitted coalesced. `force`
     /// skips pacing.
-    public func setJoyConState(_ display: JoyConTiltDisplay, force: Bool = false) {
+    public func setJoyConState(_ display: JoyConTiltDisplay, immediate: Bool = false) {
         queue.async {
             self.joyCon = display
             self.joyConDirty = true
-            if force { self.emitJoyConLocked(); self.drainLocked() }
+            if immediate { self.emitJoyConLocked(); self.drainLocked() }
         }
     }
 
