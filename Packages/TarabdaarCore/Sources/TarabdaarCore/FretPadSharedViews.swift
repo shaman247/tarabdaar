@@ -1,3 +1,4 @@
+import SarangiKit
 import SwiftUI
 
 /// The Fret Pad's display layers, shared by the Mac tab and the iPad
@@ -185,7 +186,7 @@ public struct SoundingReadout: View {
                             octaveSemis: Double) -> String {
         let fractionalMidi = tonicFractionalMidi + octaveSemis
             + 12.0 * log2(ratio)
-        let freq = 440.0 * pow(2.0, (fractionalMidi - 69.0) / 12.0)
+        let freq = Pitch.hz(fractionalMidi: fractionalMidi)
         let nearest = Int(fractionalMidi.rounded())
         let cents = Int(((fractionalMidi - Double(nearest)) * 100.0).rounded())
         let hz = freq >= 1000 ? String(format: "%.0f", freq)

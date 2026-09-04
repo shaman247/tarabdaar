@@ -41,13 +41,9 @@ public final class JoyConFusion {
     private var nHat: SIMD3<Double>?
     private var magMin: SIMD3<Double>?
     private var magMax: SIMD3<Double>?
-    /// The wrist feature's RELATIVE yaw: wrap-safe increments of the fused
-    /// yaw, drift-rate-learned while quiescent (< ~0.57°/s, ~10 s constant)
-    /// and leaked to zero over 60 s, so gyro drift can't rail the axis.
-    private var yawRel = 0.0
-    private var yawRelBias = 0.0
-    private var lastFusedYaw: Double?
-    private static let yawLeakTau = 60.0
+    /// The wrist feature's RELATIVE yaw (`RelativeYawTracker`), so gyro
+    /// drift can't rail the axis.
+    private var relYaw = RelativeYawTracker()
     /// The Joy-Con acceleration envelope (0…1) + its change gate.
     private var accelEnv = 0.0
     private var lastAccelSent = 0.0
@@ -117,8 +113,8 @@ public final class JoyConFusion {
                         atan2(g.y, g.z),
                         yaw)
         let lin = accelG - g
-        updateRelativeYaw(att.z, dt: dt)
-        let wristF = SIMD3(att.x, att.y, yawRel) / (.pi / 2)
+        relYaw.update(rawYaw: att.z, dt: dt)
+        let wristF = SIMD3(att.x, att.y, relYaw.yaw) / (.pi / 2)
         // THE JOY-CON ACCELERATION AXIS: |accel − ĝ| through the strike
         // law and its fast-attack / 150 ms-decay envelope, 0…1, change-
         // gated at 1/256.
@@ -138,22 +134,6 @@ public final class JoyConFusion {
             dt: dt)
     }
 
-    /// Wrap-safe yaw increments, drift rate learned while quiescent and
-    /// subtracted, leaked toward zero with `yawLeakTau`.
-    private func updateRelativeYaw(_ rawYaw: Double, dt: Double) {
-        if let last = lastFusedYaw {
-            var dy = rawYaw - last
-            if dy > .pi { dy -= 2 * .pi } else if dy < -.pi { dy += 2 * .pi }
-            let rate = dy / dt
-            if abs(rate - yawRelBias) < 0.01 {
-                yawRelBias += (rate - yawRelBias) * min(1, dt / 10)
-            }
-            yawRel += dy - yawRelBias * dt
-            yawRel -= yawRel * (dt / Self.yawLeakTau)
-        }
-        lastFusedYaw = rawYaw
-    }
-
     /// A reconnected Joy-Con re-earns its hard-iron estimate and its
     /// relative yaw. Returns true when the acceleration axis had a
     /// non-zero value out, so the host must send one last 0.
@@ -162,9 +142,7 @@ public final class JoyConFusion {
         nHat = nil
         magMin = nil
         magMax = nil
-        lastFusedYaw = nil
-        yawRel = 0
-        yawRelBias = 0
+        relYaw.reset()
         accelEnv = 0
         let wasSending = lastAccelSent != 0
         lastAccelSent = 0

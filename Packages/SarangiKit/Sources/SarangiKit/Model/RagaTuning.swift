@@ -118,7 +118,7 @@ public enum RagaTuning {
 public enum NoteName {
     private static let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
-    public static func hz(forMIDI m: Int) -> Double { 440.0 * pow(2.0, Double(m - 69) / 12.0) }
+    public static func hz(forMIDI m: Int) -> Double { Pitch.hz(fractionalMidi: Double(m)) }
 
     public static func name(forMIDI m: Int) -> String {
         let n = ((m % 12) + 12) % 12

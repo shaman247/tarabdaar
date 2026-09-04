@@ -80,7 +80,7 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
 
     public func noteName(tonic: Double, scaleRatios: [Double]) -> String {
         let hz = ratio(in: scaleRatios) * tonic
-        let midi = Int((69.0 + 12.0 * log2(hz / 440.0)).rounded())
+        let midi = Pitch.nearestMidi(hz: hz)
         return NoteName.name(forMIDI: midi)
     }
 }

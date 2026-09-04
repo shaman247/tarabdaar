@@ -1,3 +1,4 @@
+import SarangiKit
 import TarabdaarCore
 import SwiftUI
 
@@ -225,7 +226,7 @@ struct LiveVisualizerView: View {
     /// Hz → nearest 12-TET note name with cents offset, e.g. "D4 +12¢".
     private func noteName(_ hz: Double) -> String {
         guard hz > 0 else { return "—" }
-        let midi = 69.0 + 12.0 * log2(hz / 440.0)
+        let midi = Pitch.fractionalMidi(hz: hz)
         let nearest = Int(midi.rounded())
         let cents = Int(((midi - Double(nearest)) * 100).rounded())
         let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]

@@ -103,37 +103,17 @@ struct ContentView: View {
                 }
             }
             link.onJoyConState = { [weak scaleSync, weak pad] s in
-                // Frame u8 (centre 128) → the −1…+1 display convention.
-                func ax(_ b: UInt8) -> Double { Double(b) / 255.0 * 2.0 - 1.0 }
-                // Volume readout (TLP v9): into the polled history, NOT
-                // the published display — level motion must not
-                // re-render the toolbar (the scope polls at UI rate).
+                // Volume readout: into the polled history, NOT the
+                // published display — level motion must not re-render
+                // the toolbar (the scope polls at UI rate).
                 scaleSync?.volumeHistory.record(
                     voice: TLPVolume.value01(s.volVoice),
                     taraf: TLPVolume.value01(s.volTaraf))
-                scaleSync?.applyJoyCon(JoyConTiltDisplay(
-                    stickX: ax(s.stickX),
-                    stickY: ax(s.stickY),
-                    wrist1: ax(s.wrist1),
-                    wrist2: ax(s.wrist2),
-                    stickLive: s.flags & TLPJoyConState.flagStickLive != 0,
-                    bodyLive: s.flags & TLPJoyConState.flagBodyLive != 0,
-                    connected: s.flags & TLPJoyConState.flagConnected != 0,
-                    wrist3: ax(s.wrist3),
-                    arm1: ax(s.arm1),
-                    arm2: ax(s.arm2),
-                    arm3: ax(s.arm3),
-                    armLive: s.flags & TLPJoyConState.flagArmLive != 0,
-                    strikeWindowS: s.strikeWin == 0
-                        ? 2.0 : Double(s.strikeWin) * 0.05,
-                    // TLP v10: the Mac's live ctl_fret_warp — the fret
-                    // field resolves touch pitch through it.
-                    fieldWarp: Double(s.fieldWarp) / 255.0,
-                    // TLP v11: the playing-range octave shift (i8).
-                    octaveShift: Int(Int8(bitPattern: s.octave))))
+                let display = JoyConTiltDisplay(frame: s)
+                scaleSync?.applyJoyCon(display)
                 // The shift acts at the engine's outbound-pitch point
                 // (main-thread model, like applyJoyCon's publish).
-                let oct = Int(Int8(bitPattern: s.octave))
+                let oct = display.octaveShift
                 DispatchQueue.main.async {
                     guard let pad, pad.octaveShift != oct else { return }
                     pad.octaveShift = oct

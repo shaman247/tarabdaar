@@ -40,7 +40,7 @@ public final class TanpuraEngine: @unchecked Sendable {
     public static func centsCorrection(forHz f0: Double,
                                        params: TanpuraParams) -> Double {
         guard !params.pitchCents.isEmpty, f0 > 0 else { return 0 }
-        let note = 69.0 + 12.0 * log2(f0 / 440.0)
+        let note = Pitch.fractionalMidi(hz: f0)
         let x = note - Double(params.noteLo)
         let n = params.pitchCents.count
         if x <= 0 { return params.pitchCents[0] }

@@ -34,11 +34,9 @@ is re-blessed with a before/after render for an A/B by ear.
    yaw high-pass with a 60 s leak and drift learner, the peak-hold strike
    envelope) and the Mac re-envelopes the same byte. Change: stream raw
    attitude/acceleration; the Mac owns every time constant.
-10. **`JOYCON_STATE` fields decoded by hand in `ContentView`** (`b/255·2−1`,
-    `strikeWin == 0 ? 2.0 : ·0.05`, `Int8(bitPattern:)`) with the inverse in
-    `TarabLink`; `ScaleSync` is a second self-versioned 7-bit codec inside
-    TLP. Change: the codec exposes encode/decode pairs; the blobs carry TLP's
-    version.
+10. **`ScaleSync` is a second self-versioned 7-bit codec inside TLP**
+    (`version = 4`/`6` on the scale and arrangement blobs). Change: the
+    blobs carry TLP's version.
 11. **A test that pins table coefficients**: `BowedStringEngineTests`
     asserts six coefficients to 1e-14 outside `Goldens/`. Change: move it to
     a golden or drop it.
@@ -48,11 +46,9 @@ is re-blessed with a before/after render for an A/B by ear.
     assist → recorder → 60 Hz settle timer) is written for the Mac in
     `FretPadView` and for the iPad in `PitchPadView_iOS`; the iOS copy alone
     has `radiusPt`/`velocity01`. Change: `FretTouchPlayer` in TarabdaarCore.
-14. **The fractional-MIDI ↔ Hz carrier** `440·2^((m−69)/12)` is written in
-    ~12 places and there are two note-name tables (`Scale.pitchClassNames`,
-    `NoteName.names`). Change: `Pitch.hz(fractionalMidi:)` /
-    `Pitch.fractionalMidi(hz:)` in `Scale.swift`; SarangiKit keeps
-    `NoteName` only for parsing tonic strings.
+14. **Three fractional-MIDI carriers still spelled out** instead of
+    `SarangiKit.Pitch`: `AudioEngine+Scope.swift`, `ScopeView.swift`, and
+    `BowControls.swift:252` (hash-pinned; the same expression).
 15. **Modal-string table math** (the HF t60 law, σ = 6.91/t60, the rotation
     coefficients at dt and dt/4, the `√(2/L)·sin` shapes) is duplicated
     between `BowTables` and `TanpuraTables`. Change: a `ModalString` helper.
@@ -60,11 +56,6 @@ is re-blessed with a before/after render for an A/B by ear.
     `tp_fastpow` (deleted 2026-09-04 as unused), `jt_zone` vs `tp_zone`,
     `dup_f` vs `tp_dup`, and the worker-pool/dispatch scaffolding with the
     same ring sizes. Change: `kernel_common.h` with static inlines.
-17. **The leaky relative-yaw law** is in `MotionManager.updateYaw` and
-    `JoyConFusion.updateRelativeYaw` with the same three constants. Change:
-    `RelativeYawTracker` (folds into item 9).
-18. **The 14-bit split** `UInt8(x >> 7), UInt8(x & 0x7F)` is hand-rolled 8×
-    in `ScaleSync`. Change: `put14`/`get14`.
 19. **The one-pole coefficient** `1 − exp(−2π·f/sr)` and `1 − exp(−dt/τ)`
     are spelled out ~35× across Swift and C, mixing `M_PI` with a literal
     π. Change: `onepole_hz`/`onepole_tau` inlines and a Swift twin. Renders

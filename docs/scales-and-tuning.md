@@ -49,6 +49,6 @@ A "+12.0¢" readout follows the fields whenever the tonic sits off its note anch
 
 ## Pitch on the wire and in the engine
 
-Every touch travels as an f32 fractional-MIDI pitch (`tonicFractionalMidi + 12·log2(ratio)`) — no note + bend split. All pitch interpolation runs in `log2(freq)`. `Scale.noteName` (`Scale.swift`) is the one concert-note-name helper on both sides; the fractional-MIDI ↔ Hz conversion is `440·2^((m−69)/12)` and nothing else — never hardcode a 12-TET formula for scale degrees.
+Every touch travels as an f32 fractional-MIDI pitch (`tonicFractionalMidi + 12·log2(ratio)`) — no note + bend split. All pitch interpolation runs in `log2(freq)`. `SarangiKit.Pitch` is the ONE fractional-MIDI ↔ Hz conversion (`hz(fractionalMidi:)` / `fractionalMidi(hz:)`) and `NoteName` the one concert-name table (`Scale.noteName` reaches it from TarabdaarCore) — never hardcode a 12-TET formula, and never name a scale degree by a concert note.
 
 The older keyboard-model `Scale` (tuning system, enabled pitch classes, key range) is not on the playing path — see `docs/history/`.

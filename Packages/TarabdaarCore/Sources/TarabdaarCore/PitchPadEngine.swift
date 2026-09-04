@@ -1,5 +1,6 @@
 import Foundation
 import QuartzCore
+import SarangiKit
 
 // MARK: - PitchPoint / PitchScale
 
@@ -293,13 +294,13 @@ public final class PitchPadEngine: ObservableObject {
     /// The tonic as an absolute frequency — the ONE Hz value everything
     /// else is relative to.
     public var tonicHz: Double {
-        440.0 * pow(2.0, (tonicFractionalMidi - 69.0) / 12.0)
+        Pitch.hz(fractionalMidi: tonicFractionalMidi)
     }
 
     /// Set the tonic from a frequency.
     public func setTonic(hz: Double) {
         guard hz > 20, hz < 4000 else { return }
-        setTonic(fractionalMidi: 69.0 + 12.0 * log2(hz / 440.0))
+        setTonic(fractionalMidi: Pitch.fractionalMidi(hz: hz))
     }
 
     /// Set the tonic from a fractional MIDI note: integer anchor + ±50¢

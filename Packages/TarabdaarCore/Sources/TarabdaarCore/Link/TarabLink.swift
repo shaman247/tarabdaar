@@ -190,28 +190,9 @@ public final class TarabLink {
         guard let j = joyCon else { return }
         joyConDirty = false
         joyConSeq &+= 1
-        // Axes −1…+1 → u8 (centre 128).
-        func b(_ v: Double) -> UInt8 {
-            UInt8((min(max(v, -1), 1) + 1) / 2 * 255.0 + 0.5)
-        }
-        var flags: UInt8 = 0
-        if j.stickLive { flags |= TLPJoyConState.flagStickLive }
-        if j.bodyLive { flags |= TLPJoyConState.flagBodyLive }
-        if j.connected { flags |= TLPJoyConState.flagConnected }
-        if j.armLive { flags |= TLPJoyConState.flagArmLive }
-        outbox.enqueue(.joyConState(TLPJoyConState(
-            flags: flags, stateSeq: joyConSeq,
-            timestampUs: LinkClock.nowUs(),
-            stickX: b(j.stickX), stickY: b(j.stickY),
-            wrist1: b(j.wrist1), wrist2: b(j.wrist2), wrist3: b(j.wrist3),
-            arm1: b(j.arm1), arm2: b(j.arm2), arm3: b(j.arm3),
-            // 50 ms units, floor 1 so a tiny window never encodes as
-            // "unset" 0.
-            strikeWin: UInt8(min(max((j.strikeWindowS / 0.05).rounded(),
-                                     1), 255)),
-            volVoice: volVoice, volTaraf: volTaraf,
-            fieldWarp: UInt8(min(max(j.fieldWarp, 0), 1) * 255.0 + 0.5),
-            octave: UInt8(bitPattern: Int8(clamping: j.octaveShift)))))
+        outbox.enqueue(.joyConState(j.frame(
+            stateSeq: joyConSeq, timestampUs: LinkClock.nowUs(),
+            volVoice: volVoice, volTaraf: volTaraf)))
     }
 
     private func enqueueEventLocked(_ event: TLPEvent) {

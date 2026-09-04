@@ -97,7 +97,7 @@ private struct HeaderSection: View {
     }
 
     private func noteName(_ hz: Double) -> String {
-        NoteName.name(forMIDI: Int((69.0 + 12.0 * log2(hz / 440.0)).rounded()))
+        NoteName.name(forMIDI: Pitch.nearestMidi(hz: hz))
     }
 }
 

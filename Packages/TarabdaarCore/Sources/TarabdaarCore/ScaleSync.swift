@@ -54,6 +54,14 @@ public struct SyncedScaleState: Codable, Equatable {
 /// then per point `[num14][den14][y][enabled][labelLen][label UTF-8…]`;
 /// tonicCents14 = centi-cents above −50 ¢. Other versions are rejected —
 /// both apps ship the format together.
+/// 14-bit fields ride as two 7-bit bytes, high first.
+private func put14(_ b: inout [UInt8], _ v: Int) {
+    b.append(UInt8(v >> 7)); b.append(UInt8(v & 0x7F))
+}
+private func get14(_ b: [UInt8], _ i: Int) -> Int {
+    (Int(b[i]) << 7) | Int(b[i + 1])
+}
+
 public enum PitchScaleSysEx {
     private static let version: UInt8 = 4
 
@@ -63,16 +71,15 @@ public enum PitchScaleSysEx {
         // centi-cents above −50 ¢: 0…10000, fits 14 bits
         let cc = max(0, min(10000, Int(((state.tonicCents + 50.0) * 100.0).rounded())))
         let margin = UInt8(max(0, min(127, Int(state.marginPixels.rounded()))))
-        var blob: [UInt8] = [version, tonic,
-                             UInt8(cc >> 7), UInt8(cc & 0x7F),
-                             margin,
-                             UInt8(state.layout.rawValue & 0x7F),
-                             UInt8(min(127, state.points.count))]
+        var blob: [UInt8] = [version, tonic]
+        put14(&blob, cc)
+        blob += [margin, UInt8(state.layout.rawValue & 0x7F),
+                 UInt8(min(127, state.points.count))]
         for p in state.points.prefix(127) {
             let num = min(16383, max(0, p.num))
             let den = min(16383, max(1, p.den))
-            blob.append(UInt8(num >> 7));  blob.append(UInt8(num & 0x7F))
-            blob.append(UInt8(den >> 7));  blob.append(UInt8(den & 0x7F))
+            put14(&blob, num)
+            put14(&blob, den)
             blob.append(UInt8(max(0, min(127, Int((p.y * 127).rounded())))))
             blob.append(p.enabled ? 1 : 0)
             let label = Array(p.label.utf8.prefix(127))
@@ -87,7 +94,7 @@ public enum PitchScaleSysEx {
         guard blob.count >= 7, blob[0] == version else { return nil }
 
         let tonic = Int(blob[1])
-        let cents = Double((Int(blob[2]) << 7) | Int(blob[3])) / 100.0 - 50.0
+        let cents = Double(get14(blob, 2)) / 100.0 - 50.0
         let margin = Double(blob[4])
         let layout = PadLayout(rawValue: Int(blob[5])) ?? .pitchPad
         let count = Int(blob[6])
@@ -95,8 +102,8 @@ public enum PitchScaleSysEx {
         var points: [PitchPoint] = []
         for _ in 0..<count {
             guard i + 7 <= blob.count else { return nil }
-            let num = (Int(blob[i]) << 7) | Int(blob[i + 1])
-            let den = (Int(blob[i + 2]) << 7) | Int(blob[i + 3])
+            let num = get14(blob, i)
+            let den = get14(blob, i + 2)
             let y = Double(blob[i + 4]) / 127.0
             let enabled = blob[i + 5] != 0
             let labelLen = Int(blob[i + 6])
@@ -155,7 +162,7 @@ public enum FretArrangementSysEx {
         for s in segments {
             blob.append(b7(s.degreeIndex))
             let x14 = max(0, min(16383, Int((s.x * 16383).rounded())))
-            blob.append(UInt8(x14 >> 7)); blob.append(UInt8(x14 & 0x7F))
+            put14(&blob, x14)
             blob.append(b7(Int((s.topY * 127).rounded())))
             blob.append(b7(Int((s.bottomY * 127).rounded())))
             blob.append(s.enabled ? 1 : 0)
@@ -165,7 +172,7 @@ public enum FretArrangementSysEx {
                 : FretArrangement.defaultDroneRatios[i]
             // cents above −1200 (ratio 0.25…4 → 0…3600), 14-bit
             let c = max(0, min(16383, Int((1200.0 * log2(r) + 1200.0).rounded())))
-            blob.append(UInt8(c >> 7)); blob.append(UInt8(c & 0x7F))
+            put14(&blob, c)
         }
         return blob
     }
@@ -181,7 +188,7 @@ public enum FretArrangementSysEx {
         var segments: [FretSegment] = []
         for _ in 0..<count {
             guard i + 6 <= blob.count else { return nil }
-            let x14 = (Int(blob[i + 1]) << 7) | Int(blob[i + 2])
+            let x14 = get14(blob, i + 1)
             segments.append(FretSegment(degreeIndex: Int(blob[i]),
                                         x: Double(x14) / 16383.0,
                                         topY: Double(blob[i + 3]) / 127.0,
@@ -192,7 +199,7 @@ public enum FretArrangementSysEx {
         var drones = FretArrangement.defaultDroneRatios
         if i + 2 * FretArrangement.droneCount <= blob.count {
             for d in 0..<FretArrangement.droneCount {
-                let c = (Int(blob[i]) << 7) | Int(blob[i + 1])
+                let c = get14(blob, i)
                 drones[d] = pow(2.0, (Double(c) - 1200.0) / 1200.0)
                 i += 2
             }
@@ -213,6 +220,55 @@ public enum FretArrangementSyncStore {
     public static func load() -> FretArrangement? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return FretArrangementSysEx.decodeBlob([UInt8](data))
+    }
+}
+
+/// The JOYCON_STATE wire form of a display frame — the ONE encode/decode
+/// pair (the host's `TarabLink` and the pad's receiver both use it).
+/// Axes −1…+1 ↔ u8 (centre 128); the strike window in 50 ms units with 0
+/// = unset (the viewer's 2 s default); the warp 0…1 ↔ u8; the octave an
+/// i8 bit pattern.
+extension JoyConTiltDisplay {
+    public static let strikeWinUnitS = 0.05
+    public static let strikeWinDefaultS = 2.0
+
+    public init(frame s: TLPJoyConState) {
+        func ax(_ b: UInt8) -> Double { Double(b) / 255.0 * 2.0 - 1.0 }
+        self.init(stickX: ax(s.stickX), stickY: ax(s.stickY),
+                  wrist1: ax(s.wrist1), wrist2: ax(s.wrist2),
+                  stickLive: s.flags & TLPJoyConState.flagStickLive != 0,
+                  bodyLive: s.flags & TLPJoyConState.flagBodyLive != 0,
+                  connected: s.flags & TLPJoyConState.flagConnected != 0,
+                  wrist3: ax(s.wrist3),
+                  arm1: ax(s.arm1), arm2: ax(s.arm2), arm3: ax(s.arm3),
+                  armLive: s.flags & TLPJoyConState.flagArmLive != 0,
+                  strikeWindowS: s.strikeWin == 0 ? Self.strikeWinDefaultS
+                      : Double(s.strikeWin) * Self.strikeWinUnitS,
+                  fieldWarp: Double(s.fieldWarp) / 255.0,
+                  octaveShift: Int(Int8(bitPattern: s.octave)))
+    }
+
+    public func frame(stateSeq: UInt16, timestampUs: UInt32,
+                      volVoice: UInt8, volTaraf: UInt8) -> TLPJoyConState {
+        func b(_ v: Double) -> UInt8 {
+            UInt8((min(max(v, -1), 1) + 1) / 2 * 255.0 + 0.5)
+        }
+        var flags: UInt8 = 0
+        if stickLive { flags |= TLPJoyConState.flagStickLive }
+        if bodyLive { flags |= TLPJoyConState.flagBodyLive }
+        if connected { flags |= TLPJoyConState.flagConnected }
+        if armLive { flags |= TLPJoyConState.flagArmLive }
+        return TLPJoyConState(
+            flags: flags, stateSeq: stateSeq, timestampUs: timestampUs,
+            stickX: b(stickX), stickY: b(stickY),
+            wrist1: b(wrist1), wrist2: b(wrist2), wrist3: b(wrist3),
+            arm1: b(arm1), arm2: b(arm2), arm3: b(arm3),
+            // floor 1 so a tiny window never encodes as "unset" 0
+            strikeWin: UInt8(min(max((strikeWindowS / Self.strikeWinUnitS).rounded(),
+                                     1), 255)),
+            volVoice: volVoice, volTaraf: volTaraf,
+            fieldWarp: UInt8(min(max(fieldWarp, 0), 1) * 255.0 + 0.5),
+            octave: UInt8(bitPattern: Int8(clamping: octaveShift)))
     }
 }
 

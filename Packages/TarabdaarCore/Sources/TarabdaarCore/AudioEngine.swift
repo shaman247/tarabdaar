@@ -239,7 +239,7 @@ public class AudioEngine: ObservableObject {
         lock.unlock()
         storeMeter(snap)
         if inst != .string {
-            let hz = 440.0 * pow(2.0, (pitchSemis - 69.0) / 12.0)
+            let hz = Pitch.hz(fractionalMidi: pitchSemis)
             pluckMainTouch(inst, hz: hz, velocity: velocity, touch: id,
                            exprScale: exprScale)
             return
@@ -277,7 +277,7 @@ public class AudioEngine: ObservableObject {
         if inst != .string {
             if let slot = tpSlot, let engine = tpSrc?.currentEngine(),
                slot < engine.slotFrequencies.count {
-                let hz = 440.0 * pow(2.0, (pitchSemis - 69.0) / 12.0)
+                let hz = Pitch.hz(fractionalMidi: pitchSemis)
                 engine.bend(slot: slot, ratio: hz / engine.slotFrequencies[slot])
             }
             return

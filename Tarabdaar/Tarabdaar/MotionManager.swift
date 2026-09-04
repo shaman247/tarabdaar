@@ -58,35 +58,17 @@ class MotionManager: ObservableObject, MotionSource {
         let s = 2.0 / Double.pi
         return [max(-1, min(1, pitch * s)),
                 max(-1, min(1, roll * s)),
-                max(-1, min(1, yawRelative * s))]
+                max(-1, min(1, relYaw.yaw * s))]
     }
 
-    /// High-passed yaw: yaw is unreferenced gyro integration and drifts, so
-    /// wrap-safe increments are integrated and leaked toward zero with a 60 s
-    /// constant — gestures pass through, a held twist re-centres over ~a minute.
-    private var yawRelative: Double = 0
-    private var lastRawYaw: Double?
+    /// High-passed yaw (`RelativeYawTracker`): attitude yaw is unreferenced
+    /// gyro integration and drifts.
+    private var relYaw = RelativeYawTracker()
     private var lastYawTime: TimeInterval?
-    private let yawLeakTau: Double = 60
-    /// Learned yaw drift rate (rad/s). A constant drift rate passes the leak
-    /// and plateaus at rate × τ, so the rate is estimated while quiescent
-    /// (observed rate within 0.01 rad/s of the estimate) with a ~10 s
-    /// constant and subtracted from every increment.
-    private var yawBias: Double = 0
 
     private func updateYaw(_ rawYaw: Double, timestamp: TimeInterval) {
-        if let last = lastRawYaw, let lastT = lastYawTime {
-            var dy = rawYaw - last
-            if dy > .pi { dy -= 2 * .pi } else if dy < -.pi { dy += 2 * .pi }
-            let dt = min(max(timestamp - lastT, 0.0001), 0.1)
-            let rate = dy / dt
-            if abs(rate - yawBias) < 0.01 {
-                yawBias += (rate - yawBias) * min(1, dt / 10)
-            }
-            yawRelative += dy - yawBias * dt
-            yawRelative -= yawRelative * (dt / yawLeakTau)
-        }
-        lastRawYaw = rawYaw
+        let dt = lastYawTime.map { min(max(timestamp - $0, 0.0001), 0.1) } ?? 0.005
+        relYaw.update(rawYaw: rawYaw, dt: dt)
         lastYawTime = timestamp
     }
 
