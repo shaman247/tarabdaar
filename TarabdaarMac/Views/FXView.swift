@@ -39,25 +39,24 @@ private struct FXPointPanel: View {
     @ObservedObject var controller: AppController
     let point: FXInsertPoint
 
-    private var prefix: String { point.keyPrefix }
     private var title: String { point.name }
     private var sub: String { point.blurb }
 
     private func bind(_ suffix: String) -> Binding<Double> {
-        let key = prefix + suffix
+        let key = point.key(suffix)
         return Binding(get: { controller.paramValue(key) },
                        set: { controller.setParamValue(key, $0) })
     }
 
     private func flag(_ suffix: String) -> Binding<Bool> {
-        let key = prefix + suffix
+        let key = point.key(suffix)
         return Binding(get: { controller.paramValue(key) >= 0.5 },
                        set: { controller.setParamValue(key, $0 ? 1 : 0) })
     }
 
     private var isActive: Bool {
-        controller.paramValue(prefix + "eq_on") >= 0.5
-            || controller.paramValue(prefix + "rev_on") >= 0.5
+        controller.paramValue(point.key("eq_on")) >= 0.5
+            || controller.paramValue(point.key("rev_on")) >= 0.5
     }
 
     /// The rate this point's insert runs at — what the drawn curve is
@@ -96,8 +95,8 @@ private struct FXPointPanel: View {
     }
 
     private var eqBlock: some View {
-        let on = controller.paramValue(prefix + "eq_on") >= 0.5
-        let points = controller.eqCurve(prefix)
+        let on = controller.paramValue(point.key("eq_on")) >= 0.5
+        let points = controller.eqCurve(point.keyPrefix)
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
                 Toggle("EQ curve", isOn: flag("eq_on"))
@@ -109,14 +108,14 @@ private struct FXPointPanel: View {
                     .frame(width: 90)
                     .help("Depth of the curve, 0…1 — double-click the label to reset")
                     .disabled(!on)
-                Text(String(format: "%.2f", controller.paramValue(prefix + "eq_amount")))
+                Text(String(format: "%.2f", controller.paramValue(point.key("eq_amount"))))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .frame(width: 32, alignment: .trailing)
             }
-            EQCurveEditor(points: points, amount: controller.paramValue(prefix + "eq_amount"),
+            EQCurveEditor(points: points, amount: controller.paramValue(point.key("eq_amount")),
                           sampleRate: insertRate, enabled: on) { pts in
-                controller.setEQCurve(prefix, pts)
+                controller.setEQCurve(point.keyPrefix, pts)
             }
             .opacity(on ? 1 : 0.45)
             Text(points.isEmpty
@@ -134,8 +133,8 @@ private struct FXPointPanel: View {
                     .toggleStyle(.switch)
                     .controlSize(.small)
                 Picker("", selection: Binding<Int>(
-                    get: { Int(controller.paramValue(prefix + "rev_type").rounded()) },
-                    set: { controller.setParamValue(prefix + "rev_type", Double($0)) })) {
+                    get: { Int(controller.paramValue(point.key("rev_type")).rounded()) },
+                    set: { controller.setParamValue(point.key("rev_type"), Double($0)) })) {
                     Text("Bigverb").tag(0)
                     Text("Room").tag(1)
                 }
@@ -149,7 +148,7 @@ private struct FXPointPanel: View {
                 fxSlider("size", "rev_size", 0...1, "%.2f")
                 fxSlider("cutoff", "rev_cut", 500...20000, "%.0f Hz")
             }
-            .opacity(controller.paramValue(prefix + "rev_on") >= 0.5 ? 1 : 0.45)
+            .opacity(controller.paramValue(point.key("rev_on")) >= 0.5 ? 1 : 0.45)
         }
         .frame(width: 300)
     }
@@ -159,19 +158,19 @@ private struct FXPointPanel: View {
                           _ fmt: String) -> some View {
         ParamSliderRow(
             label: label, value: bind(suffix), range: range,
-            readout: String(format: fmt, controller.paramValue(prefix + suffix)),
+            readout: String(format: fmt, controller.paramValue(point.key(suffix))),
             labelFont: .caption, labelColor: .primary,
             labelWidth: 42, labelAlignment: .trailing,
             readoutFont: .caption.monospacedDigit(), readoutColor: .secondary,
             readoutWidth: 56,
-            onLabelDoubleTap: { controller.resetParam(prefix + suffix) })
+            onLabelDoubleTap: { controller.resetParam(point.key(suffix)) })
     }
 
     private func resetPoint() {
-        for spec in ParamRegistry.all where spec.key.hasPrefix(prefix) {
+        for spec in ParamRegistry.all where spec.key.hasPrefix(point.keyPrefix) {
             controller.resetParam(spec.key)
         }
-        controller.setEQCurve(prefix, [])
+        controller.setEQCurve(point.keyPrefix, [])
     }
 }
 

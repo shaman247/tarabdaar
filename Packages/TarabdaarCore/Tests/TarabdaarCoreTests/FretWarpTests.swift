@@ -13,19 +13,20 @@ final class FretWarpTests: XCTestCase {
         }
     }
 
-    /// The blob codec is the v6 shape: segments + extent + drones, nothing
-    /// else — a trailing warp byte would break iPad compatibility.
+    /// The blob is extent + flags + segments + drones and nothing else — no
+    /// version byte of its own (TLP's is the version) and no trailing warp
+    /// byte, which would break iPad compatibility.
     func testArrangementBlobIsWarpFree() {
         let a = FretArrangement(
             segments: [FretSegment(degreeIndex: 2, x: 0.3, topY: 0.1,
                                    bottomY: 0.6)],
             ghostExtentOctaves: 0.75)
         let blob = FretArrangementSysEx.encodeBlob(a)
-        XCTAssertEqual(blob[0], 6, "blob version is v6 again")
+        XCTAssertEqual(blob[0], 3, "the first byte is the ghost extent in quarter octaves")
         XCTAssertEqual(blob.count,
-                       4 + 6 * a.segments.count
+                       3 + 6 * a.segments.count
                          + 2 * FretArrangement.droneCount,
-                       "no trailing warp byte")
+                       "no version byte, no trailing warp byte")
         let decoded = FretArrangementSysEx.decodeBlob(blob)!
         XCTAssertEqual(decoded.segments.count, 1)
         XCTAssertEqual(decoded.ghostExtentOctaves, 0.75)

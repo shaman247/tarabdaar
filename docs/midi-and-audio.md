@@ -20,7 +20,7 @@ Reassembly on both ends is **per source** (keyed by the CoreMIDI connection refC
 
 ## Frames (`TLPFrame.swift`)
 
-Little-endian, explicitly encoded byte tables, one frame per envelope. `TLP.versionMin/Max` are 13/13; HELLO intersects version ranges, so a mismatched peer stays down cleanly instead of half-decoding (the symptom of a skipped iPad install is "drones and tilt work, touches are silent" — header-only frames decode while resized touch records don't; install both apps together).
+Little-endian, explicitly encoded byte tables, one frame per envelope. `TLP.versionMin/Max` are 14/14 (the scale and arrangement blobs carry no version of their own — this one is theirs); HELLO intersects version ranges, so a mismatched peer stays down cleanly instead of half-decoding (the symptom of a skipped iPad install is "drones and tilt work, touches are silent" — header-only frames decode while resized touch records don't; install both apps together).
 
 | Type | Name | Class | Direction |
 |---|---|---|---|
@@ -78,7 +78,7 @@ Flags: bit 0 stick live, bit 1 wrist/body live, bit 2 **`connected`** (a Joy-Con
 
 ### Sync events
 
-`SCALE_STATE` and `FRET_ARRANGEMENT` carry the binary blobs raw (`[len u16][blob]`): `PitchScaleSysEx.encodeBlob` (v4: `[ver][tonic][tonicCents14][margin][layout][count]`, then per point `num/den` 14-bit pairs, `y`, `enabled`, length-prefixed UTF-8 label) and `FretArrangementSysEx.encodeBlob` (v6). The synced state is a `SyncedScaleState` = scale + `tonicMidi` + `tonicCents` (±50 ¢ at 0.01 ¢ — the tonic is set in Hz on the Mac) + `marginPixels` + `layout` (`PadLayout`, always `.fretPad`; the enum keeps its other cases because the blob encodes the raw value). Older blob versions are rejected; both apps ship the format together. The fret pitch warp is deliberately NOT in the arrangement blob — it is a live param relayed via `fieldWarp`.
+`SCALE_STATE` and `FRET_ARRANGEMENT` carry the binary blobs raw (`[len u16][blob]`): `PitchScaleSysEx.encodeBlob` (`[tonic][tonicCents14][margin][layout][count]`, then per point `num/den` 14-bit pairs, `y`, `enabled`, length-prefixed UTF-8 label) and `FretArrangementSysEx.encodeBlob`; neither carries a version byte — TLP's version is theirs. The synced state is a `SyncedScaleState` = scale + `tonicMidi` + `tonicCents` (±50 ¢ at 0.01 ¢ — the tonic is set in Hz on the Mac) + `marginPixels` + `layout` (`PadLayout`, always `.fretPad`; the enum keeps its other cases because the blob encodes the raw value). Older blob versions are rejected; both apps ship the format together. The fret pitch warp is deliberately NOT in the arrangement blob — it is a live param relayed via `fieldWarp`.
 
 ## Sender discipline (`LinkOutbox`, `TarabLink`)
 

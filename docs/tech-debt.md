@@ -11,48 +11,9 @@ owner's, taken 2026-09-04, and bound the work.
 one device each; a stale install re-defaults). Hash-changing efficiency work
 is re-blessed with a before/after render for an A/B by ear.
 
-## Altitude — special cases on shared mechanisms
+## Open items
 
-6. **Knob neutrals re-declared outside the registry**
-   (`StringVoiceSource.ControlKnob` neutrals and clamps, 157 literal
-   `bp.v(key, default)` fallbacks in the SarangiKit builders) and
-   `ParamUnificationTests` pins a third copy. Change: `spec.def` and
-   `ParamSpec.clamp(_:)` as the single source (the glide queue already
-   clamps by the registry).
-10. **`ScaleSync` is a second self-versioned 7-bit codec inside TLP**
-    (`version = 4`/`6` on the scale and arrangement blobs). Change: the
-    blobs carry TLP's version.
-## Reuse — the same thing written twice
-
-16. **The two kernels' worker pools** (`jt_pool_run`/`jt_dispatch_run`
-    vs `tp_worker_run`/`tp_dispatch_run`) are the same gen/condvar
-    handshake, 1 ms `pthread_cond_timedwait` backstop and job ring over
-    two different structs. Change: one pool primitive in
-    `kernel_common.h` both instantiate.
-19. **Five one-pole spellings that are not the shared form**: the bow
-    kernel's jt radiation blocker (`-2·M_PI·8·jtDiv/sr`, a different
-    association), the drone-noise band-pass pair and its live setter
-    (`-2·3.14159265358979·f·dt`, a truncated π), the biquad body poles,
-    `Reverb`'s `exp(-1/(sr·tauMs/1000))`, and the block-rate forms in the
-    LiveParams slews. Each would change bits under the helper; leave or
-    re-bless deliberately.
-24. **Minor:** `ParametersView.row` hand-rolls `ParamSliderRow`'s shape; 138
-    inline `min(max())` clamps; the fret-line stroke loop in both pad
-    canvases; `ParametersView`/`FXView` compose FX keys by string prefix.
-
-## Simplification — dead paths and seams
-
-## Efficiency — wasted work by thread
-
-36. **Render-chunk lock hygiene:** seven `tiltLock` acquisitions per chunk
-    across the BowEngine extensions; `TanpuraVoiceSource` sums squares under
-    its lock every callback whether or not `outputLevel()` is polled; the
-    kernel `malloc`s scratch per block when the jt pool is < 2 threads.
-39. **Per-frame heap traffic on the 120 Hz sender**: `touches.map` →
-    `encode()` → `pack` → `envelope` → a `MIDIPacketList` allocation, five
-    buffers per frame. Change: pooled scratch per stage (the send runs on
-    more than one queue, so the scratch needs an owner per queue).
-40. **String-dispatched bindings per wire frame** (`ParamRegistry.spec`
-    hash, four `==` and a `hasPrefix`, a string `switch`, `knobByKey`,
-    `FXPoint.allCases` scan). Change: `ParamSpec` carries a pre-resolved
-    apply target (falls out of item 1).
+None. The audit's entries have all landed or been declined; a decline and
+its reason live in the commit that removed the entry. A new finding goes
+here as a numbered entry under its section (altitude, reuse,
+simplification, efficiency), in the present tense.

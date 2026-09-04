@@ -448,7 +448,7 @@ TarabdaarMac edits, Tarabdaar performs: the Mac pushes
 
 **What syncs (Mac → iPad, one-way).** The layout travels as the TLP
 `FRET_ARRANGEMENT` event (`FretArrangementSysEx` codec, blob **v6**:
-`[ver][ghostQuarterOctaves][flags][count]` then
+`[ghostQuarterOctaves][flags][count]` then
 `[degreeIndex][x14: 2×7-bit][topY][bottomY][enabled]` per segment, then the
 3 drone ratios as 14-bit cents-above-−1200; `flags` reserved, always 0),
 beside `SCALE_STATE` whenever the arrangement changes. Pre-v6 blobs are

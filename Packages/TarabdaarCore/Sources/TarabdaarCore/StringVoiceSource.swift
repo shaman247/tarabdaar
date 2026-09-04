@@ -59,23 +59,27 @@ public final class StringVoiceSource {
         }
         let key: String
         let clamp: (Double) -> Double
+        /// The value a fresh engine has built in — the registry's default
+        /// through the knob's own clamp (the LP knob maps its 20 kHz
+        /// "bypass" default to 0). A knob at neutral is never re-pushed.
         let neutral: Double
         let reapply: Reapply
         let push: (BowEngine, Double, _ read: (String) -> Double) -> Void
 
         /// Single-field knob.
-        init(_ key: String, neutral: Double = 0,
-             _ clamp: @escaping (Double) -> Double,
+        init(_ key: String, _ clamp: @escaping (Double) -> Double,
              _ push: @escaping (BowEngine, Double) -> Void) {
-            self.key = key; self.neutral = neutral; self.clamp = clamp
+            self.key = key; self.clamp = clamp
+            self.neutral = clamp(ParamRegistry.spec(key)?.def ?? 0)
             self.reapply = .whenChanged
             self.push = { engine, v, _ in push(engine, v) }
         }
         /// Multi-field knob: pushes the whole group from the cache.
-        init(_ key: String, neutral: Double, reapply: Reapply,
+        init(_ key: String, reapply: Reapply,
              _ clamp: @escaping (Double) -> Double,
              group: @escaping (BowEngine, _ read: (String) -> Double) -> Void) {
-            self.key = key; self.neutral = neutral; self.clamp = clamp
+            self.key = key; self.clamp = clamp
+            self.neutral = clamp(ParamRegistry.spec(key)?.def ?? 0)
             self.reapply = reapply
             self.push = { engine, _, read in group(engine, read) }
         }
@@ -99,26 +103,26 @@ public final class StringVoiceSource {
         ControlKnob("bow_jt_damp", unit, { $0.setTarafDamp($1) }),
         ControlKnob("bow_tone_tilt", bipolar, { $0.setToneTilt($1) }),
         // neutral = the calibrated level
-        ControlKnob("bow_gain", neutral: 1.0, nonNegative,
+        ControlKnob("bow_gain", nonNegative,
                     { $0.setMasterGain($1) }),
         // neutral = the fitted recruitment profile
-        ControlKnob("bow_jt_sel", neutral: 0.5, unit,
+        ControlKnob("bow_jt_sel", unit,
                     { $0.setTarafSelectivity($1) }),
         // neutral = the fitted bone
-        ControlKnob("bow_jt_evolve", neutral: 0.5, unit,
+        ControlKnob("bow_jt_evolve", unit,
                     { $0.setJtEvolve($1) }),
         // neutral = uniform bone across the register
         ControlKnob("bow_jt_ev_reg", bipolar, { $0.setJtEvolveRegister($1) }),
         // neutral = the chromatic bridge's fitted bone
-        ControlKnob("bow_jtc_evolve", neutral: 0.5, unit,
+        ControlKnob("bow_jtc_evolve", unit,
                     { $0.setJtEvolveChromatic($1) }),
         // inject-ring arm: 0 = no foreign drive (byte-null)
         ControlKnob("bow_jt_inject", nonNegative, { $0.setJtInjectGain($1) }),
         ControlKnob("bow_bal", bipolar, { $0.setBusBalance($1) }),
         // the cap's two fields are pushed together; hard 0 = off (byte-null)
-        ControlKnob("bow_jt_cap", neutral: 0, reapply: .whenChanged, unit,
+        ControlKnob("bow_jt_cap", reapply: .whenChanged, unit,
                     group: pushJtCap),
-        ControlKnob("bow_jt_cap_ratio", neutral: 1.0, reapply: .viaSibling,
+        ControlKnob("bow_jt_cap_ratio", reapply: .viaSibling,
                     { max($0, 0.01) }, group: pushJtCap),
     ]
 

@@ -14,8 +14,8 @@ public enum TLP {
     /// Protocol version — both apps ship in lockstep; the HELLO range check
     /// refuses a mismatched peer cleanly (the symptom otherwise: "drones and
     /// tilt work, touches are silent").
-    public static let versionMin: UInt16 = 13
-    public static let versionMax: UInt16 = 13
+    public static let versionMin: UInt16 = 14
+    public static let versionMax: UInt16 = 14
     /// Hard cap on an encoded frame.
     public static let maxFrameBytes = 1024
     /// HELLO magic 'TRBL' (LE u32).

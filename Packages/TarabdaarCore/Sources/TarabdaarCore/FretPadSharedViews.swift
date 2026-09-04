@@ -1,6 +1,17 @@
 import SarangiKit
 import SwiftUI
 
+extension FretPlacement {
+    /// The fret as drawn: the vertical stroke from its top to its bottom,
+    /// in band-local points.
+    public var linePath: Path {
+        var line = Path()
+        line.move(to: CGPoint(x: x, y: topY))
+        line.addLine(to: CGPoint(x: x, y: bottomY))
+        return line
+    }
+}
+
 /// The Fret Pad's display layers, shared by the Mac tab and the iPad
 /// surface. Only the touch layers are forked (NSEvent vs UIKit
 /// multitouch); everything drawn is one implementation, so the two

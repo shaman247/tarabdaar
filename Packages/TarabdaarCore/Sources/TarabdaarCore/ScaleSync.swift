@@ -50,10 +50,11 @@ public struct SyncedScaleState: Codable, Equatable {
 /// rides the TLP `SCALE_STATE` event and is what the iPad's persisted
 /// store holds.
 ///
-/// Blob (v4): `[ver][tonic][tonicCents14: 2×7-bit][margin][layout][count]`
-/// then per point `[num14][den14][y][enabled][labelLen][label UTF-8…]`;
-/// tonicCents14 = centi-cents above −50 ¢. Other versions are rejected —
-/// both apps ship the format together.
+/// Blob: `[tonic][tonicCents14: 2×7-bit][margin][layout][count]` then per
+/// point `[num14][den14][y][enabled][labelLen][label UTF-8…]`;
+/// tonicCents14 = centi-cents above −50 ¢. The blob's version is TLP's
+/// (`TLP.versionMin`): both apps ship in lockstep and HELLO refuses a
+/// mismatched peer, so a layout change bumps the protocol version.
 /// 14-bit fields ride as two 7-bit bytes, high first.
 private func put14(_ b: inout [UInt8], _ v: Int) {
     b.append(UInt8(v >> 7)); b.append(UInt8(v & 0x7F))
@@ -63,15 +64,13 @@ private func get14(_ b: [UInt8], _ i: Int) -> Int {
 }
 
 public enum PitchScaleSysEx {
-    private static let version: UInt8 = 4
-
     /// The raw binary blob — the TLP `SCALE_STATE` event payload.
     public static func encodeBlob(_ state: SyncedScaleState) -> [UInt8] {
         let tonic = UInt8(max(0, min(127, state.tonicMidi)))
         // centi-cents above −50 ¢: 0…10000, fits 14 bits
         let cc = max(0, min(10000, Int(((state.tonicCents + 50.0) * 100.0).rounded())))
         let margin = UInt8(max(0, min(127, Int(state.marginPixels.rounded()))))
-        var blob: [UInt8] = [version, tonic]
+        var blob: [UInt8] = [tonic]
         put14(&blob, cc)
         blob += [margin, UInt8(state.layout.rawValue & 0x7F),
                  UInt8(min(127, state.points.count))]
@@ -91,14 +90,14 @@ public enum PitchScaleSysEx {
 
     /// Decode the raw binary blob (the TLP event payload).
     public static func decodeBlob(_ blob: [UInt8]) -> SyncedScaleState? {
-        guard blob.count >= 7, blob[0] == version else { return nil }
+        guard blob.count >= 6 else { return nil }
 
-        let tonic = Int(blob[1])
-        let cents = Double(get14(blob, 2)) / 100.0 - 50.0
-        let margin = Double(blob[4])
-        let layout = PadLayout(rawValue: Int(blob[5])) ?? .pitchPad
-        let count = Int(blob[6])
-        var i = 7
+        let tonic = Int(blob[0])
+        let cents = Double(get14(blob, 1)) / 100.0 - 50.0
+        let margin = Double(blob[3])
+        let layout = PadLayout(rawValue: Int(blob[4])) ?? .pitchPad
+        let count = Int(blob[5])
+        var i = 6
         var points: [PitchPoint] = []
         for _ in 0..<count {
             guard i + 7 <= blob.count else { return nil }
@@ -124,7 +123,7 @@ public enum PitchScaleSysEx {
 
 /// iPad-only persistence of the last synced state (the raw blob).
 public enum SyncedScaleStore {
-    private static let key = "tarabdaar.syncedScaleState.v4"
+    private static let key = "tarabdaar.syncedScaleState.v5"
 
     public static func save(_ state: SyncedScaleState) {
         UserDefaults.standard.set(Data(PitchScaleSysEx.encodeBlob(state)), forKey: key)
@@ -142,21 +141,18 @@ public enum SyncedScaleStore {
 /// `FRET_ARRANGEMENT` event and is what the iPad's persisted store holds.
 /// Sent only while the Fret Pad is the active layout.
 ///
-/// Blob (v6): `[ver][ghostQuarterOctaves][flags][count]`, per segment
+/// Blob: `[ghostQuarterOctaves][flags][count]`, per segment
 /// `[degreeIndex][x14: 2×7-bit][topY][bottomY][enabled]`, then the 3
 /// drone-button ratios as 14-bit cents above −1200 (0.25–4.0). `flags` is
-/// RESERVED (written 0, decoded ignored). Other versions are rejected.
+/// RESERVED (written 0, decoded ignored). The blob's version is TLP's.
 /// The fret pitch warp is deliberately NOT here — `ctl_fret_warp` is a
 /// live registry param relayed over JOYCON_STATE.
 public enum FretArrangementSysEx {
-    private static let version: UInt8 = 6
-
     /// The raw binary blob — the TLP `FRET_ARRANGEMENT` event payload.
     public static func encodeBlob(_ a: FretArrangement) -> [UInt8] {
         func b7(_ v: Int) -> UInt8 { UInt8(max(0, min(127, v))) }
         let segments = a.segments.prefix(127)
-        var blob: [UInt8] = [version,
-                             b7(Int((a.ghostExtentOctaves * 4).rounded())),
+        var blob: [UInt8] = [b7(Int((a.ghostExtentOctaves * 4).rounded())),
                              0,   // flags — reserved
                              UInt8(segments.count)]
         for s in segments {
@@ -179,12 +175,12 @@ public enum FretArrangementSysEx {
 
     /// Decode the raw binary blob (the TLP event payload).
     public static func decodeBlob(_ blob: [UInt8]) -> FretArrangement? {
-        guard blob.count >= 4, blob[0] == version else { return nil }
+        guard blob.count >= 3 else { return nil }
 
-        let extent = Double(blob[1]) / 4.0
-        // blob[2] = the reserved flags byte (ignored).
-        let count = Int(blob[3])
-        var i = 4
+        let extent = Double(blob[0]) / 4.0
+        // blob[1] = the reserved flags byte (ignored).
+        let count = Int(blob[2])
+        var i = 3
         var segments: [FretSegment] = []
         for _ in 0..<count {
             guard i + 6 <= blob.count else { return nil }
@@ -211,7 +207,7 @@ public enum FretArrangementSysEx {
 
 /// iPad-only persistence of the last synced arrangement (the raw blob).
 public enum FretArrangementSyncStore {
-    private static let key = "tarabdaar.syncedFretArrangement.v2"
+    private static let key = "tarabdaar.syncedFretArrangement.v3"
 
     public static func save(_ a: FretArrangement) {
         UserDefaults.standard.set(Data(FretArrangementSysEx.encodeBlob(a)), forKey: key)

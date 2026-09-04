@@ -760,10 +760,7 @@ private struct FretPadSurfaceIOS: View {
                     for p in placements {
                         let hue = pitchColor(forRatio: p.ratio,
                                              lightness: 0.82, chroma: 0.20)
-                        var line = Path()
-                        line.move(to: CGPoint(x: p.x, y: p.topY))
-                        line.addLine(to: CGPoint(x: p.x, y: p.bottomY))
-                        ctx.stroke(line, with: .color(hue), lineWidth: 1.5)
+                        ctx.stroke(p.linePath, with: .color(hue), lineWidth: 1.5)
                     }
                 }
 
