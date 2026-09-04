@@ -62,7 +62,7 @@ extension AudioEngine {
     /// The String voice's engine rate; its kernel-rate inserts run at
     /// twice this (`BowEngine.fxRate`).
     public var stringVoiceSampleRate: Double {
-        stringVoiceSource?.modelSR ?? 48000
+        stringVoiceSource?.modelSR ?? Config.sampleRate
     }
 
     /// Replace one FX insert point's EQ curve — the points the FX tab

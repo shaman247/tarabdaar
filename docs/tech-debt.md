@@ -48,25 +48,14 @@ is re-blessed with a before/after render for an A/B by ear.
     `Reverb`'s `exp(-1/(sr·tauMs/1000))`, and the block-rate forms in the
     LiveParams slews. Each would change bits under the helper; leave or
     re-bless deliberately.
-22. **Sample rate** is `Config.sampleRate` 44100 for the graph and a 48000
-    literal default in both sources, `BowEngine.init` and the tanpura
-    kernel's cost budget. Change: pass `Config.sampleRate` explicitly.
 24. **Minor:** `ParametersView.row` hand-rolls `ParamSliderRow`'s shape; 138
     inline `min(max())` clamps; the fret-line stroke loop in both pad
     canvases; `ParametersView`/`FXView` compose FX keys by string prefix.
 
 ## Simplification — dead paths and seams
 
-31. **`bow_kernel_poly.c`** (3200 lines): the jt/taraf half is separable
-    into `bow_jt.c` with a private header; today every taraf edit means
-    reading past the friction solver.
-32. **`tlpsim`** (`Packages/TarabdaarCore/Sources/tlpsim`) is referenced by
-    nothing and undocumented — keep deliberately or delete.
 ## Efficiency — wasted work by thread
 
-35. **`tp_sav_contact`** does two `pow`s per contact point (`pow(em, α+1)`
-    and `pow(em, α)`) where one and a multiply suffice — not bit-exact, so
-    it waits for a tanpura lockstep re-bless.
 36. **Render-chunk lock hygiene:** seven `tiltLock` acquisitions per chunk
     across the BowEngine extensions; `TanpuraVoiceSource` sums squares under
     its lock every callback whether or not `outputLevel()` is polled; the

@@ -284,7 +284,7 @@ public final class StringVoiceSource {
         currentEngine()?.setFX(point, settings)
     }
 
-    public init(sr: Double = 48000) {
+    public init(sr: Double = Config.sampleRate) {
         modelSR = sr
         let st = state
         let fader = EngineCrossfader<BowEngine>(sr: sr)
@@ -513,7 +513,7 @@ public final class StringVoiceSource {
     public static func buildEngine(tonicHz: Double,
                                    strings: [ResolvedString],
                                    mapper: BowControlMapper,
-                                   sr: Double = 48000,
+                                   sr: Double = Config.sampleRate,
                                    overrides: [String: Double] = [:],
                                    follower: (gain: Double, t60: Double)? = nil)
         -> BowEngine? {

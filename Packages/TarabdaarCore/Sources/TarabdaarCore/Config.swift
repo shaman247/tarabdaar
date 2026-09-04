@@ -4,7 +4,10 @@ import CoreGraphics
 /// Central configuration for all tunable parameters.
 public enum Config {
     // MARK: - Audio
-    public static let sampleRate: Double = 44100
+    /// The whole graph runs at the artifacts' native rate: the String
+    /// kernel decimates 96 → 48 kHz into it, the plucked voices render at
+    /// it, and the output device is matched to it (no converter).
+    public static let sampleRate: Double = 48000
     /// Requested output IO buffer size (frames) on macOS — the play-latency
     /// floor. 128 frames ≈ 2.7 ms; the inline sarangi model needs <1 ms of a
     /// buffer, so this leaves comfortable headroom below the 512-frame default.

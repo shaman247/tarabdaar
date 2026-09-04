@@ -162,7 +162,7 @@ touch ► StringVoiceSource         ─┐
 |---|---|
 | IO buffer | requested at engine start and on `setOutputDevice` via `preferredBufferFrames(for:)` → `setOutputBufferFrames` (the device's CoreAudio HAL buffer, clamped to its range; `outputBufferFrames` reads it back, `logAudioLatencyReport` is a diagnostic). `Config.preferredOutputBufferFrames` 128 (≈ 2.7 ms) for direct transports |
 | Jitter-prone transports | DisplayPort/HDMI monitor audio, Bluetooth, AirPlay (by `kAudioDevicePropertyTransportType`) cannot hold the ~3 ms cadence and crackle on EVERY voice; they get `Config.jitterProneOutputBufferFrames` 512 (≈ 11.6 ms). Check `system_profiler SPAudioDataType` before suspecting DSP |
-| Sample rate | `matchOutputDeviceToEngineRate` sets the device to 44.1 kHz when supported (no output resampler) and `restoreOutputDeviceRate` restores it on quit (`willTerminate` + `deinit`); a device without 44.1 kHz keeps AVAudioEngine's converter |
+| Sample rate | `matchOutputDeviceToEngineRate` sets the device to 48 kHz when supported (no output resampler — the whole graph runs at the artifacts' native 48 kHz) and `restoreOutputDeviceRate` restores it on quit (`willTerminate` + `deinit`); a device without 48 kHz keeps AVAudioEngine's converter |
 
 See [Sound Design](sound-design.md) for the voice DSP.
 

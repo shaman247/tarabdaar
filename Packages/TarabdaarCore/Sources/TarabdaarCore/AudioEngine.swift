@@ -186,7 +186,6 @@ public class AudioEngine: ObservableObject {
     var recBuf: [Int16] = []      // interleaved L,R; reused across runs
     var recCount: Int = 0         // valid interleaved Int16 count
     var recURL: URL?
-    var recSampleRate: Double = 48000
     var recActive = false
     var recOverflow = false       // ran out of pre-allocated capacity
 

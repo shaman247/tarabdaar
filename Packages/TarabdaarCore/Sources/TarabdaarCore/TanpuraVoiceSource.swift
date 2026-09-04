@@ -80,7 +80,7 @@ public final class TanpuraVoiceSource {
     /// structural rebuild. nil = artifact value.
     private var outGainOverride: Double?
 
-    public init(sr: Double = 48000) {
+    public init(sr: Double = Config.sampleRate) {
         modelSR = sr
         let st = state
         let fader = EngineCrossfader<TanpuraEngine>(sr: sr)

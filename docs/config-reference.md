@@ -21,7 +21,7 @@ The registry groups are Bow stroke · Body (formula modes) · Bow & string · Pl
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `sampleRate` | 44100 Hz | The nominal engine rate reported in Setup (the String kernel renders 96 → 48 kHz at its artifact's native rate) |
+| `sampleRate` | 48000 Hz | The graph rate — the artifacts' native rate (the String kernel renders 96 → 48 kHz into it, the plucked voices render at it); the output device is matched to it |
 | `preferredOutputBufferFrames` | 128 | Output IO buffer on solid transports (built-in, USB, Thunderbolt) ≈ 2.7 ms — the play-latency floor; clamped to the device's range |
 | `jitterProneOutputBufferFrames` | 512 | Output IO buffer for DisplayPort/HDMI, Bluetooth and AirPlay outputs, which cannot hold the ~3 ms cadence (`preferredBufferFrames(for:)`) |
 

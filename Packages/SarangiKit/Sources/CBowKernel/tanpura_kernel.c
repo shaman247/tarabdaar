@@ -483,6 +483,7 @@ void tanpura_set_oversample(void *vc, int slot, int steps)
 #define TP_COST_BUDGET_XRT 5.0
 static void tp_voice_cap(tp_ctx *c, int keep)
 {
+    /* the cost model is per output sample at the artifacts' 48 kHz */
     const double perSample = 1.0 / 48000.0;
     const double budget = TP_COST_BUDGET_XRT * perSample;
     for (;;) {
@@ -926,8 +927,9 @@ static int tp_sav_contact(tp_slot *s, const float *beff,
         double em = 0.5 * (s->svEta[j] + etaF[j]);
         if (em < 0.0) em = 0.0;
         if (em > 0.0) {
-            const double V = kc * pow(em, alpha + 1.0) / (alpha + 1.0);
-            g[j] = kc * pow(em, alpha) / sqrt(2.0 * V + 1e-30);
+            const double pa = pow(em, alpha);        /* one pow per point */
+            const double V = kc * pa * em / (alpha + 1.0);
+            g[j] = kc * pa / sqrt(2.0 * V + 1e-30);
             ai[na++] = j;
         } else {
             g[j] = 0.0;

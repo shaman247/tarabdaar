@@ -3,7 +3,9 @@
 The **String voice** is Tarabdaar's default played instrument: a pure‑physics
 bowed gut string in **`SarangiKit`** (`Packages/SarangiKit/`) — **`BowEngine`**
 (`Bow/BowEngine.swift`) driving the **C friction kernel** (`CBowKernel`,
-`bow_kernel_poly.c`, built `-O3` always) at 96 kHz, half‑band‑decimated to
+built `-O3` always: `bow_kernel_poly.c` is the played strings, the body and
+the render loop, `bow_jt.c` the taraf, `bow_poly_internal.h` the state and
+the per-sample inlines both share) at 96 kHz, half‑band‑decimated to
 48 kHz. The kernel is the whole instrument — played strings, the two‑bridge
 modal‑jawari taraf, the formula body, radiation and room — and needs only
 **`bowed_string.json`** (`Resources/`). SarangiKit is Tarabdaar's own code:
@@ -42,8 +44,8 @@ touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (o
   mid/side streams; FX rack, balance and bus meter act on
   the split, and the sum is bit‑identical to a single‑bus render.
 - **Rates.** Kernel 96 kHz → 48 kHz; `StringVoiceSource` is an
-  `AVAudioSourceNode` at 48 kHz, converted by the mixer input to
-  `Config.sampleRate` 44.1 kHz. Touches arrive from the link
+  `AVAudioSourceNode` at `Config.sampleRate` 48 kHz — the whole graph's
+  rate, no converter. Touches arrive from the link
   ([MIDI & Audio](midi-and-audio.md)).
 
 ## The kernel and its host

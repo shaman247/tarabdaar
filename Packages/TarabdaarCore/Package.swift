@@ -29,13 +29,6 @@ let package = Package(
             dependencies: ["TarabdaarCore"],
             path: "Sources/paramdoc"
         ),
-        // Fake-iPad link simulator: the REAL pad-side TLP stack over REAL
-        // CoreMIDI, for exercising a running TarabdaarMac without hardware.
-        .executableTarget(
-            name: "tlpsim",
-            dependencies: ["TarabdaarCore"],
-            path: "Sources/tlpsim"
-        ),
         .testTarget(
             name: "TarabdaarCoreTests",
             dependencies: ["TarabdaarCore"],
