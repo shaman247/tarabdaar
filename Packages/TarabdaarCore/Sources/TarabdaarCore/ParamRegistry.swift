@@ -499,11 +499,11 @@ public enum ParamRegistry {
             ParamSpec("bow_vib_cents", "vibrato depth (¢)", group: "Articulation",
                       0, 60, 25, apply: .hybrid, restFraction: 0.0,
                       scope: .perNote,
-                      help: "Finger-vibrato peak DEPTH in cents at the vibrato rate — the ceiling a 100 % depth reaches. The depth itself is driven PER NOTE by the fingertip-flatten ease (flatten a sounding fingertip and that note's vibrato eases in over 2 s, out over 0.5 s when it relaxes) and, as one global \"set all\", by the vibrato composite target / a tilt binding. 0 ¢ = silent whatever drives it (the resting APPLIED depth is 0, which is bit-exact). Up to the built depth this applies instantly; above it the value re-applies in place after the debounce (no rebuild)."),
+                      help: "Finger-vibrato peak depth in cents at the vibrato rate. 0 = none (the resting default). Up to the built depth this applies instantly; above it the value re-applies in place after the debounce (no rebuild)."),
             ParamSpec("bow_vib_hz", "vibrato rate (Hz)", group: "Articulation",
                       3, 9, 5.5,
                       scope: .perNote,
-                      help: "Vibrato frequency (real players ~5–7 Hz). The rate of the fingertip-flatten vibrato and of the vibrato composite target alike."),
+                      help: "Vibrato frequency (real players ~5–7 Hz)."),
         ]),
 
         // THE STRIKE→ACCELERATION BLEND: a control-layer key, not a voice

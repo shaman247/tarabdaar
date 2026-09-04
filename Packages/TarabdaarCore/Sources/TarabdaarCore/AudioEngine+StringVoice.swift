@@ -71,17 +71,9 @@ extension AudioEngine {
         }
     }
 
-    /// Player vibrato depth 0..1 (the vibrato axis) — SET ALL: the
-    /// baseline every fresh string inherits, and every current slot.
+    /// Player vibrato depth 0..1 (the vibrato axis).
     public func setStringVibrato(_ v01: Double) {
         stringVoiceSource?.mapper.setVibrato(v01)
-    }
-
-    /// Player vibrato depth 0..1 for ONE sounding touch — the
-    /// fingertip-flatten ease (`FlattenVibrato`). No-op once the touch's
-    /// string has been re-mounted by another note.
-    public func setStringVibrato(_ v01: Double, forTouch id: UInt16) {
-        stringVoiceSource?.mapper.setVibrato(v01, forTouch: id)
     }
 
     /// Apply one `.live` registry parameter to the String voice — the ONE

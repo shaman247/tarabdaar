@@ -16,12 +16,17 @@ import Foundation
 ///    `(1−w)·strike + w·accel` with `w` from `StrikeBlendWindow`, plus the
 ///    30 Hz weight timer that keeps the ramp moving while the measurement
 ///    is still;
-///  * **the `.fingerAccel` dimension** — the sounding-touch registry (two
-///    lanes: the wire and the local pump, so their u16 id spaces cannot
-///    collide) driving a `FingerAccelTracker`, plus its 30 Hz decay tick.
+///  * **the `.fingerAccel` and `.touchSize` dimensions** — ONE
+///    sounding-touch registry (two lanes: the wire and the local pump, so
+///    their u16 id spaces cannot collide) carrying each touch's latest
+///    pitch and fingertip radius; the NEWEST entry drives a
+///    `FingerAccelTracker` and a `TouchSizeTracker`, each with its own
+///    30 Hz tick (both laws need time steps between wire frames — one to
+///    decay, one to ramp).
 ///
-/// The timing laws themselves live in `StrikeBlendWindow` and
-/// `FingerAccelTracker`; this type owns the bookkeeping and the gating.
+/// The timing laws themselves live in `StrikeBlendWindow`,
+/// `FingerAccelTracker` and `TouchSizeTracker`; this type owns the
+/// bookkeeping and the gating.
 public final class ControlAxisEvaluator {
 
     /// The two touch id spaces feeding the finger registry. Only the WIRE
@@ -43,6 +48,9 @@ public final class ControlAxisEvaluator {
         ControlAxes.dims.firstIndex(of: .acceleration) ?? 6
     public static let fingerAxisIndex =
         ControlAxes.dims.firstIndex(of: .fingerAccel) ?? 7
+    /// TOUCH SIZE — UNIPOLAR 0…1, driven as `2·level − 1` like `.jcAccel`.
+    public static let touchSizeAxisIndex =
+        ControlAxes.dims.firstIndex(of: .touchSize) ?? 12
     /// THE JOY-CON WRIST AXES ↕/↔/⟲ (bipolar).
     public static let wristAxisIndices = (
         ControlAxes.dims.firstIndex(of: .tilt4) ?? 8,
@@ -90,17 +98,27 @@ public final class ControlAxisEvaluator {
     private var fingerActive = false
     private var fingerTimer: DispatchSourceTimer?
 
+    // MARK: Touch-size state (shares `fingerLock` + `fingerOrder`)
+
+    private var sizeTracker = TouchSizeTracker()
+    private var touchRadiusPt: [Int: Double] = [:]
+    private var sizeLast = 0.0
+    private var sizeActive = false
+    private var sizeTimer: DispatchSourceTimer?
+
     public init() {}
 
     deinit {
         strikeTimer?.cancel()
         fingerTimer?.cancel()
+        sizeTimer?.cancel()
     }
 
     // MARK: - Bindings
 
-    /// Re-snapshot the per-axis bindings and re-arm the two auxiliary
-    /// timers. Call on every mapping edit.
+    /// Re-snapshot the per-axis bindings and re-arm the three auxiliary
+    /// timers (blend weight, finger decay, touch-size ramp). Call on every
+    /// mapping edit.
     public func setMapping(_ mapping: DimensionMapping) {
         var snapshot: [[(target: MapTarget, binding: DimensionBinding)]] =
             Array(repeating: [], count: ControlAxes.dims.count)
@@ -133,6 +151,18 @@ public final class ControlAxisEvaluator {
         fingerActive = fingerBound
         fingerLock.unlock()
         updateFingerTimer(active: fingerBound)
+        // Touch size: same gate — a fresh binding starts from a rested
+        // ramp, and the tick runs while bound so the limiter keeps moving
+        // between (and after) wire frames.
+        let sizeBound = !snapshot[Self.touchSizeAxisIndex].isEmpty
+        fingerLock.lock()
+        if sizeBound != sizeActive {
+            sizeTracker.reset()
+            sizeLast = 0
+        }
+        sizeActive = sizeBound
+        fingerLock.unlock()
+        updateSizeTimer(active: sizeBound)
     }
 
     /// The bindings snapshotted for one axis (test/introspection).
@@ -262,9 +292,15 @@ public final class ControlAxisEvaluator {
         let key = lane.rawValue << 16 | Int(id)
         fingerLock.lock()
         fingerOrder.removeAll { $0 == key }
-        if on { fingerOrder.append(key) } else { fingerPitch[key] = nil }
+        if on {
+            fingerOrder.append(key)
+        } else {
+            fingerPitch[key] = nil
+            touchRadiusPt[key] = nil
+        }
         fingerLock.unlock()
         fingerEvaluate()
+        sizeEvaluate()
     }
 
     /// A touch's latest pitch (fractional MIDI semitones).
@@ -275,6 +311,18 @@ public final class ControlAxisEvaluator {
         let isNewest = fingerOrder.last == key
         fingerLock.unlock()
         if isNewest { fingerEvaluate() }
+    }
+
+    /// A touch's latest FINGERTIP RADIUS in points (`UITouch.majorRadius`
+    /// off the wire; 0 = unknown, the Mac pads have no touchscreen) — the
+    /// `.touchSize` feed. Only the newest sounding touch drives the axis.
+    public func touchRadius(lane: TouchLane, id: UInt16, radiusPt: Double) {
+        let key = lane.rawValue << 16 | Int(id)
+        fingerLock.lock()
+        touchRadiusPt[key] = radiusPt
+        let isNewest = fingerOrder.last == key
+        fingerLock.unlock()
+        if isNewest { sizeEvaluate() }
     }
 
     /// Every touch currently DOWN with its latest finger pitch, oldest
@@ -313,6 +361,39 @@ public final class ControlAxisEvaluator {
         } else if !active, let t = fingerTimer {
             t.cancel()
             fingerTimer = nil
+        }
+    }
+
+    /// Rate-limit the newest sounding touch's fingertip radius and drive
+    /// the axis on change. No touch down = target 0, so the tick alone
+    /// ramps the axis back to rest.
+    private func sizeEvaluate() {
+        fingerLock.lock()
+        guard sizeActive else { fingerLock.unlock(); return }
+        let newest = fingerOrder.last
+        let v = sizeTracker.sample(
+            radiusPt: newest.flatMap { touchRadiusPt[$0] },
+            at: ProcessInfo.processInfo.systemUptime)
+        let changed = abs(v - sizeLast) > 1e-4
+        if changed { sizeLast = v }
+        fingerLock.unlock()
+        // UNIPOLAR: 0…1 → the curve's own x through `applyAxis`'s
+        // (value + 1) / 2 (the `.jcAccel` convention).
+        if changed { applyAxis(Self.touchSizeAxisIndex, v * 2 - 1) }
+    }
+
+    private func updateSizeTimer(active: Bool) {
+        if active, sizeTimer == nil {
+            let t = DispatchSource.makeTimerSource(
+                queue: .global(qos: .userInitiated))
+            t.schedule(deadline: .now(), repeating: 1.0 / 30.0,
+                       leeway: .milliseconds(5))
+            t.setEventHandler { [weak self] in self?.sizeEvaluate() }
+            t.resume()
+            sizeTimer = t
+        } else if !active, let t = sizeTimer {
+            t.cancel()
+            sizeTimer = nil
         }
     }
 }

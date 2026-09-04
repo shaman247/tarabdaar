@@ -22,11 +22,13 @@ public enum ControlAxes {
     /// `.acceleration` are evaluated JOINTLY by
     /// `AppController.evaluateStrikeBlend` (the per-note blend), never
     /// through `applyTiltAxis` — driving their indices directly would
-    /// double-apply. The unipolar axes (strike pair, `.jcAccel`) read
-    /// rest at curve x 0; every other axis rests at the centre.
+    /// double-apply. The unipolar axes (strike pair, `.jcAccel`,
+    /// `.touchSize`) read rest at curve x 0 — their drivers pass
+    /// `2·level − 1` so the curve sees the 0…1 level itself; every other
+    /// axis rests at the centre.
     public static let dims: [InputDimension] = [
         .tilt1, .tilt2, .tilt3, .stickX, .stickY, .strike, .acceleration,
-        .fingerAccel, .tilt4, .wrist2, .wrist3, .jcAccel,
+        .fingerAccel, .tilt4, .wrist2, .wrist3, .jcAccel, .touchSize,
     ]
 }
 

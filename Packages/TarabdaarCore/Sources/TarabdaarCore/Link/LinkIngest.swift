@@ -54,8 +54,8 @@ public final class LinkIngest {
     /// `.fingerAccel` feed.
     public var onTouchPitch: ((UInt16, Double) -> Void)?
     /// Per-touch FINGERTIP RADIUS in points, at every onset and on every
-    /// change of the wire byte — the `TouchFlattenDetector` feed behind the
-    /// flatten→vibrato ease. 0 from producers without a touchscreen.
+    /// change of the wire byte — the `.touchSize` dimension's feed
+    /// (`TouchSizeTracker`). 0 from producers without a touchscreen.
     public var onTouchRadius: ((UInt16, Double) -> Void)?
     /// Chord bar selection, on CHANGE only (heartbeat repeats are silent,
     /// so a Mac-local selection is not clobbered by an idle iPad); nil =

@@ -57,19 +57,22 @@ public enum Config {
     /// buttons at their full-surface position.
     public static let fretPadHeightFraction: CGFloat = 0.5
 
-    // MARK: - Fingertip flatten → vibrato
+    // MARK: - Touch size (the `.touchSize` dimension)
 
-    /// ONE Apple touch-size step, in points. `UITouch.majorRadius` is far
-    /// too coarse for a continuous axis — every finger reads one size and
-    /// deliberately FLATTENING the fingertip moves it up a single step —
-    /// so it is used as a BINARY signal: a touch reads flattened once its
-    /// radius sits this far above its own onset baseline, and unflattened
-    /// again below half of it (`TouchFlattenDetector`). The iPad's per-touch
-    /// indicator prints the raw radius, so 3 pt can be re-judged by eye.
-    public static let touchFlattenStepPt: Double = 3.0
+    /// The fingertip-radius window the `.touchSize` axis spans, in POINTS
+    /// (`UITouch.majorRadius`, the PERF_STATE `radius` byte).
+    /// **Measured on the instrument**: a normally curled fingertip reads
+    /// 20.8 or 31.3 pt, and a deliberately FLATTENED finger reaches 73.0
+    /// controllably (sometimes higher). `lo` therefore sits at the top of
+    /// the normal band — ordinary playing rests the axis at 0 — and `hi`
+    /// at the flattened reach; both ends clamp (`TouchSizeTracker`).
+    public static let touchSizeLoPt: Double = 31.3
+    public static let touchSizeHiPt: Double = 73.0
 
-    /// Flatten → vibrato ease-in time: 0 → 100 % depth while flattened.
-    public static let flattenVibratoEaseInS: TimeInterval = 2.0
-    /// Ease-out time back to 0 once the fingertip un-flattens (or lifts).
-    public static let flattenVibratoEaseOutS: TimeInterval = 0.5
+    /// The `.touchSize` RATE LIMIT: seconds for the axis to traverse its
+    /// whole 0…1 range, in both directions. Apple quantises the radius
+    /// into coarse steps, so the mapped value arrives as a staircase; a
+    /// linear ramp (not a one-pole) turns each step into a constant-slope
+    /// glide that lands exactly on the target instead of creeping at it.
+    public static let touchSizeRampS: TimeInterval = 0.5
 }

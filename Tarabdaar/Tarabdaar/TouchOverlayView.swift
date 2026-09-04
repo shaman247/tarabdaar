@@ -15,8 +15,9 @@ struct TouchEvent {
     let yFraction: Double  // 0-1 across view height (0 = top)
     let timestamp: TimeInterval
     /// `UITouch.majorRadius` in POINTS — the fingertip-size signal behind
-    /// the flatten detector. Coarse by construction (Apple quantises it
-    /// hard); used as a BINARY "flattened" state, never a continuous axis.
+    /// the `.touchSize` control dimension (`TouchSizeTracker`, which maps
+    /// and rate-limits it; Apple quantises the raw reading into coarse
+    /// steps).
     let radius: Double
 }
 

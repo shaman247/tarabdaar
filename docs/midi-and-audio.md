@@ -51,7 +51,7 @@ Events (`0x01–0x3F`) are `[type][eventSeq u16]` + payload, reliable, never dro
 | `id` | u16 | namespaced wire id — one touch = one identity |
 | `onsetSeq` | u8 | bumps on retrigger |
 | `velocity` | u8 | the onset strike estimate, 0–255 ↔ 0…1, stored per slot for `bow_attack_vel` |
-| `radius` | u8 | FINGERTIP SIZE — `UITouch.majorRadius` in points × 4 (quarter-point steps, clamped at 255 ≈ 63.75 pt); 0 = unknown (producers without a touchscreen). `LinkIngest.onTouchRadius` → `TouchFlattenDetector` → the flatten→vibrato ease — see [Sensors](sensors.md). Filled at onset and on every move. **v13** — it replaced the never-read `pressure` byte in place, so the record size is unchanged |
+| `radius` | u8 | FINGERTIP SIZE — `UITouch.majorRadius` in points × 4 (quarter-point steps, clamped at 255 ≈ 63.75 pt); 0 = unknown (producers without a touchscreen). `LinkIngest.onTouchRadius` → `TouchSizeTracker` → the `.touchSize` control dimension — see [Sensors](sensors.md). Filled at onset and on every move. **v13** — it replaced the never-read `pressure` byte in place, so the record size is unchanged |
 | `pitch` | f32 | fractional MIDI (~0.0008 ¢ steps) |
 
 The touch record is 9 bytes. The `TLPTouch` STRUCT also carries `exprScale` and `glideExempt` — in-process-only fields alive on the Mac's `LocalLinkPump` lane (the strum chord's per-note expression, the glide-queue exemption); the encoder skips them and decoded wire frames read the defaults.

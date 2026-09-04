@@ -89,9 +89,8 @@ public struct TLPTouch: Equatable, Sendable {
     public var velocity: UInt8      // 0–255 onset velocity
     /// FINGERTIP SIZE — `UITouch.majorRadius` in POINTS × 4, clamped to
     /// 255 (0 = unknown: producers without a touchscreen). Quarter-point
-    /// steps are far finer than Apple's own quantisation; the signal is
-    /// used as a BINARY flatten detection, not a continuous axis
-    /// (`TouchFlattenDetector`).
+    /// steps are far finer than Apple's own quantisation; the Mac maps it
+    /// onto the `.touchSize` control axis (`TouchSizeTracker`).
     public var radius: UInt8
     public var pitch: Float         // fractional MIDI note
     /// IN-PROCESS ONLY (the Mac strum chord's live loudness): not encoded;

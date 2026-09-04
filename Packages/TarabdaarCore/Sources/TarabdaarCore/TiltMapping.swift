@@ -44,6 +44,15 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     /// fast-attack/150 ms-decay envelope). UNIPOLAR like `.acceleration`
     /// — rest reads at the curve's LEFT end (x 0).
     case jcAccel        = 15
+    /// TOUCH SIZE: the newest sounding touch's fingertip contact radius
+    /// (`UITouch.majorRadius`, the PERF_STATE `radius` byte) mapped
+    /// 31.3 → 73.0 pt onto 0…1 and RATE-LIMITED to a linear 0.5 s ramp
+    /// (`TouchSizeTracker`) — normal playing rests near 0, a deliberately
+    /// flattened fingertip sweeps the range. UNIPOLAR like `.strike`:
+    /// rest is the curve's LEFT end (x 0), so a binding reads silence
+    /// with the finger relaxed. Mac-evaluated from the wire radius
+    /// stream; the iPad's touch ring draws its own display-only copy.
+    case touchSize      = 16
     case none           = -1
 
     public var label: String {
@@ -60,6 +69,7 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
         case .strike:        return "Strike"
         case .acceleration:  return "Acceleration"
         case .fingerAccel:   return "Finger Accel"
+        case .touchSize:     return "Touch Size"
         case .accelPressure: return "Pressure"
         case .keyY:          return "Key Y"
         case .slider1:       return "Slider 1"
@@ -83,6 +93,7 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
         case .strike:        return "St"
         case .acceleration:  return "Ac"
         case .fingerAccel:   return "FA"
+        case .touchSize:     return "TS"
         case .accelPressure: return "Pr"
         case .keyY:          return "Y"
         case .slider1:       return "S1"
@@ -101,7 +112,7 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     /// The real dimensions (excludes .none).
     public static let real: [InputDimension] = [
         .tilt1, .tilt2, .tilt3, .tilt4, .wrist2, .wrist3, .stickX, .stickY,
-        .strike, .acceleration, .fingerAccel, .jcAccel,
+        .strike, .acceleration, .fingerAccel, .touchSize, .jcAccel,
         .accelPressure, .keyY, .slider1, .slider2,
     ]
 }

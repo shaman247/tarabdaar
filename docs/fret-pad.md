@@ -168,20 +168,21 @@ fitted. Fitting rounds: `docs/history/`.
 Each touch draws one **indicator ring**, and the ring's SIZE is the raw
 fingertip radius (`UITouch.majorRadius` × 2 px, clamped 16–120 px; a ~23 pt
 fingertip draws the historic 46 px circle). Beside it the radius itself is
-printed in points, to one decimal — the signal in the raw, so
-`Config.touchFlattenStepPt` (3 pt, one Apple size step) can be judged by
-eye while playing. Colour is playing state: cyan while the finger glides,
-amber whenever the stop detector holds (`FretDragAssist.Output.stopGate`,
-and every touch is born stopped), and **violet with a second outer ring
-whenever the shared `TouchFlattenDetector` reads the fingertip FLATTENED** —
-the state that eases that note's vibrato in on the Mac (see
-[sensors.md](sensors.md)). The iPad runs its own display-only instance of
-the same law, so the highlight and the sounding vibrato agree.
+printed in points, to one decimal — the signal in the raw, so the
+`Config.touchSizeLoPt`…`touchSizeHiPt` window (31.3 → 73.0 pt) can be
+judged by eye while playing. Colour is playing state: cyan while the
+finger glides, amber whenever the stop detector holds
+(`FretDragAssist.Output.stopGate`, and every touch is born stopped).
+Outside the ring, a **violet arc** draws that finger's **`.touchSize`
+axis** — the mapped, rate-limited 0…1 value the Mac's bindings see —
+clockwise from 12 o'clock: nothing at rest, a closed circle at full. The
+iPad runs its own display-only `TouchSizeTracker` for it (see
+[sensors.md](sensors.md)), so no wire traffic is added.
 
 Display-only (`TouchIndicatorModel` + `TouchIndicatorLayerIOS`); the Mac
-preview pad has no such overlay. The detector is ticked by the 60 Hz settle
-loop as well as by moves, so a motionless finger's baseline window still
-closes.
+preview pad has no such overlay. A ~30 Hz ticker advances every touch's
+rate limiter while anything is down, because UIKit only reports a finger
+that moves.
 
 **Not on this overlay** (removed 2026-09-04): the `original → corrected`
 pitch-correction readout and the accelerometer strike ripple + 0–127

@@ -744,7 +744,7 @@ private struct FretPadSurfaceIOS: View {
                               cells: fretFillCells(placements), edgePad: edgePad)
                     .offset(x: band.minX, y: band.minY)
 
-                // Per-touch indicator: fingertip-radius ring + flatten state.
+                // Per-touch indicator: fingertip-radius ring + size arc.
                 TouchIndicatorLayerIOS(model: indicators, edgePad: edgePad)
 
                 // The chord bar (display only; taps hit-tested in `began`).
@@ -896,7 +896,7 @@ private struct FretPadSurfaceIOS: View {
                      weights: out.weights)
         engine.setTouchRadius(touchId: ev.touchId, radiusPt: ev.radius)
         indicators.update(ev.touchId, point: spt, stopGate: out.stopGate,
-                          radiusPt: ev.radius, at: now)
+                          radiusPt: ev.radius)
         recorder.sample(touchId: ev.touchId, x: pt.x, y: pt.y,
                         u: fieldLog + offset, o: out.log2Pitch, time: now)
     }
@@ -916,7 +916,7 @@ private struct FretPadSurfaceIOS: View {
             for (id, out) in assist.tick(time: now) {
                 engine.glide(touchId: id, ratio: pow(2.0, out.log2Pitch),
                              weights: out.weights)
-                indicators.update(id, stopGate: out.stopGate, at: now)
+                indicators.update(id, stopGate: out.stopGate)
                 recorder.sampleTick(touchId: id, o: out.log2Pitch, time: now)
             }
             if assist.isEmpty { timer.invalidate() }
@@ -926,10 +926,10 @@ private struct FretPadSurfaceIOS: View {
 
 // MARK: - Per-touch indicator overlay
 
-/// Live per-touch indicator state: the stop gate and the RAW FINGERTIP
-/// RADIUS (`UITouch.majorRadius`) with the shared `TouchFlattenDetector`'s
-/// verdict on it. A class so the settle-timer closure can feed it; no-op
-/// updates are skipped.
+/// Live per-touch indicator state: the stop gate, the RAW FINGERTIP
+/// RADIUS (`UITouch.majorRadius`) and the rate-limited `.touchSize` axis
+/// the Mac derives from it. A class so the settle-timer closure can feed
+/// it; no-op updates are skipped.
 ///
 /// The pitch-correction readout and the accelerometer strike ripple/number
 /// are deliberately NOT here any more — the toolbar's strike and
@@ -940,63 +940,91 @@ private final class TouchIndicatorModel: ObservableObject {
         var stopGate: Double    // 0 = moving … 1 = stopped
         /// `UITouch.majorRadius` in points, as reported (0 = unknown).
         var radiusPt: Double = 0
-        /// The shared detector's binary state for this touch.
-        var flattened = false
+        /// The `.touchSize` axis for THIS finger, 0…1 — the same mapping
+        /// and rate limit the Mac's bindings run.
+        var axis: Double = 0
     }
 
     @Published private(set) var infos: [Int: Info] = [:]
 
-    /// The iPad's own display instance of the law the Mac's bindings run
-    /// (`FlattenVibrato`) — the same baseline + hysteresis, so the ring's
-    /// highlight is exactly the state that eases the vibrato in.
-    private var flatten = TouchFlattenDetector()
+    /// DISPLAY-ONLY instances of the shared law (the finger-accel scope
+    /// pattern: the data's source side draws its own readout, no extra
+    /// wire traffic). One per touch — the Mac's control axis follows the
+    /// NEWEST touch, but on screen every finger shows its own value.
+    private var size: [Int: TouchSizeTracker] = [:]
+
+    /// The rate limiter needs regular time steps and UIKit only reports a
+    /// finger that MOVES, so a ~30 Hz ticker advances every tracker while
+    /// anything is down. `.common` mode so touch tracking can't starve it.
+    private var ticker: Timer?
 
     func begin(_ id: Int, point: CGPoint, stopGate: Double,
                radiusPt: Double, at t: TimeInterval) {
-        flatten.begin(id, radiusPt: radiusPt, at: t)
+        var tr = TouchSizeTracker()
+        tr.sample(radiusPt: radiusPt, at: t)     // seeds the clock at 0
+        size[id] = tr
         infos[id] = Info(point: point, stopGate: stopGate,
-                         radiusPt: radiusPt,
-                         flattened: flatten.isFlattened(id))
+                         radiusPt: radiusPt, axis: tr.value)
+        armTicker()
     }
 
     /// `radiusPt` nil = a settle tick (the finger has not moved, so UIKit
-    /// reported no new size); the detector still ticks so a motionless
-    /// touch's baseline window closes.
+    /// reported no new size); the last radius stands as the ramp's target.
     func update(_ id: Int, point: CGPoint? = nil, stopGate: Double,
-                radiusPt: Double? = nil, at t: TimeInterval) {
+                radiusPt: Double? = nil) {
         guard var info = infos[id] else { return }
-        if let radiusPt {
-            flatten.sample(id, radiusPt: radiusPt, at: t)
-        } else {
-            flatten.tick(id, at: t)
-        }
         let p = point ?? info.point
         let r = radiusPt ?? info.radiusPt
-        let flat = flatten.isFlattened(id)
         // ~half-px / quarter-point thresholds: a settled hold publishes
-        // nothing.
+        // nothing (the ticker publishes the ramp on its own).
         if abs(info.stopGate - stopGate) < 0.01,
            abs(info.radiusPt - r) < 0.25,
-           info.flattened == flat,
            abs(p.x - info.point.x) + abs(p.y - info.point.y) < 0.5 { return }
         info.point = p
         info.stopGate = stopGate
         info.radiusPt = r
-        info.flattened = flat
         infos[id] = info
     }
 
     func end(_ id: Int) {
-        flatten.end(id)
+        size.removeValue(forKey: id)
         infos.removeValue(forKey: id)
+        if infos.isEmpty {
+            ticker?.invalidate()
+            ticker = nil
+        }
+    }
+
+    private func armTicker() {
+        guard ticker == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) {
+            [weak self] timer in
+            guard let self, !self.infos.isEmpty else {
+                timer.invalidate()
+                self?.ticker = nil
+                return
+            }
+            let now = CACurrentMediaTime()
+            for (id, info) in self.infos {
+                guard var tr = self.size[id] else { continue }
+                let v = tr.sample(radiusPt: info.radiusPt, at: now)
+                self.size[id] = tr
+                guard abs(v - info.axis) > 0.002 else { continue }
+                var i = info
+                i.axis = v
+                self.infos[id] = i          // publishes
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        ticker = t
     }
 }
 
-/// One ring per touch, SIZED BY THE RAW FINGERTIP RADIUS: cyan gliding →
-/// amber stopped, a violet double ring while the shared detector reads the
-/// fingertip FLATTENED (the state that eases this note's vibrato in), and
-/// the radius in points printed beside it so the coarse steps Apple
-/// actually reports are visible while playing.
+/// One ring per touch, SIZED BY THE RAW FINGERTIP RADIUS (cyan gliding →
+/// amber stopped), with the radius in points printed beside it and the
+/// **`.touchSize` axis drawn as an arc** just outside the ring — a full
+/// circle at 1, nothing at 0 — so the smoothed 0…1 value the Mac's
+/// bindings actually see is visible while playing.
 private struct TouchIndicatorLayerIOS: View {
     @ObservedObject var model: TouchIndicatorModel
     let edgePad: CGFloat
@@ -1020,33 +1048,43 @@ private struct TouchIndicatorLayerIOS: View {
     private func draw(_ info: TouchIndicatorModel.Info,
                       in ctx: inout GraphicsContext, size: CGSize) {
         let g = info.stopGate
-        // Moving = cool cyan, stopped = warm amber, blended by the gate;
-        // flattened overrides both with violet.
-        let color = info.flattened
-            ? Color(red: 0.72, green: 0.45, blue: 1.0)
-            : Color(red: 0.25 + 0.75 * g,
-                    green: 0.75 - 0.15 * g,
-                    blue: 1.0 - 0.9 * g)
+        // Moving = cool cyan, stopped = warm amber, blended by the gate.
+        let color = Color(red: 0.25 + 0.75 * g,
+                          green: 0.75 - 0.15 * g,
+                          blue: 1.0 - 0.9 * g)
         let radius = ringRadius(info.radiusPt)
         let ring = Path(ellipseIn: CGRect(x: info.point.x - radius,
                                           y: info.point.y - radius,
                                           width: 2 * radius,
                                           height: 2 * radius))
         ctx.stroke(ring, with: .color(color.opacity(0.45 + 0.45 * g)),
-                   lineWidth: info.flattened ? 5 : 3)
-        // Flattened: a second, wider ring — "the vibrato is easing in".
-        if info.flattened {
-            let r2 = radius + 8
-            let halo = Path(ellipseIn: CGRect(x: info.point.x - r2,
-                                              y: info.point.y - r2,
-                                              width: 2 * r2, height: 2 * r2))
-            ctx.stroke(halo, with: .color(color.opacity(0.5)), lineWidth: 1.5)
-        }
+                   lineWidth: 3)
+        drawSizeArc(info, radius: radius, in: &ctx)
         drawRadiusNumber(info, radius: radius, in: &ctx, size: size)
     }
 
+    /// The rate-limited `.touchSize` value as an arc outside the ring,
+    /// clockwise from 12 o'clock: 0 draws nothing, 1 closes the circle.
+    private func drawSizeArc(_ info: TouchIndicatorModel.Info,
+                             radius: CGFloat,
+                             in ctx: inout GraphicsContext) {
+        let v = min(max(info.axis, 0), 1)
+        guard v > 0.005 else { return }
+        let r = radius + 7
+        var arc = Path()
+        arc.addArc(center: info.point, radius: r,
+                   startAngle: .degrees(-90),
+                   endAngle: .degrees(-90 + 360 * v),
+                   clockwise: false)
+        ctx.stroke(arc,
+                   with: .color(Color(red: 0.72, green: 0.45, blue: 1.0)
+                                    .opacity(0.9)),
+                   style: StrokeStyle(lineWidth: 4, lineCap: .round))
+    }
+
     /// The raw `majorRadius` in points at the ring's right — the signal
-    /// itself, so `Config.touchFlattenStepPt` can be judged by eye.
+    /// itself, so the `Config.touchSizeLoPt`…`HiPt` window can be judged
+    /// by eye.
     private func drawRadiusNumber(_ info: TouchIndicatorModel.Info,
                                   radius: CGFloat,
                                   in ctx: inout GraphicsContext,
@@ -1054,12 +1092,10 @@ private struct TouchIndicatorLayerIOS: View {
         guard info.radiusPt > 0 else { return }
         let text = Text(String(format: "%.1f", info.radiusPt))
             .font(.system(size: 13, weight: .bold).monospacedDigit())
-            .foregroundColor(info.flattened
-                             ? Color(red: 0.85, green: 0.68, blue: 1.0)
-                             : .white.opacity(0.92))
+            .foregroundColor(.white.opacity(0.92))
         let resolved = ctx.resolve(text)
         let sz = resolved.measure(in: CGSize(width: 80, height: 30))
-        let rightX = info.point.x + radius + 14 + sz.width / 2
+        let rightX = info.point.x + radius + 18 + sz.width / 2
         let cx = min(rightX, size.width - 2 * edgePad - sz.width / 2 - 4)
         let cy = min(max(info.point.y, sz.height / 2 + 4),
                      size.height - 2 * edgePad - sz.height / 2 - 4)

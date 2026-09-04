@@ -482,8 +482,8 @@ public final class PitchPadEngine: ObservableObject {
         playState.touchExpr(touchId, exprScale)
     }
 
-    /// Fingertip-size update for a held note (points) — the flatten
-    /// detector's feed; change-gated on the wire byte downstream.
+    /// Fingertip-size update for a held note (points) — the `.touchSize`
+    /// axis's feed; change-gated on the wire byte downstream.
     public func setTouchRadius(touchId: Int, radiusPt: Double) {
         guard currentRatio[touchId] != nil else { return }
         playState.touchRadius(touchId, radiusPt: radiusPt)
