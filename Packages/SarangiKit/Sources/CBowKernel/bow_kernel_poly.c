@@ -20,6 +20,7 @@
 #include <pthread/qos.h>
 #endif
 #include "bow_kernel.h"   /* bow_scalars_t + the public prototypes */
+#include "kernel_common.h"
 
 #define MAXBOW 4096
 /* async jt ring sizes (also the two-way-coupling FIFO's) */
@@ -407,12 +408,6 @@ static void poly_mount_string(bow_poly_state_t *st, bow_pstring_t *S)
         ^ ((unsigned long long)(S - st->strs) + 1ULL) * 0xBF58476D1CE4E5B9ULL;
 }
 
-static double *pdup_d(const double *a, int n) {
-    double *b = (double *)malloc(sizeof(double) * (n > 0 ? n : 1));
-    memcpy(b, a, sizeof(double) * (size_t)n);
-    return b;
-}
-
 /* Adopt the per-sample scalars onto a live state: plain scalar writes with
    the three guarded defaults. Shared by bow_poly_init and
    bow_poly_set_scalars so the two can never drift. Every field is always
@@ -448,13 +443,13 @@ static void poly_load_scalars(bow_poly_state_t *st, const bow_scalars_t *s)
     /* the per-sample constants the string loop reads */
     const double sr = st->sr;
     st->nutFc0 = -log(st->nutA) * sr / 6.283185307179586;
-    st->kgAtk = exp(-1.0 / (0.003 * sr));
-    st->kgRel = exp(-1.0 / (0.008 * sr));
-    st->slCD = 1.0 - exp(-1.0 / (0.010 * sr));
-    st->slAtk = exp(-1.0 / (0.015 * sr));
-    st->slRel = exp(-1.0 / (0.120 * sr));
-    st->slAAtk = exp(-1.0 / (0.010 * sr));
-    st->slARel = exp(-1.0 / (0.100 * sr));
+    st->kgAtk = kc_pole_tau_sr(0.003, sr);
+    st->kgRel = kc_pole_tau_sr(0.008, sr);
+    st->slCD = kc_onepole_tau_sr(0.010, sr);
+    st->slAtk = kc_pole_tau_sr(0.015, sr);
+    st->slRel = kc_pole_tau_sr(0.120, sr);
+    st->slAAtk = kc_pole_tau_sr(0.010, sr);
+    st->slARel = kc_pole_tau_sr(0.100, sr);
     static const double hl[3] = {0.92, 1.0, 1.09};
     for (int i = 0; i < 3; i++) st->thLeakPow[i] = pow(st->thLeak, hl[i]);
 }
@@ -468,9 +463,9 @@ void *bow_poly_init(int nb, double sr,
     st->sr = sr;
     st->nb = nb < 1 ? 1 : (nb > 64 ? 64 : nb);   /* chunk scratch is [64] */
     st->K = K > 96 ? 96 : K;
-    st->ba1 = pdup_d(ba1, K);   st->ba2 = pdup_d(ba2, K);
-    st->bn0 = pdup_d(bn0, K);   st->bA = pdup_d(bA, K);
-    st->bC = pdup_d(bC, K);
+    st->ba1 = kc_dup_d(ba1, K);   st->ba2 = kc_dup_d(ba2, K);
+    st->bn0 = kc_dup_d(bn0, K);   st->bA = kc_dup_d(bA, K);
+    st->bC = kc_dup_d(bC, K);
     poly_load_scalars(st, s);
     st->hpG = 0.5 * (1.0 + s->dcRho);
     st->lcg = 0x9E3779B97F4A7C15ULL;
@@ -555,7 +550,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
             double fcn = nutFc0 * pow(f0Open / fmax(f0t, 40.0), nailK);
             if (fcn > 0.45 * sr) fcn = 0.45 * sr;
             if (fcn < 200.0) fcn = 200.0;
-            nutAf = exp(-6.283185307179586 * fcn / sr);
+            nutAf = kc_pole_hz(fcn, sr);
         }
         /* REGISTER DAMPING (bow_loss_reg): the fitted corners are absolute
            frequencies, so below the tonic they would stay as sharp per second
@@ -597,9 +592,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
             }
             S->slF = f0t; S->slFValid = 1;
             if (st->slideNoise > 1e-12 && S->slEnvA > 1e-6) {
-                S->slRng ^= S->slRng << 13;
-                S->slRng ^= S->slRng >> 7;
-                S->slRng ^= S->slRng << 17;
+                S->slRng = kc_xorshift64(S->slRng);
                 double w = (double)(long long)S->slRng
                     * 1.0842021724855044e-19;
                 S->slLp += 0.25 * (w - S->slLp);
@@ -691,7 +684,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 if (hairHz > 1e-6) {
                     double fcH = hairHz * fmax(FbT * 3.0, 0.02) / hairRef;
                     if (fcH > 0.45 * sr) fcH = 0.45 * sr;
-                    double aH = exp(-6.283185307179586 * fcH / sr);
+                    double aH = kc_pole_hz(fcH, sr);
                     S->hairLp3[g] = (1.0 - aH) * Ffg + aH * S->hairLp3[g];
                     Ffg = S->hairLp3[g];
                 }
@@ -772,7 +765,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
             if (hairHz > 1e-6) {
                 double fcH = hairHz * fmax(Fb, 0.02) / hairRef;
                 if (fcH > 0.45 * sr) fcH = 0.45 * sr;
-                double aH = exp(-6.283185307179586 * fcH / sr);
+                double aH = kc_pole_hz(fcH, sr);
                 S->hairLp = (1.0 - aH) * Ff + aH * S->hairLp;
                 Ff = S->hairLp;
             }
@@ -901,13 +894,6 @@ static void poly_string_return(bow_poly_state_t *st, bow_pstring_t *S,
     S->w2i = (S->w2i + 1) % MAXBOW;
 }
 
-static float *dup_f(const double *a, int n)
-{
-    float *o = (float *)malloc(sizeof(float) * (size_t)(n > 0 ? n : 1));
-    for (int i = 0; i < n; i++) o[i] = (float)a[i];
-    return o;
-}
-
 static double jt_maxpen(int M, int J, const float *phiU,
                         const float *b_, const double *q);
 
@@ -934,26 +920,26 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
         st->jtM[s] = M[s]; st->jtMOff[s] = mtot; st->jtZOff[s] = ztot;
         mtot += M[s]; ztot += M[s] * J;
     }
-    st->jtCa = pdup_d(ca, mtot);   st->jtCb = pdup_d(cb, mtot);
-    st->jtCa4 = pdup_d(ca4, mtot); st->jtCb4 = pdup_d(cb4, mtot);
-    st->jtWd = pdup_d(wd, mtot);
+    st->jtCa = kc_dup_d(ca, mtot);   st->jtCb = kc_dup_d(cb, mtot);
+    st->jtCa4 = kc_dup_d(ca4, mtot); st->jtCb4 = kc_dup_d(cb4, mtot);
+    st->jtWd = kc_dup_d(wd, mtot);
     st->jtWdI = (double *)malloc(sizeof(double) * mtot);
     for (int i = 0; i < mtot; i++) st->jtWdI[i] = 1.0 / wd[i];
-    st->jtPhiD = pdup_d(phiD, mtot);
-    st->jtPhiU = dup_f(phiU, ztot); st->jtPhiF = dup_f(phiF, ztot);
-    st->jtB = dup_f(b, njt * J);
-    st->jtG = dup_f(G, njt * J * J); st->jtG4 = dup_f(G4, njt * J * J);
-    st->jtGd = dup_f(gd, njt * J);   st->jtGd4 = dup_f(gd4, njt * J);
+    st->jtPhiD = kc_dup_d(phiD, mtot);
+    st->jtPhiU = kc_dup_f(phiU, ztot); st->jtPhiF = kc_dup_f(phiF, ztot);
+    st->jtB = kc_dup_f(b, njt * J);
+    st->jtG = kc_dup_f(G, njt * J * J); st->jtG4 = kc_dup_f(G4, njt * J * J);
+    st->jtGd = kc_dup_f(gd, njt * J);   st->jtGd4 = kc_dup_f(gd4, njt * J);
     st->jtKc = phys[0]; st->jtAlpha = phys[1]; st->jtHcB = phys[2];
     st->jtDeep = phys[3]; st->jtGain = phys[4]; st->jtDrv = phys[5];
     st->jtGainCur = st->jtGain;
-    st->jtGainA = 1.0 - exp(-1.0 / (0.040 * st->sr));
+    st->jtGainA = kc_onepole_tau_sr(0.040, st->sr);
     st->jtDiv = (int)(phys[6] + 0.5);
     if (st->jtDiv < 1) st->jtDiv = 1;
     st->jtPhase = 0; st->jtHold = 0.0; st->jtFacc = 0.0;
     st->jtLpY = 0.0;
     st->jtHpA = 0.0; st->jtHpY = 0.0;
-    st->jtQ = pdup_d(q0, mtot);    /* settled static wrap (builder) */
+    st->jtQ = kc_dup_d(q0, mtot);    /* settled static wrap (builder) */
     st->jtP = (double *)calloc(mtot, sizeof(double));
     st->jtFprev = 0.0;
     /* drone rows: all-off (byte-null) until bow_poly_jt_drone/pluck */
@@ -978,7 +964,7 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     st->scopeK = 16;
     {
         const double dtj = (double)st->jtDiv / st->sr;
-        st->scopeRel = 1.0 - exp(-dtj / 0.120);
+        st->scopeRel = kc_onepole_dt(dtj, 0.120);
         st->scopeModeDk = (float)exp(-4.0 * dtj / 0.150);
     }
     st->scopeEnv = (double *)calloc(njt, sizeof(double));
@@ -988,24 +974,24 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     /* bridge-force radiation: the per-row unit match from the builder;
        DC blockers primed to their first sample */
     st->jtRadA = 1.0 - exp(-2.0 * M_PI * 8.0 * (double)st->jtDiv / st->sr);
-    st->jtRadScale = pdup_d(radScale, njt);
-    st->jtRadScaleCur = pdup_d(radScale, njt);
-    st->jtRadSlewA = 1.0 - exp(-((double)st->jtDiv / st->sr) / 0.040);
+    st->jtRadScale = kc_dup_d(radScale, njt);
+    st->jtRadScaleCur = kc_dup_d(radScale, njt);
+    st->jtRadSlewA = kc_onepole_dt((double)st->jtDiv / st->sr, 0.040);
     st->jtRadLp = (double *)calloc(njt, sizeof(double));
     st->jtRadPrime = (unsigned char *)malloc((size_t)njt);
     memset(st->jtRadPrime, 1, (size_t)njt);
     /* termination (pin) force: the builder's per-row unit match, permanent */
-    st->jtRadPinScale = pdup_d(pinScale, njt);
-    st->jtRadPinScaleCur = pdup_d(pinScale, njt);
+    st->jtRadPinScale = kc_dup_d(pinScale, njt);
+    st->jtRadPinScaleCur = kc_dup_d(pinScale, njt);
     /* two-way bridge coupling: the per-row reciprocal of the SHARED
        force->radiated factor of radScale/pinScale, so the tick's un-blocked
        sum reads in newtons. Off (byte-null) until bow_poly_jt_set_couple. */
-    st->jtCplScale = pdup_d(cplScale, njt);
+    st->jtCplScale = kc_dup_d(cplScale, njt);
     st->jtCplLast = (double *)calloc(njt, sizeof(double));
     st->jtCplG = 0.0; st->jtCplCur = 0.0; st->jtCplOn = 0;
     st->jtCplHold = 0.0; st->jtCplOut = 0.0;
     st->jtCplW = 0; st->jtCplR = 0;
-    st->jtCplA = 1.0 - exp(-1.0 / (0.040 * st->sr));
+    st->jtCplA = kc_onepole_tau_sr(0.040, st->sr);
     if (!st->jtCplRing)
         st->jtCplRing = (double *)calloc(JT_WEBN, sizeof(double));
     /* quiescence gate: off (byte-null until bow_poly_jt_set_gate) */
@@ -1023,25 +1009,25 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
         double dtj = (double)st->jtDiv / st->sr;
         /* envelope/tone defaults — BowEngine's bow_drone_* values overwrite
            these at build */
-        st->jtCapTRel = 1.0 - exp(-dtj / 0.150);
-        st->jtCapAtk = 1.0 - exp(-dtj / 0.003);
-        st->jtCapRel = 1.0 - exp(-dtj / 0.120);
-        st->jtCapVRel = 1.0 - exp(-1.0 / (st->sr * 1.2));
-        st->jtDnA = 1.0 - exp(-dtj / 0.350);
-        st->jtDnAAtk = 1.0 - exp(-dtj / 0.150);
+        st->jtCapTRel = kc_onepole_dt(dtj, 0.150);
+        st->jtCapAtk = kc_onepole_dt(dtj, 0.003);
+        st->jtCapRel = kc_onepole_dt(dtj, 0.120);
+        st->jtCapVRel = kc_onepole_tau_sr(1.2, st->sr);
+        st->jtDnA = kc_onepole_dt(dtj, 0.350);
+        st->jtDnAAtk = kc_onepole_dt(dtj, 0.150);
         st->jtDnBDec = exp(-dtj / 0.500);
         st->jtDnALp = 1.0 - exp(-2.0 * 3.14159265358979 * 1600.0 * dtj);
         st->jtDnALp2 = 1.0 - exp(-2.0 * 3.14159265358979 * 25.0 * dtj);
         /* recruitment weights: all-ones (byte-null until the setter
            first arms jtDwOn) */
         st->jtDwOn = 0;
-        st->jtDwA = 1.0 - exp(-dtj / 0.030);
+        st->jtDwA = kc_onepole_dt(dtj, 0.030);
         st->jtDwTgt = (double *)malloc(sizeof(double) * (size_t)njt);
         st->jtDwCur = (double *)malloc(sizeof(double) * (size_t)njt);
         /* evolution register offsets: zeros (byte-null until the
            setter first arms jtEvOfsOn) */
         st->jtEvOfsOn = 0;
-        st->jtEvOfsA = 1.0 - exp(-dtj / 0.040);
+        st->jtEvOfsA = kc_onepole_dt(dtj, 0.040);
         st->jtEvOfsTgt = (double *)calloc((size_t)njt, sizeof(double));
         st->jtEvOfsCur = (double *)calloc((size_t)njt, sizeof(double));
         /* per-row contact law: allocated with the global values, inert
@@ -1056,12 +1042,12 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
             st->jtRowDeep[s] = st->jtDeep;
         }
         st->jtGMulOn = 0;
-        st->jtGMulA = 1.0 - exp(-1.0 / (0.030 * st->sr));
+        st->jtGMulA = kc_onepole_tau_sr(0.030, st->sr);
         st->jtGMulTgt = 1.0;
         st->jtGMulCur = 1.0;
         /* jt body radiation: off (byte-null until the setter arms) */
         st->jtBodyOn = 0;
-        st->jtBodyA = 1.0 - exp(-1.0 / (0.030 * st->sr));
+        st->jtBodyA = kc_onepole_tau_sr(0.030, st->sr);
         st->jtBodyTgt = 0.0;
         st->jtBodyCur = 0.0;
         memset(st->jbx1, 0, sizeof(st->jbx1));
@@ -1083,7 +1069,7 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     /* harmonic-evolution lift: slewed ~40 ms per jt sample so the bone glides;
        0 = byte-null */
     st->jtEvTgt = 0.0; st->jtEvCur = 0.0;
-    st->jtEvA = 1.0 - exp(-((double)st->jtDiv / st->sr) / 0.040);
+    st->jtEvA = kc_onepole_dt((double)st->jtDiv / st->sr, 0.040);
     {
         double ref = st->jtDeep > 0.0 ? st->jtDeep : 0.0;
         for (int s = 0; s < njt; s++) {
@@ -1203,23 +1189,6 @@ static int jt_solve(int J, const float *b_, const float *ustar,
 
 /* zone snapshot: u/udot at the J points from the double state
    (float matmuls; elementwise over j — vectorizes without fast-math) */
-static void jt_zone(int M, int J, const float *phiU,
-                    const double *q, const double *p,
-                    float *u, float *ud)
-{
-    float qf[JT_MAXM], pf[JT_MAXM];
-    for (int k = 0; k < M; k++) { qf[k] = (float)q[k]; pf[k] = (float)p[k]; }
-    for (int j = 0; j < J; j++) { u[j] = 0.0f; ud[j] = 0.0f; }
-    for (int k = 0; k < M; k++) {
-        const float *Pr = phiU + (size_t)k * J;
-        float qk = qf[k], pk = pf[k];
-        for (int j = 0; j < J; j++) {
-            u[j] += Pr[j] * qk;
-            ud[j] += Pr[j] * pk;
-        }
-    }
-}
-
 /* contact core at step dts on tables (G, gd): solve on the zone snapshot,
    Hunt-Crossley (dissipative-only), impulse into q/p (double accumulation) */
 static void jt_core(int M, int J, const float *u, const float *ud,
@@ -1492,7 +1461,7 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             st->jtDnEnv[s] = env;
             if (env != 0.0) {
                 unsigned long long x = st->jtDnRng[s];
-                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                x = kc_xorshift64(x);
                 st->jtDnRng[s] = x;
                 double w = (double)(long long)(x >> 11)
                     * (1.0 / 4503599627370496.0) - 1.0;
@@ -1560,7 +1529,7 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             p[k] = -cb_[k] * (wd_[k] * qk) + ca_[k] * pk;
         }
         float u[JT_MAXJ], ud[JT_MAXJ];
-        jt_zone(Ms, J, phiU, q, p, u, ud);
+        kc_zone(Ms, J, phiU, q, p, u, ud);
         float pen = -1e30f;
         for (int j = 0; j < J; j++) {
             float d = bc_[j] - u[j];
@@ -1581,7 +1550,7 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
                     q[k] = ca4_[k] * qk + cb4_[k] * (pk * wi_[k]);
                     p[k] = -cb4_[k] * (wd_[k] * qk) + ca4_[k] * pk;
                 }
-                jt_zone(Ms, J, phiU, q, p, u, ud);
+                kc_zone(Ms, J, phiU, q, p, u, ud);
                 jt_core(Ms, J, u, ud, phiF, bc_, G4_, gd4_,
                         kcR, alphaR, hcBR, dt4, q, p, &fsum);
             }
@@ -2003,7 +1972,7 @@ static void poly_width_derive(bow_poly_state_t *st)
         st->sdG[i] = sg * 1.4 * poly_width_ramp(f);
         st->sdN = i + 1;
     }
-    st->stWidthSl = 1.0 - exp(-1.0 / (0.030 * st->sr));
+    st->stWidthSl = kc_onepole_tau_sr(0.030, st->sr);
 }
 
 /* one width-bank step for bus b ([0] voice, [1] jt wash): shared coefficients,
@@ -2757,7 +2726,7 @@ void bow_poly_jt_track_config(void *vst, int row, double f0, double t60,
         ? 18000.0 : 0.42 * st->sr / st->jtDiv;   /* the builder's fx */
     st->jtTrkIval = 128;                          /* ~1.3 ms at 96 k */
     const double dtj = (double)st->jtDiv / st->sr;
-    st->jtTrkSlew = 1.0 - exp(-((double)st->jtTrkIval * dtj) / 0.015);
+    st->jtTrkSlew = kc_onepole_dt((double)st->jtTrkIval * dtj, 0.015);
     st->jtTrkDirty = 1;
     if (st->jtTrkRow != row) {
         st->jtTrkRow = -1;        /* park while re-seeding (tick races) */
@@ -2787,8 +2756,8 @@ void bow_poly_jt_drone_env(void *vst, double atkSec, double relSec,
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     if (!st || st->njt <= 0) return;
     double dtj = (double)st->jtDiv / st->sr;
-    if (atkSec > 0.0) st->jtDnAAtk = 1.0 - exp(-dtj / atkSec);
-    if (relSec > 0.0) st->jtDnA = 1.0 - exp(-dtj / relSec);
+    if (atkSec > 0.0) st->jtDnAAtk = kc_onepole_dt(dtj, atkSec);
+    if (relSec > 0.0) st->jtDnA = kc_onepole_dt(dtj, relSec);
     if (onsetDecaySec > 0.0) st->jtDnBDec = exp(-dtj / onsetDecaySec);
 }
 

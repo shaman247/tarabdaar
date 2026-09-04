@@ -213,23 +213,14 @@ public enum TanpuraTables {
         }
         let J = p.J
         let dt = 1.0 / (p.srSim ?? p.sr)
-        var w0 = [Double](repeating: 0, count: M)
-        var t60 = [Double](repeating: 0, count: M)
         // t600 is calibrated AT refF; notes above decay ~(refF/f0)^1.5.
         // Per-role HF overrides put a scaled string's Q(f) at its register.
         let t600 = r.t600 * pow(min(1.0, r.refF / f0Sounding), 1.5)
         let fhfEff = r.fhf ?? p.fhf
         let t60hfEff = r.t60hf ?? p.t60hf
-        for k in 1...M {
-            let wk = 2.0 * Double.pi * f0 * Double(k)
-                * (1.0 + B * Double(k) * Double(k)).squareRoot()
-            w0[k - 1] = wk
-            let fk = wk / (2.0 * Double.pi)
-            t60[k - 1] = 1.0 / (1.0 / t600
-                + (fk / fhfEff) * (fk / fhfEff)
-                    * (1.0 / (t60hfEff * hfT60Mul)))
-        }
-        let sig = t60.map { 6.91 / $0 }
+        let w0 = ModalString.modeFrequencies(f0: f0, count: M, inharmonicity: B)
+        let sig = ModalString.damping(w0: w0, t60: t600, fHf: fhfEff,
+                                      t60hf: t60hfEff * hfT60Mul)
         // contact zone
         var xz = [Double](repeating: 0, count: J)
         let zoneW = r.zoneW ?? p.zoneW
@@ -243,8 +234,7 @@ public enum TanpuraTables {
         var phi = [Double](repeating: 0, count: M * J)
         for k in 0..<M {
             for j in 0..<J {
-                phi[k * J + j] = (2.0 / L).squareRoot()
-                    * sin(Double(k + 1) * Double.pi * xz[j] / L)
+                phi[k * J + j] = ModalString.shape(mode: k, at: xz[j], length: L)
             }
         }
         // G = (dt^2/2) Phi^T Phi wj / MU
@@ -288,8 +278,7 @@ public enum TanpuraTables {
         var phiO = [Double](repeating: 0, count: M)
         let xO = 0.90 * L
         for k in 0..<M {
-            phiO[k] = (2.0 / L).squareRoot()
-                * sin(Double(k + 1) * Double.pi * xO / L)
+            phiO[k] = ModalString.shape(mode: k, at: xO, length: L)
         }
         // Ladder roles radiate only the `p.mF` band — modes above it
         // (mounted for the energy budget) stay silent at the readout.
@@ -309,18 +298,7 @@ public enum TanpuraTables {
         // rotations
         func rot(_ dtv: Double, damp: Double? = nil)
             -> ([Double], [Double], [Double]) {
-            var ca = [Double](repeating: 0, count: M)
-            var cb = [Double](repeating: 0, count: M)
-            var wd = [Double](repeating: 0, count: M)
-            for k in 0..<M {
-                let sg = damp ?? sig[k]
-                let wdk = max(w0[k] * w0[k] - sig[k] * sig[k], 1e-6)
-                    .squareRoot()
-                wd[k] = wdk
-                ca[k] = exp(-sg * dtv) * cos(wdk * dtv)
-                cb[k] = exp(-sg * dtv) * sin(wdk * dtv)
-            }
-            return (ca, cb, wd)
+            ModalString.rotation(w0: w0, sigma: sig, dt: dtv, damp: damp)
         }
         let (ca, cb, wd) = rot(dt)
         let (ca4, cb4, _) = rot(dt / 4.0)

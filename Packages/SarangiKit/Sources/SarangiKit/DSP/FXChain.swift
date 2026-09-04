@@ -241,7 +241,7 @@ public struct FXChainUnit: Sendable {
     /// Advance the chunk-rate smoothers and retune whatever moved.
     /// `frames` is this chunk's length at `sr`.
     public mutating func tick(frames: Int) {
-        let a = 1.0 - exp(-Double(frames) / (0.05 * sr))
+        let a = OnePole.coefficient(frames: frames, tau: 0.05, sr: sr)
         // EQ: a finished crossfade hands over; a waiting design starts
         if incoming >= 0, fadePos >= fadeLen {
             cur = incoming

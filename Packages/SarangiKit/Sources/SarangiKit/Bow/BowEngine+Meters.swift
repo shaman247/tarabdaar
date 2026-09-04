@@ -200,7 +200,7 @@ extension BowEngine {
                          nk: Int, target: Double) {
         let bFrom = balCur
         let dt = Double(nk) / srk
-        balCur += (1.0 - exp(-dt / 0.03)) * (target - balCur)
+        balCur += OnePole.coefficient(dt: dt, tau: 0.03) * (target - balCur)
         if target == 0.0, abs(balCur) < 1e-5 { balCur = 0.0 }
         let db = (balCur - bFrom) / Double(max(nk, 1))
         for i in 0..<nk {

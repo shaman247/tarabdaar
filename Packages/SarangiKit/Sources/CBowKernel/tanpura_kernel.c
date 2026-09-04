@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "kernel_common.h"
 #include <time.h>
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
@@ -249,12 +250,6 @@ void tanpura_free(void *vc)
     free(c);
 }
 
-static double *tp_dup(const double *a, size_t n)
-{
-    double *d = (double *)malloc(n * sizeof(double));
-    memcpy(d, a, n * sizeof(double));
-    return d;
-}
 
 void tanpura_mount(void *vc, int slot, int M, int J,
                    const double *ca, const double *cb,
@@ -281,13 +276,13 @@ void tanpura_mount(void *vc, int slot, int M, int J,
     tp_slot *s = &c->s[slot];
     tp_slot_free(s);
     s->M = M; s->J = J;
-    s->ca = tp_dup(ca, M); s->cb = tp_dup(cb, M);
-    s->ca4 = tp_dup(ca4, M); s->cb4 = tp_dup(cb4, M);
-    s->ca2 = tp_dup(ca2, M); s->cb2 = tp_dup(cb2, M);
-    s->cas = tp_dup(cas, M); s->cbs = tp_dup(cbs, M);
-    s->wd = tp_dup(wd, M);
-    s->caw = tp_dup(caw, M); s->cbw = tp_dup(cbw, M);
-    s->wdw = tp_dup(wdw, M);
+    s->ca = kc_dup_d(ca, M); s->cb = kc_dup_d(cb, M);
+    s->ca4 = kc_dup_d(ca4, M); s->cb4 = kc_dup_d(cb4, M);
+    s->ca2 = kc_dup_d(ca2, M); s->cb2 = kc_dup_d(cb2, M);
+    s->cas = kc_dup_d(cas, M); s->cbs = kc_dup_d(cbs, M);
+    s->wd = kc_dup_d(wd, M);
+    s->caw = kc_dup_d(caw, M); s->cbw = kc_dup_d(cbw, M);
+    s->wdw = kc_dup_d(wdw, M);
     s->iwd = (double *)malloc((size_t)M * sizeof(double));
     s->iwdw = (double *)malloc((size_t)M * sizeof(double));
     for (int i = 0; i < M; i++) {
@@ -295,8 +290,8 @@ void tanpura_mount(void *vc, int slot, int M, int J,
         s->iwdw[i] = 1.0 / wdw[i];
     }
     /* live-bend base tables (ca/cb = E*cos/sin(wd*dt), so E = hypot) */
-    s->wd0 = tp_dup(wd, M);
-    s->wdw0 = tp_dup(wdw, M);
+    s->wd0 = kc_dup_d(wd, M);
+    s->wdw0 = kc_dup_d(wdw, M);
     s->envE = (double *)malloc((size_t)M * sizeof(double));
     s->envEw = (double *)malloc((size_t)M * sizeof(double));
     for (int i = 0; i < M; i++) {
@@ -305,15 +300,15 @@ void tanpura_mount(void *vc, int slot, int M, int J,
     }
     s->bendRatio = 1.0;
     s->relMul = 1.0;
-    s->Phi = tp_dup(Phi, (size_t)M * J);
-    s->phiF = tp_dup(phiF, (size_t)M * J);
+    s->Phi = kc_dup_d(Phi, (size_t)M * J);
+    s->phiF = kc_dup_d(phiF, (size_t)M * J);
     s->Phif = (float *)malloc((size_t)M * J * sizeof(float));
     s->phiFf = (float *)malloc((size_t)M * J * sizeof(float));
     for (int i = 0; i < M * J; i++) {
         s->Phif[i] = (float)Phi[i];
         s->phiFf[i] = (float)phiF[i];
     }
-    s->b = tp_dup(b, J);
+    s->b = kc_dup_d(b, J);
     s->Gf = (float *)malloc((size_t)J * J * sizeof(float));
     s->G4f = (float *)malloc((size_t)J * J * sizeof(float));
     for (int i = 0; i < J * J; i++) {
@@ -330,7 +325,7 @@ void tanpura_mount(void *vc, int slot, int M, int J,
     s->gd2f = (float *)malloc((size_t)J * sizeof(float));
     for (int i = 0; i < J * J; i++) s->G2f[i] = 4.0f * s->G4f[i];
     for (int i = 0; i < J; i++) s->gd2f[i] = 4.0f * s->gd4f[i];
-    s->phi_o = tp_dup(phi_o, M); s->dq = tp_dup(dq, M);
+    s->phi_o = kc_dup_d(phi_o, M); s->dq = kc_dup_d(dq, M);
     s->q0 = (double *)calloc((size_t)M, sizeof(double));
     s->q = (double *)calloc((size_t)M, sizeof(double));
     s->p = (double *)calloc((size_t)M, sizeof(double));
@@ -380,7 +375,7 @@ void tanpura_mount(void *vc, int slot, int M, int J,
     s->gwdw = (double *)calloc((size_t)M, sizeof(double));
     s->giwdw = (double *)calloc((size_t)M, sizeof(double));
     s->rt = pol_rt;
-    s->gth = tp_dup(g_th, J);
+    s->gth = kc_dup_d(g_th, J);
     s->thBase = th_base; s->thH = th_h;
     if (th_f > 0.0) {
         const double w = 2.0 * 3.14159265358979323846 * th_f;
@@ -414,20 +409,7 @@ void tanpura_mount(void *vc, int slot, int M, int J,
    vectorize float reductions without -ffast-math) */
 static void tp_zone(const tp_slot *s, float *uf, float *udf)
 {
-    const int M = s->M, J = s->J;
-    for (int j = 0; j < J; j++) { uf[j] = 0.0f; udf[j] = 0.0f; }
-    for (int k = 0; k < M; k++) {
-        const float *Pr = s->Phif + (size_t)k * J;
-        const float qk = (float)s->q[k], pk = (float)s->p[k];
-        int j = 0;
-        for (; j + 3 < J; j += 4) {
-            uf[j] += Pr[j] * qk;     udf[j] += Pr[j] * pk;
-            uf[j+1] += Pr[j+1] * qk; udf[j+1] += Pr[j+1] * pk;
-            uf[j+2] += Pr[j+2] * qk; udf[j+2] += Pr[j+2] * pk;
-            uf[j+3] += Pr[j+3] * qk; udf[j+3] += Pr[j+3] * pk;
-        }
-        for (; j < J; j++) { uf[j] += Pr[j] * qk; udf[j] += Pr[j] * pk; }
-    }
+    kc_zone(s->M, s->J, s->Phif, s->q, s->p, uf, udf);
 }
 
 
@@ -435,31 +417,12 @@ static void tp_zone(const tp_slot *s, float *uf, float *udf)
    reads the zone velocity) */
 static void tp_zone_u(const tp_slot *s, float *uf)
 {
-    const int M = s->M, J = s->J;
-    for (int j = 0; j < J; j++) uf[j] = 0.0f;
-    for (int k = 0; k < M; k++) {
-        const float *Pr = s->Phif + (size_t)k * J;
-        const float qk = (float)s->q[k];
-        int j = 0;
-        for (; j + 3 < J; j += 4) {
-            uf[j] += Pr[j] * qk;
-            uf[j+1] += Pr[j+1] * qk;
-            uf[j+2] += Pr[j+2] * qk;
-            uf[j+3] += Pr[j+3] * qk;
-        }
-        for (; j < J; j++) uf[j] += Pr[j] * qk;
-    }
+    kc_zone_u(s->M, s->J, s->Phif, s->q, uf);
 }
 
 static void tp_wlat(const tp_slot *s, float *wl)
 {
-    const int M = s->M, J = s->J;
-    for (int j = 0; j < J; j++) wl[j] = 0.0f;
-    for (int k = 0; k < M; k++) {
-        const float *Pr = s->Phif + (size_t)k * J;
-        const float qk = (float)s->qw[k];
-        for (int j = 0; j < J; j++) wl[j] += Pr[j] * qk;
-    }
+    kc_zone_u(s->M, s->J, s->Phif, s->qw, wl);
 }
 
 /* build-time settle onto the static wrap: heavy-damping rotation +

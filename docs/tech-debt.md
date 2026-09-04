@@ -36,26 +36,18 @@ is re-blessed with a before/after render for an A/B by ear.
     blobs carry TLP's version.
 ## Reuse — the same thing written twice
 
-14. **Three fractional-MIDI carriers still spelled out** instead of
-    `SarangiKit.Pitch`: `AudioEngine+Scope.swift`, `ScopeView.swift`, and
-    `BowControls.swift:252` (hash-pinned; the same expression).
-15. **Modal-string table math** (the HF t60 law, σ = 6.91/t60, the rotation
-    coefficients at dt and dt/4, the `√(2/L)·sin` shapes) is duplicated
-    between `BowTables` and `TanpuraTables`. Change: a `ModalString` helper.
-16. **The two C kernels share hot helpers by copy**: `jt_fastpow` ==
-    `tp_fastpow` (deleted 2026-09-04 as unused), `jt_zone` vs `tp_zone`,
-    `dup_f` vs `tp_dup`, and the worker-pool/dispatch scaffolding with the
-    same ring sizes. Change: `kernel_common.h` with static inlines.
-19. **The one-pole coefficient** `1 − exp(−2π·f/sr)` and `1 − exp(−dt/τ)`
-    are spelled out ~35× across Swift and C, mixing `M_PI` with a literal
-    π. Change: `onepole_hz`/`onepole_tau` inlines and a Swift twin. Renders
-    are hash-pinned: consolidate as a mechanical move that reproduces the
-    same expression order.
-20. **xorshift64** appears four times with three different word→float
-    normalisations. Change: one `XorShift64`, keeping each site's exact
-    normalisation.
-21. **The bow scope level law** in `AudioEngine+Scope` re-derives
-    `TLPVolume.level01`. Change: call it.
+16. **The two kernels' worker pools** (`jt_pool_run`/`jt_dispatch_run`
+    vs `tp_worker_run`/`tp_dispatch_run`) are the same gen/condvar
+    handshake, 1 ms `pthread_cond_timedwait` backstop and job ring over
+    two different structs. Change: one pool primitive in
+    `kernel_common.h` both instantiate.
+19. **Five one-pole spellings that are not the shared form**: the bow
+    kernel's jt radiation blocker (`-2·M_PI·8·jtDiv/sr`, a different
+    association), the drone-noise band-pass pair and its live setter
+    (`-2·3.14159265358979·f·dt`, a truncated π), the biquad body poles,
+    `Reverb`'s `exp(-1/(sr·tauMs/1000))`, and the block-rate forms in the
+    LiveParams slews. Each would change bits under the helper; leave or
+    re-bless deliberately.
 22. **Sample rate** is `Config.sampleRate` 44100 for the graph and a 48000
     literal default in both sources, `BowEngine.init` and the tanpura
     kernel's cost budget. Change: pass `Config.sampleRate` explicitly.
@@ -65,12 +57,6 @@ is re-blessed with a before/after render for an A/B by ear.
 
 ## Simplification — dead paths and seams
 
-26. **Dead two-component pitch-correction path** (`pitchKnotsRel/CentsRel/
-    KnotsAbs/CentsAbs/CentsPress` in `BowConfig`, the branch in
-    `BowControls`): the shipped artifact carries only `pitch_knots_oct`.
-28. **Definition-only API still resident** (files the audit could not touch
-    at the time): `Biquad.butterBandpass`, `Biquad.modeAllpass`,
-    `Cx.expMinusJ`, `BowEngine.liveLevelTrim`.
 31. **`bow_kernel_poly.c`** (3200 lines): the jt/taraf half is separable
     into `bow_jt.c` with a private header; today every taraf edit means
     reading past the friction solver.
@@ -85,9 +71,6 @@ is re-blessed with a before/after render for an A/B by ear.
     across the BowEngine extensions; `TanpuraVoiceSource` sums squares under
     its lock every callback whether or not `outputLevel()` is polled; the
     kernel `malloc`s scratch per block when the jt pool is < 2 threads.
-37. **`applyLiveParams` rebuilds every open-string table** (body filter
-    design, 6×6 loops) when only a scalar moved; `TanpuraVoiceSource.
-    isAvailable` decodes a 25 KB artifact to test non-nil.
 39. **Per-frame heap traffic on the 120 Hz sender**: `touches.map` →
     `encode()` → `pack` → `envelope` → a `MIDIPacketList` allocation, five
     buffers per frame. Change: pooled scratch per stage (the send runs on

@@ -535,7 +535,7 @@ extension BowEngine {
         os_unfair_lock_unlock(&tiltLock)
         if lT == 0.0, !jtLpEngaged, dT == 0.0, dampAmtCur == 0.0,
            hT == 0.0, jtHpHzCur == 0.0 { return }
-        let a = 1.0 - exp(-Double(n48) / (0.04 * sr))
+        let a = OnePole.coefficient(frames: n48, tau: 0.04, sr: sr)
         // jt tone LP: Hz-smoothed; target 0 eases back to the build coefficient
         let lpGoal = lT > 0 ? lT : tiltPureLpHiHz
         jtLpHzCur += a * (lpGoal - jtLpHzCur)
@@ -548,7 +548,7 @@ extension BowEngine {
         } else if abs(jtLpHzCur - jtLpHzPushed) > 1.0 || (lT > 0 && !jtLpEngaged) {
             jtLpHzPushed = jtLpHzCur
             jtLpEngaged = true
-            let lpA = 1.0 - exp(-2.0 * Double.pi * jtLpHzCur / jtTickRate)
+            let lpA = OnePole.coefficient(hz: jtLpHzCur, sr: jtTickRate)
             if let pk = pkernel { bow_poly_jt_set_lp(pk, lpA) }
         }
         // jt tone HP (0 eases the corner down to bypass; state kept warm)
@@ -557,7 +557,7 @@ extension BowEngine {
         if abs(jtHpHzCur - jtHpHzPushed) > 0.5 {
             jtHpHzPushed = jtHpHzCur
             let hpA = jtHpHzCur > 0
-                ? 1.0 - exp(-2.0 * Double.pi * jtHpHzCur / jtTickRate) : 0.0
+                ? OnePole.coefficient(hz: jtHpHzCur, sr: jtTickRate) : 0.0
             if let pk = pkernel { bow_poly_jt_set_hp(pk, hpA) }
         }
         // taraf damping

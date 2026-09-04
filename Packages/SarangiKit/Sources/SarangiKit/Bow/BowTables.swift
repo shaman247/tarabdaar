@@ -246,23 +246,17 @@ public enum BowTables {
             let fx = min(fmax, 0.42 * srk / Double(div))
             let M = max(16, min(mcap, Int(fx / f0s)))
             let bst = bstR
-            var w0 = [Double](repeating: 0, count: M)
-            var wd = [Double](repeating: 0, count: M)
-            for k in 0..<M {
-                let kk = Double(k + 1)
-                w0[k] = 2.0 * Double.pi * f0s * kk
-                    * (1.0 + bst * kk * kk).squareRoot()
-                let fk = w0[k] / (2.0 * Double.pi)
-                let t60k = 1.0 / (1.0 / row.t60
-                    + (fk / fHf) * (fk / fHf) * (1.0 / row.t60))
-                let sg = 6.91 / t60k
-                wd[k] = max(w0[k] * w0[k] - sg * sg, 1e-6).squareRoot()
-                T.wd.append(wd[k])
-                T.ca.append(exp(-sg * dt) * cos(wd[k] * dt))
-                T.cb.append(exp(-sg * dt) * sin(wd[k] * dt))
-                T.ca4.append(exp(-sg * dt4) * cos(wd[k] * dt4))
-                T.cb4.append(exp(-sg * dt4) * sin(wd[k] * dt4))
-            }
+            // the row's modes, HF-rolled damping (t60hf = t60) and rotations
+            let w0 = ModalString.modeFrequencies(f0: f0s, count: M, inharmonicity: bst)
+            let sig = ModalString.damping(w0: w0, t60: row.t60, fHf: fHf, t60hf: row.t60)
+            let rot = ModalString.rotation(w0: w0, sigma: sig, dt: dt)
+            let rot4 = ModalString.rotation(w0: w0, sigma: sig, dt: dt4)
+            let wd = rot.wd
+            T.wd.append(contentsOf: wd)
+            T.ca.append(contentsOf: rot.ca)
+            T.cb.append(contentsOf: rot.cb)
+            T.ca4.append(contentsOf: rot4.ca)
+            T.cb4.append(contentsOf: rot4.cb)
             var xz = [Double](repeating: 0, count: J)
             let x0 = L - zoneW, x1 = L - 0.0008
             for j in 0..<J {
@@ -270,11 +264,10 @@ public enum BowTables {
             }
             let wj = xz[1] - xz[0]
             var phi = [Double](repeating: 0, count: M * J)
-            let amp2 = (2.0 / L).squareRoot()
+            let amp2 = (2.0 / L).squareRoot()      // the shapes' unit norm
             for k in 0..<M {
                 for j in 0..<J {
-                    phi[k * J + j] = amp2
-                        * sin(Double(k + 1) * Double.pi * xz[j] / L)
+                    phi[k * J + j] = ModalString.shape(mode: k, at: xz[j], length: L)
                 }
             }
             let gscale = (dt * dt / 2.0) * wj / mu
@@ -307,7 +300,7 @@ public enum BowTables {
             // raga rows stay multiply-free — the render hash depends on it
             if chrom { gout *= gainMulC; gdrv *= driveMulC }
             for k in 0..<M {
-                let pd = amp2 * sin(Double(k + 1) * Double.pi * xD / L)
+                let pd = ModalString.shape(mode: k, at: xD, length: L)
                 T.phiD.append(gdrv * pd / mu)
             }
             T.phiU.append(contentsOf: phi)
@@ -363,7 +356,7 @@ public enum BowTables {
         // kernel skips the filter
         let lpHz = bp.v("bow_jt_lp", 20000.0)
         T.lpA = lpHz < 19999.0
-            ? 1.0 - exp(-2.0 * Double.pi * lpHz / srk) : 0.0
+            ? OnePole.coefficient(hz: lpHz, sr: srk) : 0.0
         if let ti = trackRowIndex, rows.indices.contains(ti) {
             T.trackRow = Int32(ti)
             T.trackT60 = rows[ti].t60
@@ -386,7 +379,7 @@ public enum BowTables {
         -> BowKernelTables {
         var t = BowKernelTables(sr: sr)
         let Z = bp.v("bow_Z", 1.0)
-        let dc = exp(-2.0 * Double.pi * 25.0 / sr)     // 25 Hz DC block
+        let dc = OnePole.pole(hz: 25.0, sr: sr)          // 25 Hz DC block
         let GOLD = 0.6180339887498949                  // 1/φ jitter sequence
         let SIGNQ = 0.7548776662466927                 // plastic-number signs
         let K = Int(bp.v("bow_body_modes", 0.0).rounded())
@@ -506,10 +499,10 @@ public enum BowTables {
         s.c0 = bp.v("bow_body_c0", 1.0)                // direct radiation
         s.dcRho = dc
         s.pgain = 0.0                                  // no voice force
-        s.pA = exp(-2.0 * Double.pi * 12000.0 / sr)    // inert at pgain 0
+        s.pA = OnePole.pole(hz: 12000.0, sr: sr)         // inert at pgain 0
         s.bowW = bp.v("bow_w", 1.0)                    // bowW (nBow = 1)
         s.kret = kret                                  // bridge return (capped)
-        s.retA = exp(-2.0 * Double.pi * 600.0 / sr)    // retA (retMode-1 inert)
+        s.retA = OnePole.pole(hz: 600.0, sr: sr)         // retA (retMode-1 inert)
         s.retMode = 1.0                                // 2-pole bridge
         s.rb0 = bc.rb0
         s.ra1 = bc.ra1
@@ -522,9 +515,9 @@ public enum BowTables {
         s.mu_s = bp.v("bow_mu_s", 0.8)
         s.mu_d = bp.v("bow_mu_d", 0.3)
         s.v0f = bp.v("bow_v0", 0.15)
-        s.nutA = exp(-2.0 * Double.pi * bp.v("bow_nut_fc", 5000.0) / sr)
-        s.brA = exp(-2.0 * Double.pi * bp.v("bow_br_fc", 6000.0) / sr)
-        s.thLeak = exp(-1.0 / (bp.v("bow_th_tau", 0.012) * sr))
+        s.nutA = OnePole.pole(hz: bp.v("bow_nut_fc", 5000.0), sr: sr)
+        s.brA = OnePole.pole(hz: bp.v("bow_br_fc", 6000.0), sr: sr)
+        s.thLeak = OnePole.pole(tau: bp.v("bow_th_tau", 0.012), sr: sr)
         s.thA = bp.v("bow_th_a", 0.0)
         s.thD = bp.v("bow_th_drate", 0.0)
         s.thFloor = bp.v("bow_th_floor", 0.15)
@@ -533,17 +526,16 @@ public enum BowTables {
         s.nA = bp.v("bow_noise", 0.0)
         s.nT = bp.v("bow_tnoise", 0.0)
         s.nPow = bp.v("bow_noise_pow", 1.0)
-        s.nzHi = 1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_hi", 8590.0) / sr)
-        s.nzLo = 1.0 - exp(-2.0 * Double.pi * bp.v("bow_noise_lo", 402.0) / sr)
+        s.nzHi = OnePole.coefficient(hz: bp.v("bow_noise_hi", 8590.0), sr: sr)
+        s.nzLo = OnePole.coefficient(hz: bp.v("bow_noise_lo", 402.0), sr: sr)
         s.nDir = bp.v("bow_noise_dir", 0.0)
-        s.nzHiD = 1.0 - exp(-2.0 * Double.pi
-                            * bp.v("bow_noise_dir_hi", 6000.0) / sr)
+        s.nzHiD = OnePole.coefficient(hz: bp.v("bow_noise_dir_hi", 6000.0), sr: sr)
         s.gutG = bp.v("bow_gut_g", 1.0)
         s.dispN = bp.v("bow_disp_n", 1.0)
         s.nailK = bp.v("bow_nail_k", 0.0)
         s.f0Open = tonic
         s.gutA2 = bp.v("bow_gut_fc2", 0.0) > 0.0
-            ? exp(-2.0 * Double.pi * bp.v("bow_gut_fc2", 0.0) / sr) : 0.0
+            ? OnePole.pole(hz: bp.v("bow_gut_fc2", 0.0), sr: sr) : 0.0
         s.torsRatio = bp.v("bow_tors_ratio", 5.2)      // torsional loop
         s.torsG = bp.v("bow_tors_g", 0.85)
         s.torsC = bp.v("bow_tors_c", 0.0)              // 0 = bit-null
@@ -575,7 +567,7 @@ struct SeededGaussian {
     }
 
     private mutating func uniform() -> Double {
-        x ^= x << 13; x ^= x >> 7; x ^= x << 17
+        x = XorShift64.step(x)
         // (0, 1]: 53 random bits, never exactly 0 (log-safe)
         return (Double(x >> 11) + 1.0) / 9007199254740993.0
     }

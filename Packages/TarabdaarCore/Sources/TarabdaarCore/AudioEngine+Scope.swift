@@ -53,7 +53,7 @@ extension AudioEngine {
         guard let id = heldTouchOrder.last, let semis = touchPitchSemis[id] else {
             return (0, 0, false)
         }
-        return (440.0 * pow(2.0, (semis - 69.0) / 12.0), 0, true)
+        return (Pitch.hz(fractionalMidi: semis), 0, true)
     }
 
     /// Publish a snapshot. Takes `meterLock`, which must never nest with `lock`.
@@ -107,10 +107,10 @@ extension AudioEngine {
         stringVoiceSource?.setScopeArmed(on)
     }
 
-    /// Bowed-string ring envelope → 0…1 display level (60 dB range).
+    /// Bowed-string ring envelope (0.5 = full scale) → the ONE 0…1 level
+    /// law (`TLPVolume.level01`, 60 dB range).
     static func bowScopeLevel01(_ senv: Double) -> Double {
-        guard senv > 0 else { return 0 }
-        return min(1, max(0, 1 + 20 * log10(senv / 0.5) / 60))
+        TLPVolume.level01(linear: senv / 0.5)
     }
 
     /// Plucked-string output envelope (1.0 at the pluck) → 0…1 over the same 60 dB.

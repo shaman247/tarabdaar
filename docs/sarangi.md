@@ -14,7 +14,10 @@ The plucked voices are [Tanpura](tanpura-voice.md) and [Sitar](sitar-voice.md);
 levels, rebuild cost and in‑place application are in
 [Sound Design](sound-design.md); every knob is in [Parameters](parameters.md).
 Development history lives in `docs/history/`, not here. Files: `Bow/`
-(`BowEngine`, `BowTables`, `BowControls`), `Model/`, `Presets.swift`; Mac side
+(`BowEngine`, `BowTables`, `BowControls`), `DSP/` (the laws both voices
+share, spelled once: `OnePole`, `XorShift64`, `ModalString`; the C twin is
+`CBowKernel/include/kernel_common.h` — one-pole forms, the xorshift step,
+the zone matvecs, table copies), `Model/`, `Presets.swift`; Mac side
 `TarabdaarCore/StringVoiceSource.swift`, `TarabdaarMac/SarangiStore.swift`,
 `StringParamStore.swift`, `Views/StringsView.swift`.
 

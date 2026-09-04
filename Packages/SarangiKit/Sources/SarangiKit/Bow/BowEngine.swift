@@ -29,9 +29,6 @@ public final class BowEngine {
     public let mapper: BowControlMapper
     var filter: BowControlFilter
 
-    /// Fitted output level trim (untrimmed, the post-chain parks in the
-    /// clipper). 1.0 (neutral) for the fixture/e2e path.
-    public static let liveLevelTrim = 0.04
     public var outGain = 1.0 {
         didSet { if !gainPrimed { gainPrev = outGain; gainPrimed = true } }
     }
@@ -259,8 +256,8 @@ public final class BowEngine {
         tiltEqHiHz = bp.v("bow_tilt_eq_hi", 2400.0)
         // safety limiter resting values (live edits via applyPendingLive)
         limThresh = min(max(bp.v("bow_lim_thresh", 0.8), 0.1), 1.0)
-        limRelCoef = 1.0 - exp(-1.0 /
-            (max(bp.v("bow_lim_rel_ms", 150.0), 5.0) * 0.001 * sr))
+        limRelCoef = OnePole.coefficient(
+            tau: max(bp.v("bow_lim_rel_ms", 150.0), 5.0) * 0.001, sr: sr)
         tiltLoShelf = Biquad.lowShelf(f0: bp.v("bow_tilt_eq_lo", 300.0),
                                       gainDB: 0.0, sr: sr)
         tiltHiShelf = Biquad.highShelf(f0: bp.v("bow_tilt_eq_hi", 2400.0),
@@ -363,7 +360,7 @@ public final class BowEngine {
             if hpHz > 0, let pk = pkernel {
                 let hz = min(max(hpHz, 20.0), 8000.0)
                 bow_poly_jt_set_hp(
-                    pk, 1.0 - exp(-2.0 * Double.pi * hz / jtTickRate))
+                    pk, OnePole.coefficient(hz: hz, sr: jtTickRate))
             }
             // jt body radiation: same arming rule. 0 = byte-null.
             let bodyMix = bp.v("bow_jt_body", 0.0)

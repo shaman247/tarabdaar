@@ -121,69 +121,9 @@ public struct Biquad: Sendable {
     /// expressed as a biquad — the generic bowed string's formula HF rolloff
     /// (gentler than butter-2; matches gutstring.post's lfilter([1−a],[1,−a])).
     public static func onePoleLowpass(fc: Double, sr: Double) -> Biquad {
-        let a = exp(-2.0 * Double.pi * fc / sr)
+        let a = OnePole.pole(hz: fc, sr: sr)
         return Biquad(b0: 1.0 - a, b1: 0, b2: 0, a0: 1.0, a1: -a, a2: 0)
     }
-
-    /// 4th-order **Butterworth** band-pass (`butter(2, [lo, hi], 'band')`) as a
-    /// cascade of two biquads — verified equal to scipy to 0.0000 dB. The offline
-    /// jawari morph-bandpass uses this maximally-flat response; the older RBJ
-    /// `bandpass` cascade was over-narrow (each section −3 dB at the edges → the
-    /// cascade −6 dB there), peaking the 2–4 kHz buzz. The scalar normalising the
-    /// passband to unity at the geometric centre is folded into the first section.
-    public static func butterBandpass(lo: Double, hi: Double, sr: Double) -> (Biquad, Biquad) {
-        // analog prewarp (bilinear, fs = 2 convention as in scipy.signal.butter)
-        let wl = 4.0 * tan(Double.pi * (lo / (sr / 2)) / 2.0)
-        let wh = 4.0 * tan(Double.pi * (hi / (sr / 2)) / 2.0)
-        let bw = wh - wl, wo2 = wl * wh
-        let fs2 = 4.0
-        // 2-pole Butterworth low-pass prototype poles: e^{j·3π/4}, e^{j·5π/4}
-        let proto = [Cx(cos(3 * Double.pi / 4), sin(3 * Double.pi / 4)),
-                     Cx(cos(5 * Double.pi / 4), sin(5 * Double.pi / 4))]
-        // lp→bp: each prototype pole p solves s² − (p·bw)·s + wo² = 0; bilinear→z
-        var zpoles: [Cx] = []
-        for p in proto {
-            let b = p * (-bw)                       // −p·bw
-            let disc = (b * b - Cx(4 * wo2, 0)).sqrt()
-            for s in [(b * -1 + disc) * 0.5, (b * -1 - disc) * 0.5] {
-                zpoles.append((Cx(fs2, 0) + s) / (Cx(fs2, 0) - s))   // bilinear
-            }
-        }
-        // one section per upper-half-plane pole (its conjugate completes it);
-        // band-pass numerator z²−1 → (b0,b1,b2) = (1,0,−1)
-        var secs: [Biquad] = []
-        for zp in zpoles where zp.im > 1e-12 {
-            secs.append(Biquad(b0: 1, b1: 0, b2: -1, a0: 1, a1: -2 * zp.re, a2: zp.re * zp.re + zp.im * zp.im))
-        }
-        // fall back to the (rare) degenerate case so we always return two sections
-        while secs.count < 2 { secs.append(Biquad(b0: 1, b1: 0, b2: -1, a0: 1, a1: 0, a2: 0)) }
-        var s0 = secs[0], s1 = secs[1]
-        // normalise the cascade to unity at the geometric-mean centre
-        let w0 = 2 * Double.pi * (lo * hi).squareRoot() / sr
-        let g = 1.0 / cascadeMag(s0, s1, w0)
-        s0.b0 *= g; s0.b1 *= g; s0.b2 *= g
-        return (s0, s1)
-    }
-
-    private static func cascadeMag(_ a: Biquad, _ b: Biquad, _ w: Double) -> Double {
-        let ej = Cx(cos(w), sin(w)), ej2 = ej * ej
-        func h(_ s: Biquad) -> Cx {
-            (Cx(s.b0, 0) * ej2 + Cx(s.b1, 0) * ej + Cx(s.b2, 0))
-                / (ej2 + Cx(s.a1, 0) * ej + Cx(s.a2, 0))
-        }
-        let H = h(a) * h(b)
-        return (H.re * H.re + H.im * H.im).squareRoot()
-    }
-
-    /// 2nd-order ALLPASS sharing a body mode's pole pair (R = e^{−πf/(Q·sr)}).
-    /// |H| = 1 — pure phase rotation. Exact port of `blocks.body_dispersion`'s
-    /// per-mode section (the phase half of the common-body transfer).
-    public static func modeAllpass(f0: Double, q: Double, sr: Double) -> Biquad {
-        let R = exp(-Double.pi * f0 / (max(q, 0.5) * sr))
-        let c = -2 * R * cos(2 * Double.pi * f0 / sr)
-        return Biquad(b0: R * R, b1: c, b2: 1, a0: 1, a1: c, a2: R * R)
-    }
-
 
     /// |H(e^{jω})| of this (a0-normalised) biquad at `f` Hz — the linear magnitude
     /// response, exact for any design. Used to draw the EQ curve and to derive the
@@ -223,7 +163,6 @@ struct Cx {
     init(_ re: Double, _ im: Double) { self.re = re; self.im = im }
     static let zero = Cx(0, 0)
     /// e^{-jθ} (unit phasor) — used by the coupled stability transfer sweeps.
-    static func expMinusJ(_ theta: Double) -> Cx { Cx(cos(theta), -sin(theta)) }
     var magnitude: Double { (re * re + im * im).squareRoot() }
     static func + (a: Cx, b: Cx) -> Cx { Cx(a.re + b.re, a.im + b.im) }
     static func - (a: Cx, b: Cx) -> Cx { Cx(a.re - b.re, a.im - b.im) }

@@ -249,7 +249,7 @@ public final class BowControlMapper: @unchecked Sendable {
     /// Pitch of a slot. Keep this expression TEXTUALLY as it is — the
     /// render hash depends on its FP evaluation order. Callers hold the lock.
     private func f0TargetLocked(_ slot: Slot) -> Double {
-        440.0 * pow(2.0, (slot.touchSemis - 69.0) / 12.0)
+        Pitch.hz(fractionalMidi: slot.touchSemis)
     }
 
     /// The newest slot: gated wins over released; ties broken by recency.
@@ -366,8 +366,6 @@ public struct BowControlFilter: Sendable {
     var aDipAtt = 0.0, aDipRel = 0.0    // dip smoother poles
     let pitchKnots: [Double], pitchCentsTab: [Double]
     let pitchRefLog2: Double
-    let pitchKnotsA: [Double]?, pitchCentsA: [Double]?
-    let pitchCentsPress: [Double]?
     var lf0 = 0.0                // sounding log2 f0 at the last sample
     var gateState = 0.0
     var attackFms = 0.0
@@ -407,28 +405,13 @@ public struct BowControlFilter: Sendable {
     public init(bp: BowParams, srk: Double, tonic: Double = 261.63) {
         self.srk = srk
         tonicHz = max(tonic, 40.0)
-        aGate = exp(-1.0 / (0.025 * srk))
-        aDipAtt = exp(-1.0 / (0.015 * srk))
-        aDipRel = exp(-1.0 / (0.12 * srk))
-        // two-component pitch correction when the artifact carries it
-        // (A(f0) absolute + B(f0/tonic) body residual), else the single
-        // 220 Hz-referenced table
-        if let knR = bp.pitchKnotsRel, let ceR = bp.pitchCentsRel,
-           let knA = bp.pitchKnotsAbs, let ceA = bp.pitchCentsAbs {
-            pitchKnots = knR
-            pitchCentsTab = ceR
-            pitchRefLog2 = log2(max(tonic, 40.0))
-            pitchKnotsA = knA
-            pitchCentsA = ceA
-            pitchCentsPress = bp.pitchCentsPress
-        } else {
-            pitchKnots = bp.pitchKnotsOct
-            pitchCentsTab = bp.pitchCents
-            pitchRefLog2 = log2(220.0)
-            pitchKnotsA = nil
-            pitchCentsA = nil
-            pitchCentsPress = nil
-        }
+        aGate = OnePole.pole(tau: 0.025, sr: srk)
+        aDipAtt = OnePole.pole(tau: 0.015, sr: srk)
+        aDipRel = OnePole.pole(tau: 0.12, sr: srk)
+        // the calibrated 220 Hz-referenced pitch correction table
+        pitchKnots = bp.pitchKnotsOct
+        pitchCentsTab = bp.pitchCents
+        pitchRefLog2 = log2(220.0)
         loadMappingConstants(bp: bp)
     }
 
@@ -484,7 +467,7 @@ public struct BowControlFilter: Sendable {
         gripHoldS = max(bp.v("bow_grip_hold_ms", 200.0), 0.0) / 1000.0
         gripVel = min(max(bp.v("bow_grip_v_db", -4.0), -12.0), 12.0)
         gripBeta = min(max(bp.v("bow_grip_beta", 0.35), 0.0), 0.6)
-        aDrift = exp(-2.0 * Double.pi * driftHz / srk)
+        aDrift = OnePole.pole(hz: driftHz, sr: srk)
         driftGain = sqrt(max(1.0 - aDrift * aDrift, 0.0) * 3.0)
     }
 
@@ -503,9 +486,7 @@ public struct BowControlFilter: Sendable {
     }
 
     @inline(__always) private mutating func nextUniform() -> Double {
-        rng ^= rng << 13
-        rng ^= rng >> 7
-        rng ^= rng << 17
+        rng = XorShift64.step(rng)
         return Double(Int64(bitPattern: rng)) * (1.0 / 9.223372036854775808e18)
     }
 
@@ -525,23 +506,8 @@ public struct BowControlFilter: Sendable {
         return s
     }
 
-    @inline(__always) func interpKnots(_ x: Double, _ kn: [Double],
-                                       _ ce: [Double]) -> Double {
-        if x <= kn[0] { return ce[0] }
-        let last = kn.count - 1
-        if x >= kn[last] { return ce[last] }
-        var i = 0
-        while i + 1 < kn.count && kn[i + 1] < x { i += 1 }
-        let t = (x - kn[i]) / max(kn[i + 1] - kn[i], 1e-12)
-        return ce[i] + t * (ce[i + 1] - ce[i])
-    }
-
     @inline(__always) func pitchCorrection(_ lf0: Double) -> Double {
         // piecewise-linear log2(f0/ref) knots → cents, clamped ends
-        if let knA = pitchKnotsA, let ceA = pitchCentsA {
-            return interpKnots(lf0 - log2(220.0), knA, ceA)
-                + interpKnots(lf0 - pitchRefLog2, pitchKnots, pitchCentsTab)
-        }
         let x = lf0 - pitchRefLog2
         if x <= pitchKnots[0] { return pitchCentsTab[0] }
         let last = pitchKnots.count - 1
@@ -822,11 +788,7 @@ public struct BowControlFilter: Sendable {
                     lastLf = lf
                     lastLfValid = true
                 }
-                var corr = pitchCorrection(lf)
-                if let ks = pitchKnotsA, let ps = pitchCentsPress, ps.count == ks.count {
-                    let pr = p.press + u * (snap.press - p.press)
-                    corr += interpKnots(lf - log2(220.0), ks, ps) * (pr - 0.55)
-                }
+                let corr = pitchCorrection(lf)
                 let f0 = exp2(lf + vibOct + corr / 1200.0)
                 // 25 ms softened gate
                 gateState = (1.0 - aGate) * snap.gate + aGate * gateState

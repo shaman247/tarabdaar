@@ -217,7 +217,7 @@ final class ScopeModel: ObservableObject {
         let now = Date().timeIntervalSinceReferenceDate
         let snap = controller.audio.scopeSnapshot()
         let touches = controller.currentTouches().map {
-            Touch(id: $0.id, hz: 440.0 * pow(2.0, ($0.pitchSemis - 69.0) / 12.0))
+            Touch(id: $0.id, hz: Pitch.hz(fractionalMidi: $0.pitchSemis))
         }
         // Taraf rows: the display quantities + the panel table.
         let n = snap.taraf.count

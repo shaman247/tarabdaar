@@ -181,8 +181,8 @@ extension BowEngine {
             // output safety limiter: plain scalar adoption (the limiter's
             // own gain smoothing makes threshold moves click-free)
             limThresh = min(max(bp.v("bow_lim_thresh", 0.8), 0.1), 1.0)
-            limRelCoef = 1.0 - exp(-1.0 /
-                (max(bp.v("bow_lim_rel_ms", 150.0), 5.0) * 0.001 * sr))
+            limRelCoef = OnePole.coefficient(
+                tau: max(bp.v("bow_lim_rel_ms", 150.0), 5.0) * 0.001, sr: sr)
             liveRamping = true
         }
 
@@ -190,7 +190,7 @@ extension BowEngine {
         // a fresh engine); the kernel push below stays guarded.
         guard liveRamping else { return }
         // ~25 ms one-pole glide, same shape as the taraf-axis smoother.
-        let a = 1.0 - exp(-Double(n48) / (0.025 * sr))
+        let a = OnePole.coefficient(frames: n48, tau: 0.025, sr: sr)
         var settled = true
         // Field-by-field over the struct's contiguous doubles, in
         // declaration order — the same order (and the same formula) the
@@ -251,7 +251,7 @@ extension BowEngine {
         let target = toneTiltTarget
         os_unfair_lock_unlock(&tiltLock)
         if !tiltEqActive, target == 0.0, toneTiltCur == 0.0 { return }
-        let a = 1.0 - exp(-Double(n48) / (0.05 * sr))
+        let a = OnePole.coefficient(frames: n48, tau: 0.05, sr: sr)
         toneTiltCur += a * (target - toneTiltCur)
         if target == 0.0, abs(toneTiltCur) < 1e-3 {
             toneTiltCur = 0.0
