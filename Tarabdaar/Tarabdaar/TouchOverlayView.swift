@@ -2,13 +2,6 @@ import TarabdaarCore
 import SwiftUI
 import UIKit
 
-struct TouchInfo: Identifiable {
-    let id: Int  // touch hash for identification
-    let location: CGPoint
-    let phase: UITouch.Phase
-    let timestamp: TimeInterval
-}
-
 struct TouchEvent {
     let touchId: Int
     let xFraction: Double  // 0-1 across view width
@@ -22,7 +15,6 @@ struct TouchEvent {
 }
 
 struct TouchOverlayView: UIViewRepresentable {
-    @Binding var touches: [TouchInfo]
     var onTouchBegan: ((TouchEvent) -> Void)?
     var onTouchMoved: ((TouchEvent) -> Void)?
     var onTouchEnded: ((Int) -> Void)?
@@ -32,12 +24,6 @@ struct TouchOverlayView: UIViewRepresentable {
         view.isMultipleTouchEnabled = true
         view.isExclusiveTouch = false
         view.gestureRecognizers?.forEach { $0.isEnabled = false }
-
-        view.onTouchesChanged = { touchInfos in
-            DispatchQueue.main.async {
-                self.touches = touchInfos
-            }
-        }
         view.onTouchBegan = onTouchBegan
         view.onTouchMoved = onTouchMoved
         view.onTouchEnded = onTouchEnded
@@ -52,11 +38,9 @@ struct TouchOverlayView: UIViewRepresentable {
 }
 
 class TouchCaptureView: UIView {
-    var onTouchesChanged: (([TouchInfo]) -> Void)?
     var onTouchBegan: ((TouchEvent) -> Void)?
     var onTouchMoved: ((TouchEvent) -> Void)?
     var onTouchEnded: ((Int) -> Void)?
-    private var activeTouches: Set<UITouch> = []
     // UIKit recycles UITouch instances, so `touch.hash` repeats across
     // consecutive taps — a reused id collides with the per-touch state the
     // surface keys off it (snap offsets, drag assist, MPE channel), so a new
@@ -66,7 +50,6 @@ class TouchCaptureView: UIView {
     private var nextTouchId: Int = 0
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        activeTouches.formUnion(touches)
         for touch in touches {
             nextTouchId &+= 1
             touchIds[ObjectIdentifier(touch)] = nextTouchId
@@ -81,7 +64,6 @@ class TouchCaptureView: UIView {
                 radius: Double(touch.majorRadius)
             ))
         }
-        reportTouches()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -98,7 +80,6 @@ class TouchCaptureView: UIView {
                 radius: Double(touch.majorRadius)
             ))
         }
-        reportTouches()
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -107,8 +88,6 @@ class TouchCaptureView: UIView {
                 onTouchEnded?(id)
             }
         }
-        activeTouches.subtract(touches)
-        reportTouches()
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -117,19 +96,5 @@ class TouchCaptureView: UIView {
                 onTouchEnded?(id)
             }
         }
-        activeTouches.subtract(touches)
-        reportTouches()
-    }
-
-    private func reportTouches() {
-        let infos = activeTouches.map { touch in
-            TouchInfo(
-                id: touchIds[ObjectIdentifier(touch)] ?? touch.hash,
-                location: touch.location(in: self),
-                phase: touch.phase,
-                timestamp: touch.timestamp
-            )
-        }
-        onTouchesChanged?(infos)
     }
 }

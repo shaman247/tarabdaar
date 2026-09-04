@@ -7,6 +7,7 @@ System-level constants live in `Packages/TarabdaarCore/Sources/TarabdaarCore/Con
 | Kind | Home | Edited in |
 |------|------|-----------|
 | Voice parameters (`bow_*`, `tp_*`, `st_*`, `ctl_*`, `fx_*`) | `ParamRegistry` — `.rebuild` values persist as the `StringParamStore` override dict (`tarabdaar.stringOverrides.v1`), `.live`/`.hybrid` resting values as `AppController.paramValues` (`tarabdaar.controlDefaults.v1`) | Parameters tab ⌘5, FX tab ⌘6 |
+| FX EQ curves (the points per insert) | `AppController.fxEQCurves` (`tarabdaar.fxCurves.v1`, keyed by the insert's prefix); presets carry them as `fxCurves` | FX tab ⌘6 |
 | The tarab | the `[StringSpec]` table + chromatic set + follower on `InstrumentState` (`tarabdaar.sarangiState.v8`) | Strings tab ⌘2 |
 | Composite parameters | `CompositeParam` on `AppController.composites` (`tarabdaar.compositeParams.v1`) — named 0–1 macros of parameter members each sweeping lo→hi; defaults Taraf Purity / Taraf Decay / Tone Tilt / Expression on slots 1–4 | Controls tab ⌘4 |
 | Tilt bindings | `tiltMapping` (`MapTarget` per dimension) | Controls tab ⌘4 |
@@ -28,8 +29,8 @@ The registry groups are Bow stroke · Body (formula modes) · Bow & string · Pl
 
 | Constant | Value | Description |
 |----------|-------|-------------|
+| `linkTickHz` | 120 Hz | The wire rate: link pacing, glide queue and finger-accel sampler ticks |
 | `motionUpdateRate` | 200 Hz | CoreMotion sample rate |
-| `accelHistoryLength` | 200 | Display buffer (~1 s at 200 Hz) |
 | `accelBufferDuration` | 100 ms | Ring buffer the strike estimate scans; must exceed `velocityLookback` |
 | `velocityMinG` / `velocityMaxG` | 0.01 g / 0.5 g | Softest / hardest tap on the shared strike law (`StrikeLaw`, log-scale 0…1) — the per-touch strike velocity, the strike envelope and the Joy-Con accel dimension all use it |
 | `velocityLookback` | 50 ms | The TRAILING window a fret-pad onset scans for its strike spike (`MotionSource.strikeVelocity01`) — backward-looking, so the onset never waits |

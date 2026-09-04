@@ -156,8 +156,10 @@ for (group, params) in ParamRegistry.groups {
     }
     out += "\n#### The insert (\(template.params.count) knobs × "
     out += "\(split.inserts.count) points)\n\n"
-    out += "Keys below are written `<prefix>knob` — e.g. `fx_voice_eq_b3` is\n"
-    out += "the 125 Hz band of the Voice insert. Every knob has the same\n"
+    out += "Keys below are written `<prefix>knob` — e.g. `fx_voice_rev_mix` is\n"
+    out += "the reverb mix of the Voice insert. The EQ curve's points are not\n"
+    out += "knobs: the FX tab edits them and presets carry them as a section\n"
+    out += "of their own (`fxCurves`). Every knob has the same\n"
     out += "range, default, scope and timing at every point — only the\n"
     out += "\"what it processes\" clause of the two toggles differs.\n\n"
     out += tableHead

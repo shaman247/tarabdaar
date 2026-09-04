@@ -342,6 +342,16 @@ public final class StringVoiceSource {
         return true
     }
 
+    /// Replace one point's EQ curve (the FX tab's points, normalised) and
+    /// push the whole point. Control-thread safe, same cache as the knobs.
+    public func setEQCurve(_ point: FXPoint, _ points: [EQPoint]) {
+        cacheLock.lock()
+        fxSettings[point.rawValue].eqPoints = EQCurve.normalize(points)
+        let settings = fxSettings[point.rawValue]
+        cacheLock.unlock()
+        currentEngine()?.setFX(point, settings)
+    }
+
     public init(sr: Double = 48000) {
         modelSR = sr
         let st = state

@@ -36,6 +36,15 @@ public struct Biquad: Sendable {
 
     public mutating func reset() { z1 = 0; z2 = 0 }
 
+    /// |H(e^{jω})| at `hz` for a section run at `sr` — display only.
+    public func magnitude(at hz: Double, sr: Double) -> Double {
+        let w = 2.0 * Double.pi * hz / sr
+        let c1 = cos(w), s1 = sin(w), c2 = cos(2 * w), s2 = sin(2 * w)
+        let nr = b0 + b1 * c1 + b2 * c2, ni = -(b1 * s1 + b2 * s2)
+        let dr = 1.0 + a1 * c1 + a2 * c2, di = -(a1 * s1 + a2 * s2)
+        return ((nr * nr + ni * ni) / max(dr * dr + di * di, 1e-30)).squareRoot()
+    }
+
     // MARK: - RBJ designs (ported from blocks.py)
 
     /// Peaking EQ — exact port of `blocks._peaking`.

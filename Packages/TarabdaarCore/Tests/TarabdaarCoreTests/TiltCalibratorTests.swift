@@ -55,29 +55,36 @@ final class TiltCalibratorTests: XCTestCase {
         XCTAssertEqual(last!.0, -1, accuracy: 0.05)
     }
 
-    func testOrthogonalSolveClaimsOneAxisPerSweepAndIgnoresLeakage() {
+    func testOrthogonalSolveTakesSweepOneExactlyAndInfersTheThird() {
         let cal = TiltCalibrator(config: .wrist, defaults: isolatedDefaults())
         var t = 0.0
         let rest = SIMD3<Double>(0.1, -0.2, 0)
-        capture(cal, rest: rest,
-                dirs: [SIMD3(1, 0.4, 0), SIMD3(0.3, 0, 1), SIMD3(0, 1, 0.2)],
-                amps: [0.5, 0.3, 0.4], t: &t)
+        let d1 = simd_normalize(SIMD3<Double>(1, 0.4, 0))
+        // Sweep 2 leans 30° toward sweep 1: its shared part must drop.
+        let d2raw = simd_normalize(SIMD3<Double>(0, 0, 1) + d1 * 0.58)
+        capture(cal, rest: rest, dirs: [d1, d2raw], amps: [0.5, 0.4], t: &t)
         XCTAssertTrue(cal.isCalibrated, cal.info)
-        XCTAssertEqual(cal.currentModel!.m, [[1, 0, 0], [0, 0, 1], [0, 1, 0]])
+        let m = cal.currentModel!.m.map { SIMD3<Double>($0[0], $0[1], $0[2]) }
+        XCTAssertEqual(simd_dot(m[0], d1), 1, accuracy: 1e-6)
+        XCTAssertEqual(simd_dot(m[1], m[0]), 0, accuracy: 1e-9)
+        XCTAssertEqual(simd_length(simd_cross(m[0], m[1]) - m[2]), 0, accuracy: 1e-9)
         var last: (Double, Double, Double)?
         cal.onAxes = { last = ($0, $1, $2) }
-        feed(cal, rest + SIMD3(0, 0.4, 0), n: 40, t: &t)
-        XCTAssertEqual(last!.2, 1, accuracy: 0.03)
-        XCTAssertEqual(last!.0, 0)
-        XCTAssertEqual(last!.1, 0)
-        // A second sweep on an already-claimed axis repeats itself.
+        feed(cal, rest + d1 * 0.5, n: 40, t: &t)
+        XCTAssertEqual(last!.0, 1, accuracy: 0.03)
+        XCTAssertEqual(last!.1, 0, accuracy: 1e-6)
+        XCTAssertEqual(last!.2, 0, accuracy: 1e-6)
+        feed(cal, rest + m[2] * 0.3, n: 40, t: &t)
+        XCTAssertGreaterThan(last!.2, 0.5)
+        XCTAssertEqual(last!.0, 0, accuracy: 1e-6)
+        // A second sweep along sweep 1's axis repeats itself.
         let dup = TiltCalibrator(config: .wrist, defaults: isolatedDefaults())
         dup.begin()
         feed(dup, rest, n: 30, t: &t)
         dup.advance()
-        sweep(dup, rest: rest, dir: SIMD3(1, 0, 0), amp: 0.5, t: &t)
+        sweep(dup, rest: rest, dir: d1, amp: 0.5, t: &t)
         dup.advance()
-        sweep(dup, rest: rest, dir: SIMD3(1, 0.5, 0), amp: 0.5, t: &t)
+        sweep(dup, rest: rest, dir: d1, amp: 0.5, t: &t)
         dup.advance()
         XCTAssertEqual(dup.step, 2, dup.detail)
     }

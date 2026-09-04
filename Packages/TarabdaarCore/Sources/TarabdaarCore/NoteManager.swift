@@ -1,5 +1,4 @@
 import Foundation
-import QuartzCore
 
 /// The iPad's 60 Hz sensor tick. Its ONE job is `sendTiltReport`: sampling
 /// the motion source's tilts, raw acceleration and strike envelope into
@@ -9,12 +8,6 @@ import QuartzCore
 /// Pitch does not pass through here: touches go `PitchPadEngine` →
 /// `OutboundPlayState` directly, atomic with the tilts on the wire.
 public class NoteManager: ObservableObject {
-
-    // MARK: - Profiling counters (ms, refreshed every UI tick)
-    public private(set) var lastGlideTickMs: Double = 0
-    public private(set) var maxGlideTickMs: Double = 0
-    private var profilingWindowStart: TimeInterval = 0
-    private var maxGlideTickInWindow: Double = 0
 
     private var uiUpdateCounter: Int = 0
     private let uiUpdateInterval: Int = 4  // publish every 4th tick (~15Hz)
@@ -48,7 +41,6 @@ public class NoteManager: ObservableObject {
 
     private func tick() {
         guard !paused else { return }
-        let tickStart = CACurrentMediaTime()
 
         if let tilts = motionSource?.normalizedTilts {
             for i in 0..<min(tilts.count, 3) {
@@ -60,20 +52,9 @@ public class NoteManager: ObservableObject {
         // including during calibration with no note down.
         sendTiltReport()
 
-        let tickElapsed = (CACurrentMediaTime() - tickStart) * 1000.0
-        lastGlideTickMs = tickElapsed
-        if tickElapsed > maxGlideTickInWindow { maxGlideTickInWindow = tickElapsed }
-
         uiUpdateCounter += 1
         if uiUpdateCounter >= uiUpdateInterval {
             uiUpdateCounter = 0
-            let nowSec = CACurrentMediaTime()
-            if profilingWindowStart == 0 { profilingWindowStart = nowSec }
-            if nowSec - profilingWindowStart >= 0.5 {
-                maxGlideTickMs = maxGlideTickInWindow
-                maxGlideTickInWindow = 0
-                profilingWindowStart = nowSec
-            }
             objectWillChange.send()
         }
     }

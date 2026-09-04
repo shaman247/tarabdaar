@@ -1,4 +1,5 @@
 import TarabdaarCore
+import SarangiKit
 import SwiftUI
 // NOTE: deliberately does NOT import SarangiKit — its dormant coupled-network
 // `ParamSpec` would collide with the registry's.
@@ -163,7 +164,8 @@ struct ParametersView: View {
     private func insertState(_ point: FXInsertPoint) -> String {
         var parts: [String] = []
         if controller.paramValue(point.key("eq_on")) >= 0.5 {
-            parts.append("EQ on")
+            let n = controller.eqCurve(point.keyPrefix).count
+            parts.append(n == 0 ? "EQ on (flat)" : "EQ \(n) pt\(n == 1 ? "" : "s")")
         }
         if controller.paramValue(point.key("rev_on")) >= 0.5 {
             let room = controller.paramValue(point.key("rev_type")) >= 0.5

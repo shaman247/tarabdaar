@@ -38,7 +38,6 @@ public final class OutboundPlayState {
     private var droneMask: UInt8 = 0
     /// The chord bar's active strum chord (held state; nil = none).
     private var chordSelection: ChordSelection?
-    private var backgrounded = false
     private var stateSeq: UInt16 = 0
     private var dirtyFlag = false
     /// Fired (outside the lock) on every mutation — the sender's wake-up.
@@ -183,13 +182,6 @@ public final class OutboundPlayState {
         markDirtyLockedThenNotify()
     }
 
-    public func setBackgrounded(_ b: Bool) {
-        lock.lock()
-        guard backgrounded != b else { lock.unlock(); return }
-        backgrounded = b
-        markDirtyLockedThenNotify()
-    }
-
     /// Panic / teardown: clears everything held (the panic EVENT is the
     /// caller's job).
     public func clearAll() {
@@ -210,7 +202,7 @@ public final class OutboundPlayState {
         dirtyFlag = false
         stateSeq &+= 1
         return TLPPerfState(
-            flags: backgrounded ? TLPPerfState.flagBackgrounded : 0,
+            flags: 0,
             stateSeq: stateSeq,
             timestampUs: timestampUs,
             tiltX: s16(tilt[0]), tiltY: s16(tilt[1]), tiltZ: s16(tilt[2]),

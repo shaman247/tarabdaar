@@ -21,9 +21,14 @@ public enum Config {
     /// which are not a performance monitor.
     public static let jitterProneOutputBufferFrames: UInt32 = 512
 
+    // MARK: - Link
+    /// The wire rate: `TarabLink` paces sends at this rate, and the Mac's
+    /// wire-rate samplers (the glide queue, the finger-accel scope) tick
+    /// in step with it.
+    public static let linkTickHz: Double = 120
+
     // MARK: - Motion
     public static let motionUpdateRate: Double = 200      // Hz
-    public static let accelHistoryLength: Int = 200       // ~1 second at 200Hz
     public static let accelBufferDuration: TimeInterval = 0.1  // 100ms ring buffer for velocity capture
 
     // MARK: - Velocity mapping

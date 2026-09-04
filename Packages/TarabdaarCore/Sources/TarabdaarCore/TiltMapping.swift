@@ -46,9 +46,9 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     case jcAccel        = 15
     /// TOUCH SIZE: the newest sounding touch's fingertip contact radius
     /// (`UITouch.majorRadius`, the PERF_STATE `radius` byte) mapped
-    /// 31.3 → 73.0 pt onto 0…1 and RATE-LIMITED to a linear 0.5 s ramp
-    /// (`TouchSizeTracker`'s finger estimate) — normal playing rests near 0, a deliberately
-    /// flattened fingertip sweeps the range. UNIPOLAR like `.strike`:
+    /// 31.3 → 73.0 pt onto 0…1 through `TouchSizeTracker`'s finger
+    /// estimate — normal playing rests near 0, a deliberately flattened
+    /// fingertip sweeps the range. UNIPOLAR like `.strike`:
     /// rest is the curve's LEFT end (x 0), so a binding reads silence
     /// with the finger relaxed. Mac-evaluated from the wire radius
     /// stream; the iPad's touch ring draws its own display-only copy.
@@ -101,20 +101,6 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
         case .none:          return "—"
         }
     }
-
-    public var isPerNote: Bool { self == .accelPressure || self == .keyY }
-    public var isTilt: Bool {
-        self == .tilt1 || self == .tilt2 || self == .tilt3 || self == .tilt4
-            || self == .wrist2 || self == .wrist3
-    }
-    public var isSlider: Bool { self == .slider1 || self == .slider2 }
-
-    /// The real dimensions (excludes .none).
-    public static let real: [InputDimension] = [
-        .tilt1, .tilt2, .tilt3, .tilt4, .wrist2, .wrist3, .stickX, .stickY,
-        .strike, .acceleration, .fingerAccel, .touchSize, .jcAccel,
-        .accelPressure, .keyY, .slider1, .slider2,
-    ]
 }
 
 /// What a control axis can drive: a **composite parameter** (a named 0…1
@@ -313,10 +299,6 @@ public struct DimensionBinding: Codable, Equatable {
         try container.encode(dimension, forKey: .dimension)
         try container.encode(controlPoints, forKey: .controlPoints)
     }
-
-    public mutating func sortPoints() {
-        controlPoints.sort { $0.x < $1.x }
-    }
 }
 
 /// All bindings for a single target (many:many support).
@@ -338,14 +320,6 @@ public struct ParameterMapping: Codable, Equatable {
 
     public func binding(for dim: InputDimension) -> DimensionBinding? {
         bindings.first { $0.dimension == dim }
-    }
-
-    public mutating func toggleBinding(for dim: InputDimension, defaultRange: (Double, Double)) {
-        if let idx = bindings.firstIndex(where: { $0.dimension == dim }) {
-            bindings.remove(at: idx)
-        } else {
-            bindings.append(DimensionBinding(dimension: dim, rangeMin: defaultRange.0, rangeMax: defaultRange.1))
-        }
     }
 
     public mutating func setBinding(for dim: InputDimension, to binding: DimensionBinding) {

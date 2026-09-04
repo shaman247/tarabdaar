@@ -112,13 +112,6 @@ public enum RagaTuning {
             }
             .map { StringSpec(degree: $0.0, octave: $0.1, gain: $0.2, t60: $0.3) }
     }
-
-    /// The resolved bank from raga intervals — used by the golden tests.
-    public static func buildStrings(tonic: Double, intervals: [Int]) -> [ResolvedString] {
-        let scale = ratios(forIntervals: intervals)
-        return buildSpecs(scaleRatios: scale)
-            .map { $0.resolved(tonic: tonic, scaleRatios: scale) }
-    }
 }
 
 /// 12-TET note-name ↔ frequency for tonic entry ("Eb4", "D4", "A4"=440).

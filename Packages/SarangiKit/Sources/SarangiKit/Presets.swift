@@ -40,12 +40,18 @@ public enum Presets {
     /// needs: friction/body/control-law scalars, the calibrated pitch tables,
     /// the modal-jawari taraf physics (`bow_jt_*`) and the live trims. nil when
     /// missing from the bundle.
-    public static func bowedStringParams() -> BowParams? {
-        guard let url = Bundle.module.url(forResource: "bowed_string", withExtension: "json") else {
-            return nil
-        }
-        return BowParams(url: url)
-    }
+    public static func bowedStringParams() -> BowParams? { bowed }
+
+    // Each artifact is decoded ONCE (a value; callers copy and edit).
+    private static let bowed: BowParams? =
+        Bundle.module.url(forResource: "bowed_string", withExtension: "json")
+            .flatMap { BowParams(url: $0) }
+    private static let tanpura: TanpuraParams? =
+        Bundle.module.url(forResource: "tanpura_live", withExtension: "json")
+            .flatMap { TanpuraParams(url: $0) }
+    private static let sitar: TanpuraParams? =
+        Bundle.module.url(forResource: "sitar_live", withExtension: "json")
+            .flatMap { TanpuraParams(url: $0) }
 
     // MARK: - The Tanpura voice (r7 modal-contact plucked drone)
 
@@ -57,12 +63,7 @@ public enum Presets {
     /// t60s are secanted at this exact physics config — regenerate the
     /// artifact upstream-style after any physics change, never hand-edit.
     /// nil when missing from the bundle.
-    public static func tanpuraParams() -> TanpuraParams? {
-        guard let url = Bundle.module.url(forResource: "tanpura_live", withExtension: "json") else {
-            return nil
-        }
-        return TanpuraParams(url: url)
-    }
+    public static func tanpuraParams() -> TanpuraParams? { tanpura }
 
     /// The bundled fitted SITAR artifact (`sitar_live.json`, written by
     /// `scripts/export_sitar_live.py` in the same fitting project — the
@@ -74,11 +75,5 @@ public enum Presets {
     /// halo is NOT in the artifact (it is the sarangi jt web, driven
     /// live over `bow_poly_jt_inject_write`). Same RECAL LAW.
     /// nil when missing from the bundle.
-    public static func sitarParams() -> TanpuraParams? {
-        guard let url = Bundle.module.url(forResource: "sitar_live", withExtension: "json") else {
-            return nil
-        }
-        return TanpuraParams(url: url)
-    }
-
+    public static func sitarParams() -> TanpuraParams? { sitar }
 }

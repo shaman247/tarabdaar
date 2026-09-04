@@ -82,6 +82,37 @@ extension BowEngine {
         }
     }
 
+    // MARK: - Regime telemetry
+
+    /// One played string's bow-contact regime counters, cumulative since
+    /// its mount (diff two reads for a window). `slips / periods` is the
+    /// slips-per-period figure: 1 = Helmholtz motion, ≥ 2 = multiple slip.
+    public struct SlotRegime: Sendable {
+        public var slips: Double
+        public var periods: Double
+        public var slipSamples: Double
+        public var bowedSamples: Double
+        /// Share of the string's motion at the fundamental (running, ~4
+        /// periods): Helmholtz motion holds it high, an overtone regime
+        /// collapses it.
+        public var fundamental: Double
+        public var slipsPerPeriod: Double {
+            periods > 1e-9 ? slips / periods : 0
+        }
+        public var slipFraction: Double {
+            bowedSamples > 0 ? slipSamples / bowedSamples : 0
+        }
+    }
+
+    /// Racy telemetry read of slot `s` (any thread; UI rate).
+    public func slotRegime(_ s: Int) -> SlotRegime? {
+        guard let pk = pkernel, s >= 0, s < maxPoly else { return nil }
+        var o = [Double](repeating: 0, count: 5)
+        guard bow_poly_regime_slot(pk, Int32(s), &o) != 0 else { return nil }
+        return SlotRegime(slips: o[0], periods: o[1], slipSamples: o[2],
+                          bowedSamples: o[3], fundamental: o[4])
+    }
+
     // MARK: - Bus volume meter
 
     /// BUS VOLUME METER (voice, taraf) for the iPad volume readout. Armed,

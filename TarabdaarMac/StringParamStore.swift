@@ -5,8 +5,8 @@ import SwiftUI
 
 /// Mac-side editor state for the **String instrument's** parameter surface —
 /// the `bowed_string.json` physics scalars (body / bow&string / playing
-/// ranges / jawari taraf / taraf / articulation / radiation), disjoint from
-/// the coupled-network `SarangiParams` document that `SarangiStore` edits.
+/// ranges / jawari taraf / taraf / articulation / radiation); the tarab
+/// bank itself is `SarangiStore`'s document.
 ///
 /// The bundled artifact IS the Sarangi Live default. Tarabdaar cannot (and
 /// should not) rewrite the bundle, so edits live as a persisted **override

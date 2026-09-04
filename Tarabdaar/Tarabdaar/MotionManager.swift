@@ -5,24 +5,20 @@ import SwiftUI
 class MotionManager: ObservableObject, MotionSource {
     private let motionManager = CMMotionManager()
 
-    @Published var pitch: Double = 0.0  // tilt forward/back (radians)
-    @Published var roll: Double = 0.0   // tilt left/right (radians)
-    @Published var yaw: Double = 0.0    // rotation around vertical axis (radians)
+    // The latest raw sample, written at 200 Hz. Not @Published: the
+    // readers (the 60 Hz tick, the scopes) poll, and publishing at sample
+    // rate would invalidate the root view 200 times a second.
+    private(set) var pitch: Double = 0.0  // tilt forward/back (radians)
+    private(set) var roll: Double = 0.0   // tilt left/right (radians)
+    private(set) var yaw: Double = 0.0    // rotation around vertical axis (radians)
 
     // User acceleration (gravity removed), in g's
-    @Published var userAccelX: Double = 0.0
-    @Published var userAccelY: Double = 0.0
-    @Published var userAccelZ: Double = 0.0
-
-    // Peak acceleration magnitude detected recently
-    @Published var accelMagnitude: Double = 0.0
+    private(set) var userAccelX: Double = 0.0
+    private(set) var userAccelY: Double = 0.0
+    private(set) var userAccelZ: Double = 0.0
 
     // Most recent touch velocity estimate (for display)
-    @Published var lastTouchVelocity: Double = 0.0
-
-    // Magnitude history for display.
-    @Published var accelHistory: [Double] = []
-    private let historyLength = Config.accelHistoryLength
+    var lastTouchVelocity: Double = 0.0
 
     // Timestamped accelerometer buffer for touch correlation
     private struct AccelSample {
@@ -130,7 +126,6 @@ class MotionManager: ObservableObject, MotionSource {
             }
 
             let mag = sqrt(accel.x * accel.x + accel.y * accel.y + accel.z * accel.z)
-            self.accelMagnitude = mag
 
             // Strike-scale envelope for the `.strike`/`.acceleration`
             // dimensions, historied for the scope's overlay.
@@ -147,12 +142,6 @@ class MotionManager: ObservableObject, MotionSource {
             // Trim old samples
             let cutoff = motion.timestamp - self.bufferDuration
             self.accelBuffer.removeAll { $0.timestamp < cutoff }
-
-            // Append to display history
-            self.accelHistory.append(mag)
-            if self.accelHistory.count > self.historyLength {
-                self.accelHistory.removeFirst(self.accelHistory.count - self.historyLength)
-            }
         }
     }
 

@@ -54,7 +54,7 @@ public final class TarabLink {
     private var pingId: UInt8 = 0
     private var timer: DispatchSourceTimer?
 
-    private static let tickHz = 120.0
+    private static let tickHz = Config.linkTickHz
     private static let heartbeatUs: UInt32 = 250_000
     private static let staleUs: UInt32 = 1_500_000
     private static let pingIntervalUs: UInt32 = 2_000_000

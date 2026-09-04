@@ -20,8 +20,6 @@ public struct HalfBandDecimator: Sendable {
     public static let taps: [Double] = design()
     static let order = 65
     static let centre = 32
-    /// Group delay in OUTPUT (decimated-rate) samples.
-    public static let outputDelay = centre / 2
 
     // history holds the last `order−1` input samples (previous chunks)
     private var hist: [Double]

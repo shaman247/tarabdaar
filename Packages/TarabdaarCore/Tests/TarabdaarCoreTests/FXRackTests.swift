@@ -12,9 +12,8 @@ final class FXRackTests: XCTestCase {
 
     /// The exact key surface presets carry — pinned literally so a template
     /// edit that renames a knob fails here, not in a user's file.
-    private static let knobs = ["eq_on"]
-        + (1...10).map { "eq_b\($0)" }
-        + ["rev_on", "rev_type", "rev_mix", "rev_size", "rev_cut"]
+    private static let knobs = ["eq_on", "eq_amount",
+                                "rev_on", "rev_type", "rev_mix", "rev_size", "rev_cut"]
 
     /// KEY SYNC: the derived keys are exactly one insert per engine point, in
     /// the engine's own order, and every one reaches an `FXSettings` field.
@@ -64,5 +63,48 @@ final class FXRackTests: XCTestCase {
             XCTAssertEqual(s, FXSettings(), "\(pt.name) rests armed")
             XCTAssertFalse(s.isActive)
         }
+    }
+
+    /// THE CURVE IS INFERRED FROM THE POINTS: at either insert rate the
+    /// fitted cascade passes through every point and holds the end gains
+    /// flat beyond them; no points, or amount 0, is the identity.
+    func testCurvePassesThroughItsPointsAndHoldsOutside() {
+        let sets: [[EQPoint]] = [
+            [EQPoint(hz: 500, db: 0), EQPoint(hz: 1000, db: 6), EQPoint(hz: 2000, db: 0)],
+            [EQPoint(hz: 100, db: -6), EQPoint(hz: 8000, db: 6)],
+            [EQPoint(hz: 1000, db: 4)],
+            [EQPoint(hz: 200, db: 6), EQPoint(hz: 400, db: 0),
+             EQPoint(hz: 4000, db: 0), EQPoint(hz: 8000, db: -8)],
+            (0..<10).map { EQPoint(hz: 31.5 * pow(2, Double($0)),
+                                   db: [3, -2, 4, 0, -6, 5, 2, -3, 1, 0][$0]) },
+        ]
+        for sr in [96_000.0, 48_000.0] {
+            for pts in sets {
+                let d = EQCurve.design(pts, sr: sr)
+                XCTAssertLessThanOrEqual(d.sections.count, EQCurve.maxSections)
+                for p in pts {
+                    XCTAssertEqual(d.magnitudeDB(at: p.hz, sr: sr), p.db, accuracy: 0.3,
+                                   "\(sr) Hz: \(p.hz) Hz")
+                }
+                // held flat from an octave beyond each end, within the
+                // curve's own 20 Hz…20 kHz range
+                let lo = pts.first!, hi = pts.last!
+                for hz in [lo.hz / 4, lo.hz / 2] where hz >= EQCurve.minHz {
+                    XCTAssertEqual(d.magnitudeDB(at: hz, sr: sr), lo.db, accuracy: 0.5,
+                                   "\(sr) Hz: below the first point at \(hz) Hz")
+                }
+                for hz in [hi.hz * 2, hi.hz * 4] where hz <= EQCurve.maxHz {
+                    XCTAssertEqual(d.magnitudeDB(at: hz, sr: sr), hi.db, accuracy: 0.5,
+                                   "\(sr) Hz: above the last point at \(hz) Hz")
+                }
+            }
+        }
+        XCTAssertTrue(EQCurve.design([], sr: 96_000).isIdentity)
+        XCTAssertTrue(EQCurve.design(sets[0], sr: 96_000).scaled(by: 0).isIdentity)
+        // the normaliser: sorted, clamped, merged, capped
+        let messy = [EQPoint(hz: 5000, db: 20), EQPoint(hz: 5, db: -3),
+                     EQPoint(hz: 5010, db: 2)]
+        XCTAssertEqual(EQCurve.normalize(messy),
+                       [EQPoint(hz: 20, db: -3), EQPoint(hz: 5000, db: 2)])
     }
 }

@@ -53,15 +53,21 @@ public final class TiltCalibrator: ObservableObject {
         public var legacyKey01: String?
         /// Per-frame EMA constant for the feature vector.
         public var smoothAlpha: Double
-        /// ORTHOGONAL MODE (2026-09-04, the wrist): each sweep claims the
-        /// FEATURE AXIS it moved most along (pitch, roll or yaw), the
-        /// solve is that axis alone (rows of `m` are unit vectors, no
-        /// PCA, no Gram inverse) and cross-axis motion during a sweep is
-        /// simply ignored. Two sweeps claiming the same axis = redo. The
-        /// joint mode's separation of non-perpendicular sweeps proved
-        /// hard to control by hand for the wrist — the solve turns any
-        /// cross-talk in the capture into cross-talk in play.
+        /// ORTHOGONAL MODE (the wrist): TWO sweeps, not three. Sweep 1's
+        /// PCA direction IS axis 1, exactly; sweep 2's direction is
+        /// orthogonalized against it (its axis-1 component removed) =
+        /// axis 2, the best orthogonal fit; axis 3 = axis 1 × axis 2,
+        /// inferred, with the mean of the two measured ranges as its
+        /// extents. The rows of `m` are an orthonormal frame, so the
+        /// solve is a projection — no Gram inverse, no cross-talk
+        /// amplification. The joint mode's separation of
+        /// non-perpendicular sweeps proved hard to control by hand for
+        /// the wrist: any cross-talk in the capture became cross-talk
+        /// in play.
         public var orthogonal: Bool
+        /// Sweeps in the capture: 3 joint, 2 orthogonal (the third axis
+        /// is inferred). `sweepNames` always names all three AXES.
+        public var sweepCount: Int { orthogonal ? 2 : 3 }
 
         public init(name: String, stepNames: [String], sweepNames: [String],
                     featureNames: [String], markerName: String,
@@ -104,16 +110,15 @@ public final class TiltCalibrator: ObservableObject {
         /// The Joy-Con WRIST calibration : feature = the
         /// Joy-Con's fused attitude (gravity pitch/roll + drift-learned
         /// relative yaw, all at ±90° full scale). The fusion is already
-        /// smooth, so a lighter EMA keeps the axes responsive. ORTHOGONAL
-        /// (2026-09-04): each wrist axis IS one attitude axis, rest-
-        /// relative and scaled by the sweep's range — no joint solve.
+        /// smooth, so a lighter EMA keeps the axes responsive. ORTHOGONAL:
+        /// up/down defines axis 1 exactly, in/out is fitted orthogonal to
+        /// it, rotation is inferred as their cross product.
         public static let wrist = Config(
             name: "wrist",
             stepNames: [
                 "REST: hold the Joy-Con hand still in playing position",
-                "Move the WRIST up and down — start from rest, end near rest",
-                "Move the WRIST inward and outward — start from rest, end near rest",
-                "Rotate the WRIST clockwise and counterclockwise — start from rest, end near rest",
+                "Move the WRIST up and down — start from rest, end near rest (this motion defines axis 1 exactly)",
+                "Move the WRIST inward and outward — start from rest, end near rest (fitted orthogonal to axis 1; rotation is inferred)",
             ],
             sweepNames: ["WRIST ↕", "WRIST ↔", "WRIST ⟲"],
             featureNames: ["pitch", "roll", "yaw"],
@@ -155,7 +160,7 @@ public final class TiltCalibrator: ObservableObject {
     public let config: Config
     private let defaults: UserDefaults
 
-    /// nil = idle; 0 = rest capture; 1…3 = the three sweeps.
+    /// nil = idle; 0 = rest capture; 1…`config.sweepCount` = the sweeps.
     @Published public private(set) var step: Int? = nil
     @Published public private(set) var info = ""
     /// Secondary feedback: the last phase's verdict while capturing,
@@ -304,8 +309,8 @@ public final class TiltCalibrator: ObservableObject {
     // MARK: Capture control
 
     public func begin() {
-        samples = Array(repeating: [], count: 4)
-        dirs = [nil, nil, nil]
+        samples = Array(repeating: [], count: config.sweepCount + 1)
+        dirs = Array(repeating: nil, count: config.sweepCount)
         restMean = nil
         detail = ""
         step = 0
@@ -339,7 +344,7 @@ public final class TiltCalibrator: ObservableObject {
             publishCloud()
             return
         }
-        if step < 3 {
+        if step < config.sweepCount {
             self.step = step + 1
             info = config.stepNames[step + 1]
         } else {
@@ -459,77 +464,75 @@ public final class TiltCalibrator: ObservableObject {
         return true
     }
 
-    /// Orthogonal-mode verdict: the sweep claims the feature axis with
-    /// the largest range about its rest reading; both-ways on that
-    /// axis; an axis already claimed by an earlier sweep = redo. A
-    /// second axis moving more than 60% as much warns (that motion is
-    /// ignored by the fit — the player may want a cleaner sweep).
+    /// Orthogonal-mode verdict. Sweep 1: its PCA direction is axis 1.
+    /// Sweep 2: its PCA direction with the axis-1 component removed —
+    /// too aligned with axis 1 (under ~25° apart) = redo; otherwise the
+    /// verdict reports how far the raw motion sat from orthogonal.
+    /// Both-ways is judged along the resulting axis.
     private func evaluateOrthogonalSweep(_ idx: Int, sweep: [[Double]],
                                          local: [Double],
                                          startOff: Double, endOff: Double) -> Bool {
         let name = config.sweepNames[idx]
-        let ext = Self.axisExtents(of: sweep, about: local)
-        let j = Self.dominantAxis(ext)
-        let axisName = config.featureNames[j]
-        let (lo, hi) = ext[j]
+        let raw = Self.dominantDirection(of: sweep)
+        var dir = raw
+        var offOrtho = 0.0
+        if idx == 1, let d1 = dirs[0] {
+            guard let o = Self.orthogonalize(raw, against: d1) else {
+                dirs[idx] = nil
+                detail = "⚠ \(name) moved almost entirely along \(config.sweepNames[0])'s axis (\(Int((Self.alignment(raw, d1) * 100).rounded()))% aligned) — redo with a motion at right angles to it"
+                return false
+            }
+            dir = o
+            offOrtho = Self.alignment(raw, d1)
+        }
+        var lo = 0.0, hi = 0.0
+        for s in sweep {
+            var c = 0.0
+            for i in 0..<dir.count { c += dir[i] * (s[i] - local[i]) }
+            lo = min(lo, c)
+            hi = max(hi, c)
+        }
         guard hi > 0.04, -lo > 0.04 else {
             dirs[idx] = nil
             detail = String(
-                format: "⚠ %@ was one-sided about its rest on %@ (%+.3f / %+.3f, need ±0.04) — redo, moving past the rest pose both ways; if rest sits at one end of this motion's range, the motion can't calibrate.",
-                name, axisName, lo, hi)
+                format: "⚠ %@ was one-sided about its rest (%+.3f / %+.3f, need ±0.04) — redo, moving past the rest pose both ways; if rest sits at one end of this motion's range, the motion can't calibrate.",
+                name, lo, hi)
             return false
         }
-        for k in 0..<idx {
-            guard let other = dirs[k], other[j] != 0 else { continue }
-            dirs[idx] = nil
-            detail = "⚠ \(name) moved mostly along \(axisName), which \(config.sweepNames[k]) already owns — redo with a motion on a different axis (or Cancel if \(config.sweepNames[k]) was the bad capture)"
-            return false
-        }
-        var dir = [Double](repeating: 0, count: Self.dims)
-        dir[j] = 1
         dirs[idx] = dir
-        var msg = String(format: "%@ captured (%d samples) → %@, range %+.2f / %+.2f",
-                         name, sweep.count, axisName, lo, hi)
+        var msg = String(format: "%@ captured (%d samples), range %+.2f / %+.2f",
+                         name, sweep.count, lo, hi)
+        if idx == 1 {
+            msg += String(format: " · fitted orthogonal to %@ (raw motion %d%% aligned with it — the shared part is dropped)",
+                          config.sweepNames[0], Int((offOrtho * 100).rounded()))
+        }
         if max(startOff, endOff) > 0.1 {
             msg += String(
                 format: ", %@ sat %.3f off rest (fine — using the %@ reading)",
                 startOff > endOff ? "start" : "end", max(startOff, endOff),
                 startOff > endOff ? "end" : "start")
         }
-        let range = hi - lo
-        var warning = ""
-        for i in 0..<Self.dims where i != j {
-            let r = ext[i].1 - ext[i].0
-            if r > 0.6 * range {
-                warning = String(format: "%@ also moved %d%% as much (ignored — only %@ counts); a cleaner sweep would help",
-                                 config.featureNames[i], Int((r / range * 100).rounded()), axisName)
-            }
-        }
-        detail = warning.isEmpty ? "✓ \(msg)" : "⚠ \(msg) — \(warning)"
+        detail = (idx == 1 && offOrtho >= 0.8)
+            ? "⚠ \(msg) — mostly the same motion as \(config.sweepNames[0]); the orthogonal remainder is small, consider Cancel and a cleaner run"
+            : "✓ \(msg)"
         return true
     }
 
-    /// Per-feature-axis (lo, hi) extents of a sweep about `local`.
-    static func axisExtents(of samples: [[Double]], about local: [Double])
-        -> [(Double, Double)] {
-        var ext = [(Double, Double)](repeating: (0, 0), count: dims)
-        for s in samples {
-            for i in 0..<dims {
-                let d = s[i] - local[i]
-                ext[i].0 = min(ext[i].0, d)
-                ext[i].1 = max(ext[i].1, d)
-            }
-        }
-        return ext
+    /// `v` with its `axis` component removed and renormalized; nil when
+    /// the remainder is too small to define a direction (|sin| < ~0.42,
+    /// i.e. under ~25° from the axis).
+    static func orthogonalize(_ v: [Double], against axis: [Double]) -> [Double]? {
+        let dot = zip(v, axis).reduce(0) { $0 + $1.0 * $1.1 }
+        let r = zip(v, axis).map { $0 - dot * $1 }
+        let len = (r.reduce(0) { $0 + $1 * $1 }).squareRoot()
+        guard len > 0.42 else { return nil }
+        return r.map { $0 / len }
     }
 
-    /// The axis with the largest range.
-    static func dominantAxis(_ ext: [(Double, Double)]) -> Int {
-        var best = 0
-        for i in 1..<ext.count where ext[i].1 - ext[i].0 > ext[best].1 - ext[best].0 {
-            best = i
-        }
-        return best
+    static func cross(_ a: [Double], _ b: [Double]) -> [Double] {
+        [a[1] * b[2] - a[2] * b[1],
+         a[2] * b[0] - a[0] * b[2],
+         a[0] * b[1] - a[1] * b[0]]
     }
 
     /// Fit the three-axis map from the recorded phases: the joint solve,
@@ -550,14 +553,15 @@ public final class TiltCalibrator: ObservableObject {
 
         var sweepDirs: [[Double]] = []
         var windows: [(start: [Double], end: [Double])] = []
-        for k in 1...n {
+        let sweeps = config.sweepCount
+        for k in 1...sweeps {
             let sweep = samples[k]
             guard sweep.count >= Self.sweepNeed else {
                 info = "Discarded — sweep \(k) (\(config.sweepNames[k - 1])) too short (\(sweep.count) of \(Self.sweepNeed) samples)"
                 refreshActiveFlag()
                 return
             }
-            sweepDirs.append(config.orthogonal ? [] : Self.dominantDirection(of: sweep))
+            sweepDirs.append(Self.dominantDirection(of: sweep))
             let w = Self.restWindowMeans(of: sweep)
             windows.append(w)
             readings.append(w.start)
@@ -591,27 +595,22 @@ public final class TiltCalibrator: ObservableObject {
         var m = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
         var separation = ""
         if config.orthogonal {
-            // One feature axis per sweep — the axis it moved most along
-            // about its own rest reading; distinct axes or the run is
-            // discarded (the per-sweep verdict already catches this).
-            var claimed = [Int]()
-            for k in 0..<n {
-                let j = Self.dominantAxis(Self.axisExtents(of: samples[k + 1],
-                                                           about: localRests[k]))
-                if let other = claimed.firstIndex(of: j) {
-                    info = "Discarded — sweeps \(other + 1) (\(config.sweepNames[other])) and \(k + 1) (\(config.sweepNames[k])) both moved mostly along \(config.featureNames[j])"
-                    detail = "Each wrist motion must own its own attitude axis — redo with three clearly different motions (up/down, in/out, rotation)"
-                    refreshActiveFlag()
-                    return
-                }
-                claimed.append(j)
-                sweepDirs[k] = [Double](repeating: 0, count: n)
-                sweepDirs[k][j] = 1
-                m[k][j] = 1
+            // Axis 1 = sweep 1's direction, exactly; axis 2 = sweep 2's
+            // direction orthogonalized against it; axis 3 = 1 × 2. An
+            // orthonormal frame, so the solve is a projection.
+            guard let d2 = Self.orthogonalize(sweepDirs[1], against: sweepDirs[0]) else {
+                info = "Discarded — \(config.sweepNames[1]) moved almost entirely along \(config.sweepNames[0])'s axis"
+                detail = "The second motion must be at right angles to the first — redo with two clearly different wrist movements"
+                refreshActiveFlag()
+                return
             }
-            separation = "Axes: " + (0..<n).map {
-                "\(config.sweepNames[$0]) → \(config.featureNames[claimed[$0]])"
-            }.joined(separator: ", ")
+            sweepDirs[1] = d2
+            sweepDirs.append(Self.cross(sweepDirs[0], d2))
+            for k in 0..<n { m[k] = sweepDirs[k] }
+            separation = String(format: "Axes: %@ exact, %@ fitted orthogonal (raw motion %d%% aligned with it), %@ inferred as their cross product with the mean of the two measured ranges",
+                                config.sweepNames[0], config.sweepNames[1],
+                                Int((Self.alignment(Self.dominantDirection(of: samples[2]), sweepDirs[0]) * 100).rounded()),
+                                config.sweepNames[2])
         } else {
             var worst = 0.0
             var worstA = 0
@@ -648,7 +647,7 @@ public final class TiltCalibrator: ObservableObject {
         var lo = [Double](repeating: 0, count: n)
         var hi = [Double](repeating: 0, count: n)
         var flipped = [Bool](repeating: false, count: n)
-        for k in 0..<n {
+        for k in 0..<sweeps {
             for s in samples[k + 1] {
                 var c = 0.0
                 for i in 0..<n { c += m[k][i] * (s[i] - localRests[k][i]) }
@@ -666,6 +665,15 @@ public final class TiltCalibrator: ObservableObject {
                 refreshActiveFlag()
                 return
             }
+        }
+        if sweeps < n {
+            // The inferred axis: direction from the (possibly flipped)
+            // measured axes, extents = the mean of theirs.
+            let d3 = Self.cross(m[0], m[1])
+            m[2] = d3
+            sweepDirs[2] = d3
+            lo[2] = (lo[0] + lo[1]) / 2
+            hi[2] = (hi[0] + hi[1]) / 2
         }
 
         model = Model(f0: f0, m: m, lo: lo, hi: hi)

@@ -47,16 +47,14 @@ public struct SyncedScaleState: Codable, Equatable {
 // MARK: - SysEx scale codec
 
 /// The scale-state codec. `encodeBlob`/`decodeBlob` produce the blob that
-/// rides the TLP `SCALE_STATE` event; `encode`/`decode` wrap it as
-/// `F0 7D 01 <base64 blob> F7`, the form the iPad's persisted store holds.
+/// rides the TLP `SCALE_STATE` event and is what the iPad's persisted
+/// store holds.
 ///
 /// Blob (v4): `[ver][tonic][tonicCents14: 2×7-bit][margin][layout][count]`
 /// then per point `[num14][den14][y][enabled][labelLen][label UTF-8…]`;
 /// tonicCents14 = centi-cents above −50 ¢. Other versions are rejected —
 /// both apps ship the format together.
 public enum PitchScaleSysEx {
-    public static let nonCommercialID: UInt8 = 0x7D
-    public static let scaleSubID: UInt8 = 0x01
     private static let version: UInt8 = 4
 
     /// The raw binary blob — the TLP `SCALE_STATE` event payload.
@@ -82,25 +80,6 @@ public enum PitchScaleSysEx {
             blob.append(contentsOf: label)
         }
         return blob
-    }
-
-    public static func encode(_ state: SyncedScaleState) -> [UInt8] {
-        let b64 = Data(encodeBlob(state)).base64EncodedData()   // ASCII ≤ 127
-        var out: [UInt8] = [0xF0, nonCommercialID, scaleSubID]
-        out.append(contentsOf: b64)
-        out.append(0xF7)
-        return out
-    }
-
-    /// Decode the SysEx form (framing `F0`/`F7` optional); nil on mismatch.
-    public static func decode(_ bytes: [UInt8]) -> SyncedScaleState? {
-        var b = bytes
-        if b.first == 0xF0 { b.removeFirst() }
-        if b.last == 0xF7 { b.removeLast() }
-        guard b.count >= 2, b[0] == nonCommercialID, b[1] == scaleSubID else { return nil }
-        guard let blob = Data(base64Encoded: Data(b[2...])).map(Array.init)
-        else { return nil }
-        return decodeBlob(blob)
     }
 
     /// Decode the raw binary blob (the TLP event payload).
@@ -136,27 +115,25 @@ public enum PitchScaleSysEx {
 
 // MARK: - Persistence (iPad)
 
-/// iPad-only persistence of the last synced state (SysEx-wrapped blob).
+/// iPad-only persistence of the last synced state (the raw blob).
 public enum SyncedScaleStore {
-    private static let key = "tarabdaar.syncedScaleState.v3"
+    private static let key = "tarabdaar.syncedScaleState.v4"
 
     public static func save(_ state: SyncedScaleState) {
-        UserDefaults.standard.set(Data(PitchScaleSysEx.encode(state)), forKey: key)
+        UserDefaults.standard.set(Data(PitchScaleSysEx.encodeBlob(state)), forKey: key)
     }
 
     public static func load() -> SyncedScaleState? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
-        return PitchScaleSysEx.decode([UInt8](data))
+        return PitchScaleSysEx.decodeBlob([UInt8](data))
     }
 }
 
 // MARK: - Fret-Pad arrangement codec
-// (Subtypes 0x02 and 0x04 are retired — do not reuse.)
 
-/// The Fret-Pad arrangement codec (subtype `0x03`): the blob that rides the
-/// TLP `FRET_ARRANGEMENT` event, SysEx-wrapped as `F0 7D 03 <base64> F7`
-/// for the iPad's persisted store. Sent only while the Fret Pad is the
-/// active layout.
+/// The Fret-Pad arrangement codec: the blob that rides the TLP
+/// `FRET_ARRANGEMENT` event and is what the iPad's persisted store holds.
+/// Sent only while the Fret Pad is the active layout.
 ///
 /// Blob (v6): `[ver][ghostQuarterOctaves][flags][count]`, per segment
 /// `[degreeIndex][x14: 2×7-bit][topY][bottomY][enabled]`, then the 3
@@ -165,8 +142,6 @@ public enum SyncedScaleStore {
 /// The fret pitch warp is deliberately NOT here — `ctl_fret_warp` is a
 /// live registry param relayed over JOYCON_STATE.
 public enum FretArrangementSysEx {
-    public static let nonCommercialID: UInt8 = 0x7D
-    public static let arrangementSubID: UInt8 = 0x03
     private static let version: UInt8 = 6
 
     /// The raw binary blob — the TLP `FRET_ARRANGEMENT` event payload.
@@ -193,24 +168,6 @@ public enum FretArrangementSysEx {
             blob.append(UInt8(c >> 7)); blob.append(UInt8(c & 0x7F))
         }
         return blob
-    }
-
-    public static func encode(_ a: FretArrangement) -> [UInt8] {
-        let b64 = Data(encodeBlob(a)).base64EncodedData()
-        var out: [UInt8] = [0xF0, nonCommercialID, arrangementSubID]
-        out.append(contentsOf: b64)
-        out.append(0xF7)
-        return out
-    }
-
-    public static func decode(_ bytes: [UInt8]) -> FretArrangement? {
-        var b = bytes
-        if b.first == 0xF0 { b.removeFirst() }
-        if b.last == 0xF7 { b.removeLast() }
-        guard b.count >= 2, b[0] == nonCommercialID, b[1] == arrangementSubID else { return nil }
-        guard let blob = Data(base64Encoded: Data(b[2...])).map(Array.init)
-        else { return nil }
-        return decodeBlob(blob)
     }
 
     /// Decode the raw binary blob (the TLP event payload).
@@ -245,17 +202,17 @@ public enum FretArrangementSysEx {
     }
 }
 
-/// iPad-only persistence of the last synced arrangement (SysEx-wrapped).
+/// iPad-only persistence of the last synced arrangement (the raw blob).
 public enum FretArrangementSyncStore {
-    private static let key = "tarabdaar.syncedFretArrangement.v1"
+    private static let key = "tarabdaar.syncedFretArrangement.v2"
 
     public static func save(_ a: FretArrangement) {
-        UserDefaults.standard.set(Data(FretArrangementSysEx.encode(a)), forKey: key)
+        UserDefaults.standard.set(Data(FretArrangementSysEx.encodeBlob(a)), forKey: key)
     }
 
     public static func load() -> FretArrangement? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
-        return FretArrangementSysEx.decode([UInt8](data))
+        return FretArrangementSysEx.decodeBlob([UInt8](data))
     }
 }
 

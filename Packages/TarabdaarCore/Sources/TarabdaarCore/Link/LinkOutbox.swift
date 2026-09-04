@@ -58,10 +58,5 @@ public final class LinkOutbox {
         items.removeAll { $0.stateType != nil }
     }
 
-    /// Pending events, oldest first (for verbatim re-send on lane switch).
-    public var pendingEvents: [[UInt8]] {
-        items.compactMap { $0.stateType == nil ? $0.bytes : nil }
-    }
-
     public func removeAll() { items.removeAll() }
 }

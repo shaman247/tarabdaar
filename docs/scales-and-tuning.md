@@ -49,6 +49,6 @@ A "+12.0¢" readout follows the fields whenever the tonic sits off its note anch
 
 ## Pitch on the wire and in the engine
 
-Every touch travels as an f32 fractional-MIDI pitch (`tonicFractionalMidi + 12·log2(ratio)`) — no note + bend split. All pitch interpolation runs in `log2(freq)`. `Scale.swift` owns the 12-TET frequency and note-name helpers used on both sides (`scale.frequency(for:)`, `Scale.noteName`); never hardcode a 12-TET formula.
+Every touch travels as an f32 fractional-MIDI pitch (`tonicFractionalMidi + 12·log2(ratio)`) — no note + bend split. All pitch interpolation runs in `log2(freq)`. `Scale.noteName` (`Scale.swift`) is the one concert-note-name helper on both sides; the fractional-MIDI ↔ Hz conversion is `440·2^((m−69)/12)` and nothing else — never hardcode a 12-TET formula for scale degrees.
 
 The older keyboard-model `Scale` (tuning system, enabled pitch classes, key range) is not on the playing path — see `docs/history/`.

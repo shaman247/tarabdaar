@@ -429,7 +429,16 @@ public enum BowTables {
                         .truncatingRemainder(dividingBy: 1.0)) * sgn)
             }
             // DIFFUSE TAIL: the Schroeder-region mode forest — linear
-            // spacing + golden jitter, low Q, √n-normalized signed residues
+            // spacing + golden jitter, low Q, √n-normalized residues. The
+            // RADIATION residues are GAUSSIAN (sign and magnitude) from a
+            // seeded generator: in the diffuse regime a mode's shape at the
+            // bridge and at the listener are independent normal variates,
+            // so the radiated sum has Rayleigh statistics — deep nulls and
+            // a log-normal ripple — rather than the even scallop a bounded
+            // residue law gives. The admittance residues stay positive and
+            // bounded (passivity; the loop cap and wolf behaviour are those
+            // of a lightly loaded bridge). `bow_body_tail_seed` picks the
+            // instrument.
             let nt = Int(bp.v("bow_body_tail_n", 0.0).rounded())
             if nt > 0 {
                 let tLo = bp.v("bow_body_tail_f0", 700.0)
@@ -438,6 +447,8 @@ public enum BowTables {
                 let tY = bp.v("bow_body_tail_y", 0.3)
                 let tR = bp.v("bow_body_tail_rad", 1.0)
                 let rn = 1.0 / Double(nt).squareRoot()
+                var gauss = SeededGaussian(
+                    seed: UInt64(max(1, Int(bp.v("bow_body_tail_seed", 1.0).rounded()))))
                 for j in 0..<nt {
                     let u = (Double(j) * GOLD)
                         .truncatingRemainder(dividingBy: 1.0)
@@ -457,10 +468,7 @@ public enum BowTables {
                     t.bn0.append(1.0 / max(n0, 1e-12))
                     t.bA.append(tY * rn * (0.5 + (Double(j + 1) * GOLD)
                             .truncatingRemainder(dividingBy: 1.0)))
-                    let sg: Double = (Double(j + 1) * SIGNQ)
-                        .truncatingRemainder(dividingBy: 1.0) < 0.5 ? 1.0 : -1.0
-                    t.bC.append(tR * rn * (0.5 + (Double(j + 2) * GOLD)
-                            .truncatingRemainder(dividingBy: 1.0)) * sg)
+                    t.bC.append(tR * rn * gauss.next())
                 }
             }
         }
@@ -550,5 +558,34 @@ public enum BowTables {
         s.slideAcc = bp.v("bow_slide_acc", 25000.0)    // noise (0 = bit-null)
         t.scalars = s
         return t
+    }
+}
+
+/// Deterministic unit-normal stream (xorshift64 + Box–Muller) for the
+/// body tail's radiation residues: the same seed builds the same body on
+/// every machine, so the render hash pins it.
+struct SeededGaussian {
+    private var x: UInt64
+    private var spare: Double? = nil
+
+    init(seed: UInt64) {
+        // scramble so seeds 1, 2, 3 … start far apart
+        x = (seed &* 0x9E3779B97F4A7C15) | 1
+        for _ in 0..<4 { _ = uniform() }
+    }
+
+    private mutating func uniform() -> Double {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17
+        // (0, 1]: 53 random bits, never exactly 0 (log-safe)
+        return (Double(x >> 11) + 1.0) / 9007199254740993.0
+    }
+
+    mutating func next() -> Double {
+        if let s = spare { spare = nil; return s }
+        let u1 = uniform(), u2 = uniform()
+        let r = (-2.0 * log(u1)).squareRoot()
+        let th = 2.0 * Double.pi * u2
+        spare = r * sin(th)
+        return r * cos(th)
     }
 }

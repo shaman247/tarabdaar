@@ -46,24 +46,37 @@ final class PresetCodingTests: XCTestCase {
     /// FX KEYS ARE PRESET KEYS: the derived `fx_<point>_<knob>` keys are the
     /// strings existing `.tarabdaar` files carry, and every one must still
     /// resolve — an unknown key is dropped at apply time and rests silently.
-    func testFXRackValuesRoundTripAndStillResolve() throws {
+    /// The EQ curves are a section of their own, and the graphic-EQ bands
+    /// of older files convert to a curve through the band centres.
+    func testFXRackValuesAndCurvesRoundTripAndStillResolve() throws {
         let fx: [String: Double] = [
-            "fx_voice_eq_on": 1, "fx_voice_eq_b3": -4.5,
+            "fx_voice_eq_on": 1, "fx_voice_eq_amount": 0.5,
             "fx_drive_rev_on": 1, "fx_drive_rev_type": 1,
             "fx_taraf_rev_mix": 0.42, "fx_global_rev_cut": 6000,
         ]
+        let curve = [EQPoint(hz: 120, db: -3), EQPoint(hz: 2500, db: 4.5)]
         var p = TarabdaarPreset()
         p.name = "FX rig"
         p.paramValues = fx
+        p.fxCurves = ["fx_voice_": curve]
         let back = try TarabdaarPreset.decode(p.encoded())
         XCTAssertEqual(back.paramValues, fx)
+        XCTAssertEqual(back.fxCurves, ["fx_voice_": curve])
         for (key, value) in fx {
             let spec = try XCTUnwrap(ParamRegistry.spec(key),
                                      "\(key) no longer exists in the registry")
             XCTAssertNotNil(spec.insert, key)
             XCTAssertTrue(value >= spec.lo && value <= spec.hi, key)
         }
-        XCTAssertEqual(back.sections(), ["6 parameters"])
+        XCTAssertEqual(back.sections(), ["6 parameters", "1 EQ curves"])
+        // an older file's bands: a point per band centre, only where touched
+        let legacy = TarabdaarPreset.legacyEQCurves(
+            in: ["fx_voice_eq_b3": -4.5, "fx_voice_eq_b8": 2, "fx_taraf_eq_b1": 0])
+        XCTAssertEqual(Array(legacy.keys), ["fx_voice_"])
+        XCTAssertEqual(legacy["fx_voice_"]?.count, 10)
+        XCTAssertEqual(legacy["fx_voice_"]?[2], EQPoint(hz: 125, db: -4.5))
+        XCTAssertEqual(legacy["fx_voice_"]?[7], EQPoint(hz: 4000, db: 2))
+        XCTAssertTrue(TarabdaarPreset.legacyEQCurves(in: fx).isEmpty)
     }
 
     /// A partial preset — tilt bindings only — loads without disturbing

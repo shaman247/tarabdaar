@@ -84,17 +84,17 @@ final class BowedStringEngineTests: XCTestCase {
     static let refBC: [Double] = [
         -2.072754175415813, -3.81312676312372, 2.7375173508316264,
         1.6619079385395328, -3.402280526247439, -2.3266711139553458,
-        4.067043701663253, -0.06726607484196408, -0.12374553300741577,
-        0.08883930819498885, 0.053933083382561926, -0.11041254154801362,
-        -0.07550631673558669, 0.13198577490103838, 0.09707955008861147,
-        -0.062173325276184556, -0.11865278344163624, 0.08374655862920932,
-        0.048840333816782405, -0.1053197919822341, -0.07041356716980718,
-        0.12689302533525887, 0.09198680052283195, -0.05708057571040503,
-        -0.11356003387585673, 0.07865380906342981, 0.1351332672288815,
-        -0.10022704241645457, -0.06532081760402765, 0.12180027576947934,
-        0.08689405095705242, -0.05198782614462551, -0.10846728431007736,
-        0.07356105949765028, 0.13004051766310182, -0.09513429285067505,
-        -0.060228068038248296,
+        4.067043701663253, -0.14390138088688392, -0.09143635898339433,
+        0.05399005004183723, -0.07405868971400163, -0.04551223071332504,
+        -0.018274971155507955, 0.09760854742599852, 0.2155835513221214,
+        0.12712982156698258, 0.045925028569574436, 0.00983431360775672,
+        -0.07291662173544423, -0.10523363982520625, -0.12310886633160599,
+        -0.013862032287492096, -0.0069695319677506385, -0.010911151952286603,
+        -0.13577763128668194, -0.21739456648791444, -0.0036296193497398787,
+        0.20882691567541994, 0.06919828096320296, -0.04460201593398066,
+        0.02240646937042264, -0.10066125648961707, 0.12531464242752224,
+        0.03679102882207532, -0.11398782882632416, -0.0326461371276387,
+        -0.08298261260802409,
     ]
 
     /// The shipped body configuration: 7 signature modes + a 30-mode tail.
@@ -113,8 +113,9 @@ final class BowedStringEngineTests: XCTestCase {
         return bp
     }
 
-    /// Lockstep with `gutstring.formula_body` at the shipping body config
-    /// (sr 96000, tonic 261.63) — regenerate all three arrays together.
+    /// Lockstep with `gutstring.formula_body` for the poles and admittance
+    /// and with this build's seeded Gaussian radiation law for the tail's
+    /// `bC` (sr 96000, tonic 261.63) — regenerate all three arrays together.
     func testFormulaBodyShippedLockstep() {
         let bp = Self.shippedBodyBP()
         let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp)
@@ -158,9 +159,17 @@ final class BowedStringEngineTests: XCTestCase {
         XCTAssertEqual(tailA.max()!,
                        0.390465 * rn * (0.5 + maxFrac(1...30)),
                        accuracy: 1e-12, "tail admittance lost √n")
-        XCTAssertEqual(tailC.map { abs($0) }.max()!,
-                       0.50054 * rn * (0.5 + maxFrac(2...31)),
-                       accuracy: 1e-12, "tail radiation lost √n")
+        // the radiation residues are a seeded unit-normal stream × tR·rn:
+        // the RMS holds the √n law, and the seed picks the pattern alone
+        let rmsC = (tailC.reduce(0) { $0 + $1 * $1 } / 30.0).squareRoot()
+        XCTAssertEqual(rmsC / (0.50054 * rn), 1.0, accuracy: 0.3,
+                       "tail radiation lost √n")
+        var bp2 = bp
+        bp2.num["bow_body_tail_seed"] = 2.0
+        let t2 = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp2)
+        XCTAssertEqual(t2.ba1, t.ba1, "the seed must not move a mode")
+        XCTAssertEqual(t2.bA, t.bA, "the seed must not touch the loop side")
+        XCTAssertNotEqual(t2.bC, t.bC, "the seed picks the radiation pattern")
         XCTAssertTrue(t.bA.allSatisfy { $0 > 0 })
         XCTAssertTrue(t.bC.contains { $0 > 0 } && t.bC.contains { $0 < 0 })
     }

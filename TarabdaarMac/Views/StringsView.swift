@@ -247,7 +247,7 @@ private struct DroneMappingSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Drone buttons").font(.padSubheadline).bold()
-            Text("Each Fret Pad drone button plucks ONE of the sympathetic strings above — map up to 3. The MAPPING sets the button's pitch; the VOICE below sets what sounds: the tanpura (default — press plucks, hold re-plucks like a strumming hand, release rings out) or the legacy sympathetic-string swell (press-and-hold; needs the row enabled and picked up by the jawari selection). Regenerating the bank re-runs the automatic mapping (low Sa · low Pa · Sa).")
+            Text("Each Fret Pad drone button plucks ONE of the sympathetic strings above — map up to 3. The MAPPING sets the button's pitch; the VOICE below sets what sounds: the tanpura (default — press plucks, hold re-plucks like a strumming hand, release rings out) or the sympathetic-string swell (press-and-hold; needs the row enabled and picked up by the jawari selection). Regenerating the bank re-runs the automatic mapping (low Sa · low Pa · Sa).")
                 .font(.padCaption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 6) {

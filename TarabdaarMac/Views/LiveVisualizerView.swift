@@ -1,10 +1,9 @@
 import TarabdaarCore
 import SwiftUI
 
-/// "Live" tab. The Mac no longer has a NoteManager / playing-scale
-/// concept (those are iPad-side), so this view surfaces what's reaching
-/// the audio engine: MIDI source status, render-time metrics, and live
-/// time-series graphs of the **played pitch** and **volume**.
+/// "Live" tab: what is reaching the audio engine — link status,
+/// render-time metrics, and live time-series graphs of the **played
+/// pitch** and **volume**.
 ///
 /// The pitch + volume traces are read from `AudioEngine.performanceReadout()`,
 /// derived at the single voice-routing choke point, so they reflect every

@@ -45,6 +45,7 @@ final class ParamUnificationTests: XCTestCase {
             "bow_attack_fms": 15.0,
             "bow_attack_vel": 0.0,
             "bow_settle_sharp": 0.0,
+            "bow_body_tail_seed": 1.0,      // BowTables.buildOpenString
         ]
         for (key, expect) in engineFallback {
             let spec = try XCTUnwrap(ParamRegistry.spec(key), key)

@@ -210,7 +210,7 @@ struct JoyConStatusView: View {
     private var wristPanel: some View {
         TiltCalPanel(
             cal: joyCon.wristCal, title: "Wrist calibration",
-            intro: "The Joy-Con's tilt calibration: hold the Joy-Con in the playing grip and capture a rest pose, then three wrist sweeps — up/down, inward/outward, clockwise/counterclockwise — each starting from rest. Each sweep claims the attitude axis it moved most along (pitch, roll or yaw); that axis alone, rest-relative and scaled by the sweep's range, becomes the Wrist ↕ / ↔ / ⟲ dimension on the Controls tab (rest = 0, sweep extremes ±1). Motion on the other axes during a sweep is ignored, and two sweeps that claim the same axis repeat. Dpad-up advances, dpad-down steps back, ZL re-zeroes the rest pose. Without a calibration the wrist axes stay silent; Joy-Con Accel needs no calibration.")
+            intro: "The Joy-Con's tilt calibration: hold the Joy-Con in the playing grip and capture a rest pose, then two wrist sweeps, each starting from rest. Up/down defines the Wrist ↕ axis exactly; inward/outward is fitted at right angles to it (the part shared with up/down is dropped) and becomes Wrist ↔; Wrist ⟲ is inferred as the axis perpendicular to both, with the mean of the two measured ranges. Rest = 0, sweep extremes ±1 on the Controls tab. Dpad-up advances, dpad-down steps back, ZL re-zeroes the rest pose. Without a calibration the wrist axes stay silent; Joy-Con Accel needs no calibration.")
     }
 
     /// The Mac twin of the iPad's GYRO overlay: the same 3D attitude
@@ -486,7 +486,7 @@ private struct TiltCalPanel: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     HStack(spacing: 10) {
-                        Button(cal.step == 3 ? "Finish" : "Next") {
+                        Button(cal.step == cal.config.sweepCount ? "Finish" : "Next") {
                             cal.advance()
                         }
                         Button("Redo previous") {
@@ -536,7 +536,7 @@ private struct CalCloudView: View {
     private static let spin = 0.3
 
     var body: some View {
-        let names = ["Rest"] + cal.config.sweepNames
+        let names = ["Rest"] + Array(cal.config.sweepNames.prefix(cal.config.sweepCount))
         VStack(alignment: .leading, spacing: 4) {
             TimelineView(.periodic(from: .now, by: 1.0 / 60.0)) { tl in
                 Canvas { ctx, size in
@@ -552,7 +552,7 @@ private struct CalCloudView: View {
             .background(Color.black.opacity(0.25))
             .clipShape(RoundedRectangle(cornerRadius: 6))
             HStack(spacing: 12) {
-                ForEach(0..<4, id: \.self) { i in
+                ForEach(0..<names.count, id: \.self) { i in
                     HStack(spacing: 4) {
                         Circle().fill(Self.colors[i]).frame(width: 6, height: 6)
                         Text(names[i])
@@ -563,6 +563,13 @@ private struct CalCloudView: View {
                         Rectangle().fill(Color.secondary)
                             .frame(width: 10, height: 2)
                         Text("fit")
+                    }
+                    if cal.config.sweepCount < 3 {
+                        HStack(spacing: 4) {
+                            Rectangle().fill(Self.colors[3])
+                                .frame(width: 10, height: 2)
+                            Text(cal.config.sweepNames[2] + " inferred")
+                        }
                     }
                 }
                 HStack(spacing: 4) {

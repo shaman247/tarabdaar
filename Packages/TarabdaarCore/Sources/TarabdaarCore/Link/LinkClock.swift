@@ -65,12 +65,4 @@ public struct LinkClockSync {
             rttUs = Double(rtt)
         }
     }
-
-    /// Age of a remote-stamped frame in µs, given the current offset.
-    public func frameAgeUs(timestampUs: UInt32, nowUs: UInt32) -> UInt32? {
-        guard let off = offsetUs else { return nil }
-        let localizedSend = UInt32(truncatingIfNeeded:
-            Int64(timestampUs) &- off)
-        return LinkClock.elapsedUs(from: localizedSend, to: nowUs)
-    }
 }

@@ -5,7 +5,7 @@ import Foundation
 /// `AppController` (which stays the owner/wiring layer: it feeds axes in
 /// and applies the emitted batch through the unified parameter apply).
 ///
-/// It owns three things the Mac side used to carry inline:
+/// It owns three things:
 ///
 ///  * **the per-axis binding snapshot** — `DimensionMapping` flattened to
 ///    `[axis][(target, binding)]` under its own lock, so the link and
@@ -43,22 +43,22 @@ public final class ControlAxisEvaluator {
     // MARK: Axis indices (into `ControlAxes.dims`)
 
     public static let strikeAxisIndex =
-        ControlAxes.dims.firstIndex(of: .strike) ?? 5
+        ControlAxes.dims.firstIndex(of: .strike)!
     public static let accelAxisIndex =
-        ControlAxes.dims.firstIndex(of: .acceleration) ?? 6
+        ControlAxes.dims.firstIndex(of: .acceleration)!
     public static let fingerAxisIndex =
-        ControlAxes.dims.firstIndex(of: .fingerAccel) ?? 7
+        ControlAxes.dims.firstIndex(of: .fingerAccel)!
     /// TOUCH SIZE — UNIPOLAR 0…1, driven as `2·level − 1` like `.jcAccel`.
     public static let touchSizeAxisIndex =
-        ControlAxes.dims.firstIndex(of: .touchSize) ?? 12
+        ControlAxes.dims.firstIndex(of: .touchSize)!
     /// THE JOY-CON WRIST AXES ↕/↔/⟲ (bipolar).
     public static let wristAxisIndices = (
-        ControlAxes.dims.firstIndex(of: .tilt4) ?? 8,
-        ControlAxes.dims.firstIndex(of: .wrist2) ?? 9,
-        ControlAxes.dims.firstIndex(of: .wrist3) ?? 10)
+        ControlAxes.dims.firstIndex(of: .tilt4)!,
+        ControlAxes.dims.firstIndex(of: .wrist2)!,
+        ControlAxes.dims.firstIndex(of: .wrist3)!)
     /// Joy-Con Accel — UNIPOLAR 0…1, the caller maps it as `2·level − 1`.
     public static let jcAccelAxisIndex =
-        ControlAxes.dims.firstIndex(of: .jcAccel) ?? 11
+        ControlAxes.dims.firstIndex(of: .jcAccel)!
 
     // MARK: Sinks
 

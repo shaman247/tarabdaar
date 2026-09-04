@@ -144,6 +144,28 @@ extension AudioEngine {
         return snap
     }
 
+    // MARK: - Body response (Body tab)
+
+    /// Identity of the String voice's published engine — changes on every
+    /// rebuild, so the Body tab recomputes only when the body did. Cheap.
+    public func stringVoiceEngineIdentity() -> ObjectIdentifier? {
+        lock.lock()
+        let src = stringVoiceSource
+        lock.unlock()
+        guard let engine = src?.currentEngine() else { return nil }
+        return ObjectIdentifier(engine)
+    }
+
+    /// The formula body's frequency response as built into the running
+    /// engine (see `BowEngine.bodyResponse`). Allocates; nil unarmed.
+    public func stringVoiceBodyResponse(points: Int = 1024)
+        -> BowEngine.BodyResponse? {
+        lock.lock()
+        let src = stringVoiceSource
+        lock.unlock()
+        return src?.currentEngine()?.bodyResponse(points: points)
+    }
+
     /// Render-deadline telemetry (see `StringVoiceSource.renderStats`); nil without a voice.
     public func stringVoiceRenderStats() -> (maxMs: Double, overruns: UInt64,
                                              callbacks: UInt64)? {

@@ -24,10 +24,10 @@ OUT = os.path.join(DOCS, "html")
 
 # Curated reading order (CLAUDE.md's docs list); extra pages appended.
 ORDER = [
-    "overview", "playing-guide", "architecture", "glide-system",
-    "midi-and-audio", "sound-design", "sensors", "scales-and-tuning",
-    "config-reference", "ui-layout", "simulator", "sarangi", "fret-pad",
-    "parameters", "packaging",
+    "overview", "playing-guide", "architecture", "sarangi", "tanpura-voice",
+    "sitar-voice", "fret-pad", "glide-system", "scales-and-tuning",
+    "midi-and-audio", "sensors", "sound-design", "fx", "ui-layout",
+    "parameters", "config-reference", "packaging",
 ]
 
 CSS = """

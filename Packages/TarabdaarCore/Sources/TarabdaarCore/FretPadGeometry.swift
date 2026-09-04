@@ -68,9 +68,6 @@ public struct FretArrangement: Equatable {
         self.droneRatios = r
     }
 
-    /// Band-widths the surface spans: the base band plus the flanks each side.
-    public var octaveSpan: Double { 1 + 2 * max(0, ghostExtentOctaves) }
-
     /// `FretLayoutPreset.equalFreq` ("C Equal Freq"): **pitch-aligned x** —
     /// a fret sits at `log2(ratio)`. Komal/tivra in an upper tier, shuddha in
     /// a lower one, S and P longer; every fret crosses the centre line.

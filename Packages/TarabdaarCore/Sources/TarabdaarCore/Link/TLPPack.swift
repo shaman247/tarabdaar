@@ -11,9 +11,7 @@ import Foundation
 /// (IAC bus, MIDI patchbays, dual USB+BLE delivery) — measured on the
 /// development Mac: its own pings looped back with a 0.3 ms self-RTT and
 /// the echoed stream chopped the iPad's frames in the shared reassembler.
-/// (Subtypes 0x01/0x03/0x05 were the legacy scale/arrangement/Joy-Con
-/// messages, retired into TLP events; 0x02/0x04 were deleted earlier and
-/// stay dead.)
+/// Subtypes 0x01–0x05 are retired — do not reuse.
 ///
 /// 7-in-8 packing: each group of ≤7 payload bytes becomes 1 MSB septet
 /// followed by the 7 bytes with bit 7 cleared; septet bit i carries byte

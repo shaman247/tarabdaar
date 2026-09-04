@@ -41,7 +41,7 @@ extension AudioEngine {
             }
         }
         stringVoiceSource?.reset()
-        lockAndMeasure()
+        lock.lock()
         useSarangiModelVoice = on
         let strings = lastSarangiStrings
         let tonic = lastSarangiTonic
@@ -53,11 +53,6 @@ extension AudioEngine {
         return true
     }
 
-    /// Whether the String physics instrument is currently the base voice.
-    public var isSarangiModelVoice: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return useSarangiModelVoice
-    }
 
     /// Drive one control axis from the UI (0..1): CC11 expr · CC1 press · CC74 pos · CC2/75 tilt.
     public func setSarangiModelVoiceAxis(cc: UInt8, value01: Double) {
@@ -74,6 +69,18 @@ extension AudioEngine {
     /// Player vibrato depth 0..1 (the vibrato axis).
     public func setStringVibrato(_ v01: Double) {
         stringVoiceSource?.mapper.setVibrato(v01)
+    }
+
+    /// The String voice's engine rate; its kernel-rate inserts run at
+    /// twice this (`BowEngine.fxRate`).
+    public var stringVoiceSampleRate: Double {
+        stringVoiceSource?.modelSR ?? 48000
+    }
+
+    /// Replace one FX insert point's EQ curve — the points the FX tab
+    /// edits. Cached in the source like the knobs, so it survives rebuilds.
+    public func setStringEQCurve(_ point: FXPoint, _ points: [EQPoint]) {
+        stringVoiceSource?.setEQCurve(point, points)
     }
 
     /// Apply one `.live` registry parameter to the String voice — the ONE
@@ -207,7 +214,7 @@ extension AudioEngine {
     public func rebuildSarangi(strings: [ResolvedString], tonic: Double,
                                droneFreqs: [Double?] = [],
                                follower: (gain: Double, t60: Double)? = nil) {
-        lockAndMeasure()
+        lock.lock()
         lastSarangiStrings = strings
         lastSarangiTonic = tonic
         lastSarangiFollower = follower

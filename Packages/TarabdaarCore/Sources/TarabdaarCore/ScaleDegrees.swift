@@ -3,12 +3,6 @@ import Foundation
 /// Scale-derived helpers shared across the app: the enabled degrees of a
 /// `PitchScale`, the ONE pitch-naming path (the scale's own labels), and the
 /// scale presets the Fret Pad's scale editor offers.
-///
-/// extracted from `StringPadGeometry.swift` and
-/// `ChordPadGeometry.swift` when those were deleted. Both files were
-/// geometry for the String Pad and Chord Pad — surfaces removed in the
-/// simplification — but each still held symbols the surviving
-/// Fret Pad depends on, which is why they had lingered.
 
 // MARK: - Scale-derived pitch names
 //

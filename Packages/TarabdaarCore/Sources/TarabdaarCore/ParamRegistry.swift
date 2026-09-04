@@ -102,7 +102,7 @@ public enum ParamTiming: String {
 
 /// One INSERT POINT of a repeated parameter block — the FX rack's four
 /// points. `keyPrefix` matches `SarangiKit.FXPoint.keyPrefix`; a derived
-/// key is the prefix plus a template knob (`fx_voice_eq_b3`).
+/// key is the prefix plus a template knob (`fx_voice_rev_mix`).
 public struct FXInsertPoint: Identifiable, Equatable, Sendable {
     /// `SarangiKit.FXPoint` raw value — the signal order.
     public let index: Int
@@ -270,8 +270,11 @@ public enum ParamRegistry {
                       0.0, 1.0, 0.3,
                       help: "Non-modal (flat) radiation floor. 1 with modes 0 = the raw bridge force."),
             ParamSpec("bow_body_tail_n", "formant modes", group: "Body (formula modes)",
-                      0, 48, 32, step: 1,
-                      help: "Diffuse mid/high mode forest between the tail corners — the FIXED body formants the harmonics sweep through during a glide, the cue that separates a real slide from a pitch-shifted tone. √n-normalized: more modes = denser, individually shallower structure at held total power. 0 = flat feedthrough only."),
+                      0, 256, 150, step: 1,
+                      help: "Diffuse mid/high mode forest between the tail corners — the FIXED body formants the harmonics sweep through during a glide, the cue that separates a real slide from a pitch-shifted tone. √n-normalized: more modes = denser structure at held total power (150 ≈ 10 peaks per octave, a violin-class body; 32 was a gentle scallop). 0 = flat feedthrough only. The Body tab draws the result."),
+            ParamSpec("bow_body_tail_seed", "formant seed", group: "Body (formula modes)",
+                      1, 64, 1, step: 1,
+                      help: "Which instrument: the forest's radiation residues are drawn from a seeded Gaussian stream, so each seed is a different fixed pattern of peaks and nulls at the same statistics. Audition by ear, watch it on the Body tab."),
             ParamSpec("bow_body_tail_f0", "formants from (Hz)", group: "Body (formula modes)",
                       150, 1500, 280,
                       help: "Low edge of the diffuse formant forest."),
@@ -279,14 +282,14 @@ public enum ParamRegistry {
                       2000, 12000, 6500,
                       help: "High edge of the diffuse formant forest."),
             ParamSpec("bow_body_tail_q", "formant Q", group: "Body (formula modes)",
-                      5, 60, 30,
+                      5, 80, 40,
                       help: "Formant sharpness: higher = deeper peaks/valleys and slower per-mode bloom (Q 30 at 300 Hz rings ~70 ms — body bloom, physical)."),
             ParamSpec("bow_body_tail_y", "formant mobility", group: "Body (formula modes)",
                       0.0, 1.5, 0.4,
                       help: "Bridge-load side of the formant modes. The default 0.4 leaves the admittance maximum (and the loop cap) unchanged; raising it far invites wolves."),
             ParamSpec("bow_body_tail_rad", "formant radiation", group: "Body (formula modes)",
-                      0.0, 8.0, 2.5,
-                      help: "How loudly the formant forest radiates against the flat floor. The default 2.5 gives ≈ ±4 dB ripple std across 250–6500 Hz (extremes ~26 dB) — real-body territory; near 0 the transfer is inaudibly flat."),
+                      0.0, 8.0, 3.5,
+                      help: "How loudly the formant forest radiates against the flat floor (`bow_body_c0`). The forest is a Gaussian-residue sum, so its ripple has Rayleigh depth — nulls 25–35 dB deep — and this knob sets how far the floor fills them; near 0 the transfer is inaudibly flat."),
             ParamSpec("bow_yinf", "bridge give", group: "Body (formula modes)",
                       0.0, 0.4, 0.05,
                       help: "Broadband bridge admittance floor under the modes."),
@@ -738,14 +741,13 @@ public enum ParamRegistry {
 
     /// THE FX RACK — one insert DEFINITION, instantiated at four points.
     ///
-    /// The rack used to spell out 4 × 16 near-identical specs (more than a
-    /// third of the whole registry, 40 of them EQ bands that are inert
-    /// while the point's EQ is off). The insert is now described once
+    /// The rack used to spell out 4 × N near-identical specs (more than a
+    /// third of the whole registry). The insert is now described once
     /// (`fxTemplate`) and instantiated for each point (`fxPoints`):
     /// `ParamRegistry.all` still answers every `fx_<point>_<knob>` key, so
     /// presets, tilt targets, composites and the FX tab are untouched —
     /// but each derived spec carries its `insert`,
-    /// so the Parameters tab shows FOUR collapsible inserts instead of 64
+    /// so the Parameters tab shows FOUR collapsible inserts instead of
     /// flat rows and docs/parameters.md renders the template once.
     ///
     /// `keyPrefix` must equal `SarangiKit.FXPoint.keyPrefix` and every
@@ -774,22 +776,19 @@ public enum ParamRegistry {
     /// The group every derived FX spec belongs to.
     public static let fxGroupName = "FX rack"
 
-    /// THE INSERT, described once: a 10-band graphic EQ and a selectable
-    /// additive reverb, all `.live` (they never touch the physics tables)
-    /// and all off by default — the untouched rack is byte-null. `knob` is
-    /// the field suffix; `{what}` in the help expands to the point's own
-    /// description.
+    /// THE INSERT, described once: the EQ curve's two knobs (its POINTS are
+    /// not knobs — the FX tab edits them and presets carry them, see
+    /// `TarabdaarPreset.fxCurves`) and a selectable additive reverb, all
+    /// `.live` (they never touch the physics tables) and all off by default
+    /// — the untouched rack is byte-null. `knob` is the field suffix;
+    /// `{what}` in the help expands to the point's own description.
     public static let fxTemplate: [FXKnob] = {
         var t: [FXKnob] = [
             FXKnob("eq_on", "EQ on", 0, 1, 0, step: 1,
-                   help: "Enable the 10-band graphic EQ at this point — {what}. Toggling glides the bands to/from flat (click-free)."),
+                   help: "Enable the EQ curve at this point — {what}. The curve is inferred from the points set on the FX tab (a fitted cascade through them, flat beyond the outermost points); toggling crossfades to/from flat (click-free)."),
+            FXKnob("eq_amount", "EQ amount", 0, 1, 1,
+                   help: "Depth of the EQ curve, 0…1: every dB of the curve scaled (1 = as drawn, 0 = flat). Inert while the point's EQ is off."),
         ]
-        let bands = ["31.5 Hz", "63 Hz", "125 Hz", "250 Hz", "500 Hz",
-                     "1 kHz", "2 kHz", "4 kHz", "8 kHz", "16 kHz"]
-        for (i, b) in bands.enumerated() {
-            t.append(FXKnob("eq_b\(i + 1)", "EQ \(b) (dB)", -12, 12, 0,
-                            help: "Octave peaking band at \(b), ±12 dB. Inert while the point's EQ is off."))
-        }
         t += [
             FXKnob("rev_on", "reverb on", 0, 1, 0, step: 1,
                    help: "Enable the reverb at this point — {what}. Toggling glides the wet level (click-free)."),
@@ -820,7 +819,7 @@ public enum ParamRegistry {
         })
     }
 
-    /// The rack as INSERT SECTIONS: each point with its own 16 knobs, in
+    /// The rack as INSERT SECTIONS: each point with its own knobs, in
     /// registry order. The Parameters tab and paramdoc both render a group
     /// this way, so neither needs to know the FX keys.
     public static func insertSections(of params: [ParamSpec])

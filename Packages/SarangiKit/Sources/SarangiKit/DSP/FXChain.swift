@@ -47,11 +47,15 @@ public enum FXReverbKind: Int, CaseIterable, Sendable {
 
 /// One insert point's user-facing state — plain values, `Equatable` so the
 /// render thread can skip untouched points. Field names mirror the
-/// registry key suffixes (`fx_<point>_<field>`).
+/// registry key suffixes (`fx_<point>_<field>`); the EQ curve's points are
+/// the one structured field (the FX tab edits them, presets carry them).
 public struct FXSettings: Equatable, Sendable {
     public var eqOn = false
-    /// Per-band gain in dB (`FXChainUnit.eqBands` centres), ±12.
-    public var eqGains = [Double](repeating: 0, count: FXChainUnit.eqBandCount)
+    /// The EQ curve's control points (`EQCurve`), normalised: pitch-sorted,
+    /// 20 Hz…20 kHz, ±12 dB, at most `EQCurve.maxPoints`.
+    public var eqPoints: [EQPoint] = []
+    /// Curve depth 0…1: every dB of the curve scaled (0 = flat).
+    public var eqAmount = 1.0
     public var revOn = false
     public var revKind = FXReverbKind.bigverb.rawValue
     /// Wet level 0…1 (the dry path always passes at unity — a send).
@@ -65,16 +69,18 @@ public struct FXSettings: Equatable, Sendable {
 
     /// True when this point does anything at all.
     public var isActive: Bool {
-        (eqOn && eqGains.contains { $0 != 0 }) || (revOn && revMix > 0)
+        (eqOn && eqAmount > 0 && eqPoints.contains { $0.db != 0 })
+            || (revOn && revMix > 0)
     }
 
-    /// Apply one registry value by field suffix (`eq_on`, `eq_b1`…`eq_b10`,
+    /// Apply one registry value by field suffix (`eq_on`, `eq_amount`,
     /// `rev_on`, `rev_type`, `rev_mix`, `rev_size`, `rev_cut`).
     /// Returns false for an unknown field.
     @discardableResult
     public mutating func apply(field: String, value: Double) -> Bool {
         switch field {
         case "eq_on": eqOn = value >= 0.5
+        case "eq_amount": eqAmount = min(max(value, 0), 1)
         case "rev_on": revOn = value >= 0.5
         case "rev_type":
             revKind = FXReverbKind(rawValue: Int(value.rounded()))?.rawValue
@@ -82,44 +88,94 @@ public struct FXSettings: Equatable, Sendable {
         case "rev_mix": revMix = min(max(value, 0), 1)
         case "rev_size": revSize = min(max(value, 0), 1)
         case "rev_cut": revCutoff = min(max(value, 100), 20_000)
-        default:
-            guard field.hasPrefix("eq_b"), let b = Int(field.dropFirst(4)),
-                  b >= 1, b <= eqGains.count else { return false }
-            eqGains[b - 1] = min(max(value, -12), 12)
+        default: return false
         }
         return true
     }
 }
 
-/// One insert point's DSP: a 10-band octave graphic EQ (RBJ peaking
-/// sections, click-free retunes) into a selectable additive reverb.
-/// Everything is preallocated at init; `retarget`/`tick`/`process*` run on
-/// the render thread only (settings arrive via the engine's staging lock).
+/// One realised EQ cascade with its own state — the unit keeps two and
+/// crossfades between them when the design changes.
+struct EQCascade: Sendable {
+    /// a = mono/mid/L, b = side/R — same coefficients, independent state:
+    /// EQing mid and side identically equals EQing L/R by linearity.
+    private var a: [Biquad]
+    private var b: [Biquad]
+    private(set) var count = 0
+    private(set) var gain = 1.0
+    private(set) var design = EQDesign()
+
+    init() {
+        let flat = Biquad(b0: 1, b1: 0, b2: 0, a0: 1, a1: 0, a2: 0)
+        a = [Biquad](repeating: flat, count: EQCurve.maxSections)
+        b = a
+    }
+
+    var isIdentity: Bool { count == 0 && gain == 1 }
+
+    /// Adopt a design from rest (state cleared — the caller warms it up
+    /// under a zero crossfade weight before it is heard).
+    mutating func load(_ d: EQDesign, sr: Double) {
+        design = d
+        count = min(d.sections.count, a.count)
+        gain = pow(10, d.gainDB / 20)
+        for i in 0..<count {
+            let sec = d.sections[i].biquad(sr: sr)
+            a[i] = sec; b[i] = sec
+        }
+    }
+
+    mutating func reset() {
+        for i in 0..<count { a[i].reset(); b[i].reset() }
+    }
+
+    @inline(__always)
+    mutating func process(_ x: Double) -> Double {
+        var y = x
+        for k in 0..<count { y = a[k].process(y) }
+        return y * gain
+    }
+
+    @inline(__always)
+    mutating func processPair(_ x: Double, _ z: Double) -> (Double, Double) {
+        var y = x, w = z
+        for k in 0..<count {
+            y = a[k].process(y)
+            w = b[k].process(w)
+        }
+        return (y * gain, w * gain)
+    }
+}
+
+/// One insert point's DSP: the EQ curve (a fitted cascade, see `EQCurve`)
+/// into a selectable additive reverb. Everything is preallocated at init;
+/// `retarget`/`tick`/`process*` run on the render thread only (settings
+/// and the finished design arrive via the engine's staging lock).
 ///
-/// Both halves fade rather than switch: disabling the EQ glides every band
-/// to 0 dB before bypassing, and disabling the reverb glides the wet level
-/// to zero — the toggles are click-free by construction. Bypassed halves
-/// cost nothing.
+/// Both halves fade rather than switch. A new EQ design is loaded into the
+/// idle cascade, run silently for `eqWarmMs` so its start-up transient
+/// settles, then crossfaded in over `eqFadeMs` and the old cascade dropped —
+/// so a point drag, a curve edit and the on/off toggle (a fade to the
+/// identity) are all click-free; a design arriving mid-fade waits for the
+/// fade to finish (latest wins). Disabling the reverb glides the wet level
+/// to zero. Bypassed halves cost nothing.
 public struct FXChainUnit: Sendable {
-    /// ISO octave centres of the graphic EQ.
-    public static let eqBands: [Double] =
-        [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16_000]
-    public static var eqBandCount: Int { eqBands.count }
-    /// Octave-wide peaking sections (Q ≈ f0/BW for BW = 1 octave).
-    static let eqQ = 1.41
+    public static let eqWarmMs = 10.0
+    public static let eqFadeMs = 30.0
 
     public let sr: Double
     private var target = FXSettings()
 
-    // --- graphic EQ (a = mono/mid/L, b = side/R — same coefficients,
-    //     independent state: EQing mid and side identically equals EQing
-    //     L/R by linearity, the tilt-shelf pattern) ---
-    private var eqA: [Biquad]
-    private var eqB: [Biquad]
-    private var curGains: [Double]
-    private var appliedGains: [Double]
-    private var eqEngaged = false
-
+    // --- EQ: two cascades, `cur` audible, the other warming/fading in ---
+    private var eq: [EQCascade]
+    private var cur = 0
+    private var incoming = -1          // -1 = none
+    private var warmLeft = 0           // samples of silent warm-up left
+    private var fadePos = 0            // samples into the crossfade
+    private let warmLen: Int
+    private let fadeLen: Int
+    private var pendingDesign: EQDesign?
+    private var targetDesign = EQDesign()
     // --- reverb ---
     private var bigverb: Bigverb
     private var room: Reverb
@@ -132,24 +188,33 @@ public struct FXChainUnit: Sendable {
 
     public init(sr: Double) {
         self.sr = sr
-        let flat = FXChainUnit.eqBands.map {
-            Biquad.peaking(f0: min($0, 0.4 * sr), gainDB: 0,
-                           q: FXChainUnit.eqQ, sr: sr)
-        }
-        eqA = flat
-        eqB = flat
-        curGains = [Double](repeating: 0, count: flat.count)
-        appliedGains = curGains
+        eq = [EQCascade(), EQCascade()]
+        warmLen = Int(FXChainUnit.eqWarmMs * 0.001 * sr)
+        fadeLen = max(1, Int(FXChainUnit.eqFadeMs * 0.001 * sr))
         bigverb = Bigverb(sr: sr)
         // The room's own mix/width stay pinned (1, 1): the chain owns the
         // wet level so both reverb kinds share one mix law.
         room = Reverb(rt60: 2.0, predelayMs: 12, mix: 1.0, width: 1.0, sr: sr)
     }
 
-    /// Adopt new settings (render thread, chunk boundary). Cheap when
-    /// nothing changed; a reverb-kind switch resets the incoming tank so
-    /// a stale tail from its last selection doesn't replay.
-    public mutating func retarget(_ s: FXSettings) {
+    /// Adopt new settings and the EQ design realised from them (render
+    /// thread, chunk boundary). Cheap when nothing changed; a reverb-kind
+    /// switch resets the incoming tank so a stale tail from its last
+    /// selection doesn't replay.
+    public mutating func retarget(_ s: FXSettings, design: EQDesign) {
+        if design != targetDesign {
+            targetDesign = design
+            if incoming < 0 {
+                startCascade(design)
+            } else if warmLeft > 0 {
+                // not audible yet: reload in place and warm up again
+                eq[incoming].load(design, sr: sr)
+                warmLeft = warmLen
+                pendingDesign = nil
+            } else {
+                pendingDesign = design
+            }
+        }
         guard s != target else { return }
         if s.revKind != activeKind {
             activeKind = s.revKind
@@ -160,42 +225,30 @@ public struct FXChainUnit: Sendable {
         target = s
     }
 
+    private mutating func startCascade(_ d: EQDesign) {
+        let j = 1 - cur
+        eq[j].load(d, sr: sr)
+        incoming = j
+        warmLeft = warmLen
+        fadePos = 0
+    }
+
     /// Anything to process this chunk (including fade-out tails of a
     /// just-disabled half)?
     public var isEngaged: Bool { eqEngaged || revEngaged }
+    private var eqEngaged: Bool { incoming >= 0 || !eq[cur].isIdentity }
 
     /// Advance the chunk-rate smoothers and retune whatever moved.
     /// `frames` is this chunk's length at `sr`.
     public mutating func tick(frames: Int) {
         let a = 1.0 - exp(-Double(frames) / (0.05 * sr))
-        // EQ: glide every band toward its effective target (0 dB when off)
-        var flat = true
-        var moved = false
-        for i in curGains.indices {
-            let tg = target.eqOn ? target.eqGains[i] : 0.0
-            if tg != 0 { flat = false }
-            curGains[i] += a * (tg - curGains[i])
-            if abs(curGains[i]) > 0.02 { flat = false }
-            if abs(curGains[i] - appliedGains[i]) > 0.05 { moved = true }
-        }
-        if flat {
-            if eqEngaged {
-                eqEngaged = false
-                for i in eqA.indices { eqA[i].reset(); eqB[i].reset() }
-                for i in curGains.indices { curGains[i] = 0; appliedGains[i] = 0 }
-            }
-        } else {
-            eqEngaged = true
-            if moved {
-                for i in curGains.indices where
-                    abs(curGains[i] - appliedGains[i]) > 0.05 {
-                    appliedGains[i] = curGains[i]
-                    let sec = Biquad.peaking(
-                        f0: min(FXChainUnit.eqBands[i], 0.4 * sr),
-                        gainDB: curGains[i], q: FXChainUnit.eqQ, sr: sr)
-                    eqA[i].copyCoefficients(from: sec)
-                    eqB[i].copyCoefficients(from: sec)
-                }
+        // EQ: a finished crossfade hands over; a waiting design starts
+        if incoming >= 0, fadePos >= fadeLen {
+            cur = incoming
+            incoming = -1
+            if let d = pendingDesign {
+                pendingDesign = nil
+                if d != eq[cur].design { startCascade(d) }
             }
         }
         // Reverb: glide the wet level; retune the active tank when moved
@@ -224,15 +277,31 @@ public struct FXChainUnit: Sendable {
 
     // MARK: - processing (render thread; call `tick` once per chunk first)
 
+    /// The crossfade weight of the incoming cascade for the next sample.
+    @inline(__always)
+    private mutating func fadeWeight() -> Double {
+        if warmLeft > 0 { warmLeft -= 1; return 0 }
+        if fadePos < fadeLen { fadePos += 1 }
+        return Double(fadePos) / Double(fadeLen)
+    }
+
     /// Mono in place — the drive point, and the mono post-chain.
     public mutating func processMono(_ buf: UnsafeMutablePointer<Double>,
                                      _ n: Int) {
         guard isEngaged, n > 0 else { return }
         let dm = (curMix - mixPrev) / Double(n)
+        let eqOn = eqEngaged
         for i in 0..<n {
             var x = buf[i]
-            if eqEngaged {
-                for k in eqA.indices { x = eqA[k].process(x) }
+            if eqOn {
+                if incoming >= 0 {
+                    let y1 = eq[incoming].process(x)
+                    let y0 = eq[cur].process(x)
+                    let w = fadeWeight()
+                    x = y0 + w * (y1 - y0)
+                } else {
+                    x = eq[cur].process(x)
+                }
             }
             if revEngaged {
                 let wet: Double
@@ -256,12 +325,18 @@ public struct FXChainUnit: Sendable {
                                         _ n: Int) {
         guard isEngaged, n > 0 else { return }
         let dm = (curMix - mixPrev) / Double(n)
+        let eqOn = eqEngaged
         for i in 0..<n {
             var mm = m[i], ss = s[i]
-            if eqEngaged {
-                for k in eqA.indices {
-                    mm = eqA[k].process(mm)
-                    ss = eqB[k].process(ss)
+            if eqOn {
+                if incoming >= 0 {
+                    let (m1, s1) = eq[incoming].processPair(mm, ss)
+                    let (m0, s0) = eq[cur].processPair(mm, ss)
+                    let w = fadeWeight()
+                    mm = m0 + w * (m1 - m0)
+                    ss = s0 + w * (s1 - s0)
+                } else {
+                    (mm, ss) = eq[cur].processPair(mm, ss)
                 }
             }
             if revEngaged {
@@ -286,12 +361,18 @@ public struct FXChainUnit: Sendable {
                                    _ n: Int) {
         guard isEngaged, n > 0 else { return }
         let dm = (curMix - mixPrev) / Double(n)
+        let eqOn = eqEngaged
         for i in 0..<n {
             var ll = l[i], rr = r[i]
-            if eqEngaged {
-                for k in eqA.indices {
-                    ll = eqA[k].process(ll)
-                    rr = eqB[k].process(rr)
+            if eqOn {
+                if incoming >= 0 {
+                    let (l1, r1) = eq[incoming].processPair(ll, rr)
+                    let (l0, r0) = eq[cur].processPair(ll, rr)
+                    let w = fadeWeight()
+                    ll = l0 + w * (l1 - l0)
+                    rr = r0 + w * (r1 - r0)
+                } else {
+                    (ll, rr) = eq[cur].processPair(ll, rr)
                 }
             }
             if revEngaged {
@@ -311,7 +392,7 @@ public struct FXChainUnit: Sendable {
     }
 
     public mutating func reset() {
-        for i in eqA.indices { eqA[i].reset(); eqB[i].reset() }
+        for i in eq.indices { eq[i].reset() }
         bigverb.reset()
         room.reset()
     }

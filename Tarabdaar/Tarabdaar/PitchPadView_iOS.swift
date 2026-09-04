@@ -691,7 +691,6 @@ private struct FretPadSurfaceIOS: View {
     /// Source of the per-onset strike estimate (`strikeVelocity01` → the
     /// onset frame's velocity byte → `bow_attack_vel`). nil = flat constant.
     let motion: MotionManager?
-    @State private var touchInfos: [TouchInfo] = []
     /// Per-touch log2 offset captured at a snapped onset (0 if unsnapped).
     @State private var snapOffsets: [Int: Double] = [:]
     /// Drag assist; the timer drives the settle while fingers rest.
@@ -763,7 +762,6 @@ private struct FretPadSurfaceIOS: View {
                 }
 
                 TouchOverlayView(
-                    touches: $touchInfos,
                     onTouchBegan: { ev in began(ev, placements: placements,
                                                 size: size, band: band,
                                                 chordCells: chordCells) },

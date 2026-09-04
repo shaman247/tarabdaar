@@ -189,12 +189,11 @@ final class AppController: ObservableObject {
 
     /// RESTING VALUES for every `.live`/`.hybrid` parameter (`.rebuild` ones
     /// live in `StringParamStore`). Parameters tab; composites and bindings
-    /// modulate ON TOP of these. Persisted as JSON.
+    /// modulate ON TOP of these. Persisted as JSON. The store only persists:
+    /// each mutation applies what it changed (one key from a slider, every
+    /// key from a preset or reset-all).
     @Published var paramValues: [String: Double] = AppController.loadParamValues() {
-        didSet {
-            AppController.saveParamValues(paramValues)
-            applyRestingParams()
-        }
+        didSet { AppController.saveParamValues(paramValues) }
     }
 
     private static let paramValuesKey = "tarabdaar.controlDefaults.v1"
@@ -215,6 +214,61 @@ final class AppController: ObservableObject {
     private static func saveParamValues(_ d: [String: Double]) {
         if let data = try? JSONEncoder().encode(d) {
             UserDefaults.standard.set(data, forKey: paramValuesKey)
+        }
+    }
+
+    /// THE FX RACK'S EQ CURVES: each insert point's control points, keyed by
+    /// the point's key prefix (`fx_voice_`). Not registry parameters — the
+    /// curve is inferred from the points (`SarangiKit.EQCurve`), so they
+    /// live beside `paramValues` as one structured value per point: the FX
+    /// tab edits them, presets carry them (`TarabdaarPreset.fxCurves`),
+    /// and the point's `eq_on` / `eq_amount` knobs switch and scale them.
+    /// Persisted as JSON; `applyEQCurves` pushes them to the voice.
+    @Published var fxEQCurves: [String: [EQPoint]] = AppController.loadEQCurves() {
+        didSet { AppController.saveEQCurves(fxEQCurves) }
+    }
+
+    private static let eqCurvesKey = "tarabdaar.fxCurves.v1"
+
+    private static func loadEQCurves() -> [String: [EQPoint]] {
+        if let data = UserDefaults.standard.data(forKey: eqCurvesKey),
+           let saved = try? JSONDecoder().decode([String: [EQPoint]].self, from: data) {
+            return saved.mapValues(EQCurve.normalize).filter { !$0.value.isEmpty }
+        }
+        // First run after the graphic EQ: the saved profile's band values
+        // become a curve through the band centres (`loadParamValues` drops
+        // the retired keys themselves).
+        if let data = UserDefaults.standard.data(forKey: paramValuesKey),
+           let saved = try? JSONDecoder().decode([String: Double].self, from: data) {
+            return TarabdaarPreset.legacyEQCurves(in: saved)
+        }
+        return [:]
+    }
+
+    private static func saveEQCurves(_ d: [String: [EQPoint]]) {
+        if let data = try? JSONEncoder().encode(d) {
+            UserDefaults.standard.set(data, forKey: eqCurvesKey)
+        }
+    }
+
+    /// One insert point's EQ curve (empty = flat).
+    func eqCurve(_ keyPrefix: String) -> [EQPoint] {
+        fxEQCurves[keyPrefix] ?? []
+    }
+
+    /// Replace one insert point's EQ curve (the FX tab's edits); the points
+    /// are normalised (sorted, clamped, merged) on the way in and pushed.
+    func setEQCurve(_ keyPrefix: String, _ points: [EQPoint]) {
+        let pts = EQCurve.normalize(points)
+        if pts.isEmpty { fxEQCurves.removeValue(forKey: keyPrefix) }
+        else { fxEQCurves[keyPrefix] = pts }
+        applyEQCurves()
+    }
+
+    /// Push every point's curve to the voice (startup, edits, preset loads).
+    func applyEQCurves() {
+        for point in FXPoint.allCases {
+            audio.setStringEQCurve(point, fxEQCurves[point.keyPrefix] ?? [])
         }
     }
 
@@ -283,7 +337,8 @@ final class AppController: ObservableObject {
         case .rebuild:
             stringParams.set(key, value)
         case .live:
-            paramValues[key] = value           // didSet applies
+            paramValues[key] = value
+            applyParamToVoice(key, value)
         case .hybrid:
             // Above the built headroom the build scalar must move (rebuild);
             // at or below it the kernel's scaler covers it.
@@ -292,6 +347,7 @@ final class AppController: ObservableObject {
                 refreshHybridHeadroom()
             }
             paramValues[key] = value
+            applyParamToVoice(key, value)
         }
     }
 
@@ -303,6 +359,7 @@ final class AppController: ObservableObject {
             stringParams.reset(key)
         case .live:
             paramValues.removeValue(forKey: key)
+            applyParamToVoice(key, paramValue(key))
         case .hybrid:
             // Drop a RAISED headroom first — but only touch the physics store
             // if it actually moved, so a plain reset costs no rebuild.
@@ -311,6 +368,7 @@ final class AppController: ObservableObject {
                 refreshHybridHeadroom()
             }
             paramValues.removeValue(forKey: key)
+            applyParamToVoice(key, paramValue(key))
         }
     }
 
@@ -320,6 +378,9 @@ final class AppController: ObservableObject {
         stringParams.resetToDefault()
         refreshHybridHeadroom()
         paramValues.removeAll()
+        fxEQCurves.removeAll()
+        applyRestingParams()
+        applyEQCurves()
     }
 
     /// Push every `.live`/`.hybrid` resting value to the voice — the
@@ -565,6 +626,7 @@ final class AppController: ObservableObject {
         axes.setMapping(tiltMapping)
         refreshHybridHeadroom()      // build depths behind the hybrid knobs
         applyRestingParams()         // resting values for every live param
+        applyEQCurves()              // the FX rack's EQ curves
         // A physics edit can move a hybrid's headroom — keep the cache in step
         // (`@Published` fires before the property updates: use the sink value).
         stringParams.$values
@@ -668,27 +730,6 @@ final class AppController: ObservableObject {
             .sink { [weak self] _ in self?.link.kick() }
             .store(in: &cancellables)
         link.start()
-        // TLPDBG_SELFTEST: env-gated headless self-test of the fret pad path.
-        if ProcessInfo.processInfo.environment["TLPDBG_SELFTEST"] != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                guard let self else { return }
-                NSLog("TLPDBG selftest: noteOn")
-                self.fretPad.noteOn(touchId: 999, ratio: 1.25)
-                for step in 1...20 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Double(step) * 0.1) {
-                        self.fretPad.glide(touchId: 999,
-                                           ratio: 1.25 + 0.01 * Double(step))
-                        let r = self.audio.performanceReadout()
-                        NSLog("TLPDBG selftest step=%d active=%d pitchHz=%.2f",
-                              step, r.active ? 1 : 0, r.pitchHz)
-                    }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
-                    NSLog("TLPDBG selftest: noteOff")
-                    self.fretPad.noteOff(touchId: 999)
-                }
-            }
-        }
         // Joy-Con. Control axes: arm 0–2 (the iPad's tilts), stick 3/4, wrist
         // + acceleration (`wristAxisIndices` / `jcAccelAxisIndex`).
         joyCon.onArmAxes = { [weak self] t1, t2, t3 in
@@ -1193,6 +1234,7 @@ final class AppController: ObservableObject {
         p.instrument = sarangi.state
         p.stringOverrides = stringParams.overridesSnapshot
         p.paramValues = paramValues
+        p.fxCurves = fxEQCurves.isEmpty ? nil : fxEQCurves
         p.composites = composites
         p.tiltMapping = tiltMapping
         p.mainInstrument = mainInstrument.rawValue
@@ -1210,11 +1252,20 @@ final class AppController: ObservableObject {
             refreshHybridHeadroom()
         }
         if let pv = p.paramValues {
-            // Keep only keys this build still knows; `didSet` re-applies.
+            // Keep only keys this build still knows.
             paramValues = pv.filter {
                 guard let spec = ParamRegistry.spec($0.key) else { return false }
                 return spec.apply != .rebuild
             }
+            applyRestingParams()
+        }
+        if let c = p.fxCurves {
+            fxEQCurves = c.mapValues(EQCurve.normalize).filter { !$0.value.isEmpty }
+            applyEQCurves()
+        } else if let pv = p.paramValues {
+            // a file from the graphic-EQ era: its bands become the curve
+            let legacy = TarabdaarPreset.legacyEQCurves(in: pv)
+            if !legacy.isEmpty { fxEQCurves = legacy; applyEQCurves() }
         }
         if let c = p.composites { composites = c }
         if let t = p.tiltMapping { tiltMapping = t }

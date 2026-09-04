@@ -50,8 +50,8 @@ public final class GlideSequencer {
 
     /// Repeat-tap window (semis).
     static let repeatEps = 0.25   // 25 cents
-    /// Glide tick rate — matches the link's 120 Hz pacing.
-    static let tickHz = 120.0
+    /// Glide tick rate — the wire rate.
+    static let tickHz = Config.linkTickHz
     /// Overshoot cap (semis).
     static let overshootCapSemis = 0.5
     /// The settle from the overshot peak runs at this fraction of the

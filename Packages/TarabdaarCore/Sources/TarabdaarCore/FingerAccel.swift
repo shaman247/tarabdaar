@@ -116,7 +116,7 @@ public final class FingerAccelSampler {
         self.state = state
         let t = DispatchSource.makeTimerSource(
             queue: .global(qos: .userInitiated))
-        t.schedule(deadline: .now(), repeating: 1.0 / 120.0,
+        t.schedule(deadline: .now(), repeating: 1.0 / Config.linkTickHz,
                    leeway: .milliseconds(2))
         t.setEventHandler { [weak self] in self?.tick() }
         t.resume()

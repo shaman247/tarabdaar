@@ -89,6 +89,10 @@ touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (o
   budget — a LATE callback glitches at the device even when the render
   itself is clean); `AppController`'s 5 s watchdog logs "jt OVERLOAD" /
   "render OVERRUN" when they grow. Check these first for clicking.
+- **Body (⌘0) tab** draws the formula body's frequency response as
+  built into the running engine (`BowEngine.bodyResponse`, from the
+  engine's own tables — radiation, at‑the‑ear, admittance, modes);
+  display‑only, computed on rebuild ([UI Layout](ui-layout.md)).
 - **Scope (⌘8) and Taraf (⌘9) tabs** draw display‑only kernel meters:
   `bow_poly_scope_arm` turns on, per jt row, a peak envelope of its radiated
   (post‑cap) sample and per‑mode peak envelopes of the first 16 modes' |p_k|

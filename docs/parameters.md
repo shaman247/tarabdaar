@@ -108,12 +108,13 @@ its range widens the slider rather than being clamped.
 | `bow_body_y` | mobility depth | 0 … 2 | 1.01785 (authored 0.35) | global | in-place | How much the bridge moves at the modes — note-to-note unevenness, wolf tendency, attack bloom. |
 | `bow_body_rad` | modal radiation | 0 … 3 | 2.87716 (authored 1) | global | in-place | How loudly the modes radiate (vs the direct term). |
 | `bow_body_c0` | direct radiation | 0 … 1 | 0.464459 (authored 0.3) | global | in-place | Non-modal (flat) radiation floor. 1 with modes 0 = the raw bridge force. |
-| `bow_body_tail_n` | formant modes | 0 … 48 | 32 | global | rebuild | Diffuse mid/high mode forest between the tail corners — the FIXED body formants the harmonics sweep through during a glide, the cue that separates a real slide from a pitch-shifted tone. √n-normalized: more modes = denser, individually shallower structure at held total power. 0 = flat feedthrough only. |
+| `bow_body_tail_n` | formant modes | 0 … 256 | 150 | global | rebuild | Diffuse mid/high mode forest between the tail corners — the FIXED body formants the harmonics sweep through during a glide, the cue that separates a real slide from a pitch-shifted tone. √n-normalized: more modes = denser structure at held total power (150 ≈ 10 peaks per octave, a violin-class body; 32 was a gentle scallop). 0 = flat feedthrough only. The Body tab draws the result. |
+| `bow_body_tail_seed` | formant seed | 1 … 64 | 1 | global | rebuild | Which instrument: the forest's radiation residues are drawn from a seeded Gaussian stream, so each seed is a different fixed pattern of peaks and nulls at the same statistics. Audition by ear, watch it on the Body tab. |
 | `bow_body_tail_f0` | formants from (Hz) | 150 … 1500 | 280 | global | rebuild | Low edge of the diffuse formant forest. |
 | `bow_body_tail_f1` | formants to (Hz) | 2000 … 12000 | 6500 | global | rebuild | High edge of the diffuse formant forest. |
-| `bow_body_tail_q` | formant Q | 5 … 60 | 30 | global | rebuild | Formant sharpness: higher = deeper peaks/valleys and slower per-mode bloom (Q 30 at 300 Hz rings ~70 ms — body bloom, physical). |
+| `bow_body_tail_q` | formant Q | 5 … 80 | 40 | global | rebuild | Formant sharpness: higher = deeper peaks/valleys and slower per-mode bloom (Q 30 at 300 Hz rings ~70 ms — body bloom, physical). |
 | `bow_body_tail_y` | formant mobility | 0 … 1.5 | 0.4 | global | rebuild | Bridge-load side of the formant modes. The default 0.4 leaves the admittance maximum (and the loop cap) unchanged; raising it far invites wolves. |
-| `bow_body_tail_rad` | formant radiation | 0 … 8 | 2.5 | global | rebuild | How loudly the formant forest radiates against the flat floor. The default 2.5 gives ≈ ±4 dB ripple std across 250–6500 Hz (extremes ~26 dB) — real-body territory; near 0 the transfer is inaudibly flat. |
+| `bow_body_tail_rad` | formant radiation | 0 … 8 | 3.5 | global | rebuild | How loudly the formant forest radiates against the flat floor (`bow_body_c0`). The forest is a Gaussian-residue sum, so its ripple has Rayleigh depth — nulls 25–35 dB deep — and this knob sets how far the floor fills them; near 0 the transfer is inaudibly flat. |
 | `bow_yinf` | bridge give | 0 … 0.4 | 0.021048 (authored 0.05) | global | in-place | Broadband bridge admittance floor under the modes. |
 | `bow_kret` | body return | 0 … 0.5 | 0.35 | global | in-place | Bridge motion fed back into the string (loop-cap protected). More = livelier, wolfier. |
 
@@ -302,26 +303,19 @@ every key is the point's prefix plus a knob from the table below.
 | **Taraf** | `fx_taraf_` | the sympathetic web's own radiated output (drones included), before the shared radiation chain |
 | **Global** | `fx_global_` | the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level) |
 
-#### The insert (16 knobs × 4 points)
+#### The insert (7 knobs × 4 points)
 
-Keys below are written `<prefix>knob` — e.g. `fx_voice_eq_b3` is
-the 125 Hz band of the Voice insert. Every knob has the same
+Keys below are written `<prefix>knob` — e.g. `fx_voice_rev_mix` is
+the reverb mix of the Voice insert. The EQ curve's points are not
+knobs: the FX tab edits them and presets carry them as a section
+of their own (`fxCurves`). Every knob has the same
 range, default, scope and timing at every point — only the
 "what it processes" clause of the two toggles differs.
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `<prefix>eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the 10-band graphic EQ at this point — what this insert point processes (the table above). Toggling glides the bands to/from flat (click-free). |
-| `<prefix>eq_b1` | EQ 31.5 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 31.5 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `<prefix>eq_b2` | EQ 63 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 63 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `<prefix>eq_b3` | EQ 125 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 125 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `<prefix>eq_b4` | EQ 250 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 250 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `<prefix>eq_b5` | EQ 500 Hz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 500 Hz, ±12 dB. Inert while the point's EQ is off. |
-| `<prefix>eq_b6` | EQ 1 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 1 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `<prefix>eq_b7` | EQ 2 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 2 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `<prefix>eq_b8` | EQ 4 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 4 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `<prefix>eq_b9` | EQ 8 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 8 kHz, ±12 dB. Inert while the point's EQ is off. |
-| `<prefix>eq_b10` | EQ 16 kHz (dB) | -12 … 12 | 0 | global | live | Octave peaking band at 16 kHz, ±12 dB. Inert while the point's EQ is off. |
+| `<prefix>eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the EQ curve at this point — what this insert point processes (the table above). The curve is inferred from the points set on the FX tab (a fitted cascade through them, flat beyond the outermost points); toggling crossfades to/from flat (click-free). |
+| `<prefix>eq_amount` | EQ amount | 0 … 1 | 1 | global | live | Depth of the EQ curve, 0…1: every dB of the curve scaled (1 = as drawn, 0 = flat). Inert while the point's EQ is off. |
 | `<prefix>rev_on` | reverb on | 0 … 1 | 0 | global | live | Enable the reverb at this point — what this insert point processes (the table above). Toggling glides the wet level (click-free). |
 | `<prefix>rev_type` | reverb type | 0 … 1 | 0 | global | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
 | `<prefix>rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |

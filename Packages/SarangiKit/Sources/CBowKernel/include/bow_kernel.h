@@ -202,6 +202,16 @@ void bow_poly_scope_arm(void *vst, int on);
 int bow_poly_scope_jt(void *vst, int nrows, double *f0, double *level, unsigned char *asleep, float *modes, int K);
 int bow_poly_scope_slots(void *vst, double *level, int n);
 
+/* REGIME TELEMETRY per played string (any thread, racy): out = {nut-side
+   contact slip onsets, periods elapsed (Σ f0/sr), samples in slip, bowed
+   samples, fundamental fraction}. The counters are cumulative since the
+   mount — diff two reads for a window. The fraction is the running
+   (~4-period) share of the bridge-side wave's power inside a Q=3 band at
+   f0: Helmholtz motion holds it high, an overtone regime (the string
+   captured on H3/H4 below the Schelleng floor) collapses it. Returns 0
+   for a bad slot. */
+int bow_poly_regime_slot(void *vst, int b, double out[5]);
+
 /* Gate probe: out = {asleep rows, total rows, max ring/floor ratio, max
    drive/eps ratio, drone-hot 0/1} since the last read (ratios reset on
    read; >1 names what blocks sleep). Any thread. */

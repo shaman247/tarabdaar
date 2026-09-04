@@ -33,19 +33,11 @@ extension FretSegment: Codable {
     }
 }
 
-/// On-disk representation of a Fret-Pad arrangement. Versioned so a future
-/// format change can be migrated on load rather than failing to decode.
-/// v2 replaced the integer `ghostOctavesPerSide` with the fractional
-/// `ghostExtentOctaves` (a v1 file just gets the 0.5 default); v3 added
-/// `legato` (a retired key — no longer
-/// declared and simply decodes away, so no version bump); v4 added the free
-/// per-segment `x` — pre-v4 files carry pitch-derived positions that no
-/// longer exist, so they're **rejected** on load (the caller rebuilds the
-/// new default).
-/// (`droneRatios` — the drone-button pitches — is optional: older files
-/// fall back to the default, no version bump; both historical 4-slot
-/// defaults migrate to the current 3-slot ,Sa·,Pa·Sa default on read, and
-/// a hand-picked 4-slot set drops its second (,Ma-era) slot.)
+/// On-disk representation of a Fret-Pad arrangement. Versioned: files
+/// below v4 carry pitch-derived positions instead of the free per-segment
+/// `x`, so they are **rejected** on load (the caller rebuilds the default).
+/// `ghostExtentOctaves` and `droneRatios` are optional and default when
+/// absent; a 4-slot `droneRatios` is migrated to the 3-slot layout on read.
 struct FretArrangementDocument: Codable {
     var version: Int = 4
     var segments: [FretSegment]
@@ -58,8 +50,7 @@ struct FretArrangementDocument: Codable {
 /// Saves and loads Fret-Pad arrangements as JSON. Mac-only persistence with
 /// no iPad coupling. Writes are atomic (`*.json.tmp` → move) so a reader never
 /// observes a partial file. The live arrangement is auto-saved to a reserved
-/// `_Current.json` — the same store pattern the deleted String Pad used —
-/// and the player's **named layouts** sit beside it in the same folder, one
+/// `_Current.json`, and the player's **named layouts** sit beside it in the same folder, one
 /// `<name>.json` each, listed by `savedNames()` (`_Current` filtered out).
 /// The built-in layouts are `FretLayoutPreset`, not files.
 public enum FretArrangementStore {
@@ -140,11 +131,8 @@ public enum FretArrangementStore {
     /// legacy-HFS `:`) are replaced, surrounding whitespace dropped, and the
     /// reserved autosave name refused — same rule as `PresetLibrary`.
     public static func sanitized(_ name: String) throws -> String {
-        let cleaned = name
-            .replacingOccurrences(of: "/", with: "-")
-            .replacingOccurrences(of: ":", with: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty, cleaned != currentName else {
+        let cleaned = try PresetLibrary.sanitized(name)
+        guard cleaned != currentName else {
             throw NSError(domain: "FretArrangementStore", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "Layout name is empty or reserved",
             ])

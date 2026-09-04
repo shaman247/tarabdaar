@@ -4,8 +4,8 @@ import TarabdaarCore
 /// Lets the computer keyboard play notes in TarabdaarMac. Letter keys map
 /// to ascending degrees of the active Pitch Pad scale (any size, any JI
 /// tuning) and play through the shared `pitchPad` engine — the same
-/// in-process MPE path the on-screen pad uses, so keyboard notes sound
-/// identical to clicked ones and share the scale, tonic, and velocity.
+/// touch path the on-screen pad uses, so keyboard notes sound identical
+/// to clicked ones and share the scale, tonic, and velocity.
 ///
 /// App-wide while `enabled`: one local `NSEvent` monitor catches key
 /// down/up on any tab. It steps aside automatically while a text field is
@@ -43,7 +43,7 @@ final class KeyboardNotePlayer: ObservableObject {
 
     private static let enabledKey = "tarabdaar.keyboardPlay.enabled"
 
-    /// The MPE emitter we play through (the Pitch Pad engine). It owns the
+    /// The engine we play through (the Pitch Pad engine). It owns the
     /// scale, tonic, and velocity the keyboard inherits.
     private let engine: PitchPadEngine
     private var monitor: Any?

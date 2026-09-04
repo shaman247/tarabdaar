@@ -35,6 +35,11 @@ public struct TarabdaarPreset: Codable {
     /// `AppController.paramValues` holds).
     public var paramValues: [String: Double]?
 
+    /// The FX rack's EQ curves — each insert point's control points, keyed
+    /// by the point's key prefix (`fx_voice_`). The curve is inferred from
+    /// the points (`SarangiKit.EQCurve`); a point with no entry is flat.
+    public var fxCurves: [String: [EQPoint]]?
+
     /// Composite parameters (the 0–1 macros).
     public var composites: [CompositeParam]?
 
@@ -58,6 +63,7 @@ public struct TarabdaarPreset: Codable {
         if let o = stringOverrides, !o.isEmpty { s.append("\(o.count) physics") }
         if let p = paramValues, !p.isEmpty { s.append("\(p.count) parameters") }
         if let c = composites, !c.isEmpty { s.append("\(c.count) composites") }
+        if let f = fxCurves, !f.isEmpty { s.append("\(f.count) EQ curves") }
         if let t = tiltMapping {
             let n = t.mappings.values.filter { !$0.bindings.isEmpty }.count
             if n > 0 { s.append("\(n) tilt bindings") }
@@ -99,7 +105,32 @@ public struct TarabdaarPreset: Codable {
 
     private var hasAnySection: Bool {
         instrument != nil || stringOverrides != nil || paramValues != nil
-            || composites != nil || tiltMapping != nil
+            || fxCurves != nil || composites != nil || tiltMapping != nil
             || mainInstrument != nil || droneVoice != nil
+    }
+
+    // MARK: - The graphic-EQ bands of older files
+
+    /// The octave centres of the 10-band graphic EQ that preceded the
+    /// curve (`fx_<point>_eq_b1`…`_b10`).
+    public static let legacyEQBandHz: [Double] =
+        [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16_000]
+
+    /// Curves equivalent to the graphic-EQ band values in `values`: a
+    /// point at every band centre for each insert point whose bands are
+    /// not all flat. Empty when the values carry no bands — a file from
+    /// this build, or an older one that never touched the EQ.
+    public static func legacyEQCurves(in values: [String: Double])
+        -> [String: [EQPoint]] {
+        var out: [String: [EQPoint]] = [:]
+        for point in FXPoint.allCases {
+            let gains = legacyEQBandHz.indices.map {
+                values[point.keyPrefix + "eq_b\($0 + 1)"] ?? 0
+            }
+            guard gains.contains(where: { $0 != 0 }) else { continue }
+            out[point.keyPrefix] = zip(legacyEQBandHz, gains)
+                .map { EQPoint(hz: $0, db: $1) }
+        }
+        return out
     }
 }

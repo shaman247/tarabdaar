@@ -198,12 +198,6 @@ extension AudioEngine {
     /// True once a tanpura engine is mounted and renderable.
     public var isTanpuraArmed: Bool { tanpuraVoice.source?.isArmed ?? false }
 
-    /// Tanpura async-pool telemetry (underruns / resets / ringing strings); nil unarmed.
-    public func tanpuraStats() -> (underruns: Int, resets: Int, active: Int)? {
-        guard let e = tanpuraVoice.source?.currentEngine() else { return nil }
-        return (e.underruns, e.resetCount, e.activeStrings)
-    }
-
     /// (Re)build the tanpura's JI slot grid. The tonic + scale are RETAINED
     /// here for both plucked voices (the sitar rebuilds off the same push).
     public func rebuildTanpura(tonic: Double, scaleRatios: [Double]) {

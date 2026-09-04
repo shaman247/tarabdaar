@@ -1,13 +1,16 @@
 import SwiftUI
+import SarangiKit
 import TarabdaarCore
 
-/// FX tab (⌘6): the four-insert FX rack. Each point carries a
-/// 10-band graphic EQ and a selectable reverb (Bigverb / Room), everything
-/// off by default. All controls are ordinary registry parameters
-/// (`fx_<point>_*`, all `.live`) driven through the unified
-/// `paramValue`/`setParamValue` path — so presets capture them, the
-/// Parameters tab lists them, and tilt/composites can bind them; this tab
-/// is just the curated surface.
+/// FX tab (⌘6): the four-insert FX rack. Each point carries an EQ curve
+/// (points the player sets, a curve inferred from them) and a selectable
+/// reverb (Bigverb / Room), everything off by default. The knobs are
+/// ordinary registry parameters (`fx_<point>_*`, all `.live`) driven
+/// through the unified `paramValue`/`setParamValue` path — so presets
+/// capture them, the Parameters tab lists them, and tilt/composites can
+/// bind them; the curve's points go through `AppController.setEQCurve`
+/// (presets carry them as their own section). This tab is the curated
+/// surface.
 struct FXView: View {
     @ObservedObject var controller: AppController
 
@@ -31,7 +34,7 @@ struct FXView: View {
     }
 }
 
-/// One insert point: an EQ strip and a reverb block, side by side.
+/// One insert point: the EQ curve editor and a reverb block, side by side.
 private struct FXPointPanel: View {
     @ObservedObject var controller: AppController
     let point: FXInsertPoint
@@ -57,11 +60,14 @@ private struct FXPointPanel: View {
             || controller.paramValue(prefix + "rev_on") >= 0.5
     }
 
-    /// One fader per EQ band of the insert definition.
-    private static let bands: [(knob: String, label: String)] =
-        zip(ParamRegistry.fxTemplate.filter { $0.knob.hasPrefix("eq_b") },
-            ["31", "63", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"])
-            .map { (knob: $0.knob, label: $1) }
+    /// The rate this point's insert runs at — what the drawn curve is
+    /// designed for. The three bus points run at the kernel rate (2× the
+    /// engine rate: `bow_os` is pinned to 2), the global point at the
+    /// engine rate (`BowEngine.fxRate`).
+    private var insertRate: Double {
+        let base = controller.audio.stringVoiceSampleRate
+        return FXPoint(rawValue: point.index) == .global ? base : 2 * base
+    }
 
     var body: some View {
         GroupBox {
@@ -76,7 +82,7 @@ private struct FXPointPanel: View {
                     Button("Reset") { resetPoint() }
                         .buttonStyle(.borderless)
                         .font(.caption)
-                        .help("Reset this insert point to defaults (all off)")
+                        .help("Reset this insert point to defaults (all off, no curve)")
                 }
                 HStack(alignment: .top, spacing: 24) {
                     eqBlock
@@ -90,16 +96,34 @@ private struct FXPointPanel: View {
     }
 
     private var eqBlock: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Toggle("Graphic EQ", isOn: flag("eq_on"))
-                .toggleStyle(.switch)
-                .controlSize(.small)
-            HStack(alignment: .bottom, spacing: 6) {
-                ForEach(Self.bands, id: \.knob) { b in
-                    EQFader(label: b.label, value: bind(b.knob))
-                }
+        let on = controller.paramValue(prefix + "eq_on") >= 0.5
+        let points = controller.eqCurve(prefix)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Toggle("EQ curve", isOn: flag("eq_on"))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                Text("amount").font(.caption)
+                Slider(value: bind("eq_amount"), in: 0...1)
+                    .controlSize(.small)
+                    .frame(width: 90)
+                    .help("Depth of the curve, 0…1 — double-click the label to reset")
+                    .disabled(!on)
+                Text(String(format: "%.2f", controller.paramValue(prefix + "eq_amount")))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 32, alignment: .trailing)
             }
-            .opacity(controller.paramValue(prefix + "eq_on") >= 0.5 ? 1 : 0.45)
+            EQCurveEditor(points: points, amount: controller.paramValue(prefix + "eq_amount"),
+                          sampleRate: insertRate, enabled: on) { pts in
+                controller.setEQCurve(prefix, pts)
+            }
+            .opacity(on ? 1 : 0.45)
+            Text(points.isEmpty
+                 ? "Double-click to add a point — the curve is inferred from the points."
+                 : "\(points.count) of \(EQCurve.maxPoints) points · drag to move, double-click a point to remove it")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -147,50 +171,170 @@ private struct FXPointPanel: View {
         for spec in ParamRegistry.all where spec.key.hasPrefix(prefix) {
             controller.resetParam(spec.key)
         }
+        controller.setEQCurve(prefix, [])
     }
 }
 
-/// A compact vertical fader for one EQ band: ±12 dB around a centre
-/// detent. Drag to set, double-click to reset to 0 dB.
-private struct EQFader: View {
-    let label: String
-    @Binding var value: Double   // -12…+12 dB
+/// The EQ curve editor: log-frequency 20 Hz…20 kHz across, ±14 dB up, the
+/// REALISED response of the fitted cascade (`EQCurve.design` — what the
+/// insert actually does at its rate, scaled by the amount knob) drawn
+/// through the points. Drag a point to move it in both axes (it cannot
+/// cross its neighbours), double-click empty space to add one, double-click
+/// a point to remove it.
+private struct EQCurveEditor: View {
+    let points: [EQPoint]
+    let amount: Double
+    let sampleRate: Double
+    let enabled: Bool
+    let onChange: ([EQPoint]) -> Void
 
-    private let range = 24.0
-    private let height = 92.0
+    @State private var dragIndex: Int? = nil
+    @State private var dragMissed = false
+
+    private static let dbSpan = 14.0
+    private static let lo = log2(EQCurve.minHz)
+    private static let hi = log2(EQCurve.maxHz)
+    private static let hitRadius = 9.0
+
+    private func x(_ hz: Double, _ w: CGFloat) -> CGFloat {
+        CGFloat((log2(hz) - Self.lo) / (Self.hi - Self.lo)) * w
+    }
+    private func hz(_ x: CGFloat, _ w: CGFloat) -> Double {
+        pow(2, Self.lo + Double(min(max(x, 0), w) / w) * (Self.hi - Self.lo))
+    }
+    private func y(_ db: Double, _ h: CGFloat) -> CGFloat {
+        CGFloat(0.5 - db / (2 * Self.dbSpan)) * h
+    }
+    private func db(_ y: CGFloat, _ h: CGFloat) -> Double {
+        (0.5 - Double(min(max(y, 0), h) / h)) * 2 * Self.dbSpan
+    }
 
     var body: some View {
-        VStack(spacing: 3) {
-            Text(value == 0 ? " " : String(format: "%+.0f", value))
-                .font(.system(size: 8).monospacedDigit())
-                .foregroundStyle(.secondary)
-            GeometryReader { geo in
-                let h = geo.size.height
-                let y = (0.5 - value / range) * h
-                ZStack {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.secondary.opacity(0.18))
-                        .frame(width: 4)
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.5))
-                        .frame(height: 1)
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(value == 0 ? Color.secondary : Color.accentColor)
-                        .frame(width: 14, height: 7)
-                        .position(x: geo.size.width / 2,
-                                  y: min(max(y, 4), h - 4))
+        GeometryReader { geo in
+            let w = geo.size.width, h = geo.size.height
+            let design = EQCurve.design(points, sr: sampleRate).scaled(by: amount)
+            ZStack(alignment: .topLeading) {
+                Canvas { ctx, size in
+                    draw(ctx, size, design)
                 }
-                .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0).onChanged { g in
-                    let v = (0.5 - g.location.y / h) * range
-                    value = min(max((v * 2).rounded() / 2, -range / 2),
-                                range / 2)
-                })
+                if let i = dragIndex, i < points.count {
+                    Text(readout(points[i]))
+                        .font(.system(size: 9).monospacedDigit())
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 3))
+                        .padding(3)
+                }
             }
-            .frame(width: 22, height: height)
-            .onTapGesture(count: 2) { value = 0 }
-            Text(label).font(.system(size: 8)).foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        guard enabled else { return }
+                        if dragIndex == nil, !dragMissed {
+                            if let i = nearest(g.startLocation, w, h) { dragIndex = i }
+                            else { dragMissed = true }
+                        }
+                        guard let i = dragIndex else { return }
+                        move(i, to: g.location, w, h)
+                    }
+                    .onEnded { _ in dragIndex = nil; dragMissed = false })
+            .onTapGesture(count: 2, coordinateSpace: .local) { loc in
+                guard enabled else { return }
+                if let i = nearest(loc, w, h) {
+                    var pts = points; pts.remove(at: i); onChange(pts)
+                } else if points.count < EQCurve.maxPoints {
+                    let p = EQPoint(hz: tidy(hz(loc.x, w)), db: snap(db(loc.y, h)))
+                    onChange(points + [p])
+                }
+            }
         }
-        .help("\(label) Hz band, ±12 dB — double-click to reset")
+        .frame(width: 360, height: 118)
+        .help("EQ curve: drag a point, double-click to add one, double-click a point to remove it")
+    }
+
+    private func draw(_ ctx: GraphicsContext, _ size: CGSize, _ design: EQDesign) {
+        let w = size.width, h = size.height
+        ctx.fill(Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 4),
+                 with: .color(Color.secondary.opacity(0.08)))
+        // grid: decades labelled, octaves faint; ±6 dB rules; the 0 dB line
+        var grid = Path()
+        var f = 20.0
+        while f < EQCurve.maxHz {
+            let gx = x(f, w)
+            grid.move(to: CGPoint(x: gx, y: 0)); grid.addLine(to: CGPoint(x: gx, y: h))
+            f *= 2
+        }
+        for d in [-6.0, 6.0] {
+            grid.move(to: CGPoint(x: 0, y: y(d, h))); grid.addLine(to: CGPoint(x: w, y: y(d, h)))
+        }
+        ctx.stroke(grid, with: .color(Color.secondary.opacity(0.12)), lineWidth: 1)
+        var zero = Path()
+        zero.move(to: CGPoint(x: 0, y: y(0, h))); zero.addLine(to: CGPoint(x: w, y: y(0, h)))
+        ctx.stroke(zero, with: .color(Color.secondary.opacity(0.45)), lineWidth: 1)
+        for (f, label) in [(100.0, "100"), (1000.0, "1k"), (10_000.0, "10k")] {
+            ctx.draw(Text(label).font(.system(size: 8)).foregroundColor(.secondary),
+                     at: CGPoint(x: x(f, w) + 2, y: h - 6), anchor: .leading)
+        }
+        // the realised response
+        var curve = Path()
+        let n = 128
+        for k in 0...n {
+            let px = w * CGFloat(k) / CGFloat(n)
+            let py = y(design.magnitudeDB(at: hz(px, w), sr: sampleRate), h)
+            let pt = CGPoint(x: px, y: min(max(py, 1), h - 1))
+            if k == 0 { curve.move(to: pt) } else { curve.addLine(to: pt) }
+        }
+        ctx.stroke(curve, with: .color(points.isEmpty ? .secondary : .accentColor),
+                   style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
+        // the points
+        for (i, p) in points.enumerated() {
+            let c = CGPoint(x: x(p.hz, w), y: y(p.db * amount, h))
+            let r = i == dragIndex ? 5.5 : 4.0
+            let dot = Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
+            ctx.fill(dot, with: .color(.accentColor))
+            ctx.stroke(dot, with: .color(Color(nsColor: .windowBackgroundColor)), lineWidth: 1)
+        }
+    }
+
+    private func nearest(_ loc: CGPoint, _ w: CGFloat, _ h: CGFloat) -> Int? {
+        var best: (Int, CGFloat)? = nil
+        for (i, p) in points.enumerated() {
+            let dx = x(p.hz, w) - loc.x, dy = y(p.db * amount, h) - loc.y
+            let d = (dx * dx + dy * dy).squareRoot()
+            if d <= Self.hitRadius, best.map({ d < $0.1 }) ?? true { best = (i, d) }
+        }
+        return best?.0
+    }
+
+    /// Move point `i` to a canvas location, snapped, kept between its
+    /// neighbours so the point identities never swap under the drag.
+    private func move(_ i: Int, to loc: CGPoint, _ w: CGFloat, _ h: CGFloat) {
+        guard i < points.count else { return }
+        var pts = points
+        let gap = pow(2, EQCurve.minSpacingOctaves)
+        var f = hz(loc.x, w)
+        if i > 0 { f = max(f, pts[i - 1].hz * gap) }
+        if i + 1 < pts.count { f = min(f, pts[i + 1].hz / gap) }
+        let g = amount > 0.01 ? db(loc.y, h) / amount : db(loc.y, h)
+        pts[i] = EQPoint(hz: tidy(f), db: snap(g))
+        if pts[i] != points[i] { onChange(pts) }
+    }
+
+    /// Gain snapped to 0.25 dB within the curve's range.
+    private func snap(_ db: Double) -> Double {
+        min(max((db * 4).rounded() / 4, -EQCurve.gainLimitDB), EQCurve.gainLimitDB)
+    }
+
+    /// Frequency to three significant figures (a tidy readout, no audible
+    /// quantisation).
+    private func tidy(_ hz: Double) -> Double {
+        let mag = pow(10, floor(log10(hz)) - 2)
+        return min(max((hz / mag).rounded() * mag, EQCurve.minHz), EQCurve.maxHz)
+    }
+
+    private func readout(_ p: EQPoint) -> String {
+        let f = p.hz < 1000 ? String(format: "%.0f Hz", p.hz)
+                            : String(format: "%.2f kHz", p.hz / 1000)
+        return String(format: "%@  %+.2f dB", f, p.db)
     }
 }

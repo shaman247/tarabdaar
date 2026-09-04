@@ -89,13 +89,6 @@ func gcd(_ a: Int, _ b: Int) -> Int {
     return a
 }
 
-/// Tenney height = num * den in lowest terms. Alternate metric; the pad
-/// uses `complexity(num:den:)`.
-func tenneyHeight(num: Int, den: Int) -> Int {
-    let g = gcd(num, den)
-    return (num / g) * (den / g)
-}
-
 /// Ω(n): prime factors counted with multiplicity.
 func omega(_ n: Int) -> Int {
     var n = abs(n)
@@ -138,12 +131,6 @@ func largestPrimeFactor(_ n: Int) -> Int {
     }
     if n > 1 { largest = n }
     return largest
-}
-
-/// The prime limit of `num/den` in lowest terms.
-func largestPrime(num: Int, den: Int) -> Int {
-    let g = gcd(num, den)
-    return max(largestPrimeFactor(num / g), largestPrimeFactor(den / g))
 }
 
 /// Primes ≤ 31 — covers every value the Prime picker exposes.

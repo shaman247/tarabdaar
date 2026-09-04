@@ -8,17 +8,14 @@
 #   1. `swift test --parallel` for everything EXCEPT the suites that
 #      assert wall-clock budgets — the render suites are independent
 #      CPU-bound processes, so this phase is bounded by the longest
-#      suite (~2 min LiveParamPush, serial-jt since 2026-08-31 and
-#      restructured onto one shared engine 2026-09-01) instead of the
-#      serial sum.
+#      suite (~2 min LiveParamPush) instead of the serial sum.
 #   2. RealtimePerformanceTests + RebuildCostTests run serially on a
 #      quiet machine — they measure realtime/rebuild budgets, and CPU
 #      contention from phase 1 would flake them (the reason they are
 #      not in the parallel batch; do not "optimize" them into it).
 #
-# Each phase runs under a WATCHDOG (2026-08-31): a wedged test — the jt
-# pool deadlock burned 30 minutes at 0% CPU before this existed — fails
-# the run loudly after $PHASE_TIMEOUT_S instead of hanging forever.
+# Each phase runs under a WATCHDOG: a wedged test fails the run loudly
+# after $PHASE_TIMEOUT_S instead of hanging forever.
 # macOS ships no `timeout`, hence the hand-rolled kill. Normal phases
 # finish in a couple of minutes; the cap is generous on purpose.
 #

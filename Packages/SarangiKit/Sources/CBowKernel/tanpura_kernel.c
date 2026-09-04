@@ -21,27 +21,6 @@
 #define TP_MAXM 384   /* mode-count ceiling; sizes the stack buffers */
 #define TP_MAXJ 64
 
-/* float fast pow (shared with bow_kernel.c): float32 zone math over
-   double modal state */
-static inline float tp_fastpow(float x, float A)
-{
-    union { float f; int32_t i; } u, v;
-    u.f = x;
-    const int e = ((u.i >> 23) & 255) - 127;
-    u.i = (u.i & 0x007fffff) | 0x3f800000;
-    const float m = u.f;
-    const float lm = (((-7.915036575e-02f * m + 6.288157292e-01f) * m
-                       - 2.081060203e+00f) * m + 4.028372767e+00f) * m
-        - 2.496773768e+00f;
-    const float y = A * ((float)e + lm);
-    const float yi = floorf(y);
-    const float yf = y - yi;
-    const float p2 = ((7.901993961e-02f * yf + 2.241264441e-01f) * yf
-                      + 6.968385764e-01f) * yf + 9.998119628e-01f;
-    v.i = ((int32_t)yi + 127) << 23;
-    return p2 * v.f;
-}
-
 typedef struct {
     int used, active, M, J;
     /* tables (owned) */

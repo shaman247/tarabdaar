@@ -32,6 +32,8 @@ struct MacMainWindow: View {
         /// the per-row taraf panel — level, radiated vs modal
         /// spectra, the radiation-tap comb.
         case taraf = "Taraf"
+        /// the formula body's frequency response as built (⌘0).
+        case body = "Body"
     }
 
     var body: some View {
@@ -46,15 +48,16 @@ struct MacMainWindow: View {
         }
         .background(
             // Hidden buttons for keyboard shortcuts: ⌘1..⌘9 jump to each tab
-            // (Live … Taraf). Plain Buttons don't render anything since they're
-            // sized to zero and clipped — the keyboardShortcut modifiers register
-            // with the window's responder chain.
+            // (Live … Taraf) and ⌘0 to the tenth (Body). Plain Buttons don't
+            // render anything since they're sized to zero and clipped — the
+            // keyboardShortcut modifiers register with the window's responder
+            // chain.
             ZStack {
                 ForEach(Array(Tab.allCases.enumerated()), id: \.element) { i, t in
-                    if i < 9 {
+                    if i < 10 {
                         Button("") { selectTab(t) }
                             .keyboardShortcut(
-                                KeyEquivalent(Character("\(i + 1)")),
+                                KeyEquivalent(Character("\((i + 1) % 10)")),
                                 modifiers: .command
                             )
                             .opacity(0)
@@ -103,6 +106,7 @@ struct MacMainWindow: View {
         case .setup:      SetupView(controller: controller)
         case .scope:      ScopeView(controller: controller)
         case .taraf:      TarafScopeView(controller: controller)
+        case .body:       BodyView(controller: controller)
         }
     }
 }

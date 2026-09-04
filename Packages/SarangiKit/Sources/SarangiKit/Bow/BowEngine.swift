@@ -44,7 +44,7 @@ public final class BowEngine {
     private var dec: HalfBandDecimator
     private var radFIR: FIRFilter?
     var radLp: Biquad?
-    private var radHill: Biquad?
+    var radHill: Biquad?
     /// STEREO SIDE PATH: with `bow_st_width` armed the kernel renders a
     /// SIDE stream (its diffuse-field difference bank on the whole radiated
     /// output) which rides decimator + radiation-chain twins here; L/R =
@@ -64,8 +64,11 @@ public final class BowEngine {
     // drive/voice/taraf run at KERNEL rate on the split buses, global at
     // engine rate after the post-chain. Staged under `tiltLock`. ----
     var fxUnits: [FXChainUnit]
-    var fxPending: [FXSettings]
+    var fxPending: [FXStaged]
     var fxDirty = false
+    /// Per point: the last fitted point set and its full-depth design
+    /// (control thread; under `tiltLock` for the brief read/write).
+    var fxDesignCache: [(points: [EQPoint], design: EQDesign)?]
 
     // ---- Runtime taraf/tone axes: taraf PURITY (jt tone LP) and DECAY
     // (momentum damping) are kernel scalars; TONE TILT is a shelf pair on
@@ -218,7 +221,8 @@ public final class BowEngine {
                    FXChainUnit(sr: sr * Double(osFactor)),  // voice
                    FXChainUnit(sr: sr * Double(osFactor)),  // taraf
                    FXChainUnit(sr: sr)]                     // global
-        fxPending = [FXSettings(), FXSettings(), FXSettings(), FXSettings()]
+        fxPending = FXPoint.allCases.map { _ in FXStaged() }
+        fxDesignCache = FXPoint.allCases.map { _ in nil }
         polySnap = BowControlMapper.PolySnapshot(count: nPoly)
         filters = [BowControlFilter](repeating: filter, count: nPoly)
         for i in filters.indices { filters[i].seedDrift(UInt64(i)) }

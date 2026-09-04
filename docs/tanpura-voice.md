@@ -64,8 +64,7 @@ static wrap through the kernel), so: its own serial queue
 a newer build supersedes an in-flight one (`tanpuraBuildGen`); held drone
 buttons re-pluck onto the fresh engine. The kernel renders through its
 **async worker pool** (the callback never computes; one block ≈ 32 ms of
-latency on this path only). Telemetry: `AudioEngine.tanpuraStats()`
-(underruns / divergence resets / ringing strings).
+latency on this path only).
 
 ## Drone mode (default)
 

@@ -39,7 +39,7 @@ Events (`0x01–0x3F`) are `[type][eventSeq u16]` + payload, reliable, never dro
 
 | Field | Type | Meaning |
 |---|---|---|
-| `type`, `flags` | u8, u8 | flag bit 0 = backgrounded |
+| `type`, `flags` | u8, u8 | reserved (bit 0 was `backgrounded`; always 0) |
 | `stateSeq` | u16 | wrap-aware sequence |
 | `timestampUs` | u32 | sender monotonic µs (wraps ~71.6 min) |
 | `tiltX/Y/Z` | s16 ×3 | the raw tilt report, ±32767 ↔ −1…+1 (~0.005° steps), atomic with pitch |

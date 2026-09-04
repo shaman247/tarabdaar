@@ -63,6 +63,19 @@ typedef struct {
     double slF, slD, slEnv, slA, slEnvA, slLp;
     unsigned long long slRng;
     int slFValid;
+    /* REGIME TELEMETRY (cumulative, host diffs): nut-side contact slip
+       onsets, samples in slip, bowed samples, and periods elapsed
+       (Σ f0/sr). Helmholtz = one slip per period. Plain counters — the
+       render is byte-identical with or without a reader. */
+    double rgPeriods;
+    unsigned long long rgSlips, rgSlipSmp, rgSmp;
+    int rgSlipping;
+    /* FUNDAMENTAL CAPTURE: a Q=3 band-pass tracking f0 on the bridge-side
+       wave; rgPbp / rgPtot (4-period leaky powers) is the fraction of the
+       string's motion at the fundamental — Helmholtz motion holds it
+       high, an overtone regime (the string locked on H3/H4 below the
+       Schelleng floor) drops it by an order of magnitude. Telemetry only. */
+    double rgIc1, rgIc2, rgPbp, rgPtot;
     int active;
 } bow_pstring_t;
 
@@ -446,6 +459,27 @@ void *bow_poly_init(int nb, double sr,
     return (void *)st;
 }
 
+/* Regime tracker (telemetry, never feeds the audio): TPT state-variable
+   band-pass at f0 (g ~ pi*f0/sr, k = 1/Q, Q = 3, unity peak) on the
+   bridge-side wave, and the two leaky powers over ~4 periods. */
+static inline void rg_track(bow_pstring_t *S, double x, double f0t, double sr)
+{
+    const double g = 3.141592653589793 * fmax(f0t, 40.0) / sr;
+    const double k = 1.0 / 3.0;
+    const double a1 = 1.0 / (1.0 + g * (g + k));
+    const double a2 = g * a1;
+    const double a3 = g * a2;
+    const double v3 = x - S->rgIc2;
+    const double v1 = a1 * S->rgIc1 + a2 * v3;
+    const double v2 = S->rgIc2 + a2 * S->rgIc1 + a3 * v3;
+    S->rgIc1 = 2.0 * v1 - S->rgIc1;
+    S->rgIc2 = 2.0 * v2 - S->rgIc2;
+    const double band = k * v1;
+    const double c = fmax(f0t, 40.0) / (4.0 * sr);   /* 1 - a, ~4 periods */
+    S->rgPbp += c * (band * band - S->rgPbp);
+    S->rgPtot += c * (x * x - S->rgPtot);
+}
+
 /* One string, one sample: friction contacts + terminations + contact noise
    against this string's state. Returns its transmitted bridge force,
    accumulates its direct-radiated noise, outputs rdmp/gk for the return. */
@@ -627,6 +661,14 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                     double lk = pow(thLeak, hl2[g]);
                     S->Tr3[g] = lk * S->Tr3[g]
                         + (1.0 - lk) * fabs(Ffg * dvh);
+                    if (g == 0) {
+                        int slip = fabs(stickF) > mSg * FbT;
+                        if (slip && !S->rgSlipping) S->rgSlips++;
+                        S->rgSlipping = slip;
+                        S->rgSlipSmp += (unsigned long long)slip;
+                        S->rgSmp++;
+                        S->rgPeriods += f0t / sr;
+                    }
                 }
                 if (hairHz > 1e-6) {
                     double fcH = hairHz * fmax(FbT * 3.0, 0.02) / hairRef;
@@ -683,6 +725,14 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 double Zeff = Z / (1.0 + Z / Zt);
                 double dv0 = vh - vbt;
                 double stickF = -2.0 * Zeff * dv0;
+                {
+                    int slip = fabs(stickF) > muS * Fb;
+                    if (slip && !S->rgSlipping) S->rgSlips++;
+                    S->rgSlipping = slip;
+                    S->rgSlipSmp += (unsigned long long)slip;
+                    S->rgSmp++;
+                    S->rgPeriods += f0t / sr;
+                }
                 if (fabs(stickF) <= muS * Fb) {
                     Ff = stickF;
                 } else {
@@ -802,6 +852,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 F += bowW * 2.0 * Z * S->brLp;
             }
         }
+        rg_track(S, S->brLp, f0t, sr);
     }
     return F;
 }
@@ -2287,6 +2338,24 @@ int bow_poly_scope_slots(void *vst, double *level, int n)
         level[b] = S->active ? S->senv : 0.0;
     }
     return st->nb;
+}
+
+/* Per played-string REGIME read: out = {slip onsets, periods elapsed,
+   samples in slip, bowed samples, fundamental fraction}; the first four
+   are cumulative since the mount (the host diffs two reads), the fraction
+   is the ~4-period running value. Racy telemetry. Returns 0 for a bad
+   slot. */
+int bow_poly_regime_slot(void *vst, int b, double out[5])
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (!st || !st->strs || b < 0 || b >= st->nb) return 0;
+    const bow_pstring_t *S = &st->strs[b];
+    out[0] = (double)S->rgSlips;
+    out[1] = S->rgPeriods;
+    out[2] = (double)S->rgSlipSmp;
+    out[3] = (double)S->rgSmp;
+    out[4] = S->rgPtot > 1e-20 ? S->rgPbp / S->rgPtot : 0.0;
+    return 1;
 }
 
 /* LIVE PARAMETERS: replace the per-sample scalars on a live state (the

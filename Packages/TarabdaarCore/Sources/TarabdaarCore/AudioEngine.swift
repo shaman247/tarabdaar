@@ -119,25 +119,6 @@ public class AudioEngine: ObservableObject {
     public private(set) var lastRenderTime: Double = 0
     public private(set) var maxRenderTime: Double = 0
     public private(set) var lastRenderFrames: Int = 0
-    public private(set) var lockWaitNanos: UInt64 = 0
-    public private(set) var lockAcquisitions: UInt64 = 0
-
-    public func lockAndMeasure() {
-        let t0 = CACurrentMediaTime()
-        lock.lock()
-        let waitNanos = UInt64(max(0, (CACurrentMediaTime() - t0) * 1e9))
-        lockWaitNanos &+= waitNanos
-        lockAcquisitions &+= 1
-    }
-
-    public func snapshotLockStats() -> (avgWaitMicros: Double, count: UInt64) {
-        let count = lockAcquisitions
-        let total = lockWaitNanos
-        lockAcquisitions = 0
-        lockWaitNanos = 0
-        guard count > 0 else { return (0, 0) }
-        return (Double(total) / Double(count) / 1000.0, count)
-    }
 
     // MARK: - Setup
 
@@ -175,10 +156,6 @@ public class AudioEngine: ObservableObject {
         symGain.outputVolume = 1
 
         do {
-            #if os(iOS)
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-            try AVAudioSession.sharedInstance().setActive(true)
-            #endif
             try engine.start()
             isRunning = true
         } catch {
@@ -194,29 +171,6 @@ public class AudioEngine: ObservableObject {
         #endif
     }
 
-    /// Stop the AVAudioEngine and tear down the iOS audio session.
-    public func suspend() {
-        guard isRunning else { return }
-        engine.pause()
-        #if os(iOS)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        #endif
-        isRunning = false
-    }
-
-    public func resume() {
-        guard !isRunning else { return }
-        do {
-            #if os(iOS)
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-            try AVAudioSession.sharedInstance().setActive(true)
-            #endif
-            try engine.start()
-            isRunning = true
-        } catch {
-            print("AudioEngine resume failed: \(error)")
-        }
-    }
 
     #if os(macOS)
     /// The device whose nominal rate we changed, plus its original rate (nil = none).
