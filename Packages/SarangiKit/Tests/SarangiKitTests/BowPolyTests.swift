@@ -8,9 +8,12 @@ final class BowPolyTests: XCTestCase {
     /// Driven from the shipping artifact and tarab: eight notes at maximum
     /// force stay finite and bounded, stop growing, and release.
     func testPolyEightNoteChordStaysBoundedAndReleases() throws {
-        guard let bp = Presets.bowedStringParams() else {
+        guard var bp = Presets.bowedStringParams() else {
             throw XCTSkip("bowed_string.json not available in this bundle")
         }
+        // Stability must not depend on asynchronous drive blocks dropped under test load.
+        bp.num["bow_jt_async"] = 0
+        bp.num["bow_jt_threads"] = 0
         let sr = 48000.0
         let tonic = 328.9
         let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
@@ -61,7 +64,7 @@ final class BowPolyTests: XCTestCase {
 
         mapper.setAxis(expr: 1.0, press: 1.0, pos: 0.5)
         for note in [57, 60, 62, 64, 67, 69, 72, 76] {
-            mapper.touchOn(UInt16(note), pitchSemis: Double(note), velocity: 100.0 / 127.0)
+            mapper.touchOn(UInt16(note), pitchSemis: Double(note))
         }
         _ = run(seconds: 0.5)                       // speak/settle
         let sustain = run(seconds: 2.5)

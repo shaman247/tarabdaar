@@ -2,8 +2,82 @@ import XCTest
 @testable import TarabdaarCore
 
 /// The pure half of the Joy-Con path: button edges out of per-bearer
-/// snapshots, and the stick's deadband / circle-rim calibration laws.
+/// snapshots, and the stick's change gate / circle-rim calibration laws.
 final class JoyConMapperTests: XCTestCase {
+
+    /// Presses toggle the sequence once per edge; releases and calibration presses leave its latch alone.
+    func testDroneSequenceToggleAndCalibration() {
+        var sequence = DroneSequence()
+        let steps = DroneSequence.defaultSteps
+        for slot in [0, 1, 2, 2, 0] {
+            XCTAssertEqual(sequence.press(steps: steps), slot)
+            XCTAssertNil(sequence.press(steps: steps), "A repeated report must not toggle off")
+            sequence.release()
+            sequence.release()
+            XCTAssertTrue(sequence.isRunning, "Release must keep the drone running")
+            XCTAssertEqual(sequence.heldSlot, slot)
+            XCTAssertNil(sequence.press(steps: steps))
+            XCTAssertFalse(sequence.isRunning)
+            XCTAssertNil(sequence.heldSlot)
+            XCTAssertNil(sequence.press(steps: steps), "A repeated report must not toggle back on")
+            sequence.release()
+        }
+        XCTAssertNil(sequence.press(steps: steps, enabled: false))
+        XCTAssertNil(sequence.press(steps: steps), "A held calibration press must not start a drone")
+        sequence.release()
+        XCTAssertEqual(sequence.press(steps: steps), 1, "Calibration must not advance the pattern")
+        sequence.release()
+        XCTAssertNil(sequence.press(steps: steps, enabled: false))
+        sequence.release()
+        XCTAssertTrue(sequence.isRunning, "Calibration must not stop a running drone")
+        sequence.restart()
+        XCTAssertEqual(sequence.cancel(), 1, "Editing must retain the original slot for cleanup")
+        XCTAssertEqual(sequence.press(steps: [2, 0]), 2)
+        XCTAssertEqual(DroneSequence.normalized([-1, 2, 3, 2]), [2, 2])
+        XCTAssertEqual(DroneSequence.normalized([]), steps)
+        XCTAssertEqual(DroneSequence.normalized([-1, 3]), steps)
+    }
+
+    /// Both buttons toggle one timed sequence, preserving duplicate steps and stopping on toggle-off or disconnect.
+    func testLatchedDroneSequenceTimingAndSharedButtons() {
+        var sequence = DroneSequence()
+        let steps = DroneSequence.defaultSteps
+        XCTAssertEqual(sequence.press(steps: steps, now: 10), 0)
+        sequence.release()
+        XCTAssertNil(sequence.advanceIfDue(steps: steps, now: 11.99))
+        XCTAssertEqual(sequence.advanceIfDue(steps: steps, now: 12), 1)
+        XCTAssertEqual(sequence.advanceIfDue(steps: steps, now: 14), 2)
+        XCTAssertEqual(sequence.advanceIfDue(steps: steps, now: 16), 2)
+        XCTAssertEqual(sequence.advanceIfDue(steps: steps, now: 18), 0)
+        XCTAssertNil(sequence.press(steps: steps, control: .rearZ, now: 19))
+        XCTAssertFalse(sequence.isRunning, "GL must stop the sequence started by Down")
+        XCTAssertNil(sequence.advanceIfDue(steps: steps, now: 20))
+        XCTAssertNil(sequence.press(steps: steps, control: .rearZ, now: 20))
+        sequence.release(control: .rearZ)
+        XCTAssertEqual(sequence.press(steps: steps, control: .rearZ, now: 21), 1)
+        XCTAssertNil(sequence.press(steps: steps, now: 22))
+        XCTAssertFalse(sequence.isRunning, "Down must stop GL even while GL stays held")
+        sequence.release(control: .rearZ)
+        sequence.release()
+        XCTAssertNil(sequence.advanceIfDue(steps: steps, now: 23))
+
+        XCTAssertNil(sequence.press(steps: steps, enabled: false, now: 24))
+        XCTAssertEqual(sequence.press(steps: steps, control: .rearZ, now: 25), 2)
+        sequence.release()
+        sequence.release(control: .rearZ)
+        sequence.restart()
+        XCTAssertEqual(sequence.advanceIfDue(steps: [1, 0], now: 27), 1)
+        XCTAssertEqual(sequence.advanceIfDue(steps: [1, 0], now: 50), 0)
+        XCTAssertNil(sequence.advanceIfDue(steps: [1, 0], now: 50), "No catch-up burst")
+        XCTAssertNil(sequence.advanceIfDue(steps: [1, 0], now: 51.99))
+        XCTAssertEqual(sequence.cancel(), 0)
+        XCTAssertFalse(sequence.isRunning)
+        XCTAssertNil(sequence.advanceIfDue(steps: steps, now: 60))
+        XCTAssertEqual(sequence.press(steps: steps, control: .rearZ, now: 61), 0)
+        XCTAssertEqual(sequence.cancel(), 0)
+        XCTAssertEqual(sequence.press(steps: steps, control: .rearZ, now: 62), 1,
+                       "Disconnect must clear stale button edges")
+    }
 
     /// A snapshot bearer sends the whole held set every report: repeats are
     /// silent, each bearer keeps its own view, a reattach drops the stale
@@ -46,30 +120,19 @@ final class JoyConMapperTests: XCTestCase {
         XCTAssertTrue(m.buttonsDown.isEmpty)
     }
 
-    /// The deadzone pins a drifting neutral to exact centre and rescales what
-    /// is left (continuous across the gate); a held stick sends nothing.
-    func testDeadzoneGateAndChangeGate() {
-        XCTAssertEqual(JoyConMapper.gate(0.05), 0)
-        XCTAssertEqual(JoyConMapper.gate(-0.099), 0)
-        XCTAssertEqual(JoyConMapper.gate(0.1), 0, accuracy: 1e-12)
-        XCTAssertEqual(JoyConMapper.gate(1), 1, accuracy: 1e-12)
-        XCTAssertEqual(JoyConMapper.gate(-1), -1, accuracy: 1e-12)
-        XCTAssertEqual(JoyConMapper.gate(0.55), 0.5, accuracy: 1e-12)
-
+    /// Small deflections pass through unchanged apart from quantization; repeated values stay silent.
+    func testFullRangeAndChangeGate() {
         let m = JoyConMapper()
-        let first = m.gateStick(x: 0.55, y: 0)
-        XCTAssertEqual(first.axes?.x ?? 0, 0.5, accuracy: 1e-9)
-        XCTAssertTrue(first.active)
-        XCTAssertNil(m.gateStick(x: 0.55, y: 0).axes, "a held stick sent an update")
-        XCTAssertNil(m.gateStick(x: 0.5501, y: 0).axes, "sub-quantum wiggle sent")
-
-        let rest = m.gateStick(x: 0.02, y: -0.02)
-        XCTAssertEqual(rest.axes, SIMD2(0, 0))
-        XCTAssertFalse(rest.active)
-        XCTAssertNil(m.gateStick(x: 0.0, y: 0.0).axes)
-        // a device removal parks the axes: the next value always sends
+        XCTAssertEqual(m.gateStick(x: 0.5, y: -1).axes, SIMD2(0.5, -1))
+        XCTAssertNil(m.gateStick(x: 0.5, y: -1).axes, "a held stick sent an update")
+        XCTAssertNil(m.gateStick(x: 0.5001, y: -1).axes, "sub-quantum wiggle sent")
+        XCTAssertEqual(m.gateStick(x: 1.0 / 256, y: -1.0 / 256).axes,
+                       SIMD2(1.0 / 256, -1.0 / 256))
+        XCTAssertEqual(m.gateStick(x: 1, y: 0.0625).axes, SIMD2(1, 0.0625))
+        XCTAssertEqual(m.gateStick(x: 0, y: 0).axes, .zero)
+        XCTAssertNil(m.gateStick(x: 0, y: 0).axes)
         m.resetStickSend()
-        XCTAssertEqual(m.gateStick(x: 0.0, y: 0.0).axes, SIMD2(0, 0))
+        XCTAssertEqual(m.gateStick(x: 0, y: 0).axes, .zero)
     }
 
     private func sweepRim(_ m: JoyConMapper, center: (Double, Double),
@@ -139,6 +202,8 @@ final class JoyConMapperTests: XCTestCase {
         XCTAssertEqual(dx, 1, accuracy: 1e-9)
         XCTAssertEqual(dy, 1, accuracy: 1e-9)
         XCTAssertEqual(JoyConMapper.calMap(dx: 0, dy: 0, cal: cal).0, 0)
+        XCTAssertEqual(JoyConMapper.calMap(dx: 0.5, dy: 0, cal: cal).0,
+                       0.5 / 800, accuracy: 1e-12)
         XCTAssertEqual(JoyConMapper.calMap(dx: 2000, dy: 0, cal: cal).0, 1,
                        accuracy: 1e-9, "past the rim must clamp")
     }

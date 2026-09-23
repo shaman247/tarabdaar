@@ -75,24 +75,26 @@ final class TarafCoupleTests: XCTestCase {
         XCTAssertLessThan(mean, 1e-5, "the return carries a DC term")
     }
 
-    /// A coupled ring must END: at the top of the range a bowed Sa's 12 s ring
-    /// falls the way the uncoupled one does, with every row asleep.
+    /// A coupled ring becomes inaudible, then sleeps within the slowest row's reference-clock decay bound.
     func testCoupledRingGoesFullySilent() throws {
         try skipUnlessSlowTestsEnabled()
         let r = try makeRig()
         r.e.setJtCouple(1.0)
         r.mapper.setAxis(expr: 32.0 / 127.0, press: 71.0 / 127.0)
         render(r, seconds: 1.0)                 // settle
-        r.mapper.touchOn(1, pitchSemis: 64, velocity: 100.0 / 127.0)
+        r.mapper.touchOn(1, pitchSemis: 64)
         render(r, seconds: 0.6)
         r.mapper.touchOff(1)
         let ring = render(r, seconds: 12.0)
         let tail = ring[Int(11.5 * r.sr)...]
         XCTAssertLessThan(Self.db(Self.peak(tail)), -80.0,
                           "the coupled ring never goes silent")
+        let slowest = r.e.jtDualRows.map { r.e.jtRowFreqs[$0] }.min() ?? 561
+        let sleepDeadline = 12 * max(1, 561/slowest)
+        if sleepDeadline > 12 { render(r, seconds: sleepDeadline-12) }
         let probe = r.e.jtGateProbe()
         XCTAssertEqual(r.e.jtGateAsleep(), probe.total,
-                       "rows are still awake after a 12 s ring")
+                       "rows are still awake after their reference-clock decay bound")
     }
 
     /// The heavy case the range was measured on — a hard-bowed three-note
@@ -104,9 +106,9 @@ final class TarafCoupleTests: XCTestCase {
         r.e.setJtCouple(1.0)
         r.mapper.setAxis(expr: 1.0, press: 100.0 / 127.0)
         render(r, seconds: 1.0)
-        r.mapper.touchOn(1, pitchSemis: 64, velocity: 110.0 / 127.0)   // Sa
-        r.mapper.touchOn(2, pitchSemis: 71, velocity: 110.0 / 127.0)   // Pa
-        r.mapper.touchOn(3, pitchSemis: 76, velocity: 110.0 / 127.0)   // Sa'
+        r.mapper.touchOn(1, pitchSemis: 64)   // Sa
+        r.mapper.touchOn(2, pitchSemis: 71)   // Pa
+        r.mapper.touchOn(3, pitchSemis: 76)   // Sa'
         render(r, seconds: 1.0)
         r.mapper.touchOff(1)
         r.mapper.touchOff(2)

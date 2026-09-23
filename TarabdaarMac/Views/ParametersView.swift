@@ -89,7 +89,8 @@ struct ParametersView: View {
             guard isMapped(spec.key) else { return false }
         }
         guard !q.isEmpty else { return true }
-        return spec.label.lowercased().contains(q)
+        return spec.qualifiedLabel.lowercased().contains(q)
+            || spec.group.lowercased().contains(q)
             || spec.key.lowercased().contains(q)
             || spec.help.lowercased().contains(q)
     }
@@ -408,8 +409,7 @@ private struct ParamRow: View, Equatable {
     /// renders into docs/parameters.md, so this description can never
     /// tell a different story than the documentation.
     private var helpText: String {
-        spec.help
-            + "\n\nScope: \(spec.scope.label) — \(spec.scope.summary)."
+        "Scope: \(spec.scope.label) — \(spec.scope.summary)."
             + "\nTiming: \(spec.timing.label) — \(spec.timing.summary)."
     }
 
@@ -420,8 +420,12 @@ private struct ParamRow: View, Equatable {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(spec.key)
                         .font(.padCaption2.monospaced())
+                    Text(spec.effect)
+                    (Text("Low: ").bold() + Text(spec.low))
+                    (Text("High: ").bold() + Text(spec.high))
                     Text(helpText)
                         .foregroundStyle(.secondary)
+                        .padding(.top, 4)
                 }
                 .font(.padCaption)
                 .fixedSize(horizontal: false, vertical: true)
@@ -560,13 +564,13 @@ private struct MappingPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(spec.label).font(.headline)
+            Text(spec.qualifiedLabel).font(.headline)
             Text("Drive with a dimension")
                 .font(.padCaption).foregroundStyle(.secondary)
             LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading),
                                 GridItem(.flexible(), alignment: .leading)],
                       alignment: .leading, spacing: 4) {
-                ForEach(ControlAxes.dims, id: \.rawValue) { dim in
+                ForEach(ControlAxes.bindableDims, id: \.rawValue) { dim in
                     Toggle(dim.label, isOn: Binding(
                         get: { controller.tiltMapping.isConnected(target, dim) },
                         set: { _ in controller.toggleTiltBinding(target, dim: dim) }))
@@ -586,7 +590,7 @@ private struct MappingPopover: View {
             }
             Button("New composite from this") {
                 if let c = controller.addComposite() {
-                    controller.renameComposite(c.id, to: spec.label)
+                    controller.renameComposite(c.id, to: spec.qualifiedLabel)
                     controller.addCompositeMember(c.id, key: spec.key)
                 }
             }

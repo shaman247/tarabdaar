@@ -7,6 +7,26 @@ a fret's `x` (0..1 across the base band) is its own layout state, unrelated
 to its pitch. The playable pitch is a continuous **field** interpolated
 from the frets.
 
+## Taraf pluck strip
+
+A 64-point strip above the pad shows the running taraf bank on both Mac and
+iPad, low pitch to high pitch. Each target carries its scale-derived name and
+one-based kernel row number; the two-direction raga rows are orange and the melody
+follower uses an arrow. Tap for a single pluck; drag either way to strum every
+crossed string. A fast drag visits intermediate cells even when input events
+skip them. Holding still does not re-pluck; reversing direction plucks strings
+again as they are crossed. The strip remains available with a Joy-Con attached.
+Melody touches on the pad remain independent.
+
+These gestures directly call the row pluck path, regardless of the selected
+main or drone voice. They need no drone-slot assignment. Each target is a
+running kernel row, so two banks with the same pitch retain separate targets.
+An engine rebuild publishes a new bank identity and cancels the old gesture;
+late plucks for that old bank are ignored. The iPad receives only this display
+snapshot (not editable tuning or physics), and sends discrete `TARAF_PLUCK`
+events over TLP. The snapshot clears when the link is unavailable. Both apps
+must use protocol version 19. Guards: `TarafStripTests`, `TLPCodecTests`.
+
 ## The pitch field
 
 - A **column** = the frets sharing an x position (within `fretColumnEps`
@@ -61,6 +81,43 @@ resting value persists with the control defaults and in presets; it is
 deliberately NOT in the arrangement blob or the layout files. The glide
 queue's segments are shaped by the same law — [Glide System](glide-system.md).
 Guard: `FretWarpTests`.
+
+## Pitch accent
+
+**`ctl_fret_accent`** ("pitch accent", the "Fret pad" registry group, def
+0) is the warp's sounded counterpart: the played **expression dips between
+frets** and returns as the finger lands on one, so a glided run keeps its
+notes distinct even where the field is linear. The grid is the **frets on
+the pad** — the arrangement's enabled segments resolved against the one
+scale and folded into an octave, so it covers every octave copy — and not
+the whole scale: dragging D → E → F♯ across three frets dips once per gap
+and never spikes at a D♯ or F the scale holds but the pad does not show.
+The law (`FretPitchGrid`, `PitchAccent.swift`) takes the touch pitch's
+position `t` (0…1) in the gap between its two neighbouring frets, the
+pad's own uneven gaps and never a 12-TET grid, and scales the commanded
+expression by
+
+```
+1 − accent · sin²(π·t)
+```
+
+0 on every fret, `1 − accent` midway, flat at both ends (a vibrato around
+a note barely dips). It only ever attenuates: a note ON a fret sounds
+exactly as the player's expression commands at every amount, and at 1 the
+bow fades out through the middle of a gap.
+
+It is a live control param that never reaches the wire or the iPad:
+`applyParamToVoice` hands it to `AudioEngine.setPitchAccent`, and the
+engine folds the accent at the touch's current pitch into the **per-touch
+expression scale** the strum chord already uses (`effectiveExprScale` =
+strum scale × accent). On the String voice a pitch move delivers the new
+scale in the same mapper update as the pitch (`BowControlMapper.touchGlide`
+with `exprScale`), so the dip rides the finger at wire rate and the
+control filter ramps it across each block; the plucked mains consume it at
+the onset as a pluck-level scale. The fret grid follows the arrangement
+and `tuning.didChange` undebounced (`AppController.syncAccentGridFromFrets`),
+and both a grid move and a knob move re-deliver the scale to every held
+note, so a bound tilt/stick axis works mid-phrase. Guard: `PitchAccentTests`.
 
 **Contour overlay (Mac, edit mode).** Out of Perform mode the Mac surface
 draws the field's **iso-pitch contours** (`fretFieldContours`): the
@@ -163,6 +220,16 @@ aligns inflections to a known svara sequence by monotonic DP; `selftest`
 runs synthetic strokes. The hindsight thresholds define "truth" and are not
 fitted. Fitting rounds: `docs/history/`.
 
+## Fret position mapping
+
+The **Fret Position** control dimension runs from 0 at each fret’s inner
+end to 1 at its outer end. Upper frets increase upward; lower frets increase
+downward, normalized to each fret’s own height. Values clamp beyond the
+ends and blend linearly between neighboring frets. The newest held finger
+drives the mapping, including vertical movement at constant pitch; releasing
+it falls back to the newest survivor, then to 0 when no touches remain.
+See [Sensors](sensors.md) for the mapping path.
+
 ## Touch indicator: the fingertip radius
 
 Each touch draws one **indicator ring**, and the ring's SIZE is the raw
@@ -209,11 +276,13 @@ per svara — `x = (col + 0.5)/7` for S · R/r · G/g · m/M · P · D/d · N/n 
 so the naturals are spaced like white keys and each komal/tivra fret
 **stacks above** its shuddha partner:
 
-- **S and P**: centred (y 0.324–0.676)
+- **S and P**: duplicated in both rows, at the same pitch and x position
+  and drawn toward the center (upper y 0.188–0.492, lower y 0.508–0.812).
+  Each keeps the ordinary fret height, with a narrow 0.016 gap between them.
 - **shuddha** (R G m D N): lower middle (y 0.588–0.892)
 - **komal/tivra** (r g M d n): upper middle (y 0.108–0.412)
 
-The 0.176 gap inside a stacked pair is the column's **y-interpolation zone**
+The 0.176 gap inside a komal/tivra–shuddha pair is the column's **y-interpolation zone**
 (sliding down bends r → R); the space toward the edges is open approach
 room. The drag-assist constants are fitted on this layout.
 
@@ -298,7 +367,7 @@ via SwiftUI gestures. Everything around and below plays normally; melody
 drags that cross a button keep gliding.
 
 **Hidden while a Joy-Con is attached (both surfaces):** the controller
-plays the drones (**↓** = drone button 2; ←/→ = octave shift; **L** = the
+plays the drones (**↓ / GL** = toggle continuous drone sequence; ←/→ = octave shift; **L** = the
 strum), so the on-screen buttons vanish — visual and hit-test — and
 reappear on disconnect. Mac: the surface taps only
 `JoyConInput.$connectedName` (observing the whole object would re-run the
@@ -307,9 +376,36 @@ JOYCON_STATE flags byte, pushed on attach/disconnect and with every
 scale-sync push (`ScaleSyncReceiver.joyConTilt.connected` →
 `FretPadSurfaceIOS.dronesHidden`). A drone held at attach still releases.
 
+**Drone sequence (Down / GL).** Joy-Con ↓ and rear GL share an on/off toggle.
+Switching on plays the next configured drone slot immediately,
+wrapping after the last step. The default is slots **1 → 2 → 3 → 3**:
+Sa → Pa → high Sa → high Sa relative to the lowest drone (the bank labels
+these low Sa · low Pa · Sa). In **Strings → Drone buttons → Drone sequence (Down / GL)**, each step selects one of the three mapped drones; steps can be
+added, removed, or reset. The step labels follow the mapped strings and scale.
+While switched on, the sequence advances every **2 seconds**, even after the button is released. Each
+step releases the previous slot and presses the next, including consecutive
+steps on the same slot. Controller sequencing bypasses the Tanpura same-slot
+`tp_drone_cycle` timer. The next fresh press of either button switches the sequence off, cancels
+the timer and releases the current slot; button releases do not change it.
+Switching on again resumes at the next step. Disconnecting also cancels
+the timer and releases the current slot. A delayed
+timer plays one step without a burst of missed notes. Calibration ↓ presses still
+redo the previous phase and do not toggle or advance the sequence. Edits, preset
+sequence loads and launch start at the first step. The Mac saves the pattern
+across launches and in the optional `droneSequence` preset section; older
+presets leave the current pattern alone. No sequence state crosses TLP.
+
+Tanpura drones sound **one octave below** their mapped strings by default.
+Joy-Con **↑** toggles to the original mapped octave and back; the next pluck
+uses the selected register while ringing notes keep their pitch. It does not
+advance or restart the sequence. The Strings tab shows **Tanpura octave −1 / 0**.
+The register starts low each launch and is not saved in presets. During
+calibration, ↑ still advances the capture. Sympathetic drones retain their
+mapped row pitch.
+
 **Voice.** The buttons drive the **Tanpura voice by default** — a press
-*plucks* the mapped pitch (`TanpuraEngine`, [tanpura-voice.md](tanpura-voice.md)),
-holding re-plucks every `tp_drone_cycle` s, release rings out on the
+*plucks* the mapped pitch in the selected drone register (`TanpuraEngine`, [tanpura-voice.md](tanpura-voice.md)),
+holding an on-screen drone button re-plucks every `tp_drone_cycle` s, release rings out on the
 string's t60. The **Strings tab's "Drone buttons" section holds the Voice
 picker** (`AppController.droneVoice` → `AudioEngine.setDroneVoiceMode`);
 **Sympathetic strings** swells the mapped String-voice jawari-taraf row
@@ -318,16 +414,17 @@ instead. Mapping, labels and signal path apply to both modes.
 - **Mapping**: each button plucks **ONE sympathetic string**, mapped in the
   Strings tab (`InstrumentState.droneStringIds`, 3 × optional
   `StringSpec.id`, persisted with the instrument document; nil = inert). It
-  sounds exactly as its tarab row is tuned; a disabled row, or one below
-  the jawari selection's `bow_jt_gmin`, is silent. A press is an identity
-  lookup on the row's nominal Hz (`BowEngine.droneRow(forExactHz:)`).
+  supplies the reference pitch; Tanpura applies the selected octave offset.
+  In sympathetic mode it sounds exactly as its tarab row is tuned; a disabled
+  row, or one below the jawari selection's `bow_jt_gmin`, is silent. That press
+  is an identity lookup on the row's nominal Hz (`BowEngine.droneRow(forExactHz:)`).
   **Auto-mapping**: fresh documents and every bank regeneration map each
   slot to the highest-gain enabled string within ±100 ¢ of low Sa · low Pa
   · Sa; manual mappings otherwise stick (a deleted row's mapping prunes to
   nil). Mapping changes don't rebuild — the buttons retarget
   (`AudioEngine.setDroneMappedFreqs`, releasing any held button first).
 - **Labels**: `FretArrangement.droneRatios` is **display-only** — the Mac
-  writes the mapped strings' sounding ratios vs the played tonic into the
+  writes the mapped strings' reference ratios vs the played tonic into the
   arrangement, so labels ride the autosave + iPad sync. A button is named
   like a fret (`scaleLabel(forRatio:degrees:)`, nearest degree in any
   octave). An unmapped slot keeps its last ratio.
@@ -372,11 +469,11 @@ Holding **L** sounds the Strings tab's strum SET — or the chord bar's
 selection — as a **held chord in the MAIN voice** (`AppController.strum(pressed:)`
 → the shared `pitchPad` engine, the same in-process touch path as the Mac
 pad: the notes follow the Live tab's instrument picker, allocate fresh
-strings, charge the taraf, and carry a 0.9 strike velocity for
-`bow_attack_vel`). It sustains while L is held and releases with it.
+strings, charge the taraf, and capture the current
+`bow_attack_sharpness`). It sustains while L is held and releases with it.
 **`ctl_strum_expr`** is the chord's own expression — a per-note scale on the
 chord notes' bow-expression axis (Tanpura/Sitar mains: the pluck level,
-onset-only), bound to the **Joy-Con stick Y** by default and pushed live, so
+onset-only), bound to **Stick Up / Stick Down** by default and pushed live, so
 the stick swells the ringing chord without touching the melody.
 **`ctl_strum_thresh`** adds an accel trigger: the iPad's strike envelope
 crossing the threshold strikes the chord exactly as L does and releases
@@ -386,6 +483,11 @@ low Sa · low Pa, remappable since members are scale-degree references. The
 strum is exempt from the glide queue (`TLPTouch.glideExempt`).
 
 ## Chord bar
+
+**Hidden for now** (`Config.chordBarShown = false`): `chordBarCells`
+resolves to no cells, so neither surface draws or hit-tests it and the
+strum plays the configured set. The rest of this section describes the
+bar when it is on.
 
 The strip **below the playable band** carries, per fret column, the roman
 numeral of a 3-tone chord rooted on that degree, derived from the scale
@@ -463,15 +565,19 @@ family. Wire: [MIDI & Audio](midi-and-audio.md).
 The iPad surface is **always perform mode** and **fully multitouch** — each
 finger gets its own onset snap decision and keeps its own `snapOffsetLog`.
 The frets live in a **band** (`fretPadBandRect`): a full-width strip
-spanning `Config.fretPadHeightFraction` (0.5) of the surface height,
-centered, with a hairline border. The space above/below is dead except the
-**drone buttons** and the **chord bar**. Both surfaces draw the whole
+spanning `Config.fretPadHeightFraction` (0.5) of the surface height with
+its top at `Config.fretPadBandTopFraction` (0.3 — a little below centred),
+with a hairline border. The space above/below
+is dead except the **drone buttons** (and the **chord bar** when it is
+shown). Both surfaces draw the whole
 picture, and the Mac tab letterboxes to `iPadSurfaceAspect`, so **what you
 see on the iPad is exactly what the Fret Pad tab shows**.
 
 **iPad toolbar** (`PadToolbarIOS`): PANIC · REC · GYRO (raw-motion
-diagnostic overlay) · scale-sync indicator · three display-only tilt squares
-(arm, wrist, Joy-Con stick) · the **strike scope** (accelerometer strike
+diagnostic overlay) · scale-sync indicator · two display-only tilt squares
+(arm, Joy-Con stick) around the **wrist bar cluster** (wrist tilt, its
+rate and the Joy-Con's linear acceleration, three bars each, plus its
+magnitude) · the **strike scope** (accelerometer strike
 envelope, 0–127, its onset fade tracking `ctl_strike_window`) · the
 **finger-accel scope** (the `.fingerAccel` −1…+1 law, computed locally —
 [Sensors](sensors.md)) · the **volume scope** (the Mac's radiated voice and

@@ -10,7 +10,7 @@ final class ControlCacheConcurrencyTests: XCTestCase {
     func testConcurrentSetControlAndFXParamDoNotRace() {
         let src = StringVoiceSource()
         let keys = ["bow_jt_lp", "bow_jt_damp", "bow_tone_tilt", "bow_gain",
-                    "bow_jt_sel", "bow_jt_evolve", "bow_bal", "bow_jt_couple"]
+                    "bow_jt_sel", "bow_jtc_evolve", "bow_bal", "bow_jt_couple"]
         let fxKey = "fx_voice_rev_mix"
         let curve = [EQPoint(hz: 200, db: 3), EQPoint(hz: 3000, db: -4)]
         let workers = 8

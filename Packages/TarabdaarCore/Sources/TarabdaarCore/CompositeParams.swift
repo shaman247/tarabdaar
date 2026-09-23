@@ -13,8 +13,8 @@ import Foundation
 /// mappings — it streams three raw tilt values in the PERF_STATE frame
 /// and the Mac evaluates its own bindings.
 
-/// The Mac's bindable control axes — what the Controls tab and the
-/// binding menus iterate. Axis index = position here
+/// The Mac's control-axis slots; `bindableDims` supplies the Controls tab
+/// and binding menus. Axis index = position in `dims`
 /// (`AppController.applyTiltAxis`; axis values −1…+1, rest 0). Append
 /// new axes so earlier indices stay put.
 public enum ControlAxes {
@@ -25,11 +25,24 @@ public enum ControlAxes {
     /// double-apply. The unipolar axes (strike pair, `.jcAccel`,
     /// `.touchSize`) read rest at curve x 0 — their drivers pass
     /// `2·level − 1` so the curve sees the 0…1 level itself; every other
-    /// axis rests at the centre.
+    /// axis rests at the centre. Stick directions are written together as
+    /// curve x 0…1 by `applyStick`; slots 3/4 and 8–10 are retired and reserved.
     public static let dims: [InputDimension] = [
         .tilt1, .tilt2, .tilt3, .stickX, .stickY, .strike, .acceleration,
         .fingerAccel, .tilt4, .wrist2, .wrist3, .jcAccel, .touchSize,
+        .stickLeft, .stickRight, .stickUp, .stickDown,
+        .fretPosition,
     ]
+
+    public static let stickDimensions: [InputDimension] = [
+        .stickLeft, .stickRight, .stickUp, .stickDown,
+    ]
+
+    /// Shared tilt first, then controller and touch expression.
+    public static var bindableDims: [InputDimension] {
+        [.tilt1, .tilt2, .tilt3, .jcAccel] + stickDimensions
+            + [.touchSize, .fretPosition, .strike, .fingerAccel, .acceleration]
+    }
 }
 
 public struct CompositeMember: Codable, Equatable, Identifiable {

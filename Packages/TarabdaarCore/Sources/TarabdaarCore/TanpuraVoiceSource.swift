@@ -280,12 +280,14 @@ final class PluckedVoice {
     /// release releases it) — this voice's own, under `touchLock`.
     let touchLock = NSLock()
     var touchSlot: [UInt16: Int] = [:]
+    var releasedTouchSlot: [UInt16: Int] = [:]
 
     /// Forget the held-touch bindings (a fresh engine's slots differ; a
     /// main-instrument switch drops pending plucks).
     func clearTouches() {
         touchLock.lock()
         touchSlot.removeAll(keepingCapacity: true)
+        releasedTouchSlot.removeAll(keepingCapacity: true)
         touchLock.unlock()
     }
 

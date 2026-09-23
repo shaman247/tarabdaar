@@ -8,12 +8,22 @@ import Foundation
 public final class MIDIInput: ObservableObject {
 
     /// Fires on the CoreMIDI thread with each COMPLETE inbound SysEx run
-    /// (F0…F7 inclusive) — the TarabLink tunnel's receive socket
-    /// (`AppController` wires it to `TarabLink.receivedSysEx`). CoreMIDI
-    /// may split a SysEx across packets and callbacks; the accumulator
-    /// below reassembles (the pattern proven by the iPad's
+    /// (F0…F7 inclusive) and the source endpoint that delivered it — the
+    /// TarabLink tunnel's receive socket (`AppController` wires it to
+    /// `TarabLink.receivedSysEx` and learns the link peer from the source).
+    /// CoreMIDI may split a SysEx across packets and callbacks; the
+    /// accumulator below reassembles (the pattern proven by the iPad's
     /// `ScaleSyncReceiver`).
-    public var onSysEx: ((_ bytes: [UInt8]) -> Void)?
+    public var onSysEx: ((_ bytes: [UInt8], _ source: MIDIEndpointRef) -> Void)?
+
+    /// What one source has delivered: how many TLP frames, and when the
+    /// last one came. The status panel reads this to show which bearer is
+    /// carrying the link — and that only one is.
+    public struct SourceActivity {
+        public let source: MIDIEndpointRef
+        public let tlpFrames: Int
+        public let lastTLPAt: Date?
+    }
 
     /// The shared CoreMIDI receive plumbing (client, all-sources input
     /// port, packet walk). Lazily built so `self` is capturable.
@@ -34,6 +44,8 @@ public final class MIDIInput: ObservableObject {
     private struct SysExRun {
         var buffer: [UInt8] = []
         var receiving = false
+        var tlpFrames = 0
+        var lastTLPAt: Date?
     }
     private var sysexRuns: [UInt: SysExRun] = [:]
     private let sysexLock = NSLock()
@@ -52,6 +64,16 @@ public final class MIDIInput: ObservableObject {
     }
 
     deinit { stop() }
+
+    /// Per-source TLP delivery, every source that has ever delivered bytes.
+    public func sourceActivity() -> [SourceActivity] {
+        sysexLock.lock()
+        defer { sysexLock.unlock() }
+        return sysexRuns.map { key, run in
+            SourceActivity(source: MIDIEndpointRef(key),
+                           tlpFrames: run.tlpFrames, lastTLPAt: run.lastTLPAt)
+        }
+    }
 
     // MARK: - Packet parsing
 
@@ -89,7 +111,11 @@ public final class MIDIInput: ObservableObject {
                     run.receiving = false
                     let complete = run.buffer
                     run.buffer.removeAll(keepingCapacity: true)
-                    onSysEx?(complete)
+                    if complete.starts(with: TLPPack.header) {
+                        run.tlpFrames += 1
+                        run.lastTLPAt = Date()
+                    }
+                    onSysEx?(complete, MIDIEndpointRef(sourceKey))
                     i += 1
                     continue
                 } else if byte >= 0xF8 {

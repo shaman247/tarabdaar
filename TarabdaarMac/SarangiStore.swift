@@ -91,7 +91,7 @@ final class SarangiStore: ObservableObject {
     func setDroneMapping(slot: Int, stringId: UUID?) {
         guard state.droneStringIds.indices.contains(slot) else { return }
         state.droneStringIds[slot] = stringId
-        audio.setDroneMappedFreqs(state.droneStringFreqs)
+        audio.setDroneMappedFreqs(state.droneStringFreqs, chromatic: state.droneStringChromatic)
     }
 
     /// Edit the strum set (state-only — resolved at press time, no rebuild).
@@ -122,7 +122,7 @@ final class SarangiStore: ObservableObject {
         scheduleRebuild()
     }
 
-    /// Reset the CHROMATIC set to its default 15-semitone layout (the
+    /// Reset the CHROMATIC set to its combined legacy layout (the
     /// Strings tab's "Reset chromatic set"); the raga set stands.
     func regenerateChromatic() {
         state.regenerateChromatic()
@@ -199,6 +199,7 @@ final class SarangiStore: ObservableObject {
         rebuildDebounce.cancel()
         audio.rebuildSarangi(strings: state.resolvedStrings, tonic: state.tonicHz,
                              droneFreqs: state.droneStringFreqs,
+                             droneChromatic: state.droneStringChromatic,
                              follower: state.resolvedFollower)
     }
 

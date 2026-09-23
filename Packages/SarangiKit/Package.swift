@@ -26,7 +26,8 @@ let package = Package(
             // kernel dominates the live render (poly gut strings + modal-jawari
             // web + friction solves at 96 kHz) — a debug (-O0) kernel runs
             // several times below realtime.
-            cSettings: [.unsafeFlags(["-O3"])]
+            cSettings: [.unsafeFlags(["-O3"])],
+            linkerSettings: [.linkedFramework("Accelerate", .when(platforms: [.macOS, .iOS]))]
         ),
         .target(
             name: "SarangiKit",

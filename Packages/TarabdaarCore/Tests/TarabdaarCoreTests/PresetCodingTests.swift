@@ -10,8 +10,10 @@ final class PresetCodingTests: XCTestCase {
         p.name = "Test rig"
         p.savedAt = "2026-07-24T12:00:00Z"
         p.instrument = Presets.state(.sarangiPilu)
-        p.stringOverrides = ["bow_body_q": 33.0, "bow_jt_apex": 1.4e-5]
-        p.paramValues = ["bow_expr": 0.4, "bow_vib_cents": 12.0]
+        p.stringOverrides = ["bow_body_q": 33.0, "bow_jt_apex": 1.4e-5, "bow_jt_sav": 1]
+        p.paramValues = ["bow_expr": 0.4, "bow_vib_cents": 12.0, "bow_jt_sav": 1,
+                         "bow_expr_map_5": 0.17, "bow_press_map_10": 0.1,
+                         "bow_pos_map_0": 0.4]
         p.composites = CompositeParam.defaults()
         var m = DimensionMapping.makeDefault()
         m.mappings[MapTarget(paramKey: "bow_mu_s").storageKey] =
@@ -19,6 +21,7 @@ final class PresetCodingTests: XCTestCase {
                 DimensionBinding(dimension: .tilt2, rangeMin: 0.5, rangeMax: 1.1),
             ])
         p.tiltMapping = m
+        p.droneSequence = [2, 0, 1, 1, 2]
         return p
     }
 
@@ -33,6 +36,8 @@ final class PresetCodingTests: XCTestCase {
         XCTAssertEqual(b.stringOverrides, a.stringOverrides)
         XCTAssertEqual(b.paramValues, a.paramValues)
         XCTAssertEqual(b.composites, a.composites)
+        XCTAssertEqual(b.droneSequence, a.droneSequence)
+        XCTAssertTrue(b.sections().contains("drone sequence"))
         // the instrument section: spot-check the parts a player would notice
         XCTAssertEqual(b.instrument?.strings.count, a.instrument?.strings.count)
         XCTAssertEqual(b.instrument?.tonicHz, a.instrument?.tonicHz)
@@ -41,6 +46,29 @@ final class PresetCodingTests: XCTestCase {
         let t = MapTarget(paramKey: "bow_mu_s")
         XCTAssertEqual(b.tiltMapping?.mapping(for: t).binding(for: .tilt2)?
                         .controlPoints.last?.y, 1.1)
+    }
+
+    /// Curve sections round-trip, override legacy bands, and leave mapping-only presets partial.
+    func testBowAxisCurveMigration() throws {
+        var preset = TarabdaarPreset()
+        preset.paramValues = ["bow_expr_map_5": 0.17, "bow_press_map_10": 0.1]
+        let migrated = try XCTUnwrap(preset.resolvedBowAxisCurves())
+        XCTAssertEqual(migrated["expr"]?[5], BowAxisPoint(x: 0.5, y: 0.17))
+        XCTAssertEqual(migrated["press"]?.last, BowAxisPoint(x: 1, y: 0.1))
+        let factory = TarabdaarPreset.factoryBowAxisCurves()
+        XCTAssertEqual(migrated["expr"]?[4], factory["expr"]?[4])
+        preset.bowAxisCurves = ["expr": [BowAxisPoint(x: 0, y: 0),
+                                       BowAxisPoint(x: 0.37, y: 0.2), BowAxisPoint(x: 1, y: 1)]]
+        let back = try TarabdaarPreset.decode(preset.encoded())
+        XCTAssertEqual(back.bowAxisCurves, preset.bowAxisCurves)
+        XCTAssertEqual(back.resolvedBowAxisCurves()?["expr"], preset.bowAxisCurves?["expr"])
+        XCTAssertEqual(back.resolvedBowAxisCurves()?["press"], factory["press"])
+        preset = TarabdaarPreset()
+        XCTAssertNil(preset.resolvedBowAxisCurves())
+        preset.bowAxisCurves = [:]
+        XCTAssertFalse(preset.isEmpty)
+        XCTAssertEqual(preset.resolvedBowAxisCurves(), factory)
+        XCTAssertNil(ParamRegistry.spec("bow_expr_map_5"))
     }
 
     /// FX KEYS ARE PRESET KEYS: the derived `fx_<point>_<knob>` keys are the
@@ -90,6 +118,7 @@ final class PresetCodingTests: XCTestCase {
         XCTAssertNil(back.instrument)
         XCTAssertNil(back.stringOverrides)
         XCTAssertNil(back.paramValues)
+        XCTAssertNil(back.droneSequence)
         XCTAssertNotNil(back.tiltMapping)
         XCTAssertEqual(back.sections(), ["5 tilt bindings"])
         XCTAssertThrowsError(try TarabdaarPreset.decode(Data("{}".utf8)))

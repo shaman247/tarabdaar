@@ -2,6 +2,12 @@
 
 The **FX tab (⌘6)** is a four-insert effects rack inside the String voice's render path. Each insert point carries an optional **EQ curve** (points the player sets, a curve inferred from them) and an optional **reverb** (**Bigverb**, the default, or **Room**). Everything is **off by default**, and the untouched rack is *byte-null*: `TarafRemovalParityTests` pins the shipped render bit-for-bit with the rack idle.
 
+The Voice insert processes played String radiation; the Taraf insert processes
+both banks. Voice → Taraf also receives injected Tanpura/Sitar excitation.
+Global processes the combined String-engine output, including taraf and room,
+before its limiter; it does not process the separate audible Tanpura/Sitar
+outputs. The generated parameter descriptions name these affected signals.
+
 ## The four insert points
 
 In signal order (`SarangiKit.FXPoint`):
@@ -40,6 +46,11 @@ of flat rows, and **docs/parameters.md renders the insert once** plus
 a table of the four points. The FX tab builds its panels from the same
 `fxPoints` list. To add or rename a knob, edit the template — all four
 points follow.
+
+Each template knob requires an effect description and separate low/high
+descriptions, shared by all four instances. Toggles and the reverb selector
+describe their actual choices. Amount controls state their enable dependency;
+reverb mix explicitly retains the dry signal even at its maximum.
 
 ## The EQ curve
 

@@ -5,11 +5,11 @@ import Foundation
 /// strike-envelope byte); what separates them is TIME SINCE THE NOTE
 /// STARTED: at onset the measurement drives the Strike bindings fully,
 /// and over `windowS` (2 s) it hands over linearly to the Acceleration
-/// bindings — per target, output = (1−w)·strikeOut + w·accelOut, where a
-/// side without a binding evaluates to the target's DEFAULT (registry
-/// default for a parameter, 0 = rest for a composite). So "expression
-/// [0,1] on Strike, unbound on Acceleration with default 0.4" reads at
-/// w = 0.5 as the interpolated range [0.2, 0.7].
+/// bindings — the pair's contribution to a target's sum is
+/// (1−w)·swing_strike + w·swing_accel, a side without a binding swinging
+/// 0 (`ControlAxisEvaluator`). So "Expression 0 → +0.3 on Strike, unbound
+/// on Acceleration" lifts a hard hit by 0.3 at onset and lets the lift
+/// fade back into the resting expression over the window.
 ///
 /// This struct owns the WEIGHT only — the per-note window bookkeeping:
 ///

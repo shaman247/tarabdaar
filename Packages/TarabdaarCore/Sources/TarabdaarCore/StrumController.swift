@@ -1,7 +1,7 @@
 import Foundation
 
 /// THE CONTROLLER STRUM — a HELD CHORD sounded as ordinary notes in the
-/// MAIN voice (fresh strings, taraf charge, firm strike velocity). Held by
+/// MAIN voice (fresh strings, taraf charge). Held by
 /// the Joy-Con L button and/or the ACCEL TRIGGER (the strike envelope
 /// crossing `ctl_strum_thresh`); a press always closes any chord still
 /// held; touch ids are GENERATION-scoped so a re-press retriggers.
@@ -19,13 +19,13 @@ public final class StrumController {
     /// The note engine, as plain closures (`PitchPadEngine` on the Mac).
     public struct NoteSink {
         public var noteOn: (_ touchId: Int, _ ratio: Double,
-                            _ velocity01: Double, _ exprScale: Double) -> Void
+                            _ exprScale: Double) -> Void
         public var noteOff: (_ touchId: Int) -> Void
         public var glide: (_ touchId: Int, _ ratio: Double) -> Void
         public var setExpr: (_ touchId: Int, _ exprScale: Double) -> Void
 
         public init(
-            noteOn: @escaping (Int, Double, Double, Double) -> Void,
+            noteOn: @escaping (Int, Double, Double) -> Void,
             noteOff: @escaping (Int) -> Void,
             glide: @escaping (Int, Double) -> Void,
             setExpr: @escaping (Int, Double) -> Void
@@ -181,7 +181,7 @@ public final class StrumController {
             let touch = Self.touchId(gen: gen, index: i)
             // A fixed-register anchor: exempt from the octave shift and from
             // the glide queue (near-simultaneous onsets must not chain).
-            sink.noteOn(touch, note.ratio, 0.9, expr * note.weight)
+            sink.noteOn(touch, note.ratio, expr * note.weight)
             held.append((touch, note.weight))
         }
     }
@@ -211,7 +211,7 @@ public final class StrumController {
         while held.count < notes.count {
             let i = held.count
             let touch = Self.touchId(gen: gen, index: i)
-            sink.noteOn(touch, notes[i].ratio, 0.9, expr * notes[i].weight)
+            sink.noteOn(touch, notes[i].ratio, expr * notes[i].weight)
             held.append((touch, notes[i].weight))
         }
     }

@@ -93,6 +93,7 @@ public final class StringVoiceSource {
     /// them. `bow_jt_inject` is internal (the inject-ring arm has no registry
     /// key); everything else is a `ParamRegistry` key.
     private static let controlKnobs: [ControlKnob] = [
+        ControlKnob("bow_attack_sharpness", unit, { $0.setAttackSharpness($1) }),
         // top of range = bypass: hand the engine 0 so it restores the exact
         // build-time coefficient (byte-null) — this one rests at 20 kHz
         ControlKnob("bow_jt_lp", { $0 >= 20000 ? 0 : nonNegative($0) },
@@ -108,9 +109,26 @@ public final class StringVoiceSource {
         // neutral = the fitted recruitment profile
         ControlKnob("bow_jt_sel", unit,
                     { $0.setTarafSelectivity($1) }),
-        // neutral = the fitted bone
-        ControlKnob("bow_jt_evolve", unit,
-                    { $0.setJtEvolve($1) }),
+        // neutral = the fitted graze operating point
+        ControlKnob("bow_jt_drive", nonNegative, { $0.setJtDrive($1) }),
+        ControlKnob("bow_jt_drive_norm", unit, { $0.setJtDriveNorm($1) }),
+        ControlKnob("bow_jt_pulse", reapply: .whenChanged, unit, group: pushJtPulse),
+        ControlKnob("bow_jt_dual_lp", { min(max($0, 2000), 20000) },
+                    { $0.setJtDualTone(hz: $1) }),
+        ControlKnob("bow_jt_dual_select", unit,
+                    { $0.setJtDualSelectivity($1) }),
+        ControlKnob("bow_jt_bow_bloom", unit,
+                    { $0.setJtBowBloom($1) }),
+        ControlKnob("bow_jt_dual_mm", unit,
+                    { $0.setJtDualDisplacement(mm: $1) }),
+        ControlKnob("bow_jt_pluck", reapply: .whenChanged,
+                    { min(max($0, 0), 0.3) }, group: pushJtPluck),
+        ControlKnob("bow_jt_pluck_decay_ms", reapply: .viaSibling,
+                    { min(max($0, 1), 100) }, group: pushJtPluck),
+        ControlKnob("bow_jt_pulse_attack_ms", reapply: .viaSibling,
+                    { min(max($0, 1), 100) }, group: pushJtPulse),
+        ControlKnob("bow_jt_pulse_decay_ms", reapply: .viaSibling,
+                    { min(max($0, 10), 2000) }, group: pushJtPulse),
         // neutral = uniform bone across the register
         ControlKnob("bow_jt_ev_reg", bipolar, { $0.setJtEvolveRegister($1) }),
         // neutral = the chromatic bridge's fitted bone
@@ -132,6 +150,19 @@ public final class StringVoiceSource {
                         ratio: read("bow_jt_cap_ratio"))
     }
 
+    private static func pushJtPulse(_ engine: BowEngine,
+                                    _ read: (String) -> Double) {
+        engine.setJtEvolutionPulse(amount: read("bow_jt_pulse"),
+                                   attackMs: read("bow_jt_pulse_attack_ms"),
+                                   decayMs: read("bow_jt_pulse_decay_ms"))
+    }
+
+    private static func pushJtPluck(_ engine: BowEngine,
+                                   _ read: (String) -> Double) {
+        engine.setJtPluck(drive: read("bow_jt_pluck"),
+                          decayMs: read("bow_jt_pluck_decay_ms"))
+    }
+
     private static let knobByKey: [String: ControlKnob] =
         Dictionary(uniqueKeysWithValues: controlKnobs.map { ($0.key, $0) })
 
@@ -145,6 +176,51 @@ public final class StringVoiceSource {
     /// `cacheLock`; engine pushes read from a snapshot taken inside it.
     private var controlValues: [String: Double] = [:]
     private let cacheLock = NSLock()
+    /// Diagnostic snapshot only; absent cached controls resolve to their fitted neutral.
+    func diagnosticControls() -> [String: Double] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return Dictionary(uniqueKeysWithValues: Self.controlKnobs.map {
+            ($0.key, Self.controlValue($0.key, in: controlValues))
+        })
+    }
+    func diagnosticFX() -> [String: Any] {
+        cacheLock.lock()
+        let settings = fxSettings
+        cacheLock.unlock()
+        return Dictionary(uniqueKeysWithValues: FXPoint.allCases.map { point in
+            let s = settings[point.rawValue]
+            let values: [String: Any] = [
+                "eqOn": s.eqOn, "eqAmount": s.eqAmount,
+                "eqPoints": s.eqPoints.map { ["hz": $0.hz, "db": $0.db] },
+                "revOn": s.revOn, "revKind": s.revKind, "revMix": s.revMix,
+                "revSize": s.revSize, "revCutoff": s.revCutoff
+            ]
+            return (point.keyPrefix, values)
+        })
+    }
+    private var performanceProfile: (tonic: Double, ratios: [Double], gains: [Double], unmatchedGain: Double) = (1, [], [], 1)
+
+    public func setPerformanceProfile(tonic: Double, ratios: [Double], gains: [Double], unmatchedGain: Double) {
+        cacheLock.lock()
+        performanceProfile = (tonic, ratios, gains, unmatchedGain)
+        cacheLock.unlock()
+        if let engine = currentEngine() { republishPerformanceProfile(to: engine) }
+    }
+
+    private func republishPerformanceProfile(to engine: BowEngine) {
+        cacheLock.lock()
+        let profile = performanceProfile
+        cacheLock.unlock()
+        let values = engine.jtRowFreqs.map { hz -> Double in
+            guard !profile.gains.isEmpty else { return 1 }
+            guard let d = PerformancePitchProfile.nearestDegree(ratio: hz / profile.tonic,
+                                                                scale: profile.ratios),
+                  profile.gains.indices.contains(d) else { return profile.unmatchedGain }
+            return profile.gains[d]
+        }
+        engine.setPerformanceGains(values)
+    }
 
     /// The cached (clamped) value of one knob, or its neutral, from a snapshot.
     private static func controlValue(_ key: String,
@@ -288,6 +364,19 @@ public final class StringVoiceSource {
         currentEngine()?.setFX(point, settings)
     }
 
+    private var axisTransforms: [BowAxis: BowAxisTransform] = [:]
+
+    public func setAxisTransforms(_ curves: [String: [BowAxisPoint]]) {
+        var transforms: [BowAxis: BowAxisTransform] = [:]
+        for axis in BowAxis.allCases {
+            transforms[axis] = BowAxisTransform(points: curves[axis.rawValue] ?? BowAxisTransform.identity)
+        }
+        cacheLock.lock()
+        axisTransforms = transforms
+        currentEngine()?.setAxisTransforms(transforms)
+        cacheLock.unlock()
+    }
+
     public init(sr: Double = Config.sampleRate) {
         modelSR = sr
         let st = state
@@ -344,6 +433,7 @@ public final class StringVoiceSource {
         if let engine {
             // re-apply the runtime playing state (a rebuild must not snap to defaults)
             republishControls(to: engine)
+            republishPerformanceProfile(to: engine)
             if busMeterOn { engine.setBusMeter(true) }
             if scopeOn { engine.setScopeArmed(true) }
             cacheLock.lock()
@@ -353,7 +443,10 @@ public final class StringVoiceSource {
                 engine.setFX(point, fx[point.rawValue])
             }
         }
+        cacheLock.lock()
+        engine?.setAxisTransforms(axisTransforms)
         fader.publish(engine, crossfadeMs: crossfadeMs ?? EngineCrossfade.defaultMs)
+        cacheLock.unlock()
     }
 
     public var isArmed: Bool { fader.isArmed }
@@ -385,10 +478,8 @@ public final class StringVoiceSource {
         mapper.touchAllOff()
     }
 
-    /// Settle pre-roll blocks (4096 frames each) rendered and discarded before
-    /// publish — the dominant rebuild cost; the minimum that keeps the publish
-    /// peak under −80 dBFS (`RebuildCostTests`).
-    static var settleBlocks = 5
+    /// Minimum warmup blocks for a stationary bank; publication additionally verifies silence.
+    static var settleBlocks = 1
 
     /// Apply an edit to the RUNNING engine (`BowEngine.setLiveParams`) —
     /// nothing is reset, no pre-roll or crossfade. False when no engine
@@ -509,7 +600,7 @@ public final class StringVoiceSource {
             + [Bool](repeating: true, count: chromRows.count)
         if let fw = follower {
             rows.append((f: tonicHz * 0.5, gain: fw.gain, t60: fw.t60))
-            flags.append(false)
+            flags.append(true)
         }
         return (rows, flags)
     }
@@ -537,6 +628,10 @@ public final class StringVoiceSource {
             rows: plan.rows, srk: sr * Double(osf), bp: bp,
             trackRowIndex: follower != nil ? plan.rows.count - 1 : nil,
             chromatic: plan.chromatic)
+        tables.jt?.dualRows = plan.rows.indices.filter {
+            !plan.chromatic[$0] && (follower == nil || $0 != plan.rows.count - 1)
+        }
+        bp.num.removeValue(forKey: "bow_jt_dual_row")
         let engine = BowEngine(tables: tables, mapper: mapper, bp: bp,
                                sr: sr, rfir: [],
                                eLp: bp.v("bow_rad_lp", 8000.0),
@@ -546,27 +641,14 @@ public final class StringVoiceSource {
                                reverbMix: bp.v("bow_rev_mix", 0.08),
                                reverbWidth: bp.v("bow_rev_width", 0.6),
                                maxPoly: Int(bp.v("bow_live_poly", 8.0).rounded()))
+        guard Set(tables.jt?.dualRows ?? []) == engine.jtDualRows else { return nil }
         // trim = the fitted calibration; `bow_gain` is re-applied by `setEngine`
         engine.outGain = bp.v("bow_live_trim", 0.05)
         engine.seedLiveGains()   // ramp starts from the built values
-        // SETTLE PRE-ROLL: a fresh jt web relaxes off the builder's q0 with
-        // an audible chime, so `settleBlocks` blocks are rendered and
-        // discarded here (off-main; also primes the async-jt FIFO). NOT in
-        // BowEngine.init — parity fixtures need renders from t = 0. The
-        // taraf is choked through the pre-roll so the contact settles to its
-        // discrete equilibrium; the ring is restored exactly (0 = byte-null).
-        engine.setJtSettleDamp(t60: 0.05)
-        var prL = [Double](repeating: 0, count: 4096)
-        var prR = [Double](repeating: 0, count: 4096)
-        for _ in 0..<settleBlocks {
-            prL.withUnsafeMutableBufferPointer { lb in
-                prR.withUnsafeMutableBufferPointer { rb in
-                    engine.render(frames: 4096, outL: lb.baseAddress!,
-                                  outR: rb.baseAddress!)
-                }
-            }
-        }
-        engine.setJtSettleDamp(t60: 0)   // natural ring back (byte-null)
+        // Use a quiet control snapshot during setup; held touches remain on
+        // the mapper and mount on the first published render. A failed solve
+        // retains the five-block damped warmup. Never publish a noisy build.
+        guard engine.settleForPublication(minimumBlocks: settleBlocks) != nil else { return nil }
         return engine
     }
 }

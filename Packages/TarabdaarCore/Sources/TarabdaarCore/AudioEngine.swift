@@ -40,6 +40,7 @@ public class AudioEngine: ObservableObject {
     /// Drone buttons: each plucks ONE mapped sympathetic string, found by
     /// identity on its nominal Hz (`droneFreqs`; nil = unmapped → inert).
     /// Guarded by `lock` with `droneHeld` (presses arrive on the MIDI thread).
+    var droneChromatic = [Bool?](repeating: nil, count: InstrumentState.droneSlotCount)
     var droneFreqs = [Double?](repeating: nil,
                                count: FretArrangement.droneCount)
     var droneHeld = [Bool](repeating: false,
@@ -49,6 +50,7 @@ public class AudioEngine: ObservableObject {
     let stringBuildQueue = DispatchQueue(label: "tarabdaar.string.build",
                                          qos: .userInitiated)
     var stringBuildGen = 0
+    @Published public internal(set) var tarafBank = TarafBank.empty
 
     // MARK: - Tanpura voice
 
@@ -83,6 +85,9 @@ public class AudioEngine: ObservableObject {
     /// here rather than on `PluckedVoice`. Guarded by `lock`.
     var tanpuraDroneLevel = 1.0
     var tanpuraDroneCycleSec = 2.5
+    /// Session register: drones start an octave below their mapped strings.
+    /// Guarded by `lock`; the controller's Up button restores the mapped octave.
+    var tanpuraDroneOctaveRaised = false
     /// Pending debounced table rebuild (main-thread mutate only).
     let tanpuraTableRebuild = Debouncer(delay: 0.75)
 
@@ -99,10 +104,17 @@ public class AudioEngine: ObservableObject {
     var touchPitchSemis: [UInt16: Double] = [:]
     /// Still-held touches in play order, most-recent last.
     var heldTouchOrder: [UInt16] = []
+    var performanceProfile = PerformancePitchProfile()
+    private var profileExcludedTouches = Set<UInt16>()
     /// Per-touch expression scale (the strum chord; absent = 1). Delivered
     /// by `touchExpr` ahead of the onset; String: the mapper's per-slot
     /// scale, live while held; plucked mains: the pluck level at onset.
     private var touchExprScale: [UInt16: Double] = [:]
+    /// The pitch accent (`ctl_fret_accent`): the fret grid it reads and
+    /// its amount. The per-touch expression scale handed to the voice is
+    /// the strum scale × the accent at the touch's pitch. Guarded by `lock`.
+    var fretPitchGrid = FretPitchGrid(tonicHz: 261.63, ratios: [])
+    var pitchAccentAmount: Double = 0
 
     /// Guards the readout scalars below; separate from `lock` so the Live
     /// tab's poll never contends with it. Never held while `lock` is held.
@@ -126,11 +138,14 @@ public class AudioEngine: ObservableObject {
 
     public init() {
         setupAudio()
-        glideQueue.onTouchOn = { [weak self] id, pitch, vel in
-            self?.touchOnDirect(id, pitchSemis: pitch, velocity: vel)
+        glideQueue.onTouchOn = { [weak self] id, pitch in
+            self?.touchOnDirect(id, pitchSemis: pitch)
         }
         glideQueue.onTouchGlide = { [weak self] id, pitch in
             self?.touchGlideDirect(id, pitchSemis: pitch)
+        }
+        glideQueue.onTouchResume = { [weak self] id, pitch in
+            self?.touchResumeDirect(id, pitchSemis: pitch)
         }
         glideQueue.onTouchOff = { [weak self] id in
             self?.touchOffDirect(id)
@@ -199,12 +214,15 @@ public class AudioEngine: ObservableObject {
 
     /// Touch onset, through the glide queue: a fresh note via
     /// `touchOnDirect`, or a queued glissando waypoint.
-    public func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) {
-        glideQueue.touchOn(id, pitchSemis: pitchSemis, velocity: velocity)
+    public func touchOn(_ id: UInt16, pitchSemis: Double) {
+        glideQueue.touchOn(id, pitchSemis: pitchSemis)
     }
 
     /// The glide queue's exemption mark (the strum chord), delivered before `touchOn`.
     public func touchGlideExempt(_ id: UInt16) {
+        lock.lock()
+        profileExcludedTouches.insert(id)
+        lock.unlock()
         glideQueue.markExempt(id)
     }
 
@@ -214,7 +232,7 @@ public class AudioEngine: ObservableObject {
         glideQueue.touchGlide(id, pitchSemis: pitchSemis)
     }
 
-    /// Touch release, through the glide queue (never deferred): a chain
+    /// Touch release, immediately through the glide queue: a chain
     /// member's release is resolved by the sequencer, others forward directly.
     public func touchOff(_ id: UInt16) {
         glideQueue.touchOff(id)
@@ -222,19 +240,81 @@ public class AudioEngine: ObservableObject {
 
     /// Touch onset, the DIRECT path. A plucked main instrument plucks HERE
     /// at the exact pitch (onset and pitch arrive together).
-    private func touchOnDirect(_ id: UInt16, pitchSemis: Double,
-                               velocity: Double) {
+    private func touchOnDirect(_ id: UInt16, pitchSemis: Double) {
         lock.lock()
+        if !profileExcludedTouches.contains(id) {
+            performanceProfile.setPitch(pitchSemis, for: id, at: ProcessInfo.processInfo.systemUptime)
+        }
         touchPitchSemis[id] = pitchSemis
         heldTouchOrder.removeAll { $0 == id }
         heldTouchOrder.append(id)
         let voice = playedVoiceLocked(mainInstrumentStorage)
-        let exprScale = touchExprScale[id] ?? 1.0
+        let exprScale = effectiveExprScaleLocked(id)
         let snap = meterSnapshotLocked()
         lock.unlock()
         storeMeter(snap)
-        voice?.touchOn(id, pitchSemis: pitchSemis, velocity: velocity,
+        voice?.touchOn(id, pitchSemis: pitchSemis,
                        exprScale: exprScale)
+    }
+
+    /// Restore tracking and reopen the released voice without a new attack.
+    private func touchResumeDirect(_ id: UInt16, pitchSemis: Double) {
+        lock.lock()
+        performanceProfile.setPitch(pitchSemis, for: id, at: ProcessInfo.processInfo.systemUptime)
+        touchPitchSemis[id] = pitchSemis
+        heldTouchOrder.removeAll { $0 == id }
+        heldTouchOrder.append(id)
+        let voice = playedVoiceLocked(mainInstrumentStorage)
+        let exprScale = effectiveExprScaleLocked(id)
+        let snap = meterSnapshotLocked()
+        lock.unlock()
+        storeMeter(snap)
+        if voice?.touchResume(id, exprScale: exprScale) != true {
+            // A stolen slot or rebuilt instrument has no prior string to resume.
+            voice?.touchOn(id, pitchSemis: pitchSemis, exprScale: exprScale)
+        }
+    }
+
+    /// The expression scale a touch carries into the voice: the strum
+    /// chord's scale × the pitch accent at the touch's current pitch.
+    /// Exactly 1.0 with neither in play. Callers hold `lock`.
+    func effectiveExprScaleLocked(_ id: UInt16) -> Double {
+        let strum = touchExprScale[id] ?? 1.0
+        guard pitchAccentAmount > 0, let semis = touchPitchSemis[id] else { return strum }
+        return strum * fretPitchGrid.exprScale(atSemis: semis, amount: pitchAccentAmount)
+    }
+
+    /// Re-deliver every held touch's expression scale (the accent amount
+    /// or the fret grid moved under sounding notes). Callers hold `lock`;
+    /// the returned closure runs after it is released.
+    private func repushHeldExprLocked() -> () -> Void {
+        let voice = playedVoiceLocked(mainInstrumentStorage)
+        let pushes = heldTouchOrder.map { ($0, effectiveExprScaleLocked($0)) }
+        return { for (id, s) in pushes { voice?.touchExpr(id, exprScale: s) } }
+    }
+
+    /// The pitch accent amount (`ctl_fret_accent`, 0…1). Thread-safe;
+    /// held notes take the new amount at once.
+    public func setPitchAccent(_ amount: Double) {
+        let a = min(max(amount, 0), 1)
+        lock.lock()
+        guard a != pitchAccentAmount else { lock.unlock(); return }
+        pitchAccentAmount = a
+        let push = repushHeldExprLocked()
+        lock.unlock()
+        push()
+    }
+
+    /// The fret pitches the accent reads (the pad's arrangement against
+    /// the ONE scale, pushed on every change of either). Thread-safe; held
+    /// notes follow at once.
+    public func setFretPitchGrid(_ grid: FretPitchGrid) {
+        lock.lock()
+        guard grid != fretPitchGrid else { lock.unlock(); return }
+        fretPitchGrid = grid
+        let push = pitchAccentAmount > 0 ? repushHeldExprLocked() : {}
+        lock.unlock()
+        push()
     }
 
     /// The voice the fret notes drive right now. Callers hold `lock`.
@@ -257,27 +337,35 @@ public class AudioEngine: ObservableObject {
         lock.lock()
         touchExprScale[id] = exprScale
         let voice = playedVoiceLocked(mainInstrumentStorage)
+        let effective = effectiveExprScaleLocked(id)
         lock.unlock()
-        voice?.touchExpr(id, exprScale: exprScale)
+        voice?.touchExpr(id, exprScale: effective)
     }
 
     /// Pitch update, the DIRECT path. String: the mapper tracks the finger
-    /// directly. Plucked mains: live-retune the ringing slot kernel-side.
+    /// directly, with the pitch accent's expression scale landing in the
+    /// same update. Plucked mains: live-retune the ringing slot kernel-side.
     private func touchGlideDirect(_ id: UInt16, pitchSemis: Double) {
         lock.lock()
         guard touchPitchSemis[id] != nil else { lock.unlock(); return }
+        if !profileExcludedTouches.contains(id) {
+            performanceProfile.setPitch(pitchSemis, for: id, at: ProcessInfo.processInfo.systemUptime)
+        }
         touchPitchSemis[id] = pitchSemis
         let voice = playedVoiceLocked(mainInstrumentStorage)
+        let exprScale = pitchAccentAmount > 0 ? effectiveExprScaleLocked(id) : nil
         let snap = meterSnapshotLocked()
         lock.unlock()
         storeMeter(snap)
-        voice?.touchGlide(id, pitchSemis: pitchSemis)
+        voice?.touchGlide(id, pitchSemis: pitchSemis, exprScale: exprScale)
     }
 
     /// Touch release, the DIRECT path. String: bow lift. Plucked mains:
     /// fast-release the slot (`tp_rel_t60`), even after a switch back to String.
     private func touchOffDirect(_ id: UInt16) {
         lock.lock()
+        performanceProfile.setPitch(nil, for: id, at: ProcessInfo.processInfo.systemUptime)
+        profileExcludedTouches.remove(id)
         touchPitchSemis.removeValue(forKey: id)
         touchExprScale.removeValue(forKey: id)
         heldTouchOrder.removeAll { $0 == id }
@@ -293,6 +381,8 @@ public class AudioEngine: ObservableObject {
     public func touchesAllOff() {
         glideQueue.reset()
         lock.lock()
+        performanceProfile.releaseAll(at: ProcessInfo.processInfo.systemUptime)
+        profileExcludedTouches.removeAll()
         touchPitchSemis.removeAll(keepingCapacity: true)
         touchExprScale.removeAll(keepingCapacity: true)
         heldTouchOrder.removeAll(keepingCapacity: true)

@@ -40,6 +40,32 @@ public struct TarabdaarPreset: Codable {
     /// the points (`SarangiKit.EQCurve`); a point with no entry is flat.
     public var fxCurves: [String: [EQPoint]]?
 
+    /// Editable bow-axis points, keyed by expr / pos / press; an empty section resets to factory.
+    public var bowAxisCurves: [String: [BowAxisPoint]]?
+
+    public static func factoryBowAxisCurves() -> [String: [BowAxisPoint]] {
+        let bp = Presets.bowedStringParams() ?? BowParams(num: [:])
+        return Dictionary(uniqueKeysWithValues: BowAxis.allCases.map {
+            ($0.rawValue, BowAxisTransform(bp: bp, axis: $0.rawValue).points)
+        })
+    }
+
+    /// Structured curves win; older parameter sections inherit untouched factory knots.
+    public func resolvedBowAxisCurves() -> [String: [BowAxisPoint]]? {
+        let factory = Self.factoryBowAxisCurves()
+        if let curves = bowAxisCurves {
+            return factory.merging(curves.filter { BowAxis(rawValue: $0.key) != nil }
+                .mapValues(BowAxisTransform.normalize)) { _, curve in curve }
+        }
+        guard paramValues != nil || stringOverrides != nil else { return nil }
+        var bp = Presets.bowedStringParams() ?? BowParams(num: [:])
+        let values = (stringOverrides ?? [:]).merging(paramValues ?? [:]) { _, value in value }
+        for (key, value) in values { bp.num[key] = value }
+        return Dictionary(uniqueKeysWithValues: BowAxis.allCases.map {
+            ($0.rawValue, BowAxisTransform(bp: bp, axis: $0.rawValue).points)
+        })
+    }
+
     /// Composite parameters (the 0–1 macros).
     public var composites: [CompositeParam]?
 
@@ -53,6 +79,8 @@ public struct TarabdaarPreset: Codable {
     /// simply fails the lookup at apply time.
     public var mainInstrument: String?
     public var droneVoice: String?
+    /// Ordered drone-button slots for Down / GL; repetitions are intentional.
+    public var droneSequence: [Int]?
 
     // MARK: - Sections
 
@@ -64,11 +92,13 @@ public struct TarabdaarPreset: Codable {
         if let p = paramValues, !p.isEmpty { s.append("\(p.count) parameters") }
         if let c = composites, !c.isEmpty { s.append("\(c.count) composites") }
         if let f = fxCurves, !f.isEmpty { s.append("\(f.count) EQ curves") }
+        if bowAxisCurves != nil { s.append("bow-axis curves") }
         if let t = tiltMapping {
             let n = t.mappings.values.filter { !$0.bindings.isEmpty }.count
             if n > 0 { s.append("\(n) tilt bindings") }
         }
         if mainInstrument != nil || droneVoice != nil { s.append("voice routing") }
+        if droneSequence != nil { s.append("drone sequence") }
         return s
     }
 

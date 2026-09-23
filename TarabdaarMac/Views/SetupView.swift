@@ -1,7 +1,7 @@
 import TarabdaarCore
 import SwiftUI
 
-/// Combined configuration surface: Audio, MIDI, and Connection in one
+/// Combined configuration surface: Joy-Con, Audio, MIDI, and Connection in one
 /// scroll-friendly stack, one click from the top-level Setup tab.
 struct SetupView: View {
     @ObservedObject var controller: AppController
@@ -9,6 +9,8 @@ struct SetupView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                JoyConStatusView(controller: controller)
+                Divider()
                 AudioSettingsView(controller: controller)
                     .padding(.bottom, 8)
                 Divider()
@@ -16,8 +18,6 @@ struct SetupView: View {
                     .padding(.bottom, 8)
                 Divider()
                 ConnectionStatusView(controller: controller)
-                Divider()
-                JoyConStatusView(controller: controller)
             }
         }
     }

@@ -49,6 +49,7 @@ extension AudioEngine {
         lock.unlock()
         if on { rebuildStringVoice(tonic: tonic, strings: strings,
                                    follower: follower) }
+        else { tarafBank = .empty }
         storeMeter((0, 0, false))
         return true
     }
@@ -63,6 +64,11 @@ extension AudioEngine {
     /// twice this (`BowEngine.fxRate`).
     public var stringVoiceSampleRate: Double {
         stringVoiceSource?.modelSR ?? Config.sampleRate
+    }
+
+    /// Replace the structured bow curves, retaining them across engine rebuilds.
+    public func setBowAxisCurves(_ curves: [String: [BowAxisPoint]]) {
+        stringVoiceSource?.setAxisTransforms(curves)
     }
 
     /// Replace one FX insert point's EQ curve — the points the FX tab
@@ -121,10 +127,10 @@ extension AudioEngine {
         lock.lock()
         let held = droneHeld.indices
             .filter { droneHeld[$0] }
-            .compactMap { droneFreqs[$0] }
+            .compactMap { i in droneFreqs[i].map { (hz: $0, chromatic: droneChromatic[i]) } }
         lock.unlock()
         for hz in held {
-            if let row = engine.droneRow(forExactHz: hz) {
+            if let row = engine.droneRow(forExactHz: hz.hz, chromatic: hz.chromatic) {
                 engine.dronePress(row: row)
             }
         }
@@ -151,7 +157,16 @@ extension AudioEngine {
                     NSLog("Tarabdaar: String engine build failed (bowed_string.json missing?)")
                 }
                 self.stringVoiceSource?.setEngine(engine)
-                if let engine { self.reapplyHeldDrones(to: engine) }
+                if let engine {
+                    let rows = engine.jtRowFreqs.prefix(128).enumerated().map { index, hz in
+                        TarafBank.Row(id: UInt8(index), frequency: Float(hz),
+                            flags: (engine.jtDualRows.contains(index) ? 1 : 0)
+                                | (index == engine.jtFollowerRow ? 2 : 0))
+                    }
+                    self.tarafBank = TarafBank(revision: UInt32.random(in: 1...UInt32.max),
+                                              tonic: Float(tonic), rows: rows)
+                    self.reapplyHeldDrones(to: engine)
+                } else { self.tarafBank = .empty }
             }
         }
     }
@@ -193,6 +208,13 @@ extension AudioEngine {
                                    follower: follower) }
     }
 
+    /// Main-thread gesture routing; a stale bank can never target a replacement row.
+    public func pluckTaraf(revision: UInt32, row: UInt8) {
+        guard tarafBank.contains(revision: revision, row: row),
+              let engine = stringVoiceSource?.currentEngine() else { return }
+        engine.pluckTaraf(row: Int(row))
+    }
+
     // MARK: - Tarab tuning (Strings tab) → String voice
 
     /// Push the tarab tuning (tonic + resolved strings) to the String
@@ -201,6 +223,7 @@ extension AudioEngine {
     /// `follower` = the melody-follower's (gain, t60) when enabled.
     public func rebuildSarangi(strings: [ResolvedString], tonic: Double,
                                droneFreqs: [Double?] = [],
+                               droneChromatic: [Bool?] = [],
                                follower: (gain: Double, t60: Double)? = nil) {
         lock.lock()
         lastSarangiStrings = strings
@@ -208,6 +231,7 @@ extension AudioEngine {
         lastSarangiFollower = follower
         for i in self.droneFreqs.indices {
             self.droneFreqs[i] = droneFreqs.indices.contains(i) ? droneFreqs[i] : nil
+            self.droneChromatic[i] = droneChromatic.indices.contains(i) ? droneChromatic[i] : nil
         }
         // a slot unmapped while held must not stay latched
         for i in droneHeld.indices where self.droneFreqs[i] == nil {

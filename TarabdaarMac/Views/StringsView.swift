@@ -3,15 +3,8 @@ import SarangiKit
 import TarabdaarCore
 import SwiftUI
 
-/// The **Strings** tab: the sympathetic-string bank, two sets on two bridges.
-/// The **raga set** (scale degree + octave of the centralized scale; pitches
-/// always follow it) rides the `bow_jt_*` bridge; the **chromatic set**
-/// (semitones of the fixed JI grid off the tonic) carries its own level,
-/// level norm and evolution (`bow_jtc_gain`/`_norm`/`_evolve`) over the same
-/// jawari geometry. The raga
-/// layout regenerates when the scale's degree count changes or via
-/// "Regenerate from scale"; the chromatic set resets via its own button;
-/// hand edits otherwise stand. Backed by `controller.sarangi`.
+/// Two taraf banks, edited through matching tables and bank-local actions.
+/// Raga uses physical contact rows; chromatic includes the melody follower.
 struct StringsView: View {
     @ObservedObject var controller: AppController
     @ObservedObject var store: SarangiStore
@@ -48,12 +41,17 @@ struct StringsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                PerformanceProfileView(controller: controller)
+                Divider()
                 HeaderSection(controller: controller)
                 Divider()
-                StringsSection(bridge: .raga, degreeLabels: degreeLabels)
+                StringsSection(bridge: .raga, degreeLabels: degreeLabels,
+                               regenerate: { controller.syncTarabFromScale(force: true) })
                 Divider()
                 StringsSection(bridge: .chromatic,
-                               degreeLabels: chromaticLabels)
+                               degreeLabels: chromaticLabels,
+                               regenerate: { store.regenerateChromatic() },
+                               scaleLabels: degreeLabels)
                 Divider()
                 DroneMappingSection(controller: controller,
                                     degreeLabels: degreeLabels)
@@ -61,7 +59,7 @@ struct StringsView: View {
                 StrumMappingSection(degreeLabels: degreeLabels)
             }
             .padding(16)
-            .frame(maxWidth: 700, alignment: .leading)
+            .frame(maxWidth: 1000, alignment: .leading)
         }
         .environmentObject(store)
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -81,15 +79,7 @@ private struct HeaderSection: View {
                 Text("(\(store.state.strings.count))").foregroundStyle(.secondary)
                 Spacer()
             }
-            Text("Two sets on two bridges, as on the instrument. RAGA strings are degrees of the Pitch Pad scale — pitches always follow the scale and the tonic — on the bridge the Parameters tab's \"Jawari taraf\" group tunes; the raga layout regenerates itself only when the scale's degree count changes. CHROMATIC strings are semitones of a fixed just-intonation grid off the tonic (the main-bridge set, tuned once whatever the raga) on their own bridge — the \"Chromatic bridge\" group. Gains, decays and both row sets are yours to edit. Each table stays sorted by pitch and holds one string per pitch per bridge — a pitch edit that would duplicate another row on the same bridge is ignored, and + adds at the first free pitch.")
-                .font(.padCaption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
-                Button("Regenerate from scale") { controller.syncTarabFromScale(force: true) }
-                    .help("Rebuild the default RAGA string layout from the current scale (discards hand edits to the raga rows; the chromatic set stands)")
-                Button("Reset chromatic set") { store.regenerateChromatic() }
-                    .help("Restore the default chromatic set — 15 semitones, low Ga to tivra Ma (discards hand edits to the chromatic rows)")
-                Spacer()
                 Text(String(format: "Tonic %.2f Hz · %@", store.state.tonicHz, noteName(store.state.tonicHz)))
                     .font(.padCaption).foregroundStyle(.secondary)
             }
@@ -103,18 +93,17 @@ private struct HeaderSection: View {
 
 // MARK: - The string pool
 
-/// One bridge's table. The raga table carries the melody-follower row
-/// pinned above it (a raga-bridge string by nature); the chromatic table
-/// lists the semitone strings under their own pitch dropdown.
+/// One bridge's table; the legacy melody follower lives with the chromatic bank.
 private struct StringsSection: View {
     @EnvironmentObject var store: SarangiStore
     let bridge: TarabSet
     let degreeLabels: [String]
+    let regenerate: () -> Void
 
+    var scaleLabels: [String] = []
     private var rows: [StringSpec] { store.state.strings(in: bridge) }
     private var title: String {
-        bridge == .raga ? "Raga strings (side bridges)"
-                     : "Chromatic strings (main bridge)"
+        bridge == .raga ? "Raga taraf" : "Chromatic taraf"
     }
 
     var body: some View {
@@ -123,6 +112,9 @@ private struct StringsSection: View {
                 Text(title).font(.padSubheadline).bold()
                 Text("(\(rows.count))").font(.padCaption).foregroundStyle(.secondary)
                 Spacer()
+                Button(bridge == .raga ? "Regenerate from scale" : "Reset chromatic set",
+                       action: regenerate)
+                    .font(.padCaption)
                 let allOn = !rows.isEmpty && rows.allSatisfy(\.enabled)
                 Button(allOn ? "Disable all" : "Enable all") {
                     store.setAllEnabled(!allOn, in: bridge)
@@ -131,17 +123,17 @@ private struct StringsSection: View {
                 Button { store.addString(to: bridge) } label: { Image(systemName: "plus") }
                     .help(bridge == .raga ? "Add a raga string" : "Add a chromatic string")
             }
+            if bridge == .chromatic { FollowerRow() }
             if rows.isEmpty && bridge == .chromatic {
-                Text("— (Reset chromatic set restores the default 15)")
+                Text("—")
                     .font(.padCaption2).foregroundStyle(.tertiary)
             } else if rows.isEmpty {
                 Text("—").font(.padCaption2).foregroundStyle(.tertiary)
             } else {
                 TarabTableHeader(bridge: bridge)
-                if bridge == .raga { FollowerRow() }
                 LazyVStack(spacing: 2) {
                     ForEach(rows) { s in
-                        StringRow(id: s.id, degreeLabels: degreeLabels)
+                        StringRow(id: s.id, degreeLabels: s.followsScale && bridge == .chromatic ? scaleLabels : degreeLabels)
                     }
                 }
             }
@@ -149,7 +141,7 @@ private struct StringsSection: View {
     }
 }
 
-/// The melody-follower row, pinned above the raga pool: its pitch
+/// The melody-follower row, pinned above the chromatic pool: its pitch
 /// live-retunes to the highest note being played. Same Gain / t60 / On
 /// knobs; no octave or Hz readout; not a drone-button target.
 private struct FollowerRow: View {
@@ -179,7 +171,7 @@ private struct TarabTableHeader: View {
     var bridge: TarabSet = .raga
     var body: some View {
         HStack(spacing: 6) {
-            Text(bridge == .raga ? "Pitch" : "Semitone")
+            Text("Pitch")
                 .frame(width: Typography.scaledWidth(76), alignment: .leading)
             Text("Octave").frame(width: Typography.scaledWidth(64), alignment: .leading)
             Text("Hz").frame(width: Typography.scaledWidth(64), alignment: .leading)
@@ -208,7 +200,7 @@ private struct StringRow: View {
                     }
                 }
                 .labelsHidden().frame(width: Typography.scaledWidth(76))
-                .help(s.set == .raga
+                .help(s.followsScale
                       ? "Scale degree — the pitch, straight from the centralized scale"
                       : "Semitone above the tonic on the fixed JI chromatic grid (named by the scale where it has that pitch)")
                 Picker("", selection: store.stringBinding(id, \.octave)) {
@@ -280,7 +272,52 @@ private struct DroneMappingSection: View {
                     .frame(maxWidth: 360, alignment: .leading)
                 }
             }
+            Text("Drone sequence (Down / GL)").font(.padSubheadline).bold()
+            HStack {
+                Text("Tanpura octave")
+                Text(controller.tanpuraDroneOctaveRaised ? "0" : "−1")
+                    .monospacedDigit()
+            }
+            .font(.padCaption)
+            ForEach(controller.droneSequenceSteps.indices, id: \.self) { index in
+                HStack(spacing: 6) {
+                    Text("Step \(index + 1)")
+                        .frame(width: Typography.scaledWidth(60), alignment: .leading)
+                        .font(.padCaption)
+                    Picker("Step \(index + 1)", selection: Binding(
+                        get: { controller.droneSequenceSteps[index] },
+                        set: { controller.droneSequenceSteps[index] = $0 }
+                    )) {
+                        ForEach(0..<InstrumentState.droneSlotCount, id: \.self) { slot in
+                            Text(droneLabel(slot)).tag(slot)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 360, alignment: .leading)
+                    Button {
+                        controller.droneSequenceSteps.remove(at: index)
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(controller.droneSequenceSteps.count == 1)
+                    .accessibilityLabel("Remove step \(index + 1)")
+                }
+            }
+            HStack {
+                Button("Add step") { controller.droneSequenceSteps.append(2) }
+                Button("Reset sequence") {
+                    controller.droneSequenceSteps = DroneSequence.defaultSteps
+                }
+            }
         }
+    }
+
+    private func droneLabel(_ slot: Int) -> String {
+        let id = store.state.droneStringIds.indices.contains(slot)
+            ? store.state.droneStringIds[slot] : nil
+        let label = store.state.strings.first { $0.id == id }.map(stringLabel) ?? "None"
+        return "Drone \(slot + 1) · \(label)"
     }
 
     private func stringLabel(_ s: StringSpec) -> String {
@@ -350,11 +387,12 @@ private func tarabStringLabel(_ s: StringSpec, state: InstrumentState,
                               degreeLabels: [String]) -> String {
     let hz = s.resolved(tonic: state.tonicHz, scaleRatios: state.scaleRatios).freq
     let name: String
-    if s.set == .chromatic {
+    if !s.followsScale {
         let k = ((s.degree % 12) + 12) % 12
         name = "chromatic +\(k) (\(RagaTuning.chromaticFractions[k]))"
     } else {
-        name = degreeLabels.indices.contains(s.degree) ? degreeLabels[s.degree] : "—"
+        let label = degreeLabels.indices.contains(s.degree) ? degreeLabels[s.degree] : "—"
+        name = s.set == .chromatic ? "chromatic \(label)" : label
     }
     let oct = s.octave == 0 ? "" : (s.octave > 0 ? " +\(s.octave)" : " \(s.octave)")
     let dim = s.enabled ? "" : " (off)"

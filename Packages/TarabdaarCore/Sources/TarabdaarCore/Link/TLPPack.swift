@@ -73,6 +73,15 @@ public enum TLPPack {
         return out
     }
 
+    /// The sender role stamped on a complete SysEx message, without
+    /// unpacking it — nil if it is not a TLP tunnel message.
+    public static func senderRole(of sysex: [UInt8]) -> TLPRole? {
+        guard sysex.count >= header.count + 2,
+              sysex.starts(with: header), sysex.last == 0xF7
+        else { return nil }
+        return TLPRole(rawValue: sysex[header.count])
+    }
+
     /// Decodes a complete SysEx message (F0…F7 inclusive) into the sender
     /// role + TLP frame bytes. nil if it is not a TLP tunnel message or is
     /// malformed.

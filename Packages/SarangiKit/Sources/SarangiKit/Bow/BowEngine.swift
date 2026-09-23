@@ -154,6 +154,8 @@ public final class BowEngine {
     private var lastSerial: [UInt32] = []
     private var slotSilent: [Bool] = []
     var polySnap: BowControlMapper.PolySnapshot
+    private var hasRendered = false
+    private var settlingForPublication = false
 
     /// `rfir` = the 48 kHz radiation FIR taps (empty ⇒ flat), `eLp` = the
     /// radiation low-pass corner (Hz; ≥ 0.44·sr ⇒ bypass).
@@ -243,6 +245,12 @@ public final class BowEngine {
         droneAttackSec = bp.v("bow_drone_attack_ms", 150.0) / 1000.0
         droneReleaseSec = bp.v("bow_drone_release_ms", 350.0) / 1000.0
         droneOnsetDecaySec = bp.v("bow_drone_onset_decay_ms", 500.0) / 1000.0
+        jtPulseAmount = min(max(bp.v("bow_jt_pulse", 0), 0), 1)
+        jtPulseAttack = min(max(bp.v("bow_jt_pulse_attack_ms", 5), 1), 100) / 1000
+        jtPulseDecay = min(max(bp.v("bow_jt_pulse_decay_ms", 180), 10), 2000) / 1000
+        jtPluckDrive = min(max(bp.v("bow_jt_pluck", 0), 0), 0.3)
+        jtDualDisplacement = min(max(bp.v("bow_jt_dual_mm", 0.5), 0), 1) * 0.001
+        jtPluckDecay = min(max(bp.v("bow_jt_pluck_decay_ms", 12), 1), 100) / 1000
         droneLpHz = bp.v("bow_drone_lp_hz", 1600.0)
         droneHpHz = bp.v("bow_drone_hp_hz", 25.0)
         droneToneMix = bp.v("bow_drone_tone_mix", 0.5)
@@ -291,9 +299,27 @@ public final class BowEngine {
                                  jt.phiD, jt.phiU, jt.phiF,
                                  jt.b, jt.G, jt.G4, jt.gd, jt.gd4,
                                  jt.phys, jt.q0)
+                bow_poly_jt_output_levels(pk, jt.rowOutputLevel, Int32(jt.rowOutputLevel.count), 1)
+                // The retired selector is retained only for isolated research fixtures.
+                let fixtureRow = Int(bp.v("bow_jt_dual_row", 0).rounded()) - 1
+                let dualRows = jt.dualRows.isEmpty && fixtureRow >= 0 ? [fixtureRow] : jt.dualRows
+                for row in dualRows where DualTaraf.install(kernel: pk, row: row, tables: jt,
+                    useSAV: bp.v("bow_jt_sav", 0) >= 0.5) {
+                    jtDualRows.insert(row)
+                }
+                bow_poly_jt_dual_tone(pk, bp.v("bow_jt_dual_lp", 20000))
+                bow_poly_jt_dual_selectivity(pk, bp.v("bow_jt_dual_select", 0))
+                bow_poly_jt_dual_bloom(pk, bp.v("bow_jt_bow_bloom", 1))
                 // pool spawn happens at build, never on the audio thread
                 if jt.threads >= 2 {
-                    bow_poly_jt_set_threads(pk, jt.threads)
+                    // A full physical bank needs more lanes than the one-row
+                    // prototype. Leave two cores for audio/control and the OS;
+                    // serial fixtures stay serial and a single physical row
+                    // keeps the old pool.
+                    let extra = max(0, jtDualRows.count - 1)
+                    let available = max(2, ProcessInfo.processInfo.activeProcessorCount - 2)
+                    let workers = extra > 0 ? min(available, Int(jt.threads) + extra) : Int(jt.threads)
+                    bow_poly_jt_set_threads(pk, Int32(workers))
                 }
                 // async live mode: the callback never waits (dispatcher + FIFO)
                 if jt.async >= 1 {
@@ -446,6 +472,14 @@ public final class BowEngine {
     /// thread, remaps on main).
     var droneHeldRows: Set<Int> = []
     var droneLock = os_unfair_lock()
+    var jtPulseAmount = 0.0
+    var jtPulseAttack = 0.005
+    var jtPulseDecay = 0.180
+    var jtPluckDrive = 0.0
+    public private(set) var jtDualRows: Set<Int> = []
+    public var jtDualRow: Int { jtDualRows.min() ?? -1 }
+    var jtDualDisplacement = 0.0005
+    var jtPluckDecay = 0.012
     /// Render-readable shadow of `droneHeldRows` (stores under `droneLock`,
     /// lock-free reads): recruitment counts a held row as fully ringing.
     var droneHeldMask: [Bool] = []
@@ -472,6 +506,11 @@ public final class BowEngine {
     var balCur = 0.0
 
     // MARK: - Live parameters
+
+    // Curves are prepared on the control thread and staged under tiltLock.
+    var pendingAxisTransforms: [BowAxis: BowAxisTransform]?
+    // Render-thread copy, re-applied after ordinary live parameter edits.
+    var axisTransforms: [BowAxis: BowAxisTransform] = [:]
 
     /// A parameter edit staged by the control thread, applied at the next
     /// chunk boundary on the render thread: the kernel scalar struct, `bp`
@@ -507,6 +546,7 @@ public final class BowEngine {
     /// radiation FIR → E_lp → reverb → equal (l, r) split.
     public func render(frames: Int, outL: UnsafeMutablePointer<Double>,
                        outR: UnsafeMutablePointer<Double>) {
+        hasRendered = true
         var done = 0
         while done < frames {
             // While a live ramp runs, cap the chunk so the ~25 ms glide is
@@ -531,7 +571,8 @@ public final class BowEngine {
             for i in 0..<n { outL[i] = 0; outR[i] = 0 }
             return
         }
-        mapper.snapshotPoly(into: &polySnap)
+        applyPendingAxisTransforms()
+        if !settlingForPublication { mapper.snapshotPoly(into: &polySnap) }
         // Melody follower: target = the HIGHEST gated note (bend included);
         // no gated note keeps the last target, so the string rings out there.
         if trackArmed {
@@ -585,7 +626,8 @@ public final class BowEngine {
                                     press: polySnap.press,
                                     pos: polySnap.pos, tiltDb: polySnap.tiltDb,
                                     vib: polySnap.vib,
-                                    onVel: slot.onVel)
+                                    attackSharpness: slot.attackSharpness,
+                                    resuming: slot.resuming)
                                 let o = s * slotStride
                                 // regime grip input: the kernel's running
                                 // fundamental-capture fraction for the slot
@@ -828,6 +870,7 @@ public final class BowEngine {
                               beta: [Double], gate: [Double],
                               outL: UnsafeMutablePointer<Double>,
                               outR: UnsafeMutablePointer<Double>) {
+        hasRendered = true
         let nk = f0.count
         precondition(nk % osFactor == 0 && nk <= maxFrames * osFactor)
         for i in 0..<nk {
@@ -845,6 +888,47 @@ public final class BowEngine {
         }
         postChain(n48: nk / osFactor, outL: outL, outR: outR)
     }
+
+    /// Off-thread, once before publication: settle silent physics, discard its synthetic room tail, and verify silence.
+    public func settleForPublication(minimumBlocks: Int = 1,
+                                     fallbackBlocks: Int = 5) -> Int? {
+        guard !hasRendered, minimumBlocks >= 1, fallbackBlocks >= 1 else { return nil }
+        settlingForPublication = true
+        defer { settlingForPublication = false; setJtSettleDamp(t60: 0) }
+        let prepared = tables.jt?.equilibriumConverged != false
+            && (pkernel.map { bow_poly_jt_prepare_initial_state($0) != 0 } ?? true)
+        let warmup = prepared ? minimumBlocks : max(minimumBlocks, fallbackBlocks)
+        guard warmup <= 24 else { return nil }
+        setJtSettleDamp(t60: prepared ? 0 : 0.05)
+        var l = [Double](repeating: 0, count: 4096), r = l
+        func block() -> Double {
+            l.withUnsafeMutableBufferPointer { lp in
+                r.withUnsafeMutableBufferPointer { rp in
+                    render(frames: 4096, outL: lp.baseAddress!, outR: rp.baseAddress!)
+                }
+            }
+            var peak = 0.0
+            for i in l.indices {
+                guard l[i].isFinite, r[i].isFinite else { return .infinity }
+                peak = max(peak, abs(l[i]), abs(r[i]), abs(l[i]+r[i]))
+            }
+            return peak
+        }
+        for _ in 0..<warmup { _ = block() }
+        setJtSettleDamp(t60: 0)
+        // Nobody has played this engine. Preserve the settled kernel, but do
+        // not publish the room/filter memory of the discarded setup transient.
+        reset()
+        for count in (warmup+1)...(warmup+24) {
+            let peak = block()
+            if peak < 1e-5 { return count } // −100 dBFS, including mono fold-down
+            if !peak.isFinite { return nil }
+        }
+        return nil
+    }
+
+    /// Direct onset control, retained by the shared mapper across rebuilds.
+    public func setAttackSharpness(_ value: Double) { mapper.setAttackSharpness(value) }
 
     public func reset() {
         // kernel state is the INSTRUMENT's physical state, rebuilt from silence

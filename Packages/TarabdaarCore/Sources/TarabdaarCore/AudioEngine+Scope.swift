@@ -4,6 +4,51 @@ import SarangiKit
 // Display-only readouts: the Live tab's performance readout, the iPad
 // volume levels, the voice telemetry passthroughs and the Scope snapshot.
 extension AudioEngine {
+    public func pitchProfile(tonicSemis: Double, ratios: [Double]) -> PerformancePitchProfile.Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = ProcessInfo.processInfo.systemUptime
+        performanceProfile.configure(tonicSemis: tonicSemis, ratios: ratios, at: now)
+        return performanceProfile.snapshot(at: now)
+    }
+
+    public func resetPitchProfile(seed: Bool = false) {
+        lock.lock()
+        performanceProfile.reset(at: ProcessInfo.processInfo.systemUptime, seed: seed)
+        lock.unlock()
+    }
+
+    public func finishPitchProfileSeed() {
+        lock.lock()
+        performanceProfile.finishSeed(at: ProcessInfo.processInfo.systemUptime)
+        lock.unlock()
+    }
+
+    public func setPerformanceTarafProfile(tonic: Double, ratios: [Double], gains: [Double], unmatchedGain: Double) {
+        lock.lock()
+        let source = stringVoiceSource
+        lock.unlock()
+        source?.setPerformanceProfile(tonic: tonic, ratios: ratios, gains: gains, unmatchedGain: unmatchedGain)
+    }
+
+    /// Evaluated controls of the highest held bowed note; plucked voices have no bow controls.
+    public func noteControls() -> TLPNoteControls {
+        lock.lock()
+        let source = mainInstrumentStorage == .string ? stringVoiceSource : nil
+        lock.unlock()
+        guard let source else { return .idle }
+        return Self.noteControls(mapper: source.mapper)
+    }
+
+    static func noteControls(mapper: BowControlMapper) -> TLPNoteControls {
+        var snapshot = BowControlMapper.PolySnapshot(count: BowControlMapper.maxSlots)
+        mapper.snapshotPoly(into: &snapshot)
+        guard let highest = snapshot.slots.filter({ $0.gate > 0 })
+            .max(by: { $0.f0Target < $1.f0Target }) else { return .idle }
+        return TLPNoteControls(expression: snapshot.expr * highest.exprScale,
+                               pressure: snapshot.press, position: snapshot.pos)
+    }
+
     // MARK: - Live performance readout (Live tab)
 
     /// Live-tab readout: played pitch (Hz), commanded loudness (`expression`

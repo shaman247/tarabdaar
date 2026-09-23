@@ -18,6 +18,7 @@
    with the comb bank it existed for.
    Silent strings are skipped whole (exact: their state is zero). */
 
+#include <stdatomic.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,7 @@
 #endif
 #include "bow_kernel.h"   /* bow_scalars_t + the public prototypes */
 #include "kernel_common.h"
+#include "bow_contact.h"
 
 #define MAXBOW 4096
 /* async jt ring sizes (also the two-way-coupling FIFO's) */
@@ -166,6 +168,10 @@ typedef struct {
     double jtCapHard, jtCapRatio;
     double jtCapVEnv, jtCapVRel;      /* voice peak env + per-sample release */
     double jtCapTRel, jtCapAtk, jtCapRel;   /* per-jt-tick clocks */
+    _Atomic double *jtOutputLevelTgt;
+    double *jtOutputLevelCur;       /* worker-owned, 40 ms bank level slew */
+    _Atomic double *jtProfileTgt;    /* control writers, relaxed atomic loads */
+    double *jtProfileCur;           /* worker-owned, 250 ms gain slew */
     double *jtCapEnv, *jtCapGain;     /* per-row (worker-owned) */
     int jtCapGen, *jtCapRowGen;       /* arm generation, per-row copy */
     double *jtCapV;                   /* per-tick ceiling scratch */
@@ -270,6 +276,18 @@ typedef struct {
     int jtEvOfsOn;
     double jtEvOfsA;                  /* slew coeff (jt tick rate) */
     double *jtEvOfsTgt, *jtEvOfsCur;  /* per-row offset target / current */
+    /* Optional row-local evolution gesture. One atomic mailbox per row;
+       the row worker owns every envelope sample, including retriggers. */
+    void **jtDual; /* indexed by bank row; NULL entries use the legacy solver */
+    int jtDualCount;
+    int jtDualReady;
+    int jtDualPending;
+    _Atomic uint64_t *jtPulseRequest;
+    double *jtPulseEnv, *jtPulseLift, *jtPulseDecay, *jtPulseAttack;
+    int *jtPulseLeft;
+    _Atomic uint64_t *jtBurstRequest;
+    double *jtBurstEnv, *jtBurstDecay, *jtBurstPhase;
+    int *jtBurstLeft;
     /* ---- TWO BRIDGES: per-row contact law (the chromatic set's own jawari);
        jtRowContactOn 0 until set = byte-null (the tick reads the globals). */
     int jtRowContactOn;
@@ -285,6 +303,22 @@ typedef struct {
        loudness is an output lever, which nothing drains. */
     int jtGMulOn;
     double jtGMulA, jtGMulTgt, jtGMulCur;
+    /* LIVE BRIDGE DRIVE (`bow_jt_drive`): jtDrv glides toward jtDrvTgt once
+       per jt tick (~40 ms) when armed; unarmed it is the build's phys[5]. */
+    int jtDrvOn;
+    double jtDrvA, jtDrvTgt;
+    /* the build's drive (phys[5]): the level reference. dn = jtDrv/jtDrvRef
+       scales what enters every row and 1/dn what leaves it, so the knob
+       moves the graze operating point at constant loudness. */
+    double jtDrvRef;
+    /* LEVEL COMPENSATION on the row output: (ref/act)^(exp/2), exp 0 = the
+       raw physics, 1 = constant loudness. ref/act are two power trackers
+       with the web's own decay, fed by the raw and the drive-scaled input,
+       so the ratio is the drive AVERAGED OVER THE ENERGY THE WEB HOLDS: a
+       sweep during ring-out changes nothing until new energy arrives, and a
+       fresh note after a sweep lands on its own compensation at once. */
+    double jtDrvExp, jtDrvCmpA, jtDrvEref, jtDrvEact;
+    double *jtDnV, *jtCmV;            /* per-tick dn / comp scratch (pool) */
     /* ---- jt BODY radiation: blend the jt sum through the body bank (shared
        coefficients, OWN state), slewed ~30 ms; jtBodyOn 0 until set =
        byte-null. */
@@ -328,6 +362,8 @@ typedef struct {
        post-pass, spawned off the audio thread (bow_poly_jt_set_threads).
        jtPoolN < 2 = serial replay, bit-exact vs the pool. */
     int jtNth, jtPoolN, jtPoolInit, jtGen, jtDone, jtQuit;
+    int *jtOrder;                    /* immutable task order while workers run */
+    atomic_int jtNextRow;            /* one worker owns each row for a job */
     pthread_t jtTid[16];
     pthread_mutex_t jtMx;
     /* DISPATCH-OWNER lock: one jt-web computer at a time (dispatcher vs the
@@ -453,6 +489,47 @@ static inline double jt_gain_step(bow_poly_state_t *st)
     return st->jtGainCur;
 }
 
+/* one jt-tick step of the live bridge-drive scalar: the multiplier on the
+   played strings' bridge force into every row. Unarmed = the build value
+   untouched; armed at the same value = cur + a·0, bit-identical. */
+static inline double jt_drive_step(bow_poly_state_t *st)
+{
+    if (st->jtDrvOn) st->jtDrv += st->jtDrvA * (st->jtDrvTgt - st->jtDrv);
+    return st->jtDrv;
+}
+
+/* the tick's normalized drive d/ref: exactly 1.0 at the build value (x/x),
+   so every ×dn and ×1/dn in the tick is bit-exact at rest */
+static inline double jt_drive_norm(const bow_poly_state_t *st, double d)
+{
+    return st->jtDrvRef > 0.0 ? d / st->jtDrvRef : 1.0;
+}
+
+/* one tick of the drive's level compensation (see jtDrvExp). Fraw = this
+   tick's UNSCALED bridge force; the drone envelopes (which enter the rows
+   ×dn) count as input power beside it. Both trackers see the same history,
+   so with nothing arriving they decay together and the ratio holds; in
+   silence the floor term makes it dn^-2 exactly, the steady-state answer.
+   dn == 1.0 keeps the two trackers bit-identical (×1.0 is exact) — the
+   resting instrument returns 1.0 without a pow. */
+static inline double jt_drive_comp_step(bow_poly_state_t *st, double dn,
+                                        double Fraw)
+{
+    double p = Fraw * Fraw;
+    for (int s = 0; s < st->njt; s++) {
+        const double e = st->jtDnEnv[s];
+        p += e * e;
+    }
+    const double dn2 = dn * dn;
+    const double a = st->jtDrvCmpA;
+    st->jtDrvEref += a * (p - st->jtDrvEref);
+    st->jtDrvEact += a * (dn2 * p - st->jtDrvEact);
+    if (dn == 1.0 && st->jtDrvEact == st->jtDrvEref) return 1.0;
+    const double eps = 1e-30;
+    const double ratio = (st->jtDrvEref + eps) / (st->jtDrvEact + eps * dn2);
+    return pow(ratio, 0.5 * st->jtDrvExp);
+}
+
 /* one filtered step of the jt output walk (bypass = warm-tracked identity)
    and the ONE slew point of the lush gain jtGMul, applied to the RETURN
    only so engaging it never steps the filter state. */
@@ -524,13 +601,17 @@ static inline void jt_cpl_put(bow_poly_state_t *st, long long *w, double v)
 /* bow_jt.c — the modal-jawari taraf: the load ABI, the row ticks, the
    worker pool, the deferred post-pass and every bow_poly_jt_* setter. */
 double jt_tick(bow_poly_state_t *st, double Fd, double ev,
-                      double cap, double *sideOut, double *cplOut);
+                      double cap, double dn, double comp,
+                      double *sideOut, double *cplOut);
 void jt_run_job(bow_poly_state_t *st, const double *drv,
                        const double *cv, int n,
                        double *web, double *webS);
 void jt_pool_stop(bow_poly_state_t *st);
 void jt_gate_eps(bow_poly_state_t *st, double refDisp);
 void jt_track_retune(bow_poly_state_t *st);
+double jt_dual_tick(bow_poly_state_t *st,int row,double drive,double *returned);
+void jt_dual_free(void *dual);
+double jt_dual_cost(void *dual);
 
 void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
                               const double *cv, int n,

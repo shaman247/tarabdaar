@@ -7,6 +7,34 @@ import CBowKernel
 /// releases. Hosts `stringBP()` / `testTaraf`, the scaffold other DSP tests use.
 final class BowedStringEngineTests: XCTestCase {
 
+    /// The initial wrap balances contact and restoring forces, including low rows where fixed-point iteration oscillates.
+    func testJawariInitialWrapBalancesContactForce() throws {
+        let bp = try XCTUnwrap(Presets.bowedStringParams())
+        for frequency in [82.0, 148.0, 296.0, 592.0, 987.0] {
+            let t = try XCTUnwrap(BowTables.buildJawariTables(
+                rows: [(frequency, 1, 5)], srk: 96000, bp: bp))
+            XCTAssertTrue(t.equilibriumConverged, "equilibrium failed at \(frequency) Hz")
+            let m = Int(t.M[0]), j = Int(t.J)
+            let omega = ModalString.modeFrequencies(f0: frequency, count: m,
+                inharmonicity: bp.v("bow_jt_bst", 2e-4))
+            var f = [Double](repeating: 0, count: j)
+            for z in 0..<j {
+                var u = 0.0
+                for k in 0..<m { u += t.phiU[k*j+z]*t.q0[k] }
+                f[z] = t.phys[0]*pow(max(t.b[z]-u, 0), t.phys[1])
+            }
+            var error = 0.0, norm = 0.0
+            for k in 0..<m {
+                var load = 0.0
+                for z in 0..<j { load += t.phiF[k*j+z]*f[z] }
+                let restoring = omega[k]*omega[k]*t.q0[k]
+                error += pow(restoring-load, 2)
+                norm += restoring*restoring + load*load
+            }
+            XCTAssertLessThan(sqrt(error/max(norm, 1e-30)), 1e-7)
+        }
+    }
+
     static func stringBP() -> BowParams {
         BowParams(num: [
             // string / friction physics
@@ -219,7 +247,7 @@ final class BowedStringEngineTests: XCTestCase {
         XCTAssertLessThan(idle, 1e-6, "string not silent before note-on")
 
         // bow a note
-        mapper.touchOn(60, pitchSemis: 60, velocity: 100.0 / 127.0)
+        mapper.touchOn(60, pitchSemis: 60)
         _ = rms(seconds: 0.3)                        // speak/settle
         let sustain = rms(seconds: 1.0)
         XCTAssertGreaterThan(sustain, 0.003, "bowed string made no sound")
@@ -230,7 +258,7 @@ final class BowedStringEngineTests: XCTestCase {
                                       tonic: 261.63)
         func settledFb(press: Double) -> Double {
             let m2 = BowControlMapper()
-            m2.touchOn(60, pitchSemis: 60, velocity: 100.0 / 127.0)
+            m2.touchOn(60, pitchSemis: 60)
             m2.setAxis(expr: 0.5, press: press, pos: 0.45)
             let n = 4096
             var a = [Double](repeating: 0, count: n)

@@ -222,8 +222,8 @@ public enum FretArrangementSyncStore {
 /// The JOYCON_STATE wire form of a display frame — the ONE encode/decode
 /// pair (the host's `TarabLink` and the pad's receiver both use it).
 /// Axes −1…+1 ↔ u8 (centre 128); the strike window in 50 ms units with 0
-/// = unset (the viewer's 2 s default); the warp 0…1 ↔ u8; the octave an
-/// i8 bit pattern.
+/// = unset (the viewer's 2 s default); the warp and the accel level 0…1
+/// ↔ u8; the octave an i8 bit pattern.
 extension JoyConTiltDisplay {
     public static let strikeWinUnitS = 0.05
     public static let strikeWinDefaultS = 2.0
@@ -241,7 +241,12 @@ extension JoyConTiltDisplay {
                   strikeWindowS: s.strikeWin == 0 ? Self.strikeWinDefaultS
                       : Double(s.strikeWin) * Self.strikeWinUnitS,
                   fieldWarp: Double(s.fieldWarp) / 255.0,
-                  octaveShift: Int(Int8(bitPattern: s.octave)))
+                  octaveShift: Int(Int8(bitPattern: s.octave)),
+                  wristRate1: ax(s.wristRate1), wristRate2: ax(s.wristRate2),
+                  wristRate3: ax(s.wristRate3),
+                  accel1: ax(s.accel1), accel2: ax(s.accel2),
+                  accel3: ax(s.accel3),
+                  accelLevel: Double(s.accelLevel) / 255.0)
     }
 
     public func frame(stateSeq: UInt16, timestampUs: UInt32,
@@ -264,7 +269,11 @@ extension JoyConTiltDisplay {
                                      1), 255)),
             volVoice: volVoice, volTaraf: volTaraf,
             fieldWarp: UInt8(min(max(fieldWarp, 0), 1) * 255.0 + 0.5),
-            octave: UInt8(bitPattern: Int8(clamping: octaveShift)))
+            octave: UInt8(bitPattern: Int8(clamping: octaveShift)),
+            wristRate1: b(wristRate1), wristRate2: b(wristRate2),
+            wristRate3: b(wristRate3),
+            accel1: b(accel1), accel2: b(accel2), accel3: b(accel3),
+            accelLevel: UInt8(min(max(accelLevel, 0), 1) * 255.0 + 0.5))
     }
 }
 
@@ -281,6 +290,18 @@ public struct JoyConTiltDisplay: Equatable {
     public var arm1: Double
     public var arm2: Double
     public var arm3: Double
+    /// The wrist tilt RATES — d/dt of `wrist1–3`, over
+    /// `JoyConWristMotion.rateFullScale` → −1…+1.
+    public var wristRate1: Double
+    public var wristRate2: Double
+    public var wristRate3: Double
+    /// The Joy-Con's gravity-removed acceleration per body axis, over
+    /// `JoyConWristMotion.accelFullScaleG` → −1…+1.
+    public var accel1: Double
+    public var accel2: Double
+    public var accel3: Double
+    /// The magnitude of `accel1–3`, over the same full scale (0…1).
+    public var accelLevel: Double
     public var stickLive: Bool
     public var bodyLive: Bool
     public var armLive: Bool
@@ -300,7 +321,11 @@ public struct JoyConTiltDisplay: Equatable {
                 connected: Bool, wrist3: Double = 0, arm1: Double = 0,
                 arm2: Double = 0, arm3: Double = 0,
                 armLive: Bool = false, strikeWindowS: Double = 2.0,
-                fieldWarp: Double = 0, octaveShift: Int = 0) {
+                fieldWarp: Double = 0, octaveShift: Int = 0,
+                wristRate1: Double = 0, wristRate2: Double = 0,
+                wristRate3: Double = 0, accel1: Double = 0,
+                accel2: Double = 0, accel3: Double = 0,
+                accelLevel: Double = 0) {
         self.stickX = stickX
         self.stickY = stickY
         self.wrist1 = wrist1
@@ -309,6 +334,13 @@ public struct JoyConTiltDisplay: Equatable {
         self.arm1 = arm1
         self.arm2 = arm2
         self.arm3 = arm3
+        self.wristRate1 = wristRate1
+        self.wristRate2 = wristRate2
+        self.wristRate3 = wristRate3
+        self.accel1 = accel1
+        self.accel2 = accel2
+        self.accel3 = accel3
+        self.accelLevel = min(max(accelLevel, 0), 1)
         self.stickLive = stickLive
         self.bodyLive = bodyLive
         self.armLive = armLive
@@ -338,6 +370,7 @@ public struct JoyConTiltDisplay: Equatable {
 public final class ScaleSyncReceiver: ObservableObject {
     /// Bumped on every applied scale.
     @Published public private(set) var syncCount: Int = 0
+    @Published public private(set) var tarafBank = TarafBank.empty
 
     /// The last synced arrangement (seeded from the store on `start()`).
     @Published public private(set) var fretArrangement: FretArrangement?
@@ -441,6 +474,10 @@ public final class ScaleSyncReceiver: ObservableObject {
         }
     }
 
+    public func applyTarafBank(_ bank: TarafBank) {
+        DispatchQueue.main.async { [weak self] in self?.tarafBank = bank }
+    }
+
     public func applyArrangement(_ arrangement: FretArrangement) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -462,6 +499,27 @@ public final class ScaleSyncReceiver: ObservableObject {
     /// scale). Deliberately NOT `@Published`: the toolbar scope polls it in
     /// a `TimelineView`, so level motion never re-renders the toolbar.
     public let volumeHistory = VolumeHistory()
+    public let noteControls = NoteControlDisplay()
+}
+
+/// Latest display-only note controls, polled without publishing toolbar updates.
+public final class NoteControlDisplay {
+    private let lock = NSLock()
+    private var value: TLPNoteControls = .idle
+
+    public init() {}
+
+    public func update(_ controls: TLPNoteControls) {
+        lock.lock()
+        value = controls
+        lock.unlock()
+    }
+
+    public var latest: TLPNoteControls {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
 }
 
 /// Thread-safe rolling buffer of received (voice, taraf) levels; samples

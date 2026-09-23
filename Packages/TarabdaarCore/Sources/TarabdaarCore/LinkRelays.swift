@@ -1,5 +1,32 @@
 import Foundation
 
+/// THE WRIST DISPLAY CLUSTER the Mac mirrors to the iPad's bars: the wrist
+/// tilt (the fused attitude, or the solved axes once calibrated), its
+/// rate and the gravity-removed acceleration per body axis, all
+/// pre-scaled to −1…+1, plus that acceleration's magnitude over the same
+/// full scale (0…1).
+/// Display only — nothing here drives a binding.
+public struct JoyConWristMotion: Equatable {
+    /// The rate bars' full scale in tilt full-scales per second: one tilt
+    /// unit is its ±90° span, so a bar rails at 360°/s.
+    public static let rateFullScale = 4.0
+    /// The per-axis acceleration bars' full scale, g.
+    public static let accelFullScaleG = 1.0
+
+    public var tilt: SIMD3<Double>
+    public var rate: SIMD3<Double>
+    public var accel: SIMD3<Double>
+    public var accelLevel: Double
+
+    public init(tilt: SIMD3<Double>, rate: SIMD3<Double> = .zero,
+                accel: SIMD3<Double> = .zero, accelLevel: Double = 0) {
+        self.tilt = tilt
+        self.rate = rate
+        self.accel = accel
+        self.accelLevel = accelLevel
+    }
+}
+
 /// THE JOY-CON DISPLAY MIRROR (Mac → iPad, latest-wins `JOYCON_STATE`).
 ///
 /// Holds the axis values the iPad only DRAWS (stick, wrist, calibrated
@@ -25,7 +52,7 @@ public final class JoyConDisplayRelay {
     /// Latest axis values. Wrist is nil until the fusion runs; arm is nil
     /// while no calibration drives.
     public private(set) var stick: (Double, Double) = (0, 0)
-    public private(set) var wrist: (Double, Double, Double)?
+    public private(set) var wrist: JoyConWristMotion?
     public private(set) var arm: (Double, Double, Double)?
     /// The last frame handed to `send` — the edge detector's reference.
     private var lastSent: JoyConTiltDisplay?
@@ -37,9 +64,9 @@ public final class JoyConDisplayRelay {
         push()
     }
 
-    /// The fused wrist attitude — nil while the fusion has nothing (the
-    /// pad draws the body square dim).
-    public func setWrist(_ w: (Double, Double, Double)?) {
+    /// The wrist cluster — nil while the fusion has nothing (the pad draws
+    /// the wrist bars dim).
+    public func setWrist(_ w: JoyConWristMotion?) {
         wrist = w
         push()
     }
@@ -51,21 +78,29 @@ public final class JoyConDisplayRelay {
 
     /// The frame as it stands (pure — the assembly the tests check).
     public func frame() -> JoyConTiltDisplay {
-        JoyConTiltDisplay(
+        let isConnected = connected()
+        return JoyConTiltDisplay(
             stickX: stick.0, stickY: stick.1,
-            wrist1: wrist?.0 ?? 0,
-            wrist2: wrist?.1 ?? 0,
-            stickLive: abs(stick.0) > 0.04 || abs(stick.1) > 0.04,
+            wrist1: wrist?.tilt.x ?? 0,
+            wrist2: wrist?.tilt.y ?? 0,
+            stickLive: isConnected,
             bodyLive: wrist != nil,
-            connected: connected(),
-            wrist3: wrist?.2 ?? 0,
+            connected: isConnected,
+            wrist3: wrist?.tilt.z ?? 0,
             arm1: arm?.0 ?? 0,
             arm2: arm?.1 ?? 0,
             arm3: arm?.2 ?? 0,
             armLive: arm != nil,
             strikeWindowS: strikeWindowS(),
             fieldWarp: fieldWarp(),
-            octaveShift: octaveShift())
+            octaveShift: octaveShift(),
+            wristRate1: wrist?.rate.x ?? 0,
+            wristRate2: wrist?.rate.y ?? 0,
+            wristRate3: wrist?.rate.z ?? 0,
+            accel1: wrist?.accel.x ?? 0,
+            accel2: wrist?.accel.y ?? 0,
+            accel3: wrist?.accel.z ?? 0,
+            accelLevel: wrist?.accelLevel ?? 0)
     }
 
     /// Assemble and send. Paced, unless an acted-on field changed since the
@@ -104,11 +139,19 @@ public final class VolumeMeterRelay {
     private var timer: DispatchSourceTimer?
     /// Timer queue only.
     private var lastBytes: (UInt8, UInt8) = (0, 0)
+    private let noteControls: () -> TLPNoteControls
+    private let sendNoteControls: (TLPNoteControls) -> Void
+    private var noteTick = 0
+    private var lastNoteControls: TLPNoteControls = .idle
 
     public init(levels: @escaping () -> (voice: Double, taraf: Double),
-                send: @escaping (UInt8, UInt8) -> Void) {
+                send: @escaping (UInt8, UInt8) -> Void,
+                noteControls: @escaping () -> TLPNoteControls = { .idle },
+                sendNoteControls: @escaping (TLPNoteControls) -> Void = { _ in }) {
         self.levels = levels
         self.send = send
+        self.noteControls = noteControls
+        self.sendNoteControls = sendNoteControls
     }
 
     deinit { timer?.cancel() }
@@ -130,6 +173,14 @@ public final class VolumeMeterRelay {
 
     /// One poll: convert, drop an unchanged pair, else send.
     public func tick() {
+        if noteTick == 0 {
+            let controls = noteControls()
+            if controls != lastNoteControls {
+                lastNoteControls = controls
+                sendNoteControls(controls)
+            }
+        }
+        noteTick = (noteTick + 1) % 4
         let l = levels()
         let bytes = (TLPVolume.byte(fromLinear: l.voice),
                      TLPVolume.byte(fromLinear: l.taraf))

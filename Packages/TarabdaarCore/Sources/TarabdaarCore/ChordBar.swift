@@ -274,11 +274,13 @@ public struct ChordBarCell: Identifiable {
 /// per fret column (same x within `fretColumnEps`, octave ghosts included),
 /// horizontal extent to the midpoints toward the neighbouring columns, and
 /// the column's frets splitting the bar vertically in their own band order
-/// (a lone fret — S, P — takes the full height).
+/// (a lone fret — S, P — takes the full height). No cells at all while
+/// `Config.chordBarShown` is off — the bar is neither drawn nor hit-tested.
 public func chordBarCells(arrangement: FretArrangement,
                           degrees: [(ratio: Double, label: String)],
                           chords: [ScaleChord],
                           size: CGSize) -> [ChordBarCell] {
+    guard Config.chordBarShown else { return [] }
     let bar = chordBarRect(in: size)
     guard bar.height >= 14, !chords.isEmpty else { return [] }
     let extent = max(0, arrangement.ghostExtentOctaves)

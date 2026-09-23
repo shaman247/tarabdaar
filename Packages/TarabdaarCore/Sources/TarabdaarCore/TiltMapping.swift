@@ -2,18 +2,18 @@ import Foundation
 /// The bindable input dimensions. Raw values are Codable by rawValue and
 /// persist in saved bindings, so cases are never renumbered or removed —
 /// retired cases (`accelPressure`, `keyY`, the sliders) survive so old
-/// documents still decode. Live axes: `ControlAxes.dims`.
+/// documents still decode. Live axes: `ControlAxes.bindableDims`.
 public enum InputDimension: Int, Codable, CaseIterable, Hashable {
-    case tilt1          = 0    // arm up/down (raw: iPad pitch)
-    case tilt2          = 1    // arm in/out (raw: iPad roll)
-    case tilt3          = 2    // arm rotation (raw: iPad yaw)
+    case tilt1          = 0    // shared tilt up/down
+    case tilt2          = 1    // shared tilt in/out
+    case tilt3          = 2    // shared tilt rotation
     case accelPressure  = 3
     case keyY           = 4
     case slider1        = 5
     case slider2        = 6
-    case tilt4          = 7    // wrist up/down (Joy-Con wrist calibration, axis 1)
-    case stickX         = 8    // Joy-Con stick
-    case stickY         = 9
+    case tilt4          = 7    // retired wrist up/down; migrates to tilt1
+    case stickX         = 8    // retired; migrated to Left/Right
+    case stickY         = 9    // retired; migrated to Down/Up
     /// The accelerometer STRIKE/ACCELERATION pair: both ride the iPad's
     /// 0…1 strike-scale envelope (`MotionSource.strikeScale01`, the
     /// PERF_STATE `strike` byte); what separates them is TIME SINCE THE
@@ -33,12 +33,9 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     /// centre. Mac-evaluated from the wire pitch stream; the iPad's
     /// toolbar scope runs its own display-only copy of the law.
     case fingerAccel    = 12
-    /// THE JOY-CON WRIST: three −1…+1 axes from the Joy-Con's fused
-    /// attitude through its own guided calibration (`TiltCalibrator`
-    /// `.wrist` — rest + three sweeps). `.tilt4` is the first (up/down);
-    /// these are the other two. Rest = 0 like the tilts.
-    case wrist2         = 13   // wrist in/out
-    case wrist3         = 14   // wrist rotation
+    // Retired wrist dimensions, retained for saved-binding migration.
+    case wrist2         = 13
+    case wrist3         = 14
     /// JOY-CON ACCELERATION: the Joy-Con's gravity-removed acceleration
     /// magnitude through the iPad strike law (`StrikeLaw`: log-scale 0…1 +
     /// fast-attack/150 ms-decay envelope). UNIPOLAR like `.acceleration`
@@ -49,27 +46,38 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
     /// 31.3 → 73.0 pt onto 0…1 through `TouchSizeTracker`'s finger
     /// estimate — normal playing rests near 0, a deliberately flattened
     /// fingertip sweeps the range. UNIPOLAR like `.strike`:
-    /// rest is the curve's LEFT end (x 0), so a binding reads silence
-    /// with the finger relaxed. Mac-evaluated from the wire radius
+    /// rest is the curve's LEFT end (x 0), so a binding reads its first
+    /// offset with the finger relaxed. Mac-evaluated from the wire radius
     /// stream; the iPad's touch ring draws its own display-only copy.
     case touchSize      = 16
+    case stickLeft      = 17
+    case stickRight     = 18
+    case stickUp        = 19
+    case stickDown      = 20
+    /// Finger position along the fret: inner end 0, outer end 1.
+    case fretPosition   = 21
     case none           = -1
 
     public var label: String {
         switch self {
-        case .tilt1:         return "Arm ↕"
-        case .tilt2:         return "Arm ↔"
-        case .tilt3:         return "Arm ⟲"
+        case .tilt1:         return "Tilt ↕"
+        case .tilt2:         return "Tilt ↔"
+        case .tilt3:         return "Tilt ⟲"
         case .tilt4:         return "Wrist ↕"
         case .wrist2:        return "Wrist ↔"
         case .wrist3:        return "Wrist ⟲"
         case .jcAccel:       return "Joy-Con Accel"
         case .stickX:        return "Stick X"
         case .stickY:        return "Stick Y"
+        case .stickLeft:     return "Stick Left"
+        case .stickRight:    return "Stick Right"
+        case .stickUp:       return "Stick Up"
+        case .stickDown:     return "Stick Down"
         case .strike:        return "Strike"
         case .acceleration:  return "Acceleration"
         case .fingerAccel:   return "Finger Accel"
         case .touchSize:     return "Touch Size"
+        case .fretPosition:  return "Fret Position"
         case .accelPressure: return "Pressure"
         case .keyY:          return "Key Y"
         case .slider1:       return "Slider 1"
@@ -78,22 +86,40 @@ public enum InputDimension: Int, Codable, CaseIterable, Hashable {
         }
     }
 
+    /// Where the axis RESTS in the curve's 0…1 domain — also the reference
+    /// for legacy bindings without an explicit offset origin. The
+    /// bipolar axes (tilts, wrist, stick, finger accel) rest at the
+    /// centre; the unipolar ones (the strike pair, Joy-Con accel, touch
+    /// size) rest at the left end, silence.
+    public var restX: Double {
+        switch self {
+        case .strike, .acceleration, .jcAccel, .touchSize, .fretPosition: return 0.0
+        case .stickLeft, .stickRight, .stickUp, .stickDown: return 0.0
+        default: return 0.5
+        }
+    }
+
     /// Short label for matrix column/row headers.
     public var shortLabel: String {
         switch self {
-        case .tilt1:         return "A↕"
-        case .tilt2:         return "A↔"
-        case .tilt3:         return "A⟲"
+        case .tilt1:         return "T↕"
+        case .tilt2:         return "T↔"
+        case .tilt3:         return "T⟲"
         case .tilt4:         return "W↕"
         case .wrist2:        return "W↔"
         case .wrist3:        return "W⟲"
         case .jcAccel:       return "JA"
         case .stickX:        return "SX"
         case .stickY:        return "SY"
+        case .stickLeft:     return "S←"
+        case .stickRight:    return "S→"
+        case .stickUp:       return "S↑"
+        case .stickDown:     return "S↓"
         case .strike:        return "St"
         case .acceleration:  return "Ac"
         case .fingerAccel:   return "FA"
         case .touchSize:     return "TS"
+        case .fretPosition:  return "FP"
         case .accelPressure: return "Pr"
         case .keyY:          return "Y"
         case .slider1:       return "S1"
@@ -171,7 +197,7 @@ public struct MapTarget: Hashable {
     public var label: String {
         switch kind {
         case .composite(let slot): return "Composite \(slot + 1)"
-        case .param(let key): return ParamRegistry.spec(key)?.label ?? key
+        case .param(let key): return ParamRegistry.spec(key)?.qualifiedLabel ?? key
         }
     }
 
@@ -219,6 +245,13 @@ public struct ControlPoint: Codable, Equatable {
 public struct DimensionBinding: Codable, Equatable {
     public var dimension: InputDimension
     public var controlPoints: [ControlPoint]  // sorted by x, 2-4 points
+    // A migrated stick direction evaluates one half of its original spline.
+    // Retaining the original points preserves curved mappings exactly.
+    private var inputStart: Double = 0
+    private var inputEnd: Double = 1
+    // Explicit offset edits keep a fixed reference; older curves retain
+    // their original rest-relative evaluation until edited.
+    private var offsetOrigin: Double?
 
     public init(dimension: InputDimension, controlPoints: [ControlPoint]) {
         self.dimension = dimension
@@ -239,7 +272,8 @@ public struct DimensionBinding: Codable, Equatable {
     /// Evaluates the transfer curve at a normalized input value (0..1).
     /// Uses Catmull-Rom spline interpolation for smooth curves through control points.
     public func evaluate(_ normalized: Double) -> Double {
-        let n = max(0, min(1, normalized))
+        let x = max(0, min(1, normalized))
+        let n = inputStart + x * (inputEnd - inputStart)
         let pts = controlPoints
         guard pts.count >= 2 else { return pts.first?.y ?? 0 }
 
@@ -271,16 +305,46 @@ public struct DimensionBinding: Codable, Equatable {
                              (-y0 + y2) * t +
                              (2 * y0 - 5 * y1 + 4 * y2 - y3) * t2 +
                              (-y0 + 3 * y1 - 3 * y2 + y3) * t3)
-        // Clamp to the range defined by the endpoints (first and last point Y)
-        let lo = min(pts.first!.y, pts.last!.y)
-        let hi = max(pts.first!.y, pts.last!.y)
+        // Include the resting anchor when both endpoint offsets have the same sign.
+        let lo = pts.map(\.y).min()!
+        let hi = pts.map(\.y).max()!
         return max(lo, min(hi, result))
+    }
+
+    /// The binding's offset from the target's base at curve x. Legacy
+    /// curves subtract their rest reading; edited curves use a fixed origin.
+    public func swing(atX x: Double) -> Double {
+        evaluate(x) - (offsetOrigin ?? evaluate(dimension.restX))
+    }
+
+    /// Edit both offsets independently; only bipolar curves anchor zero at centre.
+    public func withOffsets(lo: Double, hi: Double) -> DimensionBinding {
+        let origin = offsetOrigin ?? evaluate(dimension.restX)
+        var points = [ControlPoint(x: 0, y: origin + lo)]
+        if dimension.restX != 0 {
+            points.append(ControlPoint(x: dimension.restX, y: origin))
+        }
+        points.append(ControlPoint(x: 1, y: origin + hi))
+        var edited = DimensionBinding(dimension: dimension, controlPoints: points)
+        edited.offsetOrigin = origin
+        return edited
+    }
+
+    fileprivate func stickHalf(_ direction: InputDimension, end: Double) -> DimensionBinding {
+        var half = self
+        half.dimension = direction
+        half.inputStart = inputStart + 0.5 * (inputEnd - inputStart)
+        half.inputEnd = inputStart + end * (inputEnd - inputStart)
+        return half
     }
 
     /// Backward-compatible migration from old format.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         dimension = try container.decode(InputDimension.self, forKey: .dimension)
+        inputStart = try container.decodeIfPresent(Double.self, forKey: .inputStart) ?? 0
+        inputEnd = try container.decodeIfPresent(Double.self, forKey: .inputEnd) ?? 1
+        offsetOrigin = try container.decodeIfPresent(Double.self, forKey: .offsetOrigin)
         if let pts = try? container.decode([ControlPoint].self, forKey: .controlPoints) {
             controlPoints = pts
         } else {
@@ -291,20 +355,33 @@ public struct DimensionBinding: Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case dimension, controlPoints, rangeMin, rangeMax
+        case dimension, controlPoints, rangeMin, rangeMax, inputStart, inputEnd, offsetOrigin
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(dimension, forKey: .dimension)
         try container.encode(controlPoints, forKey: .controlPoints)
+        try container.encodeIfPresent(offsetOrigin, forKey: .offsetOrigin)
+        if inputStart != 0 || inputEnd != 1 {
+            try container.encode(inputStart, forKey: .inputStart)
+            try container.encode(inputEnd, forKey: .inputEnd)
+        }
     }
 }
 
-/// All bindings for a single target (many:many support).
+/// All bindings for a single target. Many dimensions may bind one
+/// target: each contributes its SWING about the target's resting value
+/// (`DimensionBinding.swing`) and the swings add —
+/// `value = rest + Σ swing_i`, clamped to the target's range
+/// (`ControlAxisEvaluator`). Two axes on one target therefore never fight;
+/// a one-way axis at zero input contributes its first edited offset.
 public struct ParameterMapping: Codable, Equatable {
     public var bindings: [DimensionBinding]
-    /// Value used when no dimension is bound (or all are at midpoint).
+    /// The base value for a COMPOSITE target, before binding offsets,
+    /// editable in the Controls tab. A parameter
+    /// target's rest is its resting store value (the Parameters tab knob),
+    /// not this field.
     public var defaultValue: Double
 
     public init(bindings: [DimensionBinding], defaultValue: Double = 0) {
@@ -335,6 +412,46 @@ public struct ParameterMapping: Codable, Equatable {
 public struct DimensionMapping: Codable, Equatable {
     public var mappings: [String: ParameterMapping]
 
+    public init(mappings: [String: ParameterMapping]) {
+        self.mappings = Self.unifyTiltBindings(Self.splitStickBindings(mappings))
+    }
+
+    /// Prefer the primary wrist curve when an old target bound both devices.
+    private static func unifyTiltBindings(_ mappings: [String: ParameterMapping])
+        -> [String: ParameterMapping] {
+        mappings.mapValues { pm in
+            var result = pm
+            for (legacy, shared) in [(InputDimension.tilt4, InputDimension.tilt1),
+                                     (.wrist2, .tilt2), (.wrist3, .tilt3)] {
+                guard var binding = pm.binding(for: legacy) else { continue }
+                binding.dimension = shared
+                result.bindings.removeAll { $0.dimension == legacy || $0.dimension == shared }
+                result.bindings.append(binding)
+            }
+            return result
+        }
+    }
+
+    private static func splitStickBindings(_ mappings: [String: ParameterMapping])
+        -> [String: ParameterMapping] {
+        mappings.mapValues { pm in
+            var result = pm
+            result.bindings.removeAll { $0.dimension == .stickX || $0.dimension == .stickY }
+            for binding in pm.bindings {
+                let directions: [(InputDimension, Double)]
+                switch binding.dimension {
+                case .stickX: directions = [(.stickLeft, 0), (.stickRight, 1)]
+                case .stickY: directions = [(.stickDown, 0), (.stickUp, 1)]
+                default: continue
+                }
+                for (direction, end) in directions where !result.hasBinding(for: direction) {
+                    result.bindings.append(binding.stickHalf(direction, end: end))
+                }
+            }
+            return result
+        }
+    }
+
     // MARK: - Defaults
 
     public static func makeDefault() -> DimensionMapping {
@@ -357,9 +474,13 @@ public struct DimensionMapping: Codable, Equatable {
         ]
         for slot in 0..<CompositeParam.maxSlots {
             let target = MapTarget(compositeSlot: slot)
+            let bindings = defaults[slot].map { [$0] } ?? []
+            // The composite's rest is what its default curve reads with
+            // the axis at rest (0 for the rest-zero shapes, 0.5 linear).
             m[target.storageKey] = ParameterMapping(
-                bindings: defaults[slot].map { [$0] } ?? [],
-                defaultValue: target.midpointValue)
+                bindings: bindings,
+                defaultValue: defaults[slot].map(Self.restOfFirstCurve)
+                    ?? target.midpointValue)
         }
         // The strum-expression default binding is seeded by `pruned()`
         // (shared with the existing-install path).
@@ -371,6 +492,42 @@ public struct DimensionMapping: Codable, Equatable {
     /// v6: arbitrary targets (composites AND single parameters) with
     /// endpoints in native units.
     private static let storageKey = "tarabdaar_dimensionMapping_v6"
+
+    /// A binding's value with its axis at rest.
+    static func restOfFirstCurve(_ b: DimensionBinding) -> Double {
+        b.evaluate(b.dimension.restX)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case mappings
+        /// Present (1) once the document's composite rests are
+        /// authoritative. A document without it predates the swing law:
+        /// its curves were applied ABSOLUTELY, so each bound target's rest
+        /// is what its first curve read with the axis at rest — adopting
+        /// that keeps every old preset bit-identical at rest and under one
+        /// axis.
+        case restLaw
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        var m = try c.decode([String: ParameterMapping].self, forKey: .mappings)
+        if (try c.decodeIfPresent(Int.self, forKey: .restLaw)) == nil {
+            for (key, var pm) in m {
+                if let first = pm.bindings.first {
+                    pm.defaultValue = Self.restOfFirstCurve(first)
+                    m[key] = pm
+                }
+            }
+        }
+        mappings = Self.unifyTiltBindings(Self.splitStickBindings(m))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(mappings, forKey: .mappings)
+        try c.encode(1, forKey: .restLaw)
+    }
 
     public func save() {
         DefaultsStore.save(self, key: Self.storageKey)
@@ -395,8 +552,8 @@ public struct DimensionMapping: Codable, Equatable {
             }
         }
         // The controller strum's expression ships bound to the Joy-Con
-        // stick Y: full-throw linear — stick down = silent chord, centre =
-        // half, up = full. Seeded only when the key is ENTIRELY absent; an
+        // Up/Down directions: split the original full-throw Y curve so its
+        // offsets are preserved. Seeded only when the key is ENTIRELY absent; an
         // entry the user emptied persists as an empty mapping.
         let strumKey = MapTarget(paramKey: "ctl_strum_expr").storageKey
         if m[strumKey] == nil {
@@ -427,6 +584,15 @@ public struct DimensionMapping: Codable, Equatable {
         mappings[target.storageKey] = m
     }
 
+    /// Set a composite target's resting value (the Controls tab's Rest
+    /// slider); no-op for a parameter target, whose rest is its store value.
+    public mutating func setRest(for target: MapTarget, _ rest: Double) {
+        guard target.compositeSlot != nil else { return }
+        var m = mapping(for: target)
+        m.defaultValue = rest
+        mappings[target.storageKey] = m
+    }
+
     /// All dimensions connected to a given target.
     public func dimensions(for target: MapTarget) -> [InputDimension] {
         mapping(for: target).bindings.map(\.dimension)
@@ -450,4 +616,3 @@ public struct DimensionMapping: Codable, Equatable {
         boundTargets.filter { isConnected($0, dim) }
     }
 }
-

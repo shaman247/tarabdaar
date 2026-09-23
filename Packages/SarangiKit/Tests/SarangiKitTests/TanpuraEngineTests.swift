@@ -85,7 +85,7 @@ final class TanpuraEngineTests: XCTestCase {
         render()
         let pre = l.map { abs($0) }.max() ?? 0
         XCTAssertLessThan(pre, 1e-9, "silent engine emitted \(pre)")
-        e.pluck(slot: 2, velocity01: 100.0 / 127.0)
+        e.pluck(slot: 2)
         var peak = 0.0
         var lastBlockPeak = 0.0
         let blocks = Int(2.0 * p.sr / Double(n))

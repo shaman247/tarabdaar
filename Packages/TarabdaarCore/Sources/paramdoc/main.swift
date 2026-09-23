@@ -5,13 +5,21 @@ import TarabdaarCore
 // Build-time parameter-documentation generator .
 //
 // Renders docs/parameters.md from the LIVE parameter definitions:
-//   * `ParamRegistry`  — every parameter of the String instrument
+//   * `ParamRegistry`  — every instrument, control and FX parameter
 //   * `CompositeParam` — the shipped composite defaults
 // Because this executable compiles against the same types the app uses,
 // the documentation cannot drift from the parameter set: add, remove, or
 // relabel a parameter and the next `tools/build-mac.sh` rewrites the doc.
 //
 // Usage: paramdoc [output-path]   (no argument = print to stdout)
+
+/// Keep structured help inside one Markdown table cell.
+func helpCell(_ text: String) -> String {
+    text.replacingOccurrences(of: "|", with: "&#124;")
+        .replacingOccurrences(of: "\nLow: ", with: "<br>**Low:** ")
+        .replacingOccurrences(of: "\nHigh: ", with: "<br>**High:** ")
+        .replacingOccurrences(of: "\n", with: "<br>")
+}
 
 func num(_ v: Double) -> String {
     if v == v.rounded() && abs(v) < 1e12 {
@@ -49,8 +57,12 @@ var out = """
 
 # Tarabdaar Parameters
 
-Tarabdaar has **one parameter list** — every knob of the String instrument,
-edited in the Mac's **Parameters** tab, in native units. There is no
+Tarabdaar has **one parameter list** for the String voice, both taraf banks,
+Tanpura, Sitar, performance controls and FX. The Mac's **Parameters** tab
+edits them in native units. Groups identify the affected voice or stage,
+then the musical function. Each description explains the effect and the
+meaning of **Low** and **High** values, including zero, neutral points,
+switch choices and dependencies where relevant. There is no
 separate "performance parameter" or "physics scalar" category: a
 parameter is a parameter, and any of them can be bound to a tilt or added
 to a composite.
@@ -78,7 +90,7 @@ simultaneous notes.
 |---|---|
 
 """
-for t in [ParamTiming.live, .inPlace, .rebuild, .hybrid] {
+for t in [ParamTiming.live, .onset, .inPlace, .rebuild, .hybrid] {
     out += "| `\(t.label)` | \(t.explanation) |\n"
 }
 out += """
@@ -108,8 +120,8 @@ for c in CompositeParam.defaults() {
     out += "| Parameter | At 0 | At 1 | Notes |\n|---|---|---|---|\n"
     for m in c.members {
         let spec = ParamRegistry.spec(m.key)
-        let label = spec?.label ?? m.key
-        out += "| \(label) (`\(m.key)`) | \(num(m.lo)) | \(num(m.hi)) | \(spec?.help ?? "") |\n"
+        let label = spec?.qualifiedLabel ?? m.key
+        out += "| \(label) (`\(m.key)`) | \(num(m.lo)) | \(num(m.hi)) | \(helpCell(spec?.help ?? "")) |\n"
     }
     out += "\n"
 }
@@ -130,7 +142,7 @@ func paramRow(_ p: ParamSpec, key: String? = nil, label: String? = nil,
     }
     // the artifact wins; the authored value is shown for reference
     if let a = shipped.authored { def += " (authored \(num(a)))" }
-    return "| `\(key ?? p.key)` | \(label ?? p.label) | \(num(p.lo)) … \(num(p.hi)) | \(def) | \(p.scope.label) | \(p.timing.label) | \(help ?? p.help) |\n"
+    return "| `\(key ?? p.key)` | \(label ?? p.label) | \(num(p.lo)) … \(num(p.hi)) | \(def) | \(p.scope.label) | \(p.timing.label) | \(helpCell(help ?? p.help)) |\n"
 }
 
 let tableHead = "| Key | Name | Range | Default | Scope | Timing | Description |\n"

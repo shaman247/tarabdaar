@@ -7,6 +7,16 @@ import CBowKernel
 // recruitment profile. Split out of BowEngine.swift; the stored state
 // these read stays on the type.
 extension BowEngine {
+    /// Performance gain multipliers in kernel row order; the follower stays at unity.
+    public func setPerformanceGains(_ gains: [Double]) {
+        guard let pk = pkernel else { return }
+        var values = gains
+        if values.indices.contains(jtTrackRowIdx) { values[jtTrackRowIdx] = 1 }
+        values.withUnsafeBufferPointer {
+            bow_poly_jt_profile_gains(pk, $0.baseAddress, Int32($0.count))
+        }
+    }
+
     /// async-jt telemetry: (drops, flat-filled samples, FIFO fill, async flag)
     public func jtAsyncStats() -> (drops: Double, flat: Double,
                                    fill: Double, on: Double) {
@@ -17,6 +27,8 @@ extension BowEngine {
 
     /// The jt row fundamentals (Hz) in kernel order — empty without a jt block.
     public var jtRowFreqs: [Double] { tables.jt?.rowFreqs ?? [] }
+
+    public var jtFollowerRow: Int { jtTrackRowIdx }
 
     /// The tuning tonic (`f0Open` — the open-string reference).
     public var tonicHz: Double { tables.scalars.f0Open }
@@ -44,10 +56,13 @@ extension BowEngine {
         return w
     }
     /// The jt row holding EXACTLY this nominal frequency, or nil if the
-    /// jawari selection did not pick the string up (then inert). Rows are
-    /// ordered raga bridge first, so a shared pitch resolves to its raga row.
-    public func droneRow(forExactHz hz: Double) -> Int? {
-        jtRowFreqs.firstIndex(of: hz)
+    /// jawari selection did not pick the string up (then inert). A bank
+    /// identity disambiguates shared pitches; omitted uses the first row.
+    public func droneRow(forExactHz hz: Double, chromatic: Bool? = nil) -> Int? {
+        jtRowFreqs.indices.first {
+            jtRowFreqs[$0] == hz && (chromatic == nil || jtRowChromatic[$0] == chromatic)
+                && $0 != jtTrackRowIdx
+        }
     }
 
     /// Press a drone: swell the row's and its kin rows' sustain drive plus
@@ -57,7 +72,20 @@ extension BowEngine {
         guard let pk = pkernel, row >= 0, row < selRowFreqs.count
         else { return }
         os_unfair_lock_lock(&droneLock)
+        if bow_poly_jt_dual_pluck(pk, Int32(row), jtDualDisplacement) == 1 {
+            os_unfair_lock_unlock(&droneLock)
+            return
+        }
+        if jtPluckDrive > 0 {
+            bow_poly_jt_excite(pk, Int32(row), jtPluckDrive, jtPluckDecay)
+            bow_poly_jt_evolve_pulse(pk, Int32(row), jtPulseAmount,
+                                     jtPulseAttack, jtPulseDecay)
+            os_unfair_lock_unlock(&droneLock)
+            return
+        }
         droneHeldRows.insert(row)
+        bow_poly_jt_evolve_pulse(pk, Int32(row), jtPulseAmount,
+                                 jtPulseAttack, jtPulseDecay)
         if row < droneHeldMask.count { droneHeldMask[row] = true }
         let w = droneDriveWeights(rows: droneHeldRows)
         let wNew = droneDriveWeights(rows: [row])
@@ -87,6 +115,80 @@ extension BowEngine {
     }
 
     // MARK: - Runtime base parameters
+
+    /// Capture these settings on the next explicit row pluck or drone press.
+    public func setJtEvolutionPulse(amount: Double, attackMs: Double, decayMs: Double) {
+        guard amount.isFinite, attackMs.isFinite, decayMs.isFinite else { return }
+        os_unfair_lock_lock(&droneLock)
+        jtPulseAmount = min(max(amount, 0), 1)
+        jtPulseAttack = min(max(attackMs, 1), 100) / 1000
+        jtPulseDecay = min(max(decayMs, 10), 2000) / 1000
+        os_unfair_lock_unlock(&droneLock)
+    }
+
+    /// A nonzero drive selects finite row plucks for sympathetic drone presses.
+    public func setJtPluck(drive: Double, decayMs: Double) {
+        guard drive.isFinite, decayMs.isFinite else { return }
+        os_unfair_lock_lock(&droneLock)
+        jtPluckDrive = min(max(drive, 0), 0.3)
+        jtPluckDecay = min(max(decayMs, 1), 100) / 1000
+        os_unfair_lock_unlock(&droneLock)
+    }
+
+    public func setJtDualDisplacement(mm: Double) {
+        guard mm.isFinite else { return }
+        os_unfair_lock_lock(&droneLock)
+        jtDualDisplacement = min(max(mm, 0), 1) * 0.001
+        os_unfair_lock_unlock(&droneLock)
+    }
+
+    /// Stronger spectral selection preserves fewer, narrower peaks.
+    public func setJtDualSelectivity(_ value: Double) {
+        guard let pk = pkernel, value.isFinite else { return }
+        bow_poly_jt_dual_selectivity(pk, value)
+    }
+
+    /// Let new bridge excitation bloom and then recede into the row's natural ring.
+    public func setJtBowBloom(_ value: Double) {
+        guard let pk = pkernel, value.isFinite else { return }
+        bow_poly_jt_dual_bloom(pk, value)
+    }
+
+    /// Radiation-only spectral cleanup; 20 kHz bypasses without changing string motion.
+    public func setJtDualTone(hz: Double) {
+        guard hz.isFinite, let pk = pkernel else { return }
+        bow_poly_jt_dual_tone(pk, hz)
+    }
+
+    public func jtDualStats() -> [Double] {
+        var stats = [Double](repeating: 0, count: 4)
+        if let pk = pkernel { bow_poly_jt_dual_stats(pk, &stats) }
+        return stats
+    }
+
+    /// A single row onset with no held drone drive; the row rings naturally.
+    /// Returns the reference displacement actually submitted to a dual row, in mm.
+    @discardableResult
+    public func pluckTaraf(row: Int, strength: Double = 1) -> Double? {
+        guard let pk = pkernel, jtRowFreqs.indices.contains(row),
+              strength.isFinite, strength > 0 else { return nil }
+        let strength = min(strength, 1)
+        os_unfair_lock_lock(&droneLock)
+        let displacement = jtDualDisplacement * strength
+        if bow_poly_jt_dual_pluck(pk, Int32(row), displacement) == 1 {
+            os_unfair_lock_unlock(&droneLock)
+            return displacement * 1000
+        }
+        if jtPluckDrive > 0 {
+            bow_poly_jt_excite(pk, Int32(row), jtPluckDrive * strength, jtPluckDecay)
+        } else {
+            bow_poly_jt_pluck(pk, Int32(row), droneOnset * strength)
+        }
+        bow_poly_jt_evolve_pulse(pk, Int32(row), jtPulseAmount * strength,
+                                 jtPulseAttack, jtPulseDecay)
+        os_unfair_lock_unlock(&droneLock)
+        return nil
+    }
 
     /// RADIATED-JT TONE LP corner in Hz (`bow_jt_lp`): brightness of the
     /// jawari buzz. <= 0 or ≥ 20 kHz = the exact build-time state. State-
@@ -159,7 +261,24 @@ extension BowEngine {
     public func setJtCouple(_ k01: Double) {
         guard let pk = pkernel else { return }
         let k = min(max(k01, 0.0), 1.0)
-        bow_poly_jt_set_couple(pk, k * Self.jtCoupleFullScale)
+        bow_poly_jt_set_couple(pk, k * (jtDualRow >= 0 ? 0.04 : Self.jtCoupleFullScale))
+    }
+
+    /// BRIDGE DRIVE (`bow_jt_drive`): the scalar on the played strings'
+    /// bridge force into every row — the graze operating point. Slewed
+    /// ~40 ms at the jt tick inside the kernel; the build value re-pushed
+    /// is byte-null.
+    public func setJtDrive(_ drive: Double) {
+        guard let pk = pkernel else { return }
+        bow_poly_jt_set_drive(pk, max(drive, 0.0))
+    }
+
+    /// DRIVE LEVEL NORM 0…1 (`bow_jt_drive_norm`): how much of the drive's
+    /// level swing the row output compensates — 0 = raw physics, 1 =
+    /// constant loudness. Moot at the fitted drive (byte-null).
+    public func setJtDriveNorm(_ g01: Double) {
+        guard let pk = pkernel else { return }
+        bow_poly_jt_set_drive_norm(pk, min(max(g01, 0.0), 1.0))
     }
 
     /// HARMONIC EVOLUTION 0…1 (`bow_jt_evolve`): a SIGNED bone offset,

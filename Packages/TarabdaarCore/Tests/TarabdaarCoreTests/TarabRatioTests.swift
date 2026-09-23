@@ -44,8 +44,9 @@ final class TarabRatioTests: XCTestCase {
     func testDecodeFoldsDuplicatesAndRemapsDrones() throws {
         var state = Presets.state(.sarangiPilu)
         // a weak twin of low Sa, mapped by drone slot 0, inserted out of order
-        let weakTwin = StringSpec(degree: 0, octave: -1, gain: 0.80, t60: 7.0)
-        let survivor = state.strings.first { $0.degree == 0 && $0.octave == -1 }!
+        let weakTwin = StringSpec(degree: 0, octave: -1, gain: 0.80, t60: 7.0,
+                                  set: .chromatic, followsScale: true)
+        let survivor = state.strings(in: .chromatic).first { $0.degree == 0 && $0.octave == -1 }!
         state.strings.insert(weakTwin, at: 0)
         state.droneStringIds[0] = weakTwin.id
         let decoded = try JSONDecoder().decode(

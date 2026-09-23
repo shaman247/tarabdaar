@@ -13,7 +13,17 @@ is re-blessed with a before/after render for an A/B by ear.
 
 ## Open items
 
-None. The audit's entries have all landed or been declined; a decline and
-its reason live in the commit that removed the entry. A new finding goes
-here as a numbered entry under its section (altitude, reuse,
-simplification, efficiency), in the present tense.
+### Efficiency
+
+1. **Reuse fixed raga model data across rows.** Each physical row rebuilds the
+   same reference geometry, equilibrium, modal coefficients and radiation
+   transforms. Share immutable tables while retaining separate motion,
+   excitation, converter and filter histories. This primarily targets rebuild
+   time and memory, so measure those separately from sustained rendering CPU.
+
+2. **Factorization reuse and row batching remain unmeasured.** Guarded reuse
+   of a local Newton factorization and SIMD batching across independent rows
+   may reduce remaining contact work. Both need evidence: extra nonlinear
+   iterations can erase factorization savings, and differing row clocks and
+   contact states complicate batching. Keep Newton's convergence check and
+   mechanical timing intact.

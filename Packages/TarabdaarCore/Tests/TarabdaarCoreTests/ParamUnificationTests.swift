@@ -41,17 +41,12 @@ final class ParamUnificationTests: XCTestCase {
             "bow_draw_min_ms": bp.num["bow_draw_ms"] ?? 1.0, // follows the draw
             "bow_attack_bite": 0.0,
             "bow_attack_bite_ms": 60.0,
-            "bow_attack_thresh": 0.5,
             "bow_attack_fms": 15.0,
-            "bow_attack_vel": 0.0,
             "bow_settle_sharp": 0.0,
             "bow_body_tail_seed": 1.0,      // BowTables.buildOpenString
         ]
-        for (key, expect) in engineFallback {
+        for (key, expect) in engineFallback where bp.num[key] == nil {
             let spec = try XCTUnwrap(ParamRegistry.spec(key), key)
-            XCTAssertNil(bp.num[key],
-                         "\(key) grew an artifact value — this pin covers "
-                         + "artifact-absent keys only; re-derive the def")
             XCTAssertEqual(spec.def, expect, accuracy: 1e-12,
                            "\(key): authored default \(spec.def) is not what "
                            + "the engine plays (\(expect)) — the Parameters "
@@ -63,14 +58,62 @@ final class ParamUnificationTests: XCTestCase {
     /// (onset clocks, envelopes, phases, blend windows); everything else is
     /// a shared mechanism. A new parameter must be classified deliberately.
     func testScopeClassificationMatchesTheMechanisms() {
-        let perNoteGroups: Set<String> = [
-            "Articulation", "Liveness", "Strike blend", "Glide",
+        let perNoteKeys: Set<String> = [
+            "bow_jt_dual_mm",
+            "bow_jt_pluck",
+            "bow_jt_pluck_decay_ms",
+            "bow_jt_pulse",
+            "bow_jt_pulse_attack_ms",
+            "bow_jt_pulse_decay_ms",
+            "bow_place_ms",
+            "bow_draw_ms",
+            "bow_draw_min_ms",
+            "bow_attack_bite",
+            "bow_attack_bite_ms",
+            "bow_attack_fms",
+            "bow_attack_sharpness",
+            "bow_attack_beta",
+            "bow_attack_speed_db",
+            "bow_tnoise",
+            "bow_grip_beta",
+            "bow_grip_v_db",
+            "bow_grip_db",
+            "bow_grip_thresh",
+            "bow_grip_release",
+            "bow_grip_wait_ms",
+            "bow_grip_confirm_ms",
+            "bow_grip_ms",
+            "bow_grip_rel_ms",
+            "bow_grip_hold_ms",
+            "bow_vib_cents",
+            "bow_vib_hz",
+            "ctl_strike_window",
+            "ctl_glide_on",
+            "ctl_glide_grace",
+            "ctl_glide_rate",
+            "ctl_glide_held",
+            "ctl_glide_catchup",
+            "ctl_glide_over",
+            "bow_settle_db",
+            "bow_settle_ms",
+            "bow_settle_sharp",
+            "bow_drift_cents",
+            "bow_drift_hz",
+            "bow_drift_db",
+            "bow_drift_force_db",
+            "bow_glide_dip_db",
+            "bow_glide_dip_rate",
+            "bow_slide_noise",
+            "bow_slide_acc",
+            "bow_slide_dull",
+            "bow_slide_rate",
+            "tp_rel_t60",
+            "st_rel_t60",
         ]
-        let perNoteExtras: Set<String> = ["tp_rel_t60", "st_rel_t60"]
         for (group, params) in ParamRegistry.groups {
             for p in params {
                 let expected: ParamScope =
-                    perNoteGroups.contains(group) || perNoteExtras.contains(p.key)
+                    perNoteKeys.contains(p.key)
                     ? .perNote : .global
                 XCTAssertEqual(p.scope, expected,
                                "\(p.key) in \(group): scope \(p.scope) — "

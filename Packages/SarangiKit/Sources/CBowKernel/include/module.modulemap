@@ -1,4 +1,7 @@
 module CBowKernel {
+    header "bow_contact.h"
+    header "bow_radiation.h"
+    header "bow_tonal.h"
     header "bow_kernel.h"
     header "tanpura_kernel.h"
     export *

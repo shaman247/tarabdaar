@@ -1,18 +1,5 @@
 import Foundation
 
-/// Result of `peakAccelSince(timestamp:)`. The peak's magnitude is in g's
-/// (matches `CMDeviceMotion.userAcceleration` magnitude); the timestamp
-/// is in `CMMotionManager`'s clock domain.
-public struct PeakResult {
-    public let magnitude: Double
-    public let timestamp: TimeInterval
-
-    public init(magnitude: Double, timestamp: TimeInterval) {
-        self.magnitude = magnitude
-        self.timestamp = timestamp
-    }
-}
-
 /// Abstraction over the source of motion data feeding `NoteManager`.
 ///
 /// On iOS, `MotionManager` (wrapping `CMMotionManager`) conforms.
@@ -30,15 +17,6 @@ public protocol MotionSource: AnyObject {
     /// Default: zeros (the Mac's mock source has no accelerometer).
     var rawAccel: [Double] { get }
 
-    /// Most recent touch velocity estimate (0..1), written by
-    /// `NoteManager` after each note-on for display.
-    var lastTouchVelocity: Double { get set }
-
-    /// Peak accelerometer magnitude in the buffered window since the
-    /// given motion-clock timestamp. Called ~20ms after a touch begins
-    /// to map the accelerometer spike to a MIDI velocity.
-    func peakAccelSince(timestamp: TimeInterval) -> PeakResult
-
     /// STRIKE-SCALE ENVELOPE 0…1 — the continuous form of
     /// the strike measure: `strikeScale01` of the accel magnitude through
     /// a fast-attack / slow-decay tracker, maintained at the source's own
@@ -54,29 +32,10 @@ public extension MotionSource {
     var rawAccel: [Double] { [0, 0, 0] }
     var strikeLevel: Double { 0 }   // sources without an accelerometer
 
-    /// ONSET STRIKE VELOCITY 0…1 at a touch onset (the accelerometer
-    /// estimate consumed by the String voice's `bow_attack_vel`
-    /// velocity→sharpness law): the peak acceleration
-    /// magnitude over the TRAILING `Config.velocityLookback` window,
-    /// mapped log-scale across [`velocityMinG`, `velocityMaxG`] — the
-    /// window is backward-looking:
-    /// UIKit delivers a touch ~10–25 ms after the physical impact, so the
-    /// chassis spike is usually already in the 200 Hz ring buffer and the
-    /// onset never waits (the old design delayed note-on 20 ms instead).
-    /// `now` must be in the motion clock's domain (seconds since boot —
-    /// `CACurrentMediaTime()` matches). Below `velocityMinG` (a gentle
-    /// placement, or no motion data at all) this reads 0 = legato.
-    func strikeVelocity01(at now: TimeInterval) -> Double {
-        Self.strikeScale01(
-            peakAccelSince(timestamp: now - Config.velocityLookback)
-                .magnitude)
-    }
-
     /// The strike LAW as a pure map: acceleration magnitude (g) → 0…1,
-    /// log-scale across [`velocityMinG`, `velocityMaxG`], 0 at or below
-    /// the floor. Shared by the onset estimate above and the iPad's
-    /// persistent strike scope , so the scope's 0–127 trace
-    /// always reads exactly what a tap at that magnitude would send.
+    /// log-scale across [`strikeMinG`, `strikeMaxG`], 0 at or below
+    /// the floor. The iPad envelope, its scope and Joy-Con acceleration
+    /// share this law.
     static func strikeScale01(_ g: Double) -> Double {
         StrikeLaw.scale01(g)
     }
@@ -89,12 +48,12 @@ public extension MotionSource {
 /// the static on.
 public enum StrikeLaw {
     /// Acceleration magnitude (g) → 0…1, log-scale across
-    /// [`velocityMinG`, `velocityMaxG`], 0 at or below the floor.
+    /// [`strikeMinG`, `strikeMaxG`], 0 at or below the floor.
     public static func scale01(_ g: Double) -> Double {
-        guard g > Config.velocityMinG else { return 0.0 }
-        let clamped = min(g, Config.velocityMaxG)
-        return log(clamped / Config.velocityMinG)
-            / log(Config.velocityMaxG / Config.velocityMinG)
+        guard g > Config.strikeMinG else { return 0.0 }
+        let clamped = min(g, Config.strikeMaxG)
+        return log(clamped / Config.strikeMinG)
+            / log(Config.strikeMaxG / Config.strikeMinG)
     }
     /// The envelope's decay time constant (s) — the iPad tracker's.
     public static let envelopeTau = 0.15

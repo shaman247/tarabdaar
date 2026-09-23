@@ -34,6 +34,7 @@ struct MacMainWindow: View {
         case taraf = "Taraf"
         /// the formula body's frequency response as built (⌘0).
         case body = "Body"
+        case transforms = "Transforms"
     }
 
     var body: some View {
@@ -89,7 +90,7 @@ struct MacMainWindow: View {
                 ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 800)
+            .frame(maxWidth: 920)
             Spacer(minLength: 12)
         }
     }
@@ -107,6 +108,7 @@ struct MacMainWindow: View {
         case .scope:      ScopeView(controller: controller)
         case .taraf:      TarafScopeView(controller: controller)
         case .body:       BodyView(controller: controller)
+        case .transforms: BowTransformsView(controller: controller)
         }
     }
 }
@@ -127,9 +129,13 @@ private struct ConnectionPill: View {
         Button {
             showDetails = true
         } label: {
+            let readout = LinkReadout(midi: midi, status: controller.linkStatus)
             HStack(spacing: 6) {
-                Circle().fill(color).frame(width: 8, height: 8)
-                Text(label).font(.padCaption)
+                Circle().fill(readout.color).frame(width: 8, height: 8)
+                Image(systemName: readout.symbol)
+                    .font(.padCaption)
+                    .foregroundStyle(readout.color)
+                Text(readout.short).font(.padCaption.monospacedDigit())
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(Capsule().fill(Color(white: 0.15)))
@@ -137,18 +143,8 @@ private struct ConnectionPill: View {
         .buttonStyle(.plain)
         .popover(isPresented: $showDetails) {
             ConnectionStatusView(controller: controller)
-                .frame(width: 360, height: 380)
+                .frame(width: 420, height: 560)
         }
-    }
-
-    private var color: Color {
-        if !midi.isActive { return .red }
-        return midi.sourceCount > 0 ? .green : .yellow
-    }
-
-    private var label: String {
-        if !midi.isActive { return "MIDI off" }
-        return midi.sourceCount > 0 ? "MIDI: \(midi.sourceCount) src" : "no MIDI in"
     }
 }
 

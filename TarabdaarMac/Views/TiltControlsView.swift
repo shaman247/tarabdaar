@@ -11,7 +11,9 @@ import SwiftUI
 ///    a two-handle range slider for the endpoints, in the target's native
 ///    units. A target is a composite parameter OR any single parameter
 ///    from `ParamRegistry` — a tilt can drive "Taraf Purity" or
-///    "vibrato depth (¢)" with the same machinery. The iPad streams only
+///    "vibrato depth (¢)" with the same machinery. Several axes on one
+///    target add their swings about its resting value (a composite's
+///    Rest slider; a parameter's store value). The iPad streams only
 ///    its raw tilt report; the Mac evaluates these bindings
 ///    (`AppController.applyTiltAxis`), so nothing syncs.
 ///  * **Composite parameters** — named 0…1 controls BUILT FROM several
@@ -22,17 +24,40 @@ import SwiftUI
 struct TiltControlsView: View {
     @ObservedObject var controller: AppController
 
+    private var smoothingParameters: [ParamSpec] {
+        ParamRegistry.all.filter {
+            if case .accelerationSmoothing = $0.target { return true }
+            return false
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Text("TILT CONTROLS")
+                Panel(title: "Acceleration smoothing") {
+                    VStack(spacing: 8) {
+                        ForEach(smoothingParameters) { spec in
+                            HStack(spacing: 8) {
+                                Text(spec.label)
+                                    .font(.padCaption)
+                                    .frame(width: Typography.scaledWidth(140), alignment: .leading)
+                                Slider(value: Binding(
+                                    get: { controller.paramValue(spec.key) },
+                                    set: { controller.setParamValue(spec.key, spec.clamp($0)) }),
+                                       in: spec.lo...spec.hi)
+                                    .accessibilityLabel(spec.label)
+                                Text("\(controller.paramValue(spec.key), specifier: "%.0f") ms")
+                                    .font(.padCaption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: Typography.scaledWidth(60), alignment: .trailing)
+                            }
+                        }
+                    }
+                }
+                Text("MOTION CONTROLS")
                     .font(.padCaption.weight(.bold))
                     .foregroundStyle(.secondary)
-                Text("Each control axis drives any set of composites or single parameters between the endpoints of its range slider, in the target's own units (left = fully one way, right = fully the other; rest sits halfway). \u{201C}From center\u{201D} holds the low endpoint through the resting half and sweeps only past neutral. Five axes: Arm \u{2195}/\u{2194}/\u{27F2} are the iPad's tilt axes through the guided arm calibration (Setup tab; every axis runs \u{2212}1\u{2026}+1 with rest = 0, sweep extremes = \u{00B1}1) — uncalibrated they carry raw pitch/roll/yaw, uncentered; Stick X/Y are the Joy-Con stick. The Mac evaluates all bindings, so edits take effect immediately.")
-                    .font(.padCaption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                ForEach(ControlAxes.dims, id: \.rawValue) { dim in
+                ForEach(ControlAxes.bindableDims, id: \.rawValue) { dim in
                     Panel(title: dim.label) {
                         TiltBindingSection(controller: controller, dim: dim)
                     }
@@ -41,10 +66,6 @@ struct TiltControlsView: View {
                     .font(.padCaption.weight(.bold))
                     .foregroundStyle(.secondary)
                     .padding(.top, 8)
-                Text("A composite parameter is a named 0\u{2013}1 control built from several parameters: each member sweeps its own low\u{2192}high range as the composite rises. Bind composites to tilts above. Most members follow the tilt instantly; a few are engine-build values that re-apply through a crossfaded rebuild about a fifth of a second after the value settles (hover a member for which).")
-                    .font(.padCaption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 ForEach(controller.composites) { comp in
                     CompositeEditor(controller: controller, compositeID: comp.id)
                 }
@@ -54,10 +75,6 @@ struct TiltControlsView: View {
                     Label("Add composite parameter", systemImage: "plus")
                 }
                 .disabled(controller.composites.count >= CompositeParam.maxSlots)
-                Divider().padding(.top, 8)
-                Text("Composites and tilt bindings save with the preset — Save preset… on the Parameters tab (⌘5).")
-                    .font(.padCaption)
-                    .foregroundStyle(.secondary)
             }
             .padding(20)
             .frame(maxWidth: 780, alignment: .leading)
@@ -129,9 +146,7 @@ private struct TiltBindingSection: View {
     }
 }
 
-/// One binding row: display name, a two-handle range slider for the
-/// endpoints (the target's native units; handles may cross = inverted),
-/// the "From center" rest-zero shape toggle, and remove.
+/// A binding's signed endpoint offsets and its target's shared base.
 private struct TiltBindingRow: View {
     @ObservedObject var controller: AppController
     let dim: InputDimension
@@ -140,14 +155,17 @@ private struct TiltBindingRow: View {
     private var binding: DimensionBinding? {
         controller.tiltMapping.mapping(for: target).binding(for: dim)
     }
-    private var lo: Double { binding?.controlPoints.first?.y ?? 0 }
-    private var hi: Double { binding?.controlPoints.last?.y ?? 0 }
-    private var fromCenter: Bool { (binding?.controlPoints.count ?? 0) >= 3 }
+    private var lo: Double { binding?.swing(atX: 0) ?? 0 }
+    private var hi: Double { binding?.swing(atX: 1) ?? 0 }
+    private var base: Double {
+        target.paramKey.map { controller.paramValue($0) }
+            ?? controller.tiltMapping.mapping(for: target).defaultValue
+    }
 
-    /// Slider bounds: the target's native range, widened to include any
-    /// stored endpoint outside it.
+    /// Offset bounds stay fixed when the base moves.
     private var sliderRange: ClosedRange<Double> {
-        ParamFormat.sliderBounds(target.defaultRange, including: lo, hi)
+        let span = abs(target.defaultRange.1 - target.defaultRange.0)
+        return ParamFormat.sliderBounds((-span, span), including: lo, hi)
     }
 
     var body: some View {
@@ -158,28 +176,22 @@ private struct TiltBindingRow: View {
             readoutWidth: Typography.scaledWidth(44),
             lo: Binding(
                 get: { lo },
-                set: { controller.setTiltBinding(target, dim: dim,
-                                                 lo: $0, hi: hi,
-                                                 fromCenter: fromCenter) }),
+                set: { controller.setTiltOffsets(target, dim: dim, lo: $0, hi: hi) }),
             hi: Binding(
                 get: { hi },
-                set: { controller.setTiltBinding(target, dim: dim,
-                                                 lo: lo, hi: $0,
-                                                 fromCenter: fromCenter) }),
+                set: { controller.setTiltOffsets(target, dim: dim, lo: lo, hi: $0) }),
             range: sliderRange,
-            sliderHelp: "Drag either handle: left value = tilted fully one way, right value = fully the other. Handles may cross for an inverted mapping."
+            sliderHelp: "Offsets added to the base at the gesture's two extremes. Hollow = first extreme; filled = second. The amber tick is zero offset.",
+            signed: true,
+            zeroMarker: true,
+            baseValue: base
         ) {
-            Toggle("From center", isOn: Binding(
-                get: { fromCenter },
-                set: { controller.setTiltBinding(target, dim: dim, lo: lo,
-                                                 hi: hi, fromCenter: $0) }))
-                .toggleStyle(.checkbox)
-                .font(.padCaption2)
             Spacer(minLength: 0)
             RemoveButton(help: "Remove this binding") {
                 controller.removeTiltBinding(target, dim: dim)
             }
         }
+        .padding(.vertical, 4)
     }
 }
 
@@ -195,6 +207,9 @@ private struct RangeSliderRow<Trailing: View>: View {
     let hi: Binding<Double>
     let range: ClosedRange<Double>
     let sliderHelp: String
+    var signed = false
+    var zeroMarker = false
+    var baseValue: Double? = nil
     @ViewBuilder let trailing: () -> Trailing
 
     var body: some View {
@@ -203,19 +218,24 @@ private struct RangeSliderRow<Trailing: View>: View {
                 .font(.padCaption)
                 .frame(width: labelWidth, alignment: .leading)
                 .help(labelHelp)
-            Text(ParamFormat.value(lo.wrappedValue))
+            Text(readout(lo.wrappedValue))
                 .font(.padCaption2.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: readoutWidth, alignment: .trailing)
-            TiltRangeSlider(lo: lo, hi: hi, range: range)
+            TiltRangeSlider(lo: lo, hi: hi, range: range,
+                            zeroMarker: zeroMarker, baseValue: baseValue)
                 .frame(minWidth: 180)
                 .help(sliderHelp)
-            Text(ParamFormat.value(hi.wrappedValue))
+            Text(readout(hi.wrappedValue))
                 .font(.padCaption2.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: readoutWidth, alignment: .leading)
             trailing()
         }
+    }
+
+    private func readout(_ value: Double) -> String {
+        (signed && value > 0 ? "+" : "") + ParamFormat.value(value)
     }
 }
 
@@ -261,6 +281,21 @@ private struct CompositeEditor: View {
                                                               to: $0) }))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 180)
+                        Text("Rest")
+                            .font(.padCaption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 8)
+                        Slider(value: Binding(
+                            get: { rest },
+                            set: { controller.setCompositeRest(slot: comp.slot,
+                                                               $0) }),
+                               in: 0...1)
+                            .frame(width: 110)
+                        Text(ParamFormat.value(rest))
+                            .font(.padCaption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: Typography.scaledWidth(36),
+                                   alignment: .leading)
                         Spacer()
                         Menu("Add parameter") {
                             ForEach(ParamRegistry.groups, id: \.name) { group in
@@ -290,7 +325,7 @@ private struct CompositeEditor: View {
                         .help("Delete this composite parameter")
                     }
                     if comp.members.isEmpty {
-                        Text("No parameters — add one to give this control an effect")
+                        Text("No parameters")
                             .font(.padCaption)
                             .foregroundStyle(.tertiary)
                     }
@@ -306,6 +341,13 @@ private struct CompositeEditor: View {
 
     private var used: Set<String> {
         Set(composite?.members.map(\.key) ?? [])
+    }
+
+    /// The composite's resting value (`ParameterMapping.defaultValue`).
+    private var rest: Double {
+        guard let slot = composite?.slot else { return 0 }
+        return controller.tiltMapping
+            .mapping(for: MapTarget(compositeSlot: slot)).defaultValue
     }
 }
 
@@ -368,6 +410,8 @@ struct TiltRangeSlider: View {
     @Binding var lo: Double
     @Binding var hi: Double
     let range: ClosedRange<Double>
+    var zeroMarker = false
+    var baseValue: Double? = nil
 
     /// Which handle the current drag owns (nil between drags).
     @State private var dragging: Handle?
@@ -378,7 +422,7 @@ struct TiltRangeSlider: View {
     var body: some View {
         GeometryReader { geo in
             let w = max(geo.size.width - 2 * knobR, 1)
-            let midY = geo.size.height / 2
+            let midY = geo.size.height / 2 + (baseValue == nil ? 0 : 8)
             let xLo = knobR + w * frac(lo)
             let xHi = knobR + w * frac(hi)
             ZStack(alignment: .leading) {
@@ -386,10 +430,26 @@ struct TiltRangeSlider: View {
                     .fill(Color.secondary.opacity(0.25))
                     .frame(height: 3)
                     .padding(.horizontal, knobR - 1)
+                    .offset(y: baseValue == nil ? 0 : 8)
                 Rectangle()
                     .fill(Color.accentColor.opacity(lo <= hi ? 0.55 : 0.25))
                     .frame(width: abs(xHi - xLo), height: 3)
-                    .offset(x: min(xLo, xHi))
+                    .offset(x: min(xLo, xHi), y: baseValue == nil ? 0 : 8)
+                if zeroMarker {
+                    Rectangle()
+                        .fill(Color.orange)
+                        .frame(width: 2, height: 16)
+                        .position(x: knobR + w * frac(0), y: midY)
+                }
+                if let baseValue {
+                    Text(ParamFormat.value(baseValue))
+                        .font(.padCaption2.monospacedDigit())
+                        .foregroundStyle(.orange)
+                        .fixedSize()
+                        .position(x: knobR + w * frac(0), y: midY - 19)
+                        .accessibilityLabel("Base \(ParamFormat.value(baseValue))")
+                        .allowsHitTesting(false)
+                }
                 Circle()
                     .strokeBorder(Color.accentColor, lineWidth: 2)
                     .background(Circle().fill(Color(white: 0.15)))
@@ -422,7 +482,7 @@ struct TiltRangeSlider: View {
                     .onEnded { _ in dragging = nil }
             )
         }
-        .frame(height: 16)
+        .frame(height: baseValue == nil ? 16 : 38)
     }
 
     private func frac(_ v: Double) -> CGFloat {

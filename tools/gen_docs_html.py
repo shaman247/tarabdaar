@@ -108,6 +108,9 @@ def inline(text):
 
     text = re.sub(r"`([^`]+)`", stash, text)
     text = html.escape(text, quote=False)
+    # Parameter descriptions use explicit breaks inside Markdown table cells.
+    # Permit only this attribute-free tag; other raw HTML stays escaped.
+    text = re.sub(r"&lt;br\s*/?&gt;", "<br>", text)
     # links (no nested brackets in this corpus)
     text = re.sub(
         r"\[([^\]]+)\]\(([^)\s]+)\)",

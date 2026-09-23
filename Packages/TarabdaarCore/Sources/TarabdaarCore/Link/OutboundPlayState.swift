@@ -11,10 +11,10 @@ public final class OutboundPlayState {
     private struct Touch {
         let wireId: UInt16
         let onsetSeq: UInt8
-        let velocity: UInt8
         /// Fingertip size, the wire byte (see `TLPTouch.radius`).
         var radius: UInt8
         var pitch: Float
+        var fretPosition: UInt16
         /// In-process only — see `TLPTouch.exprScale`.
         var exprScale: Double
         /// In-process only — see `TLPTouch.glideExempt`.
@@ -54,16 +54,15 @@ public final class OutboundPlayState {
 
     /// `radiusPt`: the fingertip's `UITouch.majorRadius` in POINTS
     /// (0 = unknown — producers without a touchscreen).
-    public func touchOn(_ token: AnyHashable, pitchSemis: Double,
-                        velocity: Double, radiusPt: Double = 0,
-                        exprScale: Double = 1.0, glideExempt: Bool = false) {
+    public func touchOn(_ token: AnyHashable, pitchSemis: Double, radiusPt: Double = 0,
+                        fretPosition: Double = 0, exprScale: Double = 1.0, glideExempt: Bool = false) {
         lock.lock()
         touches.removeAll { $0.token == token }
         let t = Touch(wireId: idNamespace | (nextWireId & 0x0FFF),
                       onsetSeq: nextOnsetSeq,
-                      velocity: clamp255(velocity),
                       radius: TLPTouch.radiusByte(points: radiusPt),
                       pitch: Float(pitchSemis),
+                      fretPosition: TLPTouch.fretPositionWord(fretPosition),
                       exprScale: exprScale,
                       glideExempt: glideExempt)
         nextWireId &+= 1
@@ -98,17 +97,22 @@ public final class OutboundPlayState {
         markDirtyLockedThenNotify()
     }
 
-    public func touchGlide(_ token: AnyHashable, pitchSemis: Double) {
+    public func touchGlide(_ token: AnyHashable, pitchSemis: Double,
+                           fretPosition: Double? = nil) {
         lock.lock()
         guard let i = touches.firstIndex(where: { $0.token == token }) else {
             lock.unlock()
             return
         }
-        guard touches[i].touch.pitch != Float(pitchSemis) else {
+        let position = fretPosition.map { TLPTouch.fretPositionWord($0) }
+            ?? touches[i].touch.fretPosition
+        guard touches[i].touch.pitch != Float(pitchSemis)
+                || touches[i].touch.fretPosition != position else {
             lock.unlock()
             return
         }
         touches[i].touch.pitch = Float(pitchSemis)
+        touches[i].touch.fretPosition = position
         markDirtyLockedThenNotify()
     }
 
@@ -218,9 +222,9 @@ public final class OutboundPlayState {
             touches: touches.map { pair in
                 TLPTouch(id: pair.touch.wireId,
                          onsetSeq: pair.touch.onsetSeq,
-                         velocity: pair.touch.velocity,
                          radius: pair.touch.radius,
                          pitch: pair.touch.pitch,
+                         fretPosition: pair.touch.fretPosition,
                          exprScale: pair.touch.exprScale,
                          glideExempt: pair.touch.glideExempt)
             })

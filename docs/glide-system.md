@@ -4,7 +4,7 @@ The instrument has two glide layers:
 
 1. **Direct finger glide** — the Fret Pad's native behaviour: a dragged
    touch's pitch tracks the finger; the String voice adds no shaping.
-2. **The Glide Queue** — queued glissandi across *overlapping touches*
+2. **The Glide Queue** — queued glissandi across *overlapping or closely spaced touches*
    (`GlideSequencer`). **Off by default** (`ctl_glide_on` 0 = pure
    pass-through).
 
@@ -35,23 +35,28 @@ public `touchOn`/`touchGlide`/`touchOff` through one instance, so every
 touch source — the iPad wire, the Mac pads, the Joy-Con strum — obeys
 the same law. It is the only note path there is.
 
-### The overlap rule
+### Overlap and release grace
 
-With `ctl_glide_on` armed, a new onset that **overlaps the sounding
-chain in time** — some member of the chain (its resting owner, or a
-queued note) is still physically down — does **not** mount a fresh
-string: it is queued as a waypoint, and the sounding voice **glides** to
-it. Every overlapping onset joins the queue and the trajectory hits each
-queued pitch **in sequence**. Once every chained touch has lifted, the
-chain is over: the next tap is an ordinary fresh attack.
+With `ctl_glide_on` armed, a new onset joins the sounding chain while
+any member is physically held, or within `ctl_glide_grace` milliseconds
+of the last physical lift. The grace defaults to **150 ms** and is
+adjustable from 0 to 500 ms in the Glide parameter group. Zero accepts
+only overlapping touches.
 
-**Releases are never deferred** — a lone tap's note-off lands the
-instant the finger lifts, so staccato articulation is exactly the
-toggle-off one. There is no time-window gate and no release grace (not
-present — see docs/history/). The flip side: armed, a second finger
-landing while another is held always chains — overlapping-touch
-polyphony is what the toggle trades away; switch it off (or bind it to a
-tilt/stick axis) to play polyphonically.
+**Release is immediate.** The last finger lifts the bow at once, even
+mid-trajectory. Grace remembers the released string and its last sounded
+pitch; it does not sustain the note. A following onset inside the window
+reopens the same string and glides from that pitch through the waypoints,
+without resetting its waveguide or restarting its attack envelope.
+Pending waypoints pause while released and are discarded when grace
+expires. Expiry produces no additional sound or note-off.
+
+An onset outside the window mounts a fresh string. A repeated pitch
+(±25 ¢ with no queued waypoint) also re-attacks, including during grace.
+Switching glide off or setting grace to zero forgets released chains;
+Panic and link loss clear the entire queue. Exempt strum touches release
+and re-attack directly. Overlapping-touch polyphony remains available
+with glide disabled.
 
 ### The trajectory
 
@@ -80,16 +85,13 @@ tilt/stick axis) to play polyphonically.
 
 - **Ownership** — after arriving at a waypoint, that waypoint's
   physical touch owns the sounding voice: its drags meend it and its
-  release ends it, mapped onto the voice's original wire id (the voice
+  last physical release ends it immediately, mapped onto the voice's original wire id (the voice
   layer never learns the queued ids). A queued finger dragging *before*
   the glide arrives retargets its waypoint live — the trajectory lands
   where the finger is.
-- **Releases** — a queued note released before the trajectory reaches
-  it stays queued (the glide still hits its pitch); it just no longer
-  holds the chain open. Arriving on an already-lifted waypoint with
-  nothing further queued releases the voice **on arrival**. A repeat tap
-  at the chain's current pitch (±25 ¢, nothing queued) passes through as
-  a real re-attack — a second finger can re-strike the sounding note.
+- **Releases** — a queued note released while other members remain held
+  stays queued, and the trajectory still visits it. When every member
+  lifts, the voice releases immediately and the queue pauses for grace.
 - **Parked fingers and glide-back** — past chain members still down are
   *parked*: only the current owner's drags drive the voice, and a parked
   finger's movements are remembered **silently** (following them is the
@@ -109,10 +111,12 @@ tilt/stick axis) to play polyphonically.
 
 The sequencer sits above the instrument routing, so the plucked mains
 get it too: on the Tanpura/Sitar a queued onset becomes a kernel-side
-bend of the ringing string — a glissando without re-plucks. It is a
+bend of the ringing string — a glissando without re-plucks. Resuming a
+released plucked string removes its extra release damping; its remaining
+energy rings naturally, with no new excitation. It is a
 queue *above* allocation, not a legato law: a captured onset never
 becomes a note-on, every note that mounts still gets a fresh string, and
 with the toggle off the sequencer is byte-for-byte pass-through (the
-inert-default contract — parity hashes unaffected). The five knobs live
+inert-default contract — parity hashes unaffected). The six knobs live
 in the Parameters tab's **Glide** group (all `.live`, per-note scope,
 tilt-bindable). Guards: `GlideSequencerTests`.

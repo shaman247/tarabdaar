@@ -15,7 +15,8 @@ import SwiftUI
 /// as the `FRET_ARRANGEMENT` TLP event. See [docs/fret-pad.md](../../docs/fret-pad.md).
 struct FretPadView: View {
     @ObservedObject var controller: AppController
-    /// The note emitter (`fretPad`): velocity, `marginPixels`, `sounding`.
+    @ObservedObject var audio: AudioEngine
+    /// The note emitter (`fretPad`): `marginPixels`, `sounding`.
     @ObservedObject var engine: PitchPadEngine
     /// The scale + tonic source, edited on this tab.
     @ObservedObject var pitchPad: PitchPadEngine
@@ -30,6 +31,7 @@ struct FretPadView: View {
 
     init(controller: AppController) {
         self.controller = controller
+        self.audio = controller.audio
         self.engine = controller.fretPad
         self.pitchPad = controller.pitchPad
     }
@@ -42,6 +44,9 @@ struct FretPadView: View {
     var body: some View {
         VStack(spacing: 8) {
             toolbar
+            TarafPluckStrip(bank: audio.tarafBank, scale: pitchPad.scale) { revision, row in
+                audio.pluckTaraf(revision: revision, row: row)
+            }
             HStack(alignment: .top, spacing: 12) {
                 FretPadSurface(engine: engine,
                                arrangement: $controller.fretArrangement,
@@ -104,7 +109,6 @@ struct FretPadView: View {
                             style: .capsule)
             snapControl
             warpControl
-            velocityControl
             primeLimitControl
             tonicControl
         }
@@ -290,18 +294,6 @@ struct FretPadView: View {
             readoutFont: .padCaption.monospacedDigit(),
             readoutWidth: Typography.scaledWidth(36))
         .help("How strongly the frets warp the pitch space around them (the ctl_fret_warp parameter — also on the Parameters tab, bindable to a tilt/stick axis for live morphing): 0 = linear (pitch moves at a constant rate between frets); higher = pitch plateaus near each fret and transitions quickly through the middle, so a straight slide between two frets traces a logistic curve. The readout shows the LIVE value (binding included). Out of Perform mode the contour lines show the resulting territories.")
-    }
-
-    private var velocityControl: some View {
-        ParamSliderRow(
-            label: "Velocity",
-            value: Binding(
-                get: { Double(engine.velocity) },
-                set: { engine.velocity = Int($0.rounded()) }),
-            range: 1...127,
-            readout: "\(engine.velocity)",
-            spacing: 6, sliderWidth: 90,
-            readoutWidth: Typography.scaledWidth(28))
     }
 
     /// The tonic, edited here only: **Hz** (the app's one absolute pitch) and

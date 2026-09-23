@@ -1,10 +1,8 @@
 import Foundation
 
-/// Which bridge a sympathetic string sits on. As on the instrument: the
-/// CHROMATIC set (~15 strings through the main bridge, tuned by semitone) and
-/// the RAGA set (side bridges, tuned to the raga). Each bridge has its own
-/// jawari: raga rows ride the `bow_jt_*` contact law, chromatic rows the
-/// `bow_jtc_*` one. Persisted as a string; absent decodes as `.raga`.
+/// Which bridge a sympathetic string sits on: the physical two-direction
+/// raga bank or the legacy modal-jawari chromatic bank. Pitch source is
+/// independent of bridge; old documents migrate their scale references.
 public enum TarabSet: String, Codable, Sendable, Hashable, CaseIterable {
     case raga, chromatic
 }
@@ -16,7 +14,8 @@ public enum TarabSet: String, Codable, Sendable, Hashable, CaseIterable {
 /// indexes `InstrumentState.scaleRatios` (the one centralized scale), so it
 /// can only sound a pitch of the scale and retunes with the scale or tonic.
 /// A chromatic string's `degree` is a semitone (0…11) into the fixed JI grid
-/// (`RagaTuning.chromaticRatio`): a tonic move retunes it, a scale edit does
+/// (`RagaTuning.chromaticRatio`), unless `followsScale` preserves a migrated
+/// scale-degree row: a tonic move retunes a fixed-grid row, a scale edit does
 /// not. No ratio or Hz exists in the document — Hz is minted at resolve time.
 public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
     public var id: UUID
@@ -31,19 +30,23 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
     public var enabled: Bool
     /// The bridge this string sits on — see `TarabSet`.
     public var set: TarabSet
+    /// Pitch source is independent of bridge: migrated scale rows retain
+    /// their degree references when moved onto the chromatic bridge.
+    public var followsScale: Bool
 
     public init(id: UUID = UUID(), degree: Int, octave: Int = 0,
                 gain: Double, t60: Double, enabled: Bool = true,
-                set: TarabSet = .raga) {
+                set: TarabSet = .raga, followsScale: Bool? = nil) {
         self.id = id; self.degree = degree; self.octave = octave
         self.gain = gain; self.t60 = t60; self.enabled = enabled
         self.set = set
+        self.followsScale = followsScale ?? (set == .raga)
     }
 
     // Tolerant decode: `octave`, `enabled` and `set` default when absent;
     // retired keys (`ratio`/`freq`/`group`/`weight`/`bright`/`raga`) decode
     // away ignored; `degree` is required.
-    private enum CodingKeys: String, CodingKey { case id, degree, octave, gain, t60, enabled, set }
+    private enum CodingKeys: String, CodingKey { case id, degree, octave, gain, t60, enabled, set, followsScale }
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
@@ -53,6 +56,7 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
         t60 = try c.decode(Double.self, forKey: .t60)
         enabled = (try? c.decode(Bool.self, forKey: .enabled)) ?? true
         set = (try? c.decode(TarabSet.self, forKey: .set)) ?? .raga
+        followsScale = (try? c.decode(Bool.self, forKey: .followsScale)) ?? (set == .raga)
     }
 
     /// Frequency ratio vs the tonic under a scale. A raga degree clamps into
@@ -60,7 +64,7 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
     /// degree); a chromatic degree reads the fixed JI grid (mod 12) and
     /// ignores the scale.
     public func ratio(in scaleRatios: [Double]) -> Double {
-        if set == .chromatic {
+        if !followsScale {
             return RagaTuning.chromaticRatio(semitone: degree)
                 * pow(2.0, Double(octave))
         }

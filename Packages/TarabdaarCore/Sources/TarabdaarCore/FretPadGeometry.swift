@@ -96,8 +96,8 @@ public struct FretArrangement: Equatable {
 
     /// `FretLayoutPreset.keyboard` ("C Keyboard") — the DEFAULT layout: **7
     /// evenly-spaced svara columns** with komal/tivra **stacked above** their
-    /// shuddha partner like black keys over white (the field y-interpolates
-    /// inside a column, so sliding up bends r → R).
+    /// shuddha partner like black keys over white, with S and P in both rows
+    /// (the field y-interpolates inside a column, so sliding down bends r → R).
     public static func keyboardArrangement(
         degrees: [(ratio: Double, label: String)]) -> FretArrangement {
         // Column per svara (pitch class): S | R/r | G/g | m/M | P | D/d | N/n.
@@ -109,14 +109,16 @@ public struct FretArrangement: Equatable {
             let semis = Int((12.0 * log2(deg.ratio)).rounded())
             let pc = ((semis % 12) + 12) % 12
             let x = (Double(columnForPC[pc] ?? 0) + 0.5) / 7.0
-            let band: (top: Double, bottom: Double)
+            let bands: [(top: Double, bottom: Double)]
             switch pc {
-            case 0, 7:            band = (0.324, 0.676)   // S, P — centred
-            case 2, 4, 5, 9, 11:  band = (0.588, 0.892)   // shuddha — lower middle
-            default:              band = (0.108, 0.412)   // komal/tivra — upper middle
+            case 0, 7:            bands = [(0.188, 0.492), (0.508, 0.812)] // S, P — close pair
+            case 2, 4, 5, 9, 11:  bands = [(0.588, 0.892)] // shuddha — lower middle
+            default:              bands = [(0.108, 0.412)] // komal/tivra — upper middle
             }
-            segments.append(FretSegment(degreeIndex: i, x: x, topY: band.top,
-                                        bottomY: band.bottom))
+            for band in bands {
+                segments.append(FretSegment(degreeIndex: i, x: x, topY: band.top,
+                                            bottomY: band.bottom))
+            }
         }
         return FretArrangement(segments: segments)
     }
@@ -173,10 +175,12 @@ public func fretRatio(_ segment: FretSegment,
 // MARK: - Band
 
 /// The playable **band**: full width, `Config.fretPadHeightFraction` of the
-/// height, centered; above/below is dead except the drone buttons.
+/// height, its top at `Config.fretPadBandTopFraction`; above/below is dead
+/// except the drone buttons.
 public func fretPadBandRect(in size: CGSize) -> CGRect {
     let h = size.height * Config.fretPadHeightFraction
-    return CGRect(x: 0, y: (size.height - h) / 2, width: size.width, height: h)
+    let y = size.height * Config.fretPadBandTopFraction
+    return CGRect(x: 0, y: y, width: size.width, height: h)
 }
 
 // MARK: - Drone buttons
@@ -312,6 +316,46 @@ func fretColumnXs(_ placements: [FretPlacement]) -> [CGFloat] {
         columns.append(x)
     }
     return columns
+}
+
+/// Position along a fret: inner end 0, outer end 1, clamped beyond its
+/// extent. Neighboring columns and gaps blend linearly, independent of pitch warp.
+public func fretPosition(at pt: CGPoint, placements: [FretPlacement],
+                         padHeight: CGFloat) -> Double {
+    let columns = fretColumnXs(placements)
+    guard !columns.isEmpty, padHeight > 0 else { return 0 }
+    func position(on p: FretPlacement, atY y: CGFloat) -> Double {
+        let height = p.bottomY - p.topY
+        guard height > 0 else { return 0 }
+        let t = min(1, max(0, Double((y - p.topY) / height)))
+        return (p.topY + p.bottomY) / 2 < padHeight / 2 ? 1 - t : t
+    }
+    func position(atColumn cx: CGFloat) -> Double {
+        let frets = placements.filter { abs($0.x - cx) <= fretColumnEps }
+        if let inside = frets.filter({ $0.topY <= pt.y && pt.y <= $0.bottomY })
+            .min(by: { abs(($0.topY + $0.bottomY) / 2 - pt.y)
+                < abs(($1.topY + $1.bottomY) / 2 - pt.y) }) {
+            return position(on: inside, atY: pt.y)
+        }
+        let above = frets.filter { $0.bottomY < pt.y }.max { $0.bottomY < $1.bottomY }
+        let below = frets.filter { $0.topY > pt.y }.min { $0.topY < $1.topY }
+        switch (above, below) {
+        case (let a?, let b?):
+            let t = Double((pt.y - a.bottomY) / (b.topY - a.bottomY))
+            let start = position(on: a, atY: a.bottomY)
+            return start + (position(on: b, atY: b.topY) - start) * t
+        case (let a?, nil): return position(on: a, atY: pt.y)
+        case (nil, let b?): return position(on: b, atY: pt.y)
+        case (nil, nil): return 0
+        }
+    }
+    guard columns.count > 1 else { return position(atColumn: columns[0]) }
+    let upper = columns.firstIndex(where: { $0 > pt.x }) ?? columns.count
+    let i = min(max(upper - 1, 0), columns.count - 2)
+    let (a, b) = (columns[i], columns[i + 1])
+    let t = min(1, max(0, Double((pt.x - a) / (b - a))))
+    let start = position(atColumn: a)
+    return start + (position(atColumn: b) - start) * t
 }
 
 /// log2 pitch of the fret field at `pt`: each **column** (frets within

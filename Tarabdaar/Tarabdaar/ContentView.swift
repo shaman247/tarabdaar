@@ -90,6 +90,8 @@ struct ContentView: View {
             }
             link.onEvent = { [weak scaleSync] event in
                 switch event {
+                case .tarafBank(let bank):
+                    scaleSync?.applyTarafBank(bank)
                 case .scaleState(let blob):
                     if let state = PitchScaleSysEx.decodeBlob(blob) {
                         scaleSync?.applyState(state)
@@ -103,6 +105,7 @@ struct ContentView: View {
                 }
             }
             link.onJoyConState = { [weak scaleSync, weak pad] s in
+                scaleSync?.noteControls.update(s.noteControls)
                 // Volume readout: into the polled history, NOT the
                 // published display — level motion must not re-render
                 // the toolbar (the scope polls at UI rate).
@@ -125,6 +128,8 @@ struct ContentView: View {
             link.onStatus = { [weak scaleSync, weak pad] status in
                 if !status.isUp || status.isStale {
                     scaleSync?.applyJoyCon(.idle)
+                    scaleSync?.applyTarafBank(.empty)
+                    scaleSync?.noteControls.update(.idle)
                     // The Mac's levels are history too — drop the scope
                     // to silence instead of freezing at the last value.
                     scaleSync?.volumeHistory.record(voice: 0, taraf: 0)
@@ -161,6 +166,9 @@ struct ContentView: View {
                        arrangement: scaleSync.fretArrangement
                            ?? FretArrangement.keyboardArrangement(
                                degrees: scaleDegrees(from: pad.scale)),
+                       pluckTaraf: { revision, row in
+                           link.send(event: .tarafPluck(revision: revision, row: row))
+                       },
                        motion: motion,
                        fingerAccel: fingerAccel)
     }

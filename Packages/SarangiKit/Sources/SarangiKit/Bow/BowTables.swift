@@ -67,6 +67,8 @@ extension bow_scalars_t {
 /// Concatenated modal-jawari tables in the C loader's layouts (bow_kernel.h
 /// documents them; all dt-dependence is baked here).
 public struct JtTables: Sendable {
+    /// Physical two-direction rows selected by the application bank plan.
+    public var dualRows: [Int] = []
     public var J: Int32 = 0
     public var M: [Int32] = []
     public var ca: [Double] = [], cb: [Double] = []
@@ -76,9 +78,11 @@ public struct JtTables: Sendable {
     public var b: [Double] = [], G: [Double] = [], G4: [Double] = []
     public var gd: [Double] = [], gd4: [Double] = []
     public var phys: [Double] = [], q0: [Double] = []
+    /// False if any row needed the legacy wrap and must receive the full settle pre-roll.
+    public var equilibriumConverged = true
     /// Worker-pool size for the deferred jt post-pass (`bow_jt_threads`;
-    /// < 2 = serial; workers spawn at engine build, never on the audio
-    /// thread).
+    /// < 2 = serial; multiple physical rows can expand this base up to
+    /// available cores. Workers spawn at build, never on the audio thread).
     public var threads: Int32 = 0
     /// Async one-block-late live mode (`bow_jt_async`): the callback never
     /// waits on the pool.
@@ -105,6 +109,11 @@ public struct JtTables: Sendable {
     /// `cplScale`; a silent row (gout 0) gets 0. Only `bow_jt_couple` reads
     /// it.
     public var rowCplScale: [Double] = []
+    public var rowInputGain: [Double] = []
+    public var rowOutputGain: [Double] = []
+    /// Bank mix levels, outside the physical return; 1 preserves the fitted mix.
+    public var rowOutputLevel: [Double] = []
+    public var rowCouplingNorm: Double = 1
     /// One-pole tone-LP coefficient on the radiated jt sum (`bow_jt_lp`;
     /// 0 = bypass). Applied via bow_jt_set_lp — not part of the load ABI.
     public var lpA: Double = 0
@@ -158,12 +167,9 @@ public enum BowTables {
         return false
     }
 
-    /// The chromatic bridge's resting values (used when no `bow_jtc_*` key
-    /// is set). Only the three knobs that genuinely differ per bank exist —
-    /// level, level norm and evolution; the contact GEOMETRY is derived from
-    /// the raga bridge's `bow_jt_*` values, so at rest both bridges are the
-    /// same jawari. The registry's `bow_jtc_*` defaults MUST equal these
-    /// (`TarabSetTests`): the artifact never carries the keys.
+    /// Chromatic bank defaults; the artifact omits these keys, so the
+    /// registry and builder share these values. Legacy `bow_jt_*` geometry
+    /// belongs to the chromatic model; physical raga rows use DualTaraf.
     public static let chromaticBridgeDefaults: [String: Double] = [
         "bow_jtc_gain": 0.3, "bow_jtc_norm": 0.0, "bow_jtc_evolve": 0.5,
     ]
@@ -175,11 +181,9 @@ public enum BowTables {
     /// should sit LOW: the mode allocation is fixed at build and the
     /// kernel only TRIMS the active count as the pitch rises.
     ///
-    /// `chromatic` (index-aligned with `rows`; nil = all raga): flagged rows
-    /// share the raga bridge's geometry, damping and contact law and carry
-    /// their own level (`bow_jtc_gain`) and t60 normalization
-    /// (`bow_jtc_norm`), the level baked into the row taps as a ratio
-    /// against the raga bridge's global `phys` gain.
+    /// `chromatic` identifies the bank of each row. Bank levels scale each
+    /// row against a fixed output reference, so neither bank controls the
+    /// other's radiation or gain ramp. nil retains the unbanked fixture law.
     public static func buildJawariTables(
         rows: [(f: Double, gain: Double, t60: Double)],
         srk: Double, bp: BowParams,
@@ -198,21 +202,24 @@ public enum BowTables {
         // hcb: contact hysteresis damping; fhf: HF corner of the per-mode
         // t60 law; bst: stiffness inharmonicity
         let hcBR = bp.v("bow_jt_hcb", 8.0)
-        let gain = bp.v("bow_jt_gain", 1.0)
+        let ragaGain = bp.v("bow_jt_gain", 1.0)
         let drive = bp.v("bow_jt_drive", 1.0)
         let fmax = 18000.0, fHfR = bp.v("bow_jt_fhf", 4000.0)
         let mcap = Int(bp.v("bow_jt_mcap", 64.0) + 0.5)
         let div = max(1, Int(bp.v("bow_jt_div", 1.0) + 0.5))
         let normR = bp.v("bow_jt_norm", 0.0)
         let bstR = bp.v("bow_jt_bst", 2.0e-4)
-        // the chromatic bridge's own values (see chromaticBridgeDefaults);
-        // its contact geometry is DERIVED from the raga bridge's
+        // Chromatic defaults; legacy bow_jt_* geometry belongs to its model.
         func cv(_ k: String) -> Double { bp.v(k, chromaticBridgeDefaults[k] ?? 0.0) }
         let hasChrom = chromatic?.contains(true) ?? false
         let normC = cv("bow_jtc_norm")
-        // chromatic level as a ratio against the global (raga) phys gain —
-        // a silenced raga bridge silences the chromatic set too
-        let gainMulC = gain > 1e-12 ? cv("bow_jtc_gain") / gain : 0.0
+        // Keep the shipped 0.3 carrier constant for banked tables. Moving
+        // either bank only slews its row radiation, including through zero;
+        // a moving shared carrier would pump the other bank during the ramp.
+        // The unbanked builder remains available for legacy kernel fixtures.
+        let gain = chromatic == nil ? ragaGain : 0.3
+        let gainMulR = chromatic == nil ? 1.0 : ragaGain / gain
+        let gainMulC = cv("bow_jtc_gain") / max(gain, 1e-12)
         let driveMulC = 1.0
         let rW = 2.0e-4
         let mu = Double.pi * rW * rW * 7850.0
@@ -295,10 +302,14 @@ public enum BowTables {
             // drive tap: the bridge force enters each row at 0.90 L
             let xD = 0.90 * L
             // t60-response level normalization
-            var gout = row.gain * pow(5.0 / max(row.t60, 0.5), norm)
+            let gout = row.gain * pow(5.0 / max(row.t60, 0.5), norm)
             var gdrv = row.gain
-            // raga rows stay multiply-free — the render hash depends on it
-            if chrom { gout *= gainMulC; gdrv *= driveMulC }
+            // Bank levels are radiation-only. Keeping them out of these
+            // coefficients preserves bridge feedback through every gain ramp.
+            T.rowOutputLevel.append(chrom ? gainMulC : gainMulR)
+            if chrom { gdrv *= driveMulC }
+            T.rowInputGain.append(gdrv)
+            T.rowOutputGain.append(gout)
             for k in 0..<M {
                 let pd = ModalString.shape(mode: k, at: xD, length: L)
                 T.phiD.append(gdrv * pd / mu)
@@ -323,30 +334,39 @@ public enum BowTables {
             T.rowCplScale.append(gout > 1e-12
                                  ? mu * L * wd[0] / (gout * Double.pi)
                                  : 0.0)
-            // static wrap q0 (fixed-point, 300 iterations)
-            var q0 = [Double](repeating: 0, count: M)
-            for _ in 0..<300 {
-                var u = [Double](repeating: 0, count: J)
-                for k in 0..<M {
-                    let qk = q0[k]
-                    for j in 0..<J { u[j] += phi[k * J + j] * qk }
-                }
-                var fst = [Double](repeating: 0, count: J)
-                for j in 0..<J {
-                    let eta = bprof[j] - u[j]
-                    fst[j] = eta > 0.0 ? kc * pow(eta, alpha) : 0.0
-                }
-                for k in 0..<M {
-                    var s = 0.0
-                    for j in 0..<J { s += phi[k * J + j] * fst[j] * wj }
-                    let qn = s / mu / (w0[k] * w0[k])
-                    q0[k] = q0[k] + 0.5 * (qn - q0[k])
+            // Solve the force equilibrium with a checked residual. The old
+            // recurrence can oscillate indefinitely for low rows; it remains
+            // only a fallback for configurations the Newton solve cannot handle.
+            let solved = JawariEquilibrium.solve(phi: phi,
+                force: phi.map { $0 * wj / mu }, omega: w0,
+                bone: bprof, stiffness: kc, alpha: alpha)
+            var q0 = solved ?? [Double](repeating: 0, count: M)
+            if solved == nil {
+                T.equilibriumConverged = false
+                for _ in 0..<300 {
+                    var u = [Double](repeating: 0, count: J)
+                    for k in 0..<M {
+                        let qk = q0[k]
+                        for j in 0..<J { u[j] += phi[k * J + j] * qk }
+                    }
+                    var fst = [Double](repeating: 0, count: J)
+                    for j in 0..<J {
+                        let eta = bprof[j] - u[j]
+                        fst[j] = eta > 0.0 ? kc * pow(eta, alpha) : 0.0
+                    }
+                    for k in 0..<M {
+                        var s = 0.0
+                        for j in 0..<J { s += phi[k * J + j] * fst[j] * wj }
+                        let qn = s / mu / (w0[k] * w0[k])
+                        q0[k] = q0[k] + 0.5 * (qn - q0[k])
+                    }
                 }
             }
             T.q0.append(contentsOf: q0)
             T.M.append(Int32(M))
         }
         if goutSum > 1e-12 {
+            T.rowCouplingNorm = 1 / goutSum
             for i in T.rowCplScale.indices { T.rowCplScale[i] /= goutSum }
         }
         T.phys = [kc, alphaR, hcBR, 2.5 * apexR, gain, drive, Double(div)]

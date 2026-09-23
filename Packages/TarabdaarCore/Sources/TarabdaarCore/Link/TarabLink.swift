@@ -18,6 +18,7 @@ public final class TarabLink {
         public var isStale = false
         public var rttMs: Double?
         public var remoteVersionMax: UInt16?
+        public init() {}
     }
 
     private let role: TLPRole
@@ -145,6 +146,16 @@ public final class TarabLink {
     }
     private var volVoice: UInt8 = 0
     private var volTaraf: UInt8 = 0
+    private var noteControls: TLPNoteControls = .idle
+
+    public func setNoteControls(_ controls: TLPNoteControls) {
+        queue.async {
+            guard self.noteControls != controls else { return }
+            self.noteControls = controls
+            if self.joyCon == nil { self.joyCon = .idle }
+            self.joyConDirty = true
+        }
+    }
 
     /// Complete inbound SysEx (F0…F7) from either leg; non-TLP ignored.
     public func receivedSysEx(_ sysex: [UInt8]) {
@@ -190,9 +201,11 @@ public final class TarabLink {
         guard let j = joyCon else { return }
         joyConDirty = false
         joyConSeq &+= 1
-        outbox.enqueue(.joyConState(j.frame(
+        var frame = j.frame(
             stateSeq: joyConSeq, timestampUs: LinkClock.nowUs(),
-            volVoice: volVoice, volTaraf: volTaraf)))
+            volVoice: volVoice, volTaraf: volTaraf)
+        frame.noteControls = noteControls
+        outbox.enqueue(.joyConState(frame))
     }
 
     private func enqueueEventLocked(_ event: TLPEvent) {
@@ -284,6 +297,12 @@ public final class TarabLink {
             // Always greet back (the 1 s throttle ends the chain). Never
             // gate on the up-transition: a relaunched peer would stay down.
             sendHelloLocked()
+            // A host restart resets its sequence epoch even if we still look
+            // up. Its initial snapshot may precede this hello (or our MIDI
+            // port becoming ready), so request the truth in the new epoch.
+            if compatible, role == .pad {
+                enqueueEventLocked(.resyncRequest)
+            }
             drainLocked()
         case .ping(let id, let t1):
             enqueueEventLocked(.pong(id: id, t1: t1, t2: LinkClock.nowUs()))

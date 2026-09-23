@@ -53,7 +53,7 @@ final class LiveParamPushTests: XCTestCase {
             throw XCTSkip("bowed_string.json not available in this bundle")
         }
         pushed.mapper.setAxis(expr: 64.0 / 127.0)
-        pushed.mapper.touchOn(1, pitchSemis: 60, velocity: 100.0 / 127.0)
+        pushed.mapper.touchOn(1, pitchSemis: 60)
         _ = pull(pushed, 8)
         _ = pushed.applyLiveParams(tonicHz: 328.9, strings: strings(),
                                    overrides: [key: v])
@@ -67,7 +67,7 @@ final class LiveParamPushTests: XCTestCase {
         else { return XCTFail("build failed") }
         rebuilt.setEngine(e, crossfadeMs: 0)
         rebuilt.mapper.setAxis(expr: 64.0 / 127.0)
-        rebuilt.mapper.touchOn(1, pitchSemis: 60, velocity: 100.0 / 127.0)
+        rebuilt.mapper.touchOn(1, pitchSemis: 60)
         _ = pull(rebuilt, 8)
         let rebuiltTail = pull(rebuilt, 30)
 
@@ -97,7 +97,7 @@ final class LiveParamPushTests: XCTestCase {
             }
             src.setEngine(e, crossfadeMs: 0)
             src.mapper.setAxis(expr: 64.0 / 127.0)
-            src.mapper.touchOn(1, pitchSemis: 60, velocity: 100.0 / 127.0)
+            src.mapper.touchOn(1, pitchSemis: 60)
             var out: [Double] = []
             for i in 0..<10 {
                 if push, i == 5 {

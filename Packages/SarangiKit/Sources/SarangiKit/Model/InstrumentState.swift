@@ -9,11 +9,10 @@ import Foundation
 /// so a scale or tonic move always retunes the bank. The raga row LAYOUT
 /// regenerates when the degree count changes or on "Regenerate".
 ///
-/// `strings` holds the RAGA set (`bow_jt_*` bridge) and the CHROMATIC set
-/// (fixed JI semitones, `bow_jtc_*`), tagged by `StringSpec.set`; one string
-/// per pitch per bridge; only the raga set follows scale edits. A schema-3
-/// document is migrated on decode by seeding the chromatic set — the persist
-/// key is not bumped.
+/// `strings` holds the physical raga bank and the legacy chromatic bank,
+/// tagged by `StringSpec.set`, with one string per pitch per bridge.
+/// Schema 6 extends the former five-string factory raga layout without
+/// replacing existing identities, levels or performance mappings.
 public struct InstrumentState: Codable, Sendable {
     public var tonicHz: Double
     /// The centralized scale's degree ratios (0 = Sa = 1.0), the target of
@@ -37,8 +36,8 @@ public struct InstrumentState: Codable, Sendable {
     // `autoSyncToScale`) decode away ignored.
 
     /// The document schema this build writes; a lower version on decode
-    /// seeds the chromatic set.
-    public static let currentSchemaVersion = 4
+    /// migrates the bridge layout.
+    public static let currentSchemaVersion = 6
 
     /// The strings of one bridge, in pool order.
     public func strings(in set: TarabSet) -> [StringSpec] {
@@ -49,13 +48,13 @@ public struct InstrumentState: Codable, Sendable {
     /// from here); `DroneStringTests` pins the two equal.
     public static let droneSlotCount = 3
 
-    /// Auto-map the drone buttons: the highest-gain enabled RAGA string within
+    /// Auto-map the drone buttons: the highest-gain enabled string on either bridge within
     /// ±100 ¢ of each target (low Sa · low Pa · Sa), nearest as tie-break.
     /// Gain-first: a quiet row can sit below `bow_jt_gmin` and never sound.
     public static func autoDroneMapping(strings: [StringSpec],
                                         scaleRatios: [Double]) -> [UUID?] {
         [0.5, 0.75, 1.0].map { target in
-            strings.filter { $0.enabled && $0.set == .raga }
+            strings.filter { $0.enabled }
                 .filter { abs(1200.0 * log2($0.ratio(in: scaleRatios) / target)) <= 100.0 }
                 .min { a, b in
                     if a.gain != b.gain { return a.gain > b.gain }
@@ -70,7 +69,7 @@ public struct InstrumentState: Codable, Sendable {
     public static func autoStrumMapping(strings: [StringSpec],
                                         scaleRatios: [Double]) -> [UUID] {
         [0.5, 0.75].compactMap { target in
-            strings.filter { $0.enabled && $0.set == .raga }
+            strings.filter { $0.enabled }
                 .filter { abs(1200.0 * log2($0.ratio(in: scaleRatios) / target)) <= 100.0 }
                 .min { a, b in
                     if a.gain != b.gain { return a.gain > b.gain }
@@ -174,10 +173,27 @@ public struct InstrumentState: Codable, Sendable {
             ?? FollowerSpec()
         schemaVersion = (try? c.decode(Int.self, forKey: .schemaVersion)) ?? 3
         // Schema < 4: an all-raga document — seed the default chromatic set
-        // once (the re-saved document carries schema 4).
-        if schemaVersion < Self.currentSchemaVersion {
-            if !strings.contains(where: { $0.set == .chromatic }) {
-                strings += RagaTuning.buildChromaticSpecs()
+        // before applying the schema-5 bank migration.
+        if schemaVersion < 4 && !strings.contains(where: { $0.set == .chromatic }) {
+            strings += RagaTuning.buildChromaticSpecs()
+        }
+        if schemaVersion < 5 {
+            // Keep identities, degree references, levels and mappings. The
+            // usual one-pitch-per-bridge fold remaps any merged twins below.
+            for i in strings.indices { strings[i].set = .chromatic }
+            strings += RagaTuning.buildSpecs(scaleRatios: scaleRatios)
+            schemaVersion = Self.currentSchemaVersion
+        }
+        if schemaVersion == 5 {
+            let raga = strings(in: .raga)
+            let oldRatios = [1.0, 5.0/4, 4.0/3, 5.0/3].map { target in
+                scaleRatios.min { abs(log2($0/target)) < abs(log2($1/target)) } ?? target
+            } + [2.0]
+            let existing = Set(raga.map { $0.ratio(in: scaleRatios) })
+            if !scaleRatios.isEmpty && raga.allSatisfy(\.followsScale)
+                && existing == Set(oldRatios) {
+                strings += RagaTuning.buildSpecs(scaleRatios: scaleRatios)
+                    .filter { !existing.contains($0.ratio(in: scaleRatios)) }
             }
             schemaVersion = Self.currentSchemaVersion
         }
@@ -210,6 +226,15 @@ public struct InstrumentState: Codable, Sendable {
                 .flatMap { $0.enabled
                     ? $0.resolved(tonic: tonicHz, scaleRatios: scaleRatios).freq
                     : nil }
+        }
+    }
+
+    /// Bank identity accompanies nominal Hz so equal pitches on different
+    /// bridges remain distinct drone targets.
+    public var droneStringChromatic: [Bool?] {
+        droneStringIds.map { id in
+            id.flatMap { id in strings.first { $0.id == id } }
+                .flatMap { $0.enabled ? $0.set == .chromatic : nil }
         }
     }
 
@@ -249,15 +274,22 @@ public struct InstrumentState: Codable, Sendable {
         strings = RagaTuning.buildSpecs(scaleRatios: ratios)
             + strings(in: .chromatic)
         normalizeStrings()
-        droneStringIds = Self.autoDroneMapping(strings: strings, scaleRatios: ratios)
-        strumStringIds = Self.autoStrumMapping(strings: strings, scaleRatios: ratios)
+        let ids = Set(strings.map(\.id))
+        let defaults = Self.autoDroneMapping(strings: strings, scaleRatios: ratios)
+        droneStringIds = droneStringIds.enumerated().map { i, id in
+            id.flatMap { ids.contains($0) ? $0 : nil } ?? defaults[i]
+        }
+        strumStringIds = strumStringIds.filter { ids.contains($0) }
+        if strumStringIds.isEmpty {
+            strumStringIds = Self.autoStrumMapping(strings: strings, scaleRatios: ratios)
+        }
     }
 
-    /// Reset the chromatic set to its default 15-semitone layout; the raga
+    /// Reset the chromatic set to its combined legacy layout; the raga
     /// set stands. A mapped chromatic row dies with its id and the mapping
     /// is pruned.
     public mutating func regenerateChromatic() {
-        strings = strings(in: .raga) + RagaTuning.buildChromaticSpecs()
+        strings = strings(in: .raga) + RagaTuning.buildCombinedChromaticSpecs(scaleRatios: scaleRatios)
         normalizeStrings()
         let ids = Set(strings.map(\.id))
         droneStringIds = droneStringIds.map { $0.flatMap { ids.contains($0) ? $0 : nil } }

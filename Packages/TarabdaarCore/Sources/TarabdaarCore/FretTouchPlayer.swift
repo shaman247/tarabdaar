@@ -50,7 +50,7 @@ public final class FretTouchPlayer {
     /// Onset at `pt` (band-local). False when there is nothing to play.
     @discardableResult
     public func begin(touchId: Int, at pt: CGPoint, context c: Context,
-                      velocity01: Double? = nil, radiusPt: Double = 0,
+                      radiusPt: Double = 0,
                       time now: TimeInterval) -> Bool {
         guard let engine, let recorder,
               let fieldLog = fretFieldLog(at: pt, placements: c.placements,
@@ -72,8 +72,10 @@ public final class FretTouchPlayer {
         }
         snapOffsets[touchId] = offset
         engine.noteOn(touchId: touchId, ratio: pow(2.0, onsetLog),
-                      weights: weights, velocity01: velocity01,
-                      radiusPt: radiusPt)
+                      weights: weights,
+                      radiusPt: radiusPt,
+                      fretPosition: fretPosition(at: pt, placements: c.placements,
+                                                 padHeight: c.size.height))
         assist.setContext(placements: c.placements, snapDistance: c.snapDistance)
         assist.begin(touchId: touchId, x: pt.x, y: pt.y,
                      uncorrectedLog: fieldLog + offset, time: now)
@@ -106,7 +108,9 @@ public final class FretTouchPlayer {
         let out = assist.move(touchId: touchId, x: pt.x, y: pt.y,
                               uncorrectedLog: fieldLog + offset, time: now)
         engine.glide(touchId: touchId, ratio: pow(2.0, out.log2Pitch),
-                     weights: out.weights)
+                     weights: out.weights,
+                     fretPosition: fretPosition(at: pt, placements: c.placements,
+                                                padHeight: c.size.height))
         if let radiusPt { engine.setTouchRadius(touchId: touchId, radiusPt: radiusPt) }
         recorder.sample(touchId: touchId, x: pt.x, y: pt.y,
                         u: fieldLog + offset, o: out.log2Pitch, time: now)

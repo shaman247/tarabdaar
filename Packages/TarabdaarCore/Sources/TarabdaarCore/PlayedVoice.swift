@@ -6,12 +6,15 @@ import SarangiKit
 /// so the per-instrument paths cannot diverge. Calls arrive with the
 /// engine's lock released; a voice keeps its own per-touch state.
 protocol PlayedVoice: AnyObject {
-    func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double, exprScale: Double)
+    func touchOn(_ id: UInt16, pitchSemis: Double, exprScale: Double)
     /// Per-touch expression scale (the strum chord); live while held or
     /// consumed at onset, as the voice can.
     func touchExpr(_ id: UInt16, exprScale: Double)
-    func touchGlide(_ id: UInt16, pitchSemis: Double)
+    /// A pitch move; `exprScale` (the pitch accent's) lands with it when
+    /// given, nil leaves the touch's scale as it is.
+    func touchGlide(_ id: UInt16, pitchSemis: Double, exprScale: Double?)
     func touchOff(_ id: UInt16)
+    func touchResume(_ id: UInt16, exprScale: Double) -> Bool
     func touchAllOff()
     /// The Scope tab's sounding strings of this voice.
     func scopeVoices() -> [AudioEngine.ScopeSnapshot.Voice]
@@ -23,19 +26,23 @@ protocol PlayedVoice: AnyObject {
 /// The bow: the mapper allocates a gut string per touch and follows the
 /// finger at wire rate.
 extension StringVoiceSource: PlayedVoice {
-    func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double, exprScale: Double) {
-        mapper.touchOn(id, pitchSemis: pitchSemis, velocity: velocity, exprScale: exprScale)
+    func touchOn(_ id: UInt16, pitchSemis: Double, exprScale: Double) {
+        mapper.touchOn(id, pitchSemis: pitchSemis, exprScale: exprScale)
     }
 
     func touchExpr(_ id: UInt16, exprScale: Double) {
         mapper.setExprScale(exprScale, forTouch: id)
     }
 
-    func touchGlide(_ id: UInt16, pitchSemis: Double) {
-        mapper.touchGlide(id, pitchSemis: pitchSemis)
+    func touchGlide(_ id: UInt16, pitchSemis: Double, exprScale: Double?) {
+        mapper.touchGlide(id, pitchSemis: pitchSemis, exprScale: exprScale)
     }
 
     func touchOff(_ id: UInt16) { mapper.touchOff(id) }
+
+    func touchResume(_ id: UInt16, exprScale: Double) -> Bool {
+        mapper.touchResume(id, exprScale: exprScale)
+    }
 
     func touchAllOff() { mapper.touchAllOff() }
 
@@ -58,23 +65,23 @@ extension StringVoiceSource: PlayedVoice {
 /// at `<prefix>_rel_t60`. Expression is consumed at onset (a sounded
 /// pluck cannot swell).
 extension PluckedVoice: PlayedVoice {
-    func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double, exprScale: Double) {
+    func touchOn(_ id: UInt16, pitchSemis: Double, exprScale: Double) {
         let hz = Pitch.hz(fractionalMidi: pitchSemis)
         guard let engine = source?.currentEngine(),
               let slot = engine.nearestSlot(toHz: hz, toleranceCents: 60)
         else { return }
-        engine.pluck(slot: slot, velocity01: velocity,
-                     scale: pluckLevel * exprScale,
+        engine.pluck(slot: slot, scale: pluckLevel * exprScale,
                      bendRatio: hz / engine.slotFrequencies[slot],
                      touch: pluckTouch, drive: pluckDrive)
         touchLock.lock()
+        releasedTouchSlot = releasedTouchSlot.filter { $0.value != slot && $0.key != id }
         touchSlot[id] = slot
         touchLock.unlock()
     }
 
     func touchExpr(_ id: UInt16, exprScale: Double) {}
 
-    func touchGlide(_ id: UInt16, pitchSemis: Double) {
+    func touchGlide(_ id: UInt16, pitchSemis: Double, exprScale: Double?) {
         touchLock.lock()
         let slot = touchSlot[id]
         touchLock.unlock()
@@ -87,15 +94,33 @@ extension PluckedVoice: PlayedVoice {
     func touchOff(_ id: UInt16) {
         touchLock.lock()
         let slot = touchSlot.removeValue(forKey: id)
+        if let slot {
+            releasedTouchSlot = releasedTouchSlot.filter { $0.value != slot }
+            releasedTouchSlot[id] = slot
+        }
         touchLock.unlock()
         guard let slot, let engine = source?.currentEngine() else { return }
         engine.release(slot: slot, rate: releaseRate)
+    }
+
+    func touchResume(_ id: UInt16, exprScale: Double) -> Bool {
+        touchLock.lock()
+        defer { touchLock.unlock() }
+        guard let slot = releasedTouchSlot.removeValue(forKey: id),
+              !touchSlot.values.contains(slot),
+              let engine = source?.currentEngine(), slot < engine.slotFrequencies.count else {
+            return false
+        }
+        touchSlot[id] = slot
+        engine.release(slot: slot, rate: 0)
+        return true
     }
 
     func touchAllOff() {
         touchLock.lock()
         let slots = Array(touchSlot.values)
         touchSlot.removeAll(keepingCapacity: true)
+        releasedTouchSlot.removeAll(keepingCapacity: true)
         touchLock.unlock()
         guard let engine = source?.currentEngine() else { return }
         for s in slots { engine.release(slot: s, rate: releaseRate) }

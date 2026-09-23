@@ -40,11 +40,11 @@ struct PadToolbarIOS: View {
             }
             ScaleSyncIndicator(scaleSync: scaleSync)
             Spacer(minLength: 12)
-            // Tilt squares: ARM, WRIST (Joy-Con fusion), stick.
+            // Joy-Con motion leads; keep the fallback arm readout beside it.
+            WristMotionPane(tilt: scaleSync.joyConTilt)
+            JoyConTiltPane(tilt: scaleSync.joyConTilt)
             ArmTiltPane(localTilts: noteManager.currentTilt,
                         display: scaleSync.joyConTilt)
-            WristTiltPane(tilt: scaleSync.joyConTilt)
-            JoyConTiltPane(tilt: scaleSync.joyConTilt)
             if let motion {
                 // The onset fade tracks the Mac's blend window
                 // (`ctl_strike_window`, relayed over JOYCON_STATE).
@@ -98,6 +98,33 @@ struct PadToolbarIOS: View {
 
 // MARK: - Stroke-recording toggle (Fret Pad)
 
+private struct NoteControlReadout: View {
+    let display: NoteControlDisplay
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1.0 / 15.0)) { _ in
+            let controls = display.latest
+            VStack(spacing: 1) {
+                row("Expression", controls.expression, active: controls.active)
+                row("Pressure", controls.pressure, active: controls.active)
+                row("Position", controls.position, active: controls.active)
+            }
+            .font(.padCaption2.monospacedDigit())
+            .frame(width: 150)
+        }
+    }
+
+    private func row(_ label: String, _ byte: UInt8, active: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(label).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Text(active ? String(format: "%.2f", Double(byte) / 255) : "—")
+                .foregroundStyle(active ? Color.white : Color.gray)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// REC button: records play strokes to **Documents/FretRecordings/** as JSONL
 /// (visible in Files / Finder) for `tools/fretpad_fit.py`.
 private struct RecToggleIOS: View {
@@ -125,10 +152,13 @@ private struct RecToggleIOS: View {
 
 // MARK: - Transport indicators + Bluetooth MIDI (BLE-MIDI advertise)
 
-/// USB + Bluetooth indicators: **green** = carrying the link (wired-first),
-/// **white** = idle, **dim gray** = absent. The antenna presents the system
-/// BLE-MIDI peripheral sheet so the iPad can advertise (the Mac connects from
-/// Audio MIDI Setup → Bluetooth); advertising is per-session.
+/// USB + Bluetooth indicators: **green** = carrying the link (wired-first:
+/// USB whenever the cable is in, Bluetooth only without it — never both),
+/// **white** = idle, **dim gray** = absent; the bearer carrying the link is
+/// named beside the icons (`USB` / `BT`, `no link` when neither exists).
+/// The antenna presents the system BLE-MIDI peripheral sheet so the iPad
+/// can advertise (the Mac connects from Audio MIDI Setup → Bluetooth);
+/// advertising is per-session.
 private struct TransportIndicatorsIOS: View {
     @ObservedObject var midi: MIDIEngine
     @State private var showBluetoothSheet = false
@@ -148,9 +178,21 @@ private struct TransportIndicatorsIOS: View {
                     .foregroundColor(color(present: btPresent,
                                            active: btPresent && !usbPresent))
             }
+            Text(bearerLabel)
+                .font(.padCaption2.weight(.bold))
+                .foregroundColor(midi.linkTransport == nil ? .gray.opacity(0.5) : .green)
+                .fixedSize()
         }
         .sheet(isPresented: $showBluetoothSheet) {
             BluetoothMIDIPeripheralSheet()
+        }
+    }
+
+    private var bearerLabel: String {
+        switch midi.linkTransport {
+        case .wired: return "USB"
+        case .bluetooth: return "BT"
+        case .virtualEndpoint, nil: return "no link"
         }
     }
 
@@ -212,15 +254,91 @@ private struct ArmTiltPane: View {
     }
 }
 
-/// The WRIST attitude — the Joy-Con's fused pitch / roll / yaw, from the Mac.
-private struct WristTiltPane: View {
+/// The WRIST cluster from the Mac's fusion (JOYCON_STATE, ~30 Hz): three
+/// bar triplets — the wrist tilt (fused attitude, or the solved axes once
+/// calibrated), its rate (`JoyConWristMotion.rateFullScale`, 360°/s
+/// rails) and the gravity-removed acceleration per body axis (±1 g) — and
+/// one bar for that acceleration's magnitude on the same 1 g scale.
+/// Dim while the fusion is silent.
+private struct WristMotionPane: View {
     let tilt: JoyConTiltDisplay
 
     var body: some View {
-        TiltSquare(x: tilt.wrist1, y: tilt.wrist2,
-                   dotColor: tilt.bodyLive ? thirdAxisColor(tilt.wrist3)
-                                           : .gray,
-                   lit: tilt.bodyLive)
+        let lit = tilt.bodyLive
+        HStack(alignment: .top, spacing: 6) {
+            SignalBarGroup(caption: "wrist", color: .cyan, lit: lit,
+                           bipolar: [tilt.wrist1, tilt.wrist2, tilt.wrist3])
+            SignalBarGroup(caption: "d/dt", color: .yellow, lit: lit,
+                           bipolar: [tilt.wristRate1, tilt.wristRate2,
+                                     tilt.wristRate3])
+            SignalBarGroup(caption: "accel", color: .orange, lit: lit,
+                           bipolar: [tilt.accel1, tilt.accel2, tilt.accel3],
+                           unipolar: tilt.accelLevel)
+        }
+    }
+}
+
+/// A caption over a stack of `SignalBar`s: bipolar rows (−1…+1, centre
+/// tick) and an optional unipolar row (0…1, left-anchored) beneath them.
+private struct SignalBarGroup: View {
+    let caption: String
+    let color: Color
+    let lit: Bool
+    let bipolar: [Double]
+    var unipolar: Double? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(caption)
+                .font(.padCaption2)
+                .foregroundColor(lit ? color : .gray)
+                .fixedSize()
+            ForEach(bipolar.indices, id: \.self) { i in
+                SignalBar(value: bipolar[i], bipolar: true,
+                          color: color, lit: lit)
+            }
+            if let unipolar {
+                SignalBar(value: unipolar, bipolar: false,
+                          color: color, lit: lit)
+            }
+        }
+    }
+}
+
+/// One 40 × 5 pt horizontal bar. Bipolar: the fill grows from the centre
+/// tick toward either end (value −1…+1). Unipolar: from the left (0…1).
+private struct SignalBar: View {
+    let value: Double
+    let bipolar: Bool
+    let color: Color
+    let lit: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let v = CGFloat(max(-1.0, min(1.0, value)))
+            ZStack(alignment: .leading) {
+                Rectangle()
+                    .fill(Color.gray.opacity(lit ? 0.25 : 0.15))
+                if bipolar {
+                    Rectangle()
+                        .fill(lit ? color : Color.gray)
+                        .frame(width: abs(v) * w / 2, height: h)
+                        .offset(x: v >= 0 ? w / 2 : w / 2 + v * w / 2)
+                    Rectangle()
+                        .fill(Color.white.opacity(0.5))
+                        .frame(width: 1, height: h)
+                        .offset(x: w / 2 - 0.5)
+                } else {
+                    Rectangle()
+                        .fill(lit ? color : Color.gray)
+                        .frame(width: max(0, v) * w, height: h)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 2))
+        }
+        .frame(width: 40, height: 5)
     }
 }
 
@@ -396,14 +514,12 @@ private enum ScopeTraces {
     private static let idleGray = Color(white: 0.38).opacity(0.9)
 
     /// The strike scope: the strike envelope (0–127 wire scale) with the
-    /// current value at the right; the amber tick holds the last onset's
-    /// reading. Pale yellow at an onset fading down `ScopeColor.level` over
+    /// current value at the right. Pale yellow at an onset fading down `ScopeColor.level` over
     /// `fadeS` (the Mac's `ctl_strike_window` blend window), dark gray
     /// while nothing plays.
     static func strike(motion: MotionManager, fadeS: Double) -> ScopeTraceFrame {
         let onsets = motion.noteOnsets
         let fade = max(fadeS, 0.05)
-        let lastStrike = motion.lastTouchVelocity
         return ScopeTraceFrame(
             traces: [.init(
                 samples: motion.strikeHistory.map { (t: $0.t, v: $0.level) },
@@ -420,7 +536,7 @@ private enum ScopeTraces {
             // Guide lines at thirds (≈42 / 85).
             guides: [(1.0 / 3.0, 0.12), (2.0 / 3.0, 0.12)],
             y01: { $0 },
-            tick: lastStrike > 0 ? lastStrike : nil,
+            tick: nil,
             readout: .newestSample,
             labels: { v in [wireLabel(v[0], width: 40)] })
     }
@@ -527,6 +643,7 @@ struct FretPadViewIOS: View {
     @ObservedObject var scaleSync: ScaleSyncReceiver
     @ObservedObject var midi: MIDIEngine
     let arrangement: FretArrangement
+    var pluckTaraf: (UInt32, UInt8) -> Void = { _, _ in }
     /// The motion source, for the raw-motion diagnostic overlay.
     var motion: MotionManager? = nil
     /// The display-only finger-accel feed for the toolbar scope.
@@ -543,6 +660,7 @@ struct FretPadViewIOS: View {
                           midi: midi, recorder: recorder, motion: motion,
                           fingerAccel: fingerAccel,
                           showGyro: $showGyro)
+            TarafPluckStrip(bank: scaleSync.tarafBank, scale: engine.scale, pluck: pluckTaraf)
             // The playable band (`fretPadBandRect`) is the centered half-height
             // strip; the rest is dead except the drone buttons, which hide
             // while a Joy-Con is attached to the Mac (JOYCON_STATE).
@@ -552,6 +670,11 @@ struct FretPadViewIOS: View {
                               dronesHidden: scaleSync.joyConTilt.connected,
                               motion: motion)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .topLeading) {
+                    NoteControlReadout(display: scaleSync.noteControls)
+                        .padding(12)
+                        .allowsHitTesting(false)
+                }
                 .overlay(alignment: .topTrailing) {
                     if showGyro, let motion {
                         HStack(alignment: .top, spacing: 10) {
@@ -723,8 +846,7 @@ private struct FretPadSurfaceIOS: View {
     /// While a Joy-Con is attached to the Mac its arrows play the drones, so
     /// the on-screen buttons hide (visual + hit-test).
     let dronesHidden: Bool
-    /// Source of the per-onset strike estimate (`strikeVelocity01` → the
-    /// onset frame's velocity byte → `bow_attack_vel`). nil = flat constant.
+    /// Motion source for the Strike envelope and scope activity.
     let motion: MotionManager?
     /// The touch pipeline (onset, drag, settle tick, release).
     @State private var player = FretTouchPlayer()
@@ -841,17 +963,11 @@ private struct FretPadSurfaceIOS: View {
         // Band-local coordinates from here on — the frets' space.
         let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
         let now = CACurrentMediaTime()
-        // Onset strike velocity from the TRAILING accelerometer window (the
-        // impact precedes UIKit's touch delivery, so the onset never waits).
-        let vel01 = motion.map { m -> Double in
-            let v = m.strikeVelocity01(at: now)
-            m.lastTouchVelocity = v
-            return v
-        }
+        engine.setStrike(motion?.strikeLevel ?? 0)
         bindPlayer()
         guard player.begin(touchId: ev.touchId, at: pt,
                            context: playContext(placements: placements, size: band.size),
-                           velocity01: vel01, radiusPt: ev.radius, time: now)
+                           radiusPt: ev.radius, time: now)
         else { return }   // no frets — nothing to play
         motion?.noteBegan(ev.touchId, at: now)   // strike-scope coloring
         // Every touch is born stopped — the indicator starts amber.

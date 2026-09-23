@@ -26,7 +26,7 @@ final class StrumControllerTests: XCTestCase {
     ) -> (StrumController, () -> [Call]) {
         var calls: [Call] = []
         let sink = StrumController.NoteSink(
-            noteOn: { id, ratio, _, expr in
+            noteOn: { id, ratio, expr in
                 calls.append(.on(id: id, ratio: ratio, expr: expr))
             },
             noteOff: { calls.append(.off(id: $0)) },

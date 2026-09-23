@@ -329,7 +329,6 @@ public final class PitchPadEngine: ObservableObject {
     /// The shift as a fractional-MIDI offset.
     public var octaveShiftSemis: Double { Double(octaveShift) * 12.0 }
 
-    @Published public var velocity: Int = 92
     /// Half-width (px) of the soft interpolation zone around each cell
     /// boundary — the toolbar's Margin slider.
     @Published public var marginPixels: Double = 16
@@ -422,7 +421,6 @@ public final class PitchPadEngine: ObservableObject {
     /// Begin a note at `ratio` above the tonic; `noteOff` must reuse the
     /// caller's `touchId`. The pitch enters the outbound state as
     /// fractional MIDI (`tonicFractionalMidi + octave + 12·log2(ratio)`).
-    /// `velocity01`: onset strike velocity (nil = the flat `velocity`).
     /// `radiusPt`: the fingertip's `UITouch.majorRadius` in points
     /// (0 = unknown — the Mac pads have no touchscreen).
     /// `octaveShifted: false` exempts the note from the octave shift (the
@@ -430,8 +428,8 @@ public final class PitchPadEngine: ObservableObject {
     /// strum chord's in-process expression and glide-queue exemption.
     public func noteOn(touchId: Int, ratio: Double,
                        weights: [String: Double] = [:],
-                       velocity01: Double? = nil,
                        radiusPt: Double = 0,
+                       fretPosition: Double = 0,
                        octaveShifted: Bool = true,
                        exprScale: Double = 1.0,
                        glideExempt: Bool = false) {
@@ -443,8 +441,7 @@ public final class PitchPadEngine: ObservableObject {
         touchOctaveSemis[touchId] = octSemis
         let pitchSemis = tonicFractionalMidi + octSemis + 12.0 * log2(r)
         playState.touchOn(touchId, pitchSemis: pitchSemis,
-                          velocity: velocity01 ?? Double(velocity) / 127.0,
-                          radiusPt: radiusPt,
+                          radiusPt: radiusPt, fretPosition: fretPosition,
                           exprScale: exprScale, glideExempt: glideExempt)
         sounding.ratio = r
         sounding.octaveSemis = octSemis
@@ -481,7 +478,8 @@ public final class PitchPadEngine: ObservableObject {
     /// block — meend IS the finger's trajectory — and the wire carries at
     /// most one fresh frame per sender tick.
     public func glide(touchId: Int, ratio: Double,
-                      weights: [String: Double]? = nil) {
+                      weights: [String: Double]? = nil,
+                      fretPosition: Double? = nil) {
         guard currentRatio[touchId] != nil else { return }
         let r = clampRatio(ratio)
         currentRatio[touchId] = r
@@ -493,7 +491,7 @@ public final class PitchPadEngine: ObservableObject {
         let octSemis = touchOctaveSemis[touchId] ?? octaveShiftSemis
         playState.touchGlide(touchId,
                              pitchSemis: tonicFractionalMidi + octSemis
-                                 + 12.0 * log2(r))
+                                 + 12.0 * log2(r), fretPosition: fretPosition)
         sounding.ratio = r
         sounding.octaveSemis = octSemis
     }
@@ -510,6 +508,9 @@ public final class PitchPadEngine: ObservableObject {
             refreshSoundingWeights()
         }
     }
+
+    /// Publish the current Strike envelope before a touch onset.
+    public func setStrike(_ level: Double) { playState.setStrike(level) }
 
     /// Drone button `index` (0–2) press/release: a held-state bit in the
     /// outbound frame (latest-wins, stuck-drone safe by construction).

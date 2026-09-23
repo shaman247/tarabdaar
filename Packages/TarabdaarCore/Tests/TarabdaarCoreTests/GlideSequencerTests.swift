@@ -1,15 +1,14 @@
 import XCTest
 @testable import TarabdaarCore
 
-/// The glide queue's rules: off = pass-through, staccato releases land
-/// immediately, an overlapping onset queues and glides, ownership transfers on
-/// arrival, parked fingers are silent, releases cascade back, strum is exempt.
+/// Glide joining, release grace, ownership, parked fingers and pass-through contracts.
 final class GlideSequencerTests: XCTestCase {
 
     enum Call: Equatable {
-        case on(UInt16, Double, Double)
+        case on(UInt16, Double)
         case glide(UInt16, Double)
         case off(UInt16)
+        case resume(UInt16, Double)
     }
 
     var now = 0.0
@@ -23,11 +22,14 @@ final class GlideSequencerTests: XCTestCase {
         seq = GlideSequencer(drivesTimer: false) { [weak self] in
             self?.now ?? 0
         }
-        seq.onTouchOn = { [weak self] id, p, v in
-            self?.calls.append(.on(id, p, v))
+        seq.onTouchOn = { [weak self] id, p in
+            self?.calls.append(.on(id, p))
         }
         seq.onTouchGlide = { [weak self] id, p in
             self?.calls.append(.glide(id, p))
+        }
+        seq.onTouchResume = { [weak self] id, p in
+            self?.calls.append(.resume(id, p))
         }
         seq.onTouchOff = { [weak self] id in
             self?.calls.append(.off(id))
@@ -45,8 +47,9 @@ final class GlideSequencerTests: XCTestCase {
 
     /// `over` defaults to 0 so the trajectory math stays exact.
     func enable(rate: Double = 40, held: Double = 0.3,
-                catchup: Double = 4, over: Double = 0) {
+                catchup: Double = 4, over: Double = 0, grace: Double = 0) {
         seq.setControl("ctl_glide_on", 1)
+        seq.setControl("ctl_glide_grace", grace)
         seq.setControl("ctl_glide_rate", rate)
         seq.setControl("ctl_glide_held", held)
         seq.setControl("ctl_glide_catchup", catchup)
@@ -76,37 +79,122 @@ final class GlideSequencerTests: XCTestCase {
     /// The parity contract: with the toggle off (the default), every event
     /// passes through verbatim — overlapping fingers included.
     func testDisabledIsPurePassThrough() {
-        seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
+        seq.touchOn(1, pitchSemis: 60)
         now += 0.01                       // overlapping second finger
-        seq.touchOn(2, pitchSemis: 64, velocity: 0.6)
+        seq.touchOn(2, pitchSemis: 64)
         seq.touchGlide(1, pitchSemis: 60.5)
         seq.touchOff(1)
         seq.touchOff(2)
         XCTAssertEqual(calls, [
-            .on(1, 60, 0.5), .on(2, 64, 0.6), .glide(1, 60.5),
+            .on(1, 60), .on(2, 64), .glide(1, 60.5),
             .off(1), .off(2),
         ])
     }
 
-    /// THE STACCATO CONTRACT: a lone tap's release lands immediately — no
-    /// deferral, no sustain.
+    /// Zero grace preserves immediate staccato release.
     func testStaccatoReleaseIsImmediate() {
         enable()
-        seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
+        seq.touchOn(1, pitchSemis: 60)
         now += 0.03
         seq.touchOff(1)
-        XCTAssertEqual(calls, [.on(1, 60, 0.5), .off(1)],
+        XCTAssertEqual(calls, [.on(1, 60), .off(1)],
                        "off in the release call itself, no tick needed")
+    }
+
+    /// Short gaps reuse the sounding voice and renew grace after each final lift.
+    func testReleaseGraceConnectsSuccessiveGaps() {
+        seq.setControl("ctl_glide_on", 1) // exercise the default grace
+        seq.setControl("ctl_glide_over", 0)
+        seq.touchOn(1, pitchSemis: 60)
+        seq.touchOff(1)
+        advance(0.10)
+        XCTAssertEqual(calls, [.on(1, 60), .off(1)])
+        seq.touchOn(2, pitchSemis: 64)
+        advance(0.11)
+        XCTAssertEqual(lastPitch(1), 64)
+        seq.touchOff(2)
+        advance(0.10)
+        seq.touchOn(3, pitchSemis: 67)
+        advance(0.10)
+        XCTAssertEqual(lastPitch(1), 67)
+        XCTAssertEqual(onCount(), 1)
+        XCTAssertEqual(calls.filter { if case .resume = $0 { return true }; return false },
+                       [.resume(1, 60), .resume(1, 64)])
+        seq.touchOff(3)
+        XCTAssertEqual(calls.last, .off(1), "the last release is immediate")
+        let atRelease = calls
+        advance(0.16)
+        XCTAssertEqual(calls, atRelease, "expiry emits no sound or duplicate release")
+    }
+
+    /// A late onset expires grace even before the next timer tick.
+    func testExpiredGraceStartsFreshWithoutTimerTick() {
+        enable(grace: 150)
+        seq.touchOn(1, pitchSemis: 60)
+        seq.touchOff(1)
+        now = 0.151
+        seq.touchOn(2, pitchSemis: 64)
+        XCTAssertEqual(calls, [.on(1, 60), .off(1), .on(2, 64)])
+    }
+
+    /// Repeated pitches re-attack during grace, including reused touch identities.
+    func testRepeatTapDuringGraceReattacks() {
+        enable(grace: 150)
+        seq.touchOn(1, pitchSemis: 60)
+        seq.touchOff(1)
+        now = 0.05
+        seq.touchOn(2, pitchSemis: 60)
+        XCTAssertEqual(calls, [.on(1, 60), .off(1), .on(2, 60)])
+        seq.touchOff(2)
+        now += 0.05
+        seq.touchOn(2, pitchSemis: 60)
+        XCTAssertEqual(Array(calls.suffix(2)), [.off(2), .on(2, 60)])
+    }
+
+    /// The last physical lift releases even mid-glide; expiry never plays abandoned waypoints.
+    func testQueuedReleaseGraceRunsFromLastPhysicalLift() {
+        enable(rate: 40, held: 1, grace: 150)
+        seq.touchOn(1, pitchSemis: 60)
+        seq.touchOn(2, pitchSemis: 72)
+        seq.touchOff(1)
+        seq.touchOff(2)
+        advance(0.20)
+        seq.touchOn(3, pitchSemis: 76)
+        XCTAssertEqual(onCount(), 2, "an expired in-flight chain cannot capture")
+        advance(0.11)
+        XCTAssertNil(lastPitch(1))
+        XCTAssertTrue(calls.contains(.off(1)))
+    }
+
+    /// Disabling grace flushes a waiting release; reset cancels it without later events.
+    func testGraceControlsAndResetDoNotLeavePendingReleases() {
+        enable(grace: 150)
+        seq.touchOn(1, pitchSemis: 60)
+        seq.touchOff(1)
+        seq.setControl("ctl_glide_on", 0)
+        XCTAssertEqual(calls.last, .off(1))
+        enable(grace: 150)
+        seq.touchOn(2, pitchSemis: 64)
+        seq.touchOff(2)
+        seq.setControl("ctl_glide_grace", 0)
+        XCTAssertEqual(calls.last, .off(2))
+        enable(grace: 150)
+        seq.touchOn(3, pitchSemis: 67)
+        seq.touchOff(3)
+        seq.reset()
+        calls = []
+        advance(1)
+        XCTAssertEqual(calls, [])
     }
 
     /// A second onset while the first is HELD mounts NO note — the first
     /// voice glides to its pitch and arrives exactly.
     func testOverlappingOnsetQueuesAndGlides() {
         enable(rate: 40, held: 1.0)                // held = full rate
-        seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
+        seq.touchOn(1, pitchSemis: 60)
         now += 0.1
-        seq.touchOn(2, pitchSemis: 64, velocity: 0.5)
-        XCTAssertEqual(calls, [.on(1, 60, 0.5)], "no second note-on")
+        seq.touchOn(2, pitchSemis: 64)
+        XCTAssertEqual(calls, [.on(1, 60)], "no second note-on")
 
         advance(0.05)                              // mid-glide
         guard let mid = lastPitch(1) else { return XCTFail("no glide") }
@@ -122,9 +210,9 @@ final class GlideSequencerTests: XCTestCase {
     /// (as the original voice id) and its release ends it immediately.
     func testOwnershipTransfersOnArrival() {
         enable(rate: 400, held: 1.0)
-        seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
+        seq.touchOn(1, pitchSemis: 60)
         now += 0.05
-        seq.touchOn(2, pitchSemis: 64, velocity: 0.5)   // overlap → queue
+        seq.touchOn(2, pitchSemis: 64)   // overlap → queue
         seq.touchOff(1)                            // source lifts mid-glide
         advance(0.1)                               // arrive well within
         XCTAssertEqual(lastPitch(1), 64)
@@ -143,9 +231,9 @@ final class GlideSequencerTests: XCTestCase {
     /// voice's downstream id, so passing them through yanked the pitch back.
     func testParkedFingerWiggleIsIgnored() {
         enable(rate: 400, held: 1.0)
-        seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
+        seq.touchOn(1, pitchSemis: 60)
         now += 0.05
-        seq.touchOn(2, pitchSemis: 64, velocity: 0.5)   // both held
+        seq.touchOn(2, pitchSemis: 64)   // both held
         advance(0.1)                                    // arrive; 1 parks
         XCTAssertEqual(lastPitch(1), 64)
 
@@ -164,11 +252,11 @@ final class GlideSequencerTests: XCTestCase {
     /// order, and only the last release lifts the bow.
     func testCascadeGlidesBackInOrderAndHandsOverOwnership() {
         enable(rate: 400, held: 1.0)
-        seq.touchOn(1, pitchSemis: 60, velocity: 0.5)
+        seq.touchOn(1, pitchSemis: 60)
         now += 0.05
-        seq.touchOn(2, pitchSemis: 64, velocity: 0.5)
+        seq.touchOn(2, pitchSemis: 64)
         advance(0.1)
-        seq.touchOn(3, pitchSemis: 67, velocity: 0.5)
+        seq.touchOn(3, pitchSemis: 67)
         advance(0.1)
         XCTAssertEqual(lastPitch(1), 67)
 
@@ -195,12 +283,12 @@ final class GlideSequencerTests: XCTestCase {
         enable()
         seq.markExempt(10)
         seq.markExempt(11)
-        seq.touchOn(10, pitchSemis: 48, velocity: 0.9)
+        seq.touchOn(10, pitchSemis: 48)
         now += 0.01
-        seq.touchOn(11, pitchSemis: 55, velocity: 0.9)   // chord mate
+        seq.touchOn(11, pitchSemis: 55)   // chord mate
         seq.touchOff(10)
         seq.touchOff(11)
-        XCTAssertEqual(calls, [.on(10, 48, 0.9), .on(11, 55, 0.9),
+        XCTAssertEqual(calls, [.on(10, 48), .on(11, 55),
                                .off(10), .off(11)])
     }
 }

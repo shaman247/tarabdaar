@@ -7,8 +7,12 @@
 
 # Tarabdaar Parameters
 
-Tarabdaar has **one parameter list** — every knob of the String instrument,
-edited in the Mac's **Parameters** tab, in native units. There is no
+Tarabdaar has **one parameter list** for the String voice, both taraf banks,
+Tanpura, Sitar, performance controls and FX. The Mac's **Parameters** tab
+edits them in native units. Groups identify the affected voice or stage,
+then the musical function. Each description explains the effect and the
+meaning of **Low** and **High** values, including zero, neutral points,
+switch choices and dependencies where relevant. There is no
 separate "performance parameter" or "physics scalar" category: a
 parameter is a parameter, and any of them can be bound to a tilt or added
 to a composite.
@@ -19,7 +23,7 @@ Each parameter carries two audit columns:
 
 | Scope | Meaning |
 |---|---|
-| `global` | ONE shared mechanism — the bridge/body, the taraf bank, the room/FX/output chain, the shared string physics, or a control axis every note rides together. Changing it moves the whole instrument at once. |
+| `global` | ONE shared mechanism — the bridge/body, the taraf bank, the room/FX/output chain, the shared string physics, or a control axis every note rides together. Changing it updates that mechanism across its affected voice, bank or processing stage. |
 | `per-note` | Runs SEPARATELY for each note: every sounding note carries its own state for it (onset clock, settle envelope, vibrato phase, drift walk, strike-blend window), so simultaneous notes are affected independently. The attack family is CAPTURED at the articulation edge — an edit changes subsequent onsets, never a sounding note. |
 
 The line follows per-note CONTROL STATE, not physics plumbing: friction
@@ -32,6 +36,7 @@ simultaneous notes.
 | Timing | Meaning |
 |---|---|
 | `live` | A dedicated runtime setter — instant everywhere, including through tilt/strike bindings and composites. The right kind for continuous real-time control. |
+| `onset` | A live binding target captured independently at each note onset. Changes do not reshape held notes or rebuild the engine. |
 | `in-place` | A build scalar whose change lands on the RUNNING kernel (no rebuild, no lost ring) — but it persists as an override and flushes through a ~0.2 s debounce, in the Parameters tab and through bindings alike. Fine for set-and-listen editing; for continuous binding prefer a `live` parameter. |
 | `rebuild` | Needs a fresh engine: ~0.2 s debounce, then an off-main rebuild adopted through a crossfade. |
 | `hybrid` | Instant at or below the built headroom (a live 0–1 kernel scaler); pushing above the built value takes the debounced build-scalar path (in place when the key allows it — the one shipped hybrid, vibrato depth, does). |
@@ -58,26 +63,26 @@ below are the shipped defaults (all editable in-app).
 
 | Parameter | At 0 | At 1 | Notes |
 |---|---|---|---|
-| tone LP (Hz) (`bow_jt_lp`) | 16000 | 1500 | One-pole low-pass on the radiated jawari sum only (the played string is untouched). ≥ 20 kHz = bypass, bit-exact. Applies live — the Taraf Purity composite's tone member. |
-| recruitment (`bow_jt_sel`) | 0.5 | 0 | Which strings contribute to the taraf — the contribution profile, at held loudness. 0.5 = the fitted natural response: unison rows dominate, octaves a few dB down, fifths faint, unrelated rows only haze. Below it rows lose bridge drive by harmonic distance from the played notes until at 0 only kin rows ring (chords recruit additively). Above it the profile flattens — resonant rows are cut toward the common haze level until at 1 every string contributes equally and the taraf no longer depends on what the voice plays. Loudness holds throughout via the radiated jt gain (incoherent power model); held drones and the melody follower count as fully ringing, and rings already sounding are never ducked. Lattice width/kin exponent are bp scalars (bow_jt_sel_width 30 ¢, bow_jt_sel_kin 0.7). Applies live — the Taraf Purity composite's recruitment member (purity up = kin-only). |
+| Taraf · Shared · low-pass cutoff (Hz) (`bow_jt_lp`) | 16000 | 1500 | Low-pass filters the combined audible taraf output; played-string sound and physical bridge return are unaffected.<br>**Low:** Removes more high harmonics for a darker wash.<br>**High:** Preserves more brightness; 20000 Hz bypasses the filter. |
+| Taraf · Shared · recruitment (`bow_jt_sel`) | 0.5 | 0 | Sets which rows contribute in both taraf banks, with loudness compensation. The fitted natural response is 0.5.<br>**Low:** Toward 0, favors rows harmonically related to the played notes.<br>**High:** Toward 1, flattens contributions toward a uniform haze that depends less on the played pitches. |
 
 ### Taraf Decay
 
 | Parameter | At 0 | At 1 | Notes |
 |---|---|---|---|
-| extra damping (`bow_jt_damp`) | 0 | 1 | Runtime damping of these modal rows: 0 = the natural long ring, 1 = choked within a second. Applies live — this is what the Taraf Decay composite sweeps. |
+| Taraf · Shared · extra damping (`bow_jt_damp`) | 0 | 1 | Adds damping to both taraf banks while they ring.<br>**Low:** At 0, preserves each row's natural decay.<br>**High:** Shortens the ring progressively; near 1 the strings are strongly choked. |
 
 ### Tone Tilt
 
 | Parameter | At 0 | At 1 | Notes |
 |---|---|---|---|
-| tone tilt (bass–treble) (`bow_tone_tilt`) | -1 | 1 | Overall spectral tilt: −1 = bass-biased, 0 = flat, +1 = treble-biased. A complementary shelf pair on the whole voice before the room. Applies live — the Tone Tilt composite sweeps this. |
+| Output · Tone & stereo · tone tilt (bass–treble) (`bow_tone_tilt`) | -1 | 1 | Tilts the String engine's combined spectrum before the room. Zero leaves the spectral balance flat.<br>**Low:** Negative values favor bass over treble.<br>**High:** Positive values favor treble over bass. |
 
 ### Expression
 
 | Parameter | At 0 | At 1 | Notes |
 |---|---|---|---|
-| expression (`bow_expr`) | 0 | 0.5 | Loudness of the played stroke: low = fade toward silence, high = push harder. The fitted playing median is ~0.25. |
+| String · Bow stroke · expression (`bow_expr`) | 0 | 0.5 | Controls the played String voice through bow speed and force; it does not turn down an already ringing taraf.<br>**Low:** A lighter stroke; below the lift-zone threshold the bow fades toward silence.<br>**High:** A faster, stronger stroke with greater loudness and excitation. |
 
 ## Parameters
 
@@ -87,219 +92,296 @@ wherever the artifact carries the key, with the registry's authored
 default in parentheses when the two differ. A value loaded outside
 its range widens the slider rather than being clamped.
 
-### Bow stroke
+### String · Bow stroke
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `bow_expr` | expression | 0 … 1 | 0.251 | global | live | Loudness of the played stroke: low = fade toward silence, high = push harder. The fitted playing median is ~0.25. |
-| `bow_press` | bow pressure | 0 … 1 | 0.562 | global | live | Bow force inside the playable wedge — under-pressed flautando/whistle at the low end, pressed grit at the high end. |
-| `bow_pos` | bow position (brightness) | 0 … 1 | 0.45 | global | live | Where the bow contacts the string: low = sul ponticello (bright/edgy near the bridge), high = sul tasto (soft/round over the fingerboard). |
-| `bow_tilt` | bow tilt | 0 … 1 | 0.331 | global | live | Harmonic color of the bow stroke (bow-hair tilt). The default 0.331 is the neutral 0 dB point. |
+| `bow_expr` | expression | 0 … 1 | 0.251 | global | live | Controls the played String voice through bow speed and force; it does not turn down an already ringing taraf.<br>**Low:** A lighter stroke; below the lift-zone threshold the bow fades toward silence.<br>**High:** A faster, stronger stroke with greater loudness and excitation. |
+| `bow_press` | bow pressure | 0 … 1 | 0.562 | global | live | Sets bow force between the playable stroke's lower and upper force limits.<br>**Low:** Light contact, with airy or whistling tone near the lower edge.<br>**High:** Pressed contact, with more grit or choking near the upper edge. |
+| `bow_pos` | bow position (brightness) | 0 … 1 | 0.45 | global | live | Sets the bow's distance from the bridge within the configured position range.<br>**Low:** Closer to the bridge, usually brighter and edgier.<br>**High:** Farther toward the fingerboard, usually rounder and softer. |
+| `bow_tilt` | bow tilt | 0 … 1 | 0.331 | global | live | Changes stroke color by shifting bow position and force together. About 0.331 is neutral.<br>**Low:** Moves away from the bridge and reduces force for a softer color.<br>**High:** Moves toward the bridge and increases force for a brighter, more pressed color. |
 
-### Body (formula modes)
-
-| Key | Name | Range | Default | Scope | Timing | Description |
-|---|---|---|---|---|---|---|
-| `bow_body_modes` | modes | 0 … 16 | 9 (authored 12) | global | rebuild | Analytic body mode count. 0 = rigid bridge (the bare string, no body colour). |
-| `bow_body_scale` | body size | 0.1 … 1.5 | 0.241243 (authored 1) | global | in-place | Scales every mode: <1 = smaller body (violin direction), >1 = larger (cello direction). 1 = built for the current tonic. |
-| `bow_body_air_ratio` | air mode ratio | 0.4 … 2.2 | 0.694463 (authored 1.4) | global | in-place | Lowest (air) resonance as a multiple of the open string. Under 1 (air mode BELOW the tonic) is what charges the taraf. |
-| `bow_body_q` | wood Q | 5 … 60 | 14.9759 (authored 25) | global | in-place | Mode sharpness: low = damp/soft wood, high = ringy/hard. |
-| `bow_body_q_air` | air Q | 4 … 50 | 27.8606 (authored 12) | global | in-place | Air-resonance sharpness. |
-| `bow_body_y` | mobility depth | 0 … 2 | 1.01785 (authored 0.35) | global | in-place | How much the bridge moves at the modes — note-to-note unevenness, wolf tendency, attack bloom. |
-| `bow_body_rad` | modal radiation | 0 … 3 | 2.87716 (authored 1) | global | in-place | How loudly the modes radiate (vs the direct term). |
-| `bow_body_c0` | direct radiation | 0 … 1 | 0.464459 (authored 0.3) | global | in-place | Non-modal (flat) radiation floor. 1 with modes 0 = the raw bridge force. |
-| `bow_body_tail_n` | formant modes | 0 … 256 | 150 | global | rebuild | Diffuse mid/high mode forest between the tail corners — the FIXED body formants the harmonics sweep through during a glide, the cue that separates a real slide from a pitch-shifted tone. √n-normalized: more modes = denser structure at held total power (150 ≈ 10 peaks per octave, a violin-class body; 32 was a gentle scallop). 0 = flat feedthrough only. The Body tab draws the result. |
-| `bow_body_tail_seed` | formant seed | 1 … 64 | 1 | global | rebuild | Which instrument: the forest's radiation residues are drawn from a seeded Gaussian stream, so each seed is a different fixed pattern of peaks and nulls at the same statistics. Audition by ear, watch it on the Body tab. |
-| `bow_body_tail_f0` | formants from (Hz) | 150 … 1500 | 280 | global | rebuild | Low edge of the diffuse formant forest. |
-| `bow_body_tail_f1` | formants to (Hz) | 2000 … 12000 | 6500 | global | rebuild | High edge of the diffuse formant forest. |
-| `bow_body_tail_q` | formant Q | 5 … 80 | 40 | global | rebuild | Formant sharpness: higher = deeper peaks/valleys and slower per-mode bloom (Q 30 at 300 Hz rings ~70 ms — body bloom, physical). |
-| `bow_body_tail_y` | formant mobility | 0 … 1.5 | 0.4 | global | rebuild | Bridge-load side of the formant modes. The default 0.4 leaves the admittance maximum (and the loop cap) unchanged; raising it far invites wolves. |
-| `bow_body_tail_rad` | formant radiation | 0 … 8 | 3.5 | global | rebuild | How loudly the formant forest radiates against the flat floor (`bow_body_c0`). The forest is a Gaussian-residue sum, so its ripple has Rayleigh depth — nulls 25–35 dB deep — and this knob sets how far the floor fills them; near 0 the transfer is inaudibly flat. |
-| `bow_yinf` | bridge give | 0 … 0.4 | 0.021048 (authored 0.05) | global | in-place | Broadband bridge admittance floor under the modes. |
-| `bow_kret` | body return | 0 … 0.5 | 0.35 | global | in-place | Bridge motion fed back into the string (loop-cap protected). More = livelier, wolfier. |
-
-### Bow & string
+### String · Bow ranges
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `bow_mu_s` | static friction | 0.4 … 1.2 | 1.06607 (authored 0.8) | global | in-place | Rosin stick strength (grip). |
-| `bow_mu_d` | dynamic friction | 0.1 … 0.6 | 0.184372 (authored 0.3) | global | in-place | Slip friction. The stick/slip GAP sets the Schelleng ceiling. |
-| `bow_v0` | friction corner | 0.05 … 0.5 | 0.107992 (authored 0.2) | global | in-place | Friction-curve knee: smaller = sharper corner = brighter attack edge. |
-| `bow_Zt` | torsional damping | 0 … 15 | 11.3381 (authored 7.9) | global | in-place | String rotation losses at the bow contact. |
-| `bow_gut_g` | gut loss | 0.99 … 1 | 1 (authored 0.998) | global | in-place | Per-round-trip broadband loss — lower = duller, deader string. |
-| `bow_gut_fc2` | gut top (Hz) | 500 … 12000 | 3172.33 (authored 3500) | global | in-place | Second termination pole: the gut string's own HF ceiling. |
-| `bow_nut_fc` | nut corner (Hz) | 1000 … 12000 | 8921.51 (authored 5500) | global | in-place | Nut/finger termination low-pass. |
-| `bow_br_fc` | bridge corner (Hz) | 1000 … 12000 | 9000 (authored 6750) | global | in-place | Bridge termination low-pass. |
-| `bow_loss_reg` | register damping | 0 … 1.5 | 0.7 | global | in-place | Register-tracking string loss: below the tonic the nut/bridge/gut loss corners scale down with pitch — fc × (f0/tonic)^this — so a low note's Helmholtz corner rounds in proportion to its period, keeping the low register warm instead of brassy, and glides darken smoothly on the way down. At and above the tonic the corners are untouched. 0 = fixed corners; 0.7 (default) = moderate warmth; 1 = full period-proportional tracking. |
-| `bow_noise` | contact noise | 0 … 0.4 | 0.1 | global | in-place | Hair-scatter noise recirculated into the friction loop. |
-| `bow_noise_dir` | direct noise | 0 … 0.4 | 0.12 | global | in-place | Contact noise radiated directly (inter-harmonic air). |
-| `bow_tors_c` | torsion coupling | 0 … 0.5 | 0.048906 (authored 0) | global | in-place | Slip → torsional wave → returned micro-slips: period-locked harmonic HF regeneration at the source. 0 = off. |
-| `bow_tors_g` | torsion return | 0.5 … 0.98 | 0.959677 (authored 0.85) | global | in-place | Torsional loop reflection/loss (higher = stronger ripple). |
-| `bow_tors_ratio` | torsion speed × | 3.5 … 8 | 4.46653 (authored 5.2) | global | in-place | Torsional/transverse wave-speed ratio (gut ≈ 5). |
+| `bow_v_lo` | speed floor | 0.02 … 0.15 | 0.065 | global | in-place | Sets the minimum bow speed in the expression response above the lift zone.<br>**Low:** Allows a slower, quieter stroke at the bottom of the active range.<br>**High:** Raises the speed floor, so low expression still produces a firmer stroke. |
+| `bow_v_hi` | speed ceiling | 0.1 … 0.5 | 0.23 | global | in-place | Sets the upper bow-speed reference used by the expression response.<br>**Low:** Restrains the speed available at strong expression.<br>**High:** Allows faster, more energetic strokes; fitted dynamics may extend beyond this reference. |
+| `bow_live_beta_lo` | pos: bridge end | 0.02 … 0.1 | 0.05 | global | in-place | Sets the bridge-side endpoint of bow position as a fraction of string length.<br>**Low:** Position 0 reaches closer to the bridge, increasing edge and brightness.<br>**High:** Position 0 stays farther from the bridge, softening that extreme. |
+| `bow_live_beta_hi` | pos: tasto end | 0.12 … 0.33 | 0.24 | global | in-place | Sets the fingerboard-side endpoint of bow position as a fraction of string length.<br>**Low:** Position 1 stays closer to the bridge.<br>**High:** Position 1 reaches farther over the fingerboard, giving a softer extreme. |
+| `bow_live_press_under` | press-0 undershoot | 0.2 … 1 | 0.55 | global | in-place | Sets pressure 0 as a multiple of the minimum force needed for stable bowing.<br>**Low:** Falls farther below stable capture, encouraging airy or whistling strokes.<br>**High:** At 1, pressure 0 reaches the calculated stable-bowing floor. |
+| `bow_live_press_over` | press-1 overshoot | 1 … 1.8 | 1.25 | global | in-place | Sets pressure 1 as a multiple of the calculated upper bow-force limit.<br>**Low:** At 1, the pressure range ends at that limit.<br>**High:** Extends into over-pressed, gritty contact; the force cap still applies. |
+| `bow_expr_lift` | lift zone | 0 … 0.4 | 0.2 | global | in-place | Sets the expression range in which bow force and speed fade toward zero.<br>**Low:** A narrow fade zone; 0 disables this extra lift-to-silence law.<br>**High:** A wider fade zone, leaving less of the expression range for full contact. |
+| `bow_f_cap` | force cap | 1 … 8 | 4 | global | in-place | Caps bow force after pressure, tilt, register compensation and attack bite are applied.<br>**Low:** Restrains force sooner, limiting heavy attacks and pressed strokes.<br>**High:** Permits stronger force peaks; it does not add force by itself. |
 
-### Playing ranges
+### String · Attack
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `bow_v_lo` | speed floor | 0.02 … 0.15 | 0.065 | global | in-place | Bow velocity at expression 0 (above the lift zone). |
-| `bow_v_hi` | speed ceiling | 0.1 … 0.5 | 0.23 | global | in-place | Bow velocity at full expression. |
-| `bow_live_beta_lo` | pos: bridge end | 0.02 … 0.1 | 0.05 | global | in-place | β at pos 0 — sul ponticello limit. |
-| `bow_live_beta_hi` | pos: tasto end | 0.12 … 0.33 | 0.24 | global | in-place | β at pos 1 — sul tasto limit. |
-| `bow_live_press_under` | press-0 undershoot | 0.2 … 1 | 0.55 | global | in-place | Press 0 dips to this ×fmin — the flautando/whistle edge. |
-| `bow_live_press_over` | press-1 overshoot | 1 … 1.8 | 1.25 | global | in-place | Press 1 pushes to this ×fmax — the grit edge. |
-| `bow_expr_lift` | lift zone | 0 … 0.4 | 0.2 | global | in-place | Expression below this fades the bow off the string entirely. |
-| `bow_f_cap` | force cap | 1 … 8 | 4 | global | in-place | Hard force guard over every push (tilt/register). |
+| `bow_place_ms` | gentle placement (ms) | 0 … 120 | 0 (authored 35) | per-note | in-place | Sets the delay before drawing the bow on a gentle attack. Attack sharpness progressively removes this delay.<br>**Low:** The draw starts sooner; 0 starts it immediately while retaining the draw ramp.<br>**High:** A longer placement phase before the gentle stroke speaks. |
+| `bow_draw_ms` | gentle draw (ms) | 5 … 200 | 180 (authored 60) | per-note | in-place | Sets the bow-speed and force rise time at attack sharpness 0.<br>**Low:** A quicker gentle attack.<br>**High:** A slower swell into the sustained stroke; sharp attacks use their separate ramp settings. |
+| `bow_draw_min_ms` | sharp draw (ms) | 3 … 60 | 5 (authored 60) | per-note | in-place | Sets the bow-speed rise time at attack sharpness 1, with intermediate sharpness interpolating from the gentle draw time.<br>**Low:** A faster draw and more abrupt onset.<br>**High:** A slower draw and softer onset, even with high sharpness. |
+| `bow_attack_bite` | attack bite | 0 … 4 | 0.5 (authored 0) | per-note | in-place | Adds a temporary bow-force boost on sharp attacks, scaled by captured attack sharpness and constrained by the force cap.<br>**Low:** Less force accent; 0 disables the boost.<br>**High:** A stronger pressed burst and more upper-harmonic bite at onset. |
+| `bow_attack_bite_ms` | bite decay (ms) | 10 … 200 | 60 | per-note | in-place | Sets the decay time shared by sharp-attack force bite, bridgeward position shift and speed boost.<br>**Low:** The attack gesture recedes quickly into the sustained bow.<br>**High:** The accent and contact-color shift persist longer. |
+| `bow_attack_fms` | sharp force ramp (ms) | 2 … 60 | 3 (authored 15) | per-note | in-place | Sets the bow-force rise time at attack sharpness 1; intermediate sharpness blends from the gentle draw time.<br>**Low:** Pressure builds more quickly, giving a firmer onset.<br>**High:** Pressure builds more gradually, softening the attack. |
+| `bow_attack_sharpness` | attack sharpness | 0 … 1 | 0 | per-note | onset | Selects the attack shape independently at each new note. Held notes retain the shape captured at onset.<br>**Low:** Toward 0, uses the placement delay and gentle draw ramps.<br>**High:** Toward 1, uses the sharp draw and force ramps plus any configured bite, position shift and speed boost. |
+| `bow_attack_beta` | attack: toward bridge | 0 … 0.7 | 0.6 (authored 0) | per-note | in-place | Moves the bow toward the bridge during a sharp attack, scaled by captured sharpness and fading with bite decay.<br>**Low:** Less temporary movement; 0 leaves attack position unchanged.<br>**High:** A larger bridgeward shift for a brighter, more forceful attack color. |
+| `bow_attack_speed_db` | attack: speed boost (dB) | 0 … 12 | 8 (authored 0) | per-note | in-place | Temporarily boosts bow speed during a sharp attack, scaled by captured sharpness and fading with bite decay.<br>**Low:** Less extra speed; 0 disables the boost.<br>**High:** A faster, more energetic onset before returning to the sustained speed. |
+| `bow_tnoise` | force-change grain | 0 … 4 | 2 (authored 0) | per-note | in-place | Adds friction grain when bow force changes, including during an attack.<br>**Low:** Less force-change noise; 0 disables this contribution.<br>**High:** More transient grain as the bow force moves; steady contact noise has separate controls. |
+| `bow_settle_db` | onset settle (dB) | 0 … 12 | 7 | per-note | in-place | Temporarily eases bow speed after an attack, then recovers to the sustained stroke.<br>**Low:** A smaller post-attack dip; 0 disables settling.<br>**High:** A deeper dip, reducing the initial note's sustained energy after its attack. |
+| `bow_settle_ms` | settle decay (ms) | 30 … 500 | 130 | per-note | in-place | Sets the recovery time of the post-attack bow-speed dip. Requires onset settle above 0.<br>**Low:** The bow regains sustained speed sooner.<br>**High:** The eased-down phase lasts longer before recovering. |
+| `bow_settle_sharp` | sharp settle exemption | 0 … 1 | 1 (authored 0) | per-note | in-place | Reduces post-attack settling for sharp attacks, using each note's captured sharpness.<br>**Low:** At 0, all attack shapes receive the same settle depth.<br>**High:** At 1, fully sharp attacks skip the dip while gentle attacks retain it. |
 
-### Jawari taraf (modal contact)
-
-| Key | Name | Range | Default | Scope | Timing | Description |
-|---|---|---|---|---|---|---|
-| `bow_jt_gain` | level | 0 … 3 | 0.3 | global | in-place | Output mix of the jawari web (the raga bridge's rows). Slewed ~40 ms inside the kernel, so a bound sweep never clicks. |
-| `bow_jt_drive` | drive | 0.001 … 0.3 | 0.03 | global | in-place | Bridge-force coupling INTO the strings — sets the graze operating point: too low = no cascade, too high = over-drained/linearized. |
-| `bow_jt_apex` | graze depth | 2e-06 … 5e-05 | 1e-05 | global | in-place | Bone protrusion of the raga bridge. The evolution lives at the grazing knee — pressed deep it linearizes (sparkle only), too shallow it never engages. This group is the raga set's bridge plus the web-wide taraf controls; the chromatic set has its own bridge group below. |
-| `bow_jt_zone` | contact zone (m) | 0.002 … 0.02 | 0.006 | global | in-place | Length of the bone the string can touch, in metres — the flat of the jawari. The default 6 mm concentrates the contact grid on the active region; wider = a flatter, more open jawari whose wrap spreads along the bone (longer, more diffuse buzz), narrower = a sharper knee. |
-| `bow_jt_radius` | bone radius (m) | 0.05 … 2 | 0.3 | global | in-place | Curvature radius of the bone's parabola, in metres. Small = a rounded bridge (the wrap point stays put, a cleaner ring); large = a nearly flat bone (the string rolls along it as it swings — the wide open sitar/tanpura-style jawari). |
-| `bow_jt_evolve` | evolution | 0 … 1 | 0.5 | global | live | Harmonic-evolution rate — the tanpura/sitar twang axis: a signed bone offset spanning graze margin ×4 … ×¼ around the fitted bone, slewed inside the kernel (~40 ms) so the bone glides — tilt-sweepable without a strum. 1 = the ring always sits in the grazing band: energy cascades up the partials fast (centroid rise ~0.3 s) at any level, and the taraf rings a few dB hotter (trim with level). 0 = the string is pressed past the knee: harmonics stay put, no twang. 0.5 = the fitted geometry, bit-exact. Applies live. |
-| `bow_jt_ev_reg` | evolution register | -1 … 1 | 0 | global | live | Register tilt of the evolution axis, in evolve units per octave from the tonic — each row's bone evaluates the margin map at its own shifted evolve (kernel-slewed ~40 ms). Positive opens the below-tonic rows toward the grazing band while pressing the above-tonic web closed, so the long-ringing Sa/Pa anchor rows bloom for their whole ring without the whole web buzzing; negative reverses it (highs shimmer, lows stay put). 0 = the uniform bone, bit-exact. Relative to wherever the evolution knob sits. Applies live. |
-| `bow_jt_alpha` | contact law | 1 … 2 | 1.3 (authored 1.5) | global | in-place | Contact stiffness exponent. 1.5 = Hertz (the fast sqrt path); the fitted instrument runs 1.3, and other values cost more CPU. |
-| `bow_jt_norm` | level norm | 0 … 1.5 | 0 (authored 1) | global | in-place | Per-string t60-response normalization — evens the driven level across scale degrees (long-ring rows charge hotter); 0 = raw physics. |
-| `bow_jt_hcb` | contact damping | 1 … 40 | 8 | global | in-place | Hysteretic damping of the string–bone contact. More = softer buzz transients (rounder force pulses, less clang). Default 8. |
-| `bow_jt_fhf` | damping corner (Hz) | 800 … 12000 | 4000 | global | in-place | Corner of the per-mode f² damping law — above it, partials die progressively faster. Lower = warmer (the top decays in tens of ms while fundamentals sustain). Default 4000 Hz. |
-| `bow_jt_bst` | inharmonicity | 0 … 0.001 | 0.0002 | global | in-place | Stiffness stretch of the upper partials (steel-wire dispersion). Lower = a more harmonic, less bell-metallic top; the default 2e-4 puts mode 40 ~15% sharp. |
-| `bow_jt_lp` | tone LP (Hz) | 1000 … 20000 | 20000 | global | live | One-pole low-pass on the radiated jawari sum only (the played string is untouched). ≥ 20 kHz = bypass, bit-exact. Applies live — the Taraf Purity composite's tone member. |
-| `bow_jt_hp` | tone HP (Hz) | 0 … 4000 | 0 | global | live | One-pole high-pass on the radiated jawari sum only — the formant voicing: quiets the taraf's fundamental band so its high-harmonic cluster carries the ring. ~1–2× the tonic leaves the twang untouched and drops the lows ~6 dB/oct below the corner. 0 = bypass, bit-exact. Applies live. |
-| `bow_jt_body` | body radiation | 0 … 1 | 0 | global | live | Blend of the radiated jawari sum through the same formula-body radiation bank the played strings radiate through — the coherence lever: at 0 the taraf radiates raw (beside the instrument), at 1 it rings from the instrument's body with the voice's own formants. Shared coefficients (a body edit re-voices both), own filter state. 0 = bypass, bit-exact. Applies live. |
-| `bow_jt_couple` | bridge coupling | 0 … 1 | 0 | global | live | Two-way coupling: how much of the sympathetic web's OWN bridge force pushes back on the bridge. The drive is one-way without it — the played string charges the rows and never feels them. Here each row's real bridge load (its contact force on the bone plus the pull at its pin, DC-blocked so a resting web pushes nothing) is summed and added back into the played strings' bridge force, so it drives the body, returns into every played string, AND becomes part of what charges every row on the next tick: the web feeds itself through the bridge, which is how a real taraf blooms and how the played string loses energy into it. The sum is normalized by the bank's total row gain, so one knob position means one loop gain whether the document holds six rows or thirty-four. THE KNOB IS 0…1 OF A MEASURED SAFE RANGE: 1 is HALF the gain at which a hard-bowed three-note chord's ring stops decaying and starts feeding itself, so even the top is a bound rather than a cliff — but it is still a very long ring, and it is loud. 0 = off, bit-exact. Applies live, slewed ~40 ms. |
-| `bow_jt_damp` | extra damping | 0 … 1 | 0 | global | live | Runtime damping of these modal rows: 0 = the natural long ring, 1 = choked within a second. Applies live — this is what the Taraf Decay composite sweeps. |
-| `bow_jt_cap` | voice cap | 0 … 1 | 0 | global | live | How hard each sympathetic string is held at or below the played voice's own level — the runaway-bloom lever: with high evolve the web can feed itself past the voice, and a fixed threshold can't follow a phrase's dynamics. The ceiling is the voice bus's instant-attack peak envelope decaying ~7 dB/s, times bow_jt_cap_ratio — a string may ring on after a note but never peak above what the voice reached. Applied per string inside the kernel's jt tick, so one blooming anchor row is held while the rest of the web stands. 0 = off, bit-exact; 1 = a hard relative limiter; between = a soft proportional lean. A dimensionless ratio law, so it rides bow_gain and expression untouched. Armed hard with the voice silent, drones and the tanpura's taraf charge are held down until the voice first sounds. Applies live. |
-| `bow_jt_cap_ratio` | voice cap ratio | 0.1 … 2 | 1 | global | live | The level each sympathetic string is allowed relative to the voice's peak, when `bow_jt_cap` is armed: 1 = parity (may match but not exceed the voice), 0.5 = held ~6 dB under, 2 = allowed 6 dB over (a loose leash — still stops the extreme bloom). Per string, the strings sum after the cap, so the whole web can still stand above a single string's ceiling. Applies live. |
-| `bow_jt_sel` | recruitment | 0 … 1 | 0.5 | global | live | Which strings contribute to the taraf — the contribution profile, at held loudness. 0.5 = the fitted natural response: unison rows dominate, octaves a few dB down, fifths faint, unrelated rows only haze. Below it rows lose bridge drive by harmonic distance from the played notes until at 0 only kin rows ring (chords recruit additively). Above it the profile flattens — resonant rows are cut toward the common haze level until at 1 every string contributes equally and the taraf no longer depends on what the voice plays. Loudness holds throughout via the radiated jt gain (incoherent power model); held drones and the melody follower count as fully ringing, and rings already sounding are never ducked. Lattice width/kin exponent are bp scalars (bow_jt_sel_width 30 ¢, bow_jt_sel_kin 0.7). Applies live — the Taraf Purity composite's recruitment member (purity up = kin-only). |
-
-### Chromatic bridge (jawari taraf)
+### String · Bow recovery
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `bow_jtc_gain` | level | 0 … 3 | 0.3 | global | in-place | Output mix of the chromatic set's rows (the raga set keeps `bow_jt_gain`). Baked into the rows' radiation taps as a ratio against the raga bridge's level, so silencing the raga bridge silences this too — trim with the row gains for finer balance. |
-| `bow_jtc_evolve` | evolution | 0 … 1 | 0.5 | global | live | The chromatic bridge's harmonic-evolution axis — the twang of the chromatic set alone, the same graze-margin map (×4 … ×¼) on its own bone, kernel-slewed (~40 ms) so it is tilt-sweepable. 0.5 = its fitted geometry. Rides `bow_jt_ev_reg` like the raga rows (the register tilt is web-wide). Applies live. |
-| `bow_jtc_norm` | level norm | 0 … 1.5 | 0 | global | in-place | Per-string t60-response normalization for the chromatic rows; 0 = raw physics. |
+| `bow_grip_beta` | bow toward bridge | 0 … 0.6 | 0.35 | per-note | in-place | Moves the bow toward the bridge when recovery detects an overtone lock instead of the intended fundamental. Heavy pressure reduces this movement.<br>**Low:** Less corrective movement; 0 disables this lever.<br>**High:** A stronger bridgeward correction, helping move off contact positions that sustain an overtone lock. |
+| `bow_grip_v_db` | bow speed change (dB) | -12 … 12 | -4 | per-note | in-place | Changes bow speed during overtone-lock recovery. Zero leaves speed unchanged.<br>**Low:** Negative values slow the bow, lowering the force needed for stable capture.<br>**High:** Positive values speed the bow and may deepen an overtone lock rather than cure it. |
+| `bow_grip_db` | bow force change (dB) | -12 … 12 | 0 | per-note | in-place | Changes bow force during overtone-lock recovery. Zero leaves force unchanged.<br>**Low:** Negative values reduce pressure during recovery.<br>**High:** Positive values increase pressure; extra force can strengthen an overtone lock, so this is not a recovery-strength scale. |
+| `bow_grip_thresh` | engage below | 0.05 … 5 | 1 | per-note | in-place | Engages recovery when fundamental power relative to the strongest second-to-fourth harmonic stays below this ratio.<br>**Low:** Requires a more severe loss of the fundamental before intervening.<br>**High:** Intervenes more readily, including on less pronounced overtone dominance. |
+| `bow_grip_release` | release above | 0.05 … 8 | 1.5 | per-note | in-place | Releases recovery when fundamental dominance stays above this ratio for the hold time. The effective value is at least the engage threshold.<br>**Low:** Allows release with weaker fundamental dominance.<br>**High:** Requires a more clearly restored fundamental before release; a second failed recovery can latch for the note. |
+| `bow_grip_wait_ms` | attack protection (ms) | 10 … 500 | 150 | per-note | in-place | Sets the protected attack interval before overtone-lock recovery may engage.<br>**Low:** Allows correction soon after onset, with more chance of reacting to a normal attack transient.<br>**High:** Gives the attack longer to settle before intervening. |
+| `bow_grip_confirm_ms` | confirm lock (ms) | 0 … 500 | 60 | per-note | in-place | Sets how long fundamental dominance must stay below the engage threshold before recovery starts.<br>**Low:** Responds to brief dips; 0 adds no confirmation delay.<br>**High:** Requires a persistent overtone lock, reducing reactions to short disturbances. |
+| `bow_grip_ms` | engage time (ms) | 2 … 200 | 30 | per-note | in-place | Sets the time constant for moving into the configured recovery position, speed and force changes.<br>**Low:** Applies correction more quickly.<br>**High:** Introduces correction more gradually. |
+| `bow_grip_rel_ms` | release time (ms) | 10 … 1000 | 250 | per-note | in-place | Sets the time constant for returning from recovery to the player's bow settings.<br>**Low:** Returns to the played stroke quickly.<br>**High:** Fades the correction away more slowly. |
+| `bow_grip_hold_ms` | stable hold (ms) | 0 … 1000 | 200 | per-note | in-place | Sets how long the fundamental must remain above the release threshold before recovery may let go.<br>**Low:** Releases sooner after capture returns.<br>**High:** Requires a longer stable interval, keeping the correction engaged longer. |
 
-### Articulation
-
-| Key | Name | Range | Default | Scope | Timing | Description |
-|---|---|---|---|---|---|---|
-| `bow_place_ms` | place (ms) | 0 … 120 | 35 | per-note | in-place | Bow-set hold before the draw: force on, velocity 0 (static stick). 0 = no hold, instant attack. |
-| `bow_draw_ms` | draw (ms) | 5 … 200 | 60 | per-note | in-place | Velocity rise for a GENTLE (legato) attack — the pre-Helmholtz crunch window. |
-| `bow_draw_min_ms` | sharp draw (ms) | 3 … 60 | 60 | per-note | in-place | Velocity rise for a maximally SHARP attack: a hard onset draws this fast (accent/martelé). At the default it equals the gentle draw time (no speedup); ~8 ms gives crisp accents. |
-| `bow_attack_bite` | attack bite | 0 … 4 | 0 | per-note | in-place | How hard a sharp onset over-forces: the high force under a fast velocity onset drives the friction loop's own upper-harmonic multi-slip burst — the violin-attack consonant. 0 = off (plain place-then-draw); 1–2 with a low threshold gives martelé accents. Sharpness = press above the threshold, or strike velocity when armed. |
-| `bow_attack_bite_ms` | bite decay (ms) | 10 … 200 | 60 | per-note | in-place | How long the onset over-force lasts before settling into the steady note. |
-| `bow_attack_thresh` | bite threshold | 0 … 1 | 0.5 | per-note | in-place | Press below this = legato (no bite); above it the attack sharpens toward the full bite at press 1. The pads hold press ~0.56, so lowering this sharpens EVERY onset. |
-| `bow_attack_fms` | sharp force ramp (ms) | 2 … 60 | 15 | per-note | in-place | Force rise of a maximally SHARP attack (velocity-leads-force martelé mechanics: the bow moves at once, the force ramps in over this time). |
-| `bow_attack_vel` | velocity sharpness | 0 … 1 | 0 | per-note | in-place | How much the ONSET STRIKE VELOCITY sharpens the attack: sharpness = max(press law, this × velocity 0…1). Makes articulation per-note — tap hard = martelé bite, place gently = legato draw. Velocity comes from the iPad's accelerometer strike estimate; 0 = off (the press law alone decides). |
-| `bow_grip_beta` | grip: bow toward bridge | 0 … 0.6 | 0.35 | per-note | in-place | REGIME GRIP, position lever: when a string locks on an overtone (the kernel's fundamental dominance stays under the grip threshold after the attack window), the bow moves this fraction of its distance toward the bridge, scaled by (1 − press) — off the quarter-point node a sul-tasto bow sits on; the Schelleng wedge raises the force with it as a real bow would, which is why a heavy bow is moved less (pulled to the bridge it would choke). 0 = no position lever (all three levers 0 = the grip never runs, bit-exact). |
-| `bow_grip_v_db` | grip: bow speed (dB) | -12 … 12 | -4 | per-note | in-place | REGIME GRIP, speed lever: bow velocity change at full grip. Negative = a slower bow, which lowers the Helmholtz minimum force; a faster bow deepens the overtone lock. 0 = off. |
-| `bow_grip_db` | grip: bow force (dB) | -12 … 12 | 0 | per-note | in-place | REGIME GRIP, force lever: bow force change at full grip. Measured: extra force alone makes the overtone lock STRONGER on the low string, so the shipped grip uses position and speed; this is here for the ear. 0 = off. |
-| `bow_grip_thresh` | grip: engage below | 0.05 … 5 | 1 | per-note | in-place | Fundamental DOMINANCE (kernel regime telemetry: the string's power at f0 over the strongest of 2f0…4f0, ~4-period running value; Helmholtz motion reads ≈ 2.5–3.5 at any pitch or force, an overtone lock 0.02–0.5) under which the grip engages. |
-| `bow_grip_release` | grip: release above | 0.05 … 8 | 1.5 | per-note | in-place | Fundamental dominance above which the grip releases, once it has held there for the hold time. A note that collapses again after one release is not stable at the played bow: its second grip latches for the note. |
-| `bow_grip_wait_ms` | grip: attack window (ms) | 10 … 500 | 150 | per-note | in-place | Time after the attack begins before the grip may engage — the place/draw window plus the periods the detector needs to read a low string. |
-| `bow_grip_confirm_ms` | grip: confirm (ms) | 0 … 500 | 60 | per-note | in-place | How long the dominance must stay under the threshold before the grip engages — a one-window dip in an onset transient is not a lock. |
-| `bow_grip_ms` | grip: engage (ms) | 2 … 200 | 30 | per-note | in-place | Time constant of the grip's engagement. |
-| `bow_grip_rel_ms` | grip: release (ms) | 10 … 1000 | 250 | per-note | in-place | Time constant of the grip's release back to the played bow. |
-| `bow_grip_hold_ms` | grip: hold (ms) | 0 … 1000 | 200 | per-note | in-place | How long the fundamental must read captured before the grip releases. |
-| `bow_vib_cents` | vibrato depth (¢) | 0 … 60 | 25 built · rests at 0× the built value | per-note | hybrid | Finger-vibrato peak depth in cents at the vibrato rate. 0 = none (the resting default). Up to the built depth this applies instantly; above it the value re-applies in place after the debounce (no rebuild). |
-| `bow_vib_hz` | vibrato rate (Hz) | 3 … 9 | 5.5 | per-note | in-place | Vibrato frequency (real players ~5–7 Hz). |
-
-### Strike blend
+### String · Sustain motion
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `ctl_strike_window` | blend window (s) | 0.25 … 8 | 2 | per-note | live | How long a note takes to hand the accelerometer measure from its Strike bindings to its Acceleration bindings: at onset the Strike side applies fully, by this many seconds the Acceleration side does — linear in between, per note (a new note never resets a sounding note's window). Also sets the iPad strike scope's onset fade (yellow → violet on the shared magma level ramp). |
+| `bow_vib_cents` | vibrato depth (¢) | 0 … 60 | 25 built · rests at 0× the built value | per-note | hybrid | Sets peak pitch-modulation depth in cents for the String voice's vibrato control. It rests at 0; rate is set separately.<br>**Low:** Narrower pitch movement; 0 disables this added modulation.<br>**High:** Wider excursions above and below the played pitch. |
+| `bow_vib_hz` | vibrato rate (Hz) | 3 … 9 | 5.5 | per-note | in-place | Sets the cycle rate of the String voice's vibrato modulation. Has no audible effect when vibrato depth is 0.<br>**Low:** Slower pitch oscillations.<br>**High:** Faster pitch oscillations; it does not increase their depth. |
+| `bow_drift_cents` | pitch drift (¢) | 0 … 8 | 0.55 | per-note | in-place | Sets the scale of slow random pitch wander independently for each held String note, separate from vibrato.<br>**Low:** Steadier pitch; 0 disables this pitch wander.<br>**High:** Wider irregular pitch motion and more shimmer as harmonics cross body resonances. |
+| `bow_drift_hz` | drift bandwidth (Hz) | 0.2 … 6 | 1.2 | per-note | in-place | Sets the bandwidth of the pitch, bow-speed and bow-force drift processes.<br>**Low:** Slow, leisurely wandering.<br>**High:** Quicker random fluctuations; this is not a periodic vibrato rate. |
+| `bow_drift_db` | speed drift (dB) | 0 … 3 | 0.15 | per-note | in-place | Sets the size of random bow-speed fluctuations in dB, alongside pitch and force drift.<br>**Low:** Steadier bow speed; 0 disables this speed wander.<br>**High:** Greater irregular changes in stroke energy and loudness. |
+| `bow_drift_force_db` | force drift (dB) | 0 … 4 | 0.3 | per-note | in-place | Sets the size of random bow-force fluctuations in dB, alongside pitch and speed drift.<br>**Low:** Steadier pressure; 0 disables this force wander.<br>**High:** Greater irregular pressure changes and more changing contact color. |
 
-### Fret pad
-
-| Key | Name | Range | Default | Scope | Timing | Description |
-|---|---|---|---|---|---|---|
-| `ctl_fret_warp` | pitch warp | 0 … 1 | 0 | global | live | How strongly the frets warp the pitch space around them (the Fret Pad's logistic field reshaping): 0 = linear (pitch moves at a constant rate between frets), 1 = pitch plateaus hard around each fret and jumps quickly through the middle of each gap — a straight slide traces a logistic curve, and fast runs land near-quantized. Applies at every touch onset and move on both surfaces (relayed to the iPad over JOYCON_STATE), so a tilt/stick binding morphs the pad mid-phrase between meend-friendly and run-friendly. |
-
-### Glide
-
-| Key | Name | Range | Default | Scope | Timing | Description |
-|---|---|---|---|---|---|---|
-| `ctl_glide_on` | glide enable | 0 … 1 | 0 | per-note | live | The glide queue's on/off toggle (≥ 0.5 = on). On: a note played while another is still HELD does not mount a fresh string — it is QUEUED and the sounding voice glides to it; further overlapping notes join the queue and are hit in sequence, and once every chained touch has lifted the next tap is a fresh attack (staccato is untouched — releases are never deferred). A repeat tap at the sounding pitch still re-attacks. 0 = off — every onset is a fresh note. |
-| `ctl_glide_rate` | glide rate (st/s) | 2 … 200 | 40 | per-note | live | Base speed of a queued glide, in semitones per second, when the note being left has been RELEASED. A 12-semitone glide at 40 st/s takes 0.3 s. Bindable. |
-| `ctl_glide_held` | held glide × | 0.05 … 1 | 0.3 | per-note | live | Rate multiplier while the note being left is STILL HELD — holding the old note makes the glide slower and more deliberate (expressive meend); lifting it mid-glide snaps back to the full rate. 1 = held and released glide alike. |
-| `ctl_glide_catchup` | catch-up × | 1 … 16 | 4 | per-note | live | Rate multiplier while the note being glided TOWARD is not the END of the queue — when the player has already moved on, the trajectory hurries through the intermediate pitches to catch up. 1 = no hurry (every waypoint at the plain rate). |
-| `ctl_glide_over` | overshoot | 0 … 0.3 | 0.08 | per-note | live | How far a glide's FINAL approach overshoots past the target before settling back, as a fraction of the glide distance (capped at ±50 ¢) — the human player's land-and-correct: a 12-semitone jump at 0.08 lands ~50 ¢ past and eases back on at a gentler rate. Only the run's last note gets the miss (catch-up glides through a queue are already hurrying and hit their waypoints dead-on). 0 = every glide lands exactly. |
-
-### Controller
+### String · Slide response
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `ctl_strum_expr` | strum expression | 0 … 1 | 1 | global | live | Loudness of the controller strum's held chord: a per-note expression scale on the chord's notes only. On the String bow voice it multiplies the bow's expression axis for those strings LIVE — a bound stick swells the ringing chord without touching the melody; on the Tanpura/Sitar mains it scales the pluck level at the onset (a sounded pluck can't swell). 1 = the chord follows the global expression untouched; 0 = the bow lifts to silence. Bound to the Joy-Con stick Y by default (rest = 0.5). |
-| `ctl_strum_thresh` | strum accel trigger | 0 … 1 | 1 | global | live | Accelerometer level that TRIGGERS the strum chord — the iPad's strike envelope (the same measurement the Strike dimension reads), 0…1. Crossing the threshold strikes the chord exactly as an L press does; the chord releases when the envelope falls back below ~60% of the threshold (unless L is holding it). 1 = off (the default — no accel strum). Lower values let a gentler shake strum. |
+| `bow_glide_dip_db` | glide dip (dB) | 0 … 12 | 5 | per-note | in-place | Lightens bow speed and, to a lesser extent, force while the played pitch slides within a note.<br>**Low:** A smaller transition dip; 0 disables this lightening.<br>**High:** A deeper dip through moving-pitch transitions, recovering as the slide ends. |
+| `bow_glide_dip_rate` | dip half-rate (¢/s) | 100 … 5000 | 900 | per-note | in-place | Sets the pitch speed in cents per second at which slide lightening reaches half its configured depth.<br>**Low:** Gentler slides produce substantial lightening.<br>**High:** Requires faster slides for the same dip; it does not set the glide speed itself. |
+| `bow_slide_noise` | slide noise | 0 … 0.02 | 0.008 | per-note | in-place | Sets finger-friction noise injected into the string when pitch movement accelerates, stops or reverses. Constant-speed slides produce little drive.<br>**Low:** Quieter scrape; 0 removes this noise.<br>**High:** More audible finger scrape shaped by the string and body. |
+| `bow_slide_acc` | noise half-accel (¢/s²) | 5000 … 100000 | 25000 | per-note | in-place | Sets the pitch acceleration needed for half-strength slide noise, above the movement floor. Requires slide noise above 0.<br>**Low:** Noise responds to gentler starts, stops and turns.<br>**High:** Sharper changes of finger speed are needed for the same noise level. |
+| `bow_slide_dull` | slide dulling | 0 … 0.8 | 0.35 | per-note | in-place | Lowers string-loss cutoffs while the finger moves, making slides temporarily darker.<br>**Low:** Less moving-finger absorption; 0 keeps the cutoffs unchanged by slides.<br>**High:** Stronger darkening during motion, with brightness returning when the finger stops. |
+| `bow_slide_rate` | slide half-rate (¢/s) | 100 … 4000 | 900 | per-note | in-place | Sets the pitch speed needed for half-strength slide dulling, above the movement floor. Requires slide dulling above 0.<br>**Low:** Gentler slides darken the string noticeably.<br>**High:** Requires faster slides for the same darkening. |
 
-### Liveness
-
-| Key | Name | Range | Default | Scope | Timing | Description |
-|---|---|---|---|---|---|---|
-| `bow_settle_db` | onset settle (dB) | 0 … 12 | 7 | per-note | in-place | How far the bow eases down after a fresh attack: the friction loop alone overshoots ~+7 dB over the sustainable level for ~0.5 s; this trims the stroke onto a natural ~+2 dB settle. Zero through the place+draw window, so the staccato bite is untouched. 0 = off. |
-| `bow_settle_ms` | settle decay (ms) | 30 … 500 | 130 | per-note | in-place | Exponential time constant of the post-onset ease-down (starts where the draw ends). |
-| `bow_settle_sharp` | sharp settle exemption | 0 … 1 | 0 | per-note | in-place | How much a SHARP attack is exempted from the settle: depth × (1 − this × sharpness). At 1 a full-sharp (martelé) staccato keeps its level while gentle sustains keep the fitted settle balance. 0 = off (every attack settles equally). |
-| `bow_drift_cents` | drift depth (¢) | 0 … 8 | 0.55 | per-note | in-place | Slow random pitch wander of a held note (bounded random walk, NOT vibrato) — the finger/bow life of a sustain. The body slope turns it into decorrelated per-harmonic shimmer, and the sarangi body is steep (~3 dB/¢ at D4), so a little goes far. 0 = a perfectly steady sustain. |
-| `bow_drift_hz` | drift bandwidth (Hz) | 0.2 … 6 | 1.2 | per-note | in-place | Bandwidth of all three liveness walks (pitch, level, force). Natural sustain motion lives at 0.5–2.5 Hz — well below vibrato rate. |
-| `bow_drift_db` | level drift (dB) | 0 … 3 | 0.15 | per-note | in-place | Direct bow-velocity wander (dB std) on top of what the pitch drift already does to the level. |
-| `bow_drift_force_db` | force drift (dB) | 0 … 4 | 0.3 | per-note | in-place | Bow-force wander (dB std): slow timbre motion — brightness breathes without the level moving much. |
-| `bow_glide_dip_db` | glide dip (dB) | 0 … 12 | 5 | per-note | in-place | Glide bow lightening: the bow eases while the pitch is MOVING (full depth on velocity, 0.3× on force) — the 3.5–9 dB dip a player makes through a transition. Only within-note movement (finger glides / meend) triggers it; the dip follows the sounding-pitch slew, so drift and vibrato never do. 0 = off. |
-| `bow_glide_dip_rate` | dip half-rate (¢/s) | 100 … 5000 | 900 | per-note | in-place | Pitch slew at which the glide dip reaches half depth. A fast fret-to-fret finger drag sweeps ~1500 ¢/s; slow meend ~200 ¢/s gets a gentle ~1 dB. |
-| `bow_slide_noise` | slide noise | 0 … 0.02 | 0.008 | per-note | in-place | Finger-slide friction noise: filtered per-note noise injected at the finger termination in the kernel — it circulates the string, combs at the sliding pitch and radiates through the body — driven by the CHANGE of the finger's pitch slew, so it scrapes where the finger starts, stops or turns and stays quiet through a constant-rate meend. A 6000 ¢/s² drive floor keeps drift and steady notes bit-exact with it armed. 10 ms attack / 100 ms release, faded with the note's gate. 0 = silent slides. |
-| `bow_slide_acc` | noise half-accel (¢/s²) | 5000 … 100000 | 25000 | per-note | in-place | Finger acceleration at which the slide noise reaches half strength. A smooth 700 ¢ meend over 0.35 s peaks near ~28k ¢/s²; strong vibrato ~25k. Lower = the noise speaks on gentler gestures. |
-| `bow_slide_dull` | slide dulling | 0 … 0.8 | 0.35 | per-note | in-place | Moving-finger HF absorption: while the pitch slews, the loop-loss corners (nut/bridge/gut) scale down by up to this fraction — a finger in motion presses lighter and damps more top than a firmly stopped one, so the tone dulls slightly through the slide and blooms back on arrival. Composes with the register damping law; drift never triggers it (80 ¢/s slew floor), strong finger vibrato does. 0 = static terminations. |
-| `bow_slide_rate` | slide half-rate (¢/s) | 100 … 4000 | 900 | per-note | in-place | Pitch slew at which the slide dulling reaches half strength (80 ¢/s drive floor). |
-
-### Radiation & output
+### String · Friction
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `bow_rad_hp` | radiation HP (Hz) | 50 … 600 | 84.8227 (authored 200) | global | in-place | A finite radiator can't radiate below its size — butter-2 high-pass corner. |
-| `bow_rad_lp` | radiation LP (Hz) | 500 … 16000 | 10373.7 (authored 8000) | global | in-place | Air/skin HF absorption — one-pole corner. |
-| `bow_w` | excitation level | 0.2 … 2.5 | 0.632167 (authored 1.196) | global | in-place | Bridge-force weight (pre-radiation drive). |
-| `bow_gain` | master gain | 0 … 2 | 1 | global | live | Performance volume of the WHOLE radiated instrument — played voice, taraf ring and room together — on top of the fitted calibration trim. Expression drives the bow (the played string only), so the ringing taraf keeps the total level up; this is the knob that actually moves it. 1 = the calibrated level. INSTANT (a dedicated 25 ms-ramped engine setter — no rebuild, no debounce), so bind it to a tilt or the Strike/Acceleration pair for real-time volume control. The safety limiter still guards the ceiling. |
-| `bow_bal` | voice↔taraf balance | -1 … 1 | 0 | global | live | Volume balance between the played VOICE bus and the sympathetic TARAF (jt) bus, at the point where they merge: −1 = voice only, 0 = neutral (the calibrated mix, bit-exact), +1 = taraf only. A pure attenuator pair — the favored side stays at its calibrated level, the other turns down — so no headroom appears and the limiter calibration holds. Slewed ~30 ms; INSTANT like master gain, so bind it to a tilt to lean into the wash mid-phrase. The iPad volume readout tracks it (the meter taps post-balance). Applies live. |
-| `bow_live_trim` | output trim | 0.01 … 0.5 | 0.2332 (authored 0.175) | global | in-place | Final calibration level of the fitted instrument — the CALIBRATION half; use master gain for performance volume. |
-| `bow_lim_thresh` | limiter ceiling | 0.1 … 1 | 0.8 | global | in-place | Output safety limiter: linked-stereo peak ceiling at the very end of the chain (after global FX). Below it samples pass bit-exact; above, instant-attack gain riding with the release below. Guards the coherent kin peaks (hard-struck Sa/Pa: voice + jt ring add in phase) and the ±16 dB expression axis. To even the CAUSE, see bow_jt_norm — long-ring anchor rows charge hotter. |
-| `bow_lim_rel_ms` | limiter release (ms) | 20 … 500 | 150 | global | in-place | Release time of the output safety limiter's gain recovery. Shorter pumps on sustained hot material; longer ducks the wash noticeably after a peak. |
-| `bow_rev_mix` | room mix | 0 … 0.3 | 0.08 | global | in-place | Room level. The wet pair is width-decorrelated (see room width); the L+R fold-down stays pan-invariant. 0 = bone dry. |
-| `bow_rev_rt60` | room decay (s) | 0.2 … 2 | 1 | global | rebuild | Room reverberation time. |
-| `bow_rev_width` | room width | 0 … 1 | 0.8 | global | in-place | L/R decorrelation of the room tail — a real room's reverberant field differs at the two ears. Cancels in the mono fold-down. 0 = a mono room. |
-| `bow_st_width` | instrument width | 0 … 1 | 0.2 | global | rebuild | The width law: the whole instrument — played voice, taraf wash, drones, bow noise — heard from TWO observation points. A dense diffuse-field difference bank above the Schroeder crossover, so lows stay identical in L and R (one centred instrument) while the upper spectrum decorrelates the way a real instrument's does between two ears. At the 0.2 default: melody interaural coherence ~0.9 at 4–8 kHz, the bare wash ~0.3–0.4, balance within ±0.8 dB. Not a pan — zero net lean by construction; cancels in the mono fold-down. 0 = point radiator (mono-in-place). |
-| `bow_tone_tilt` | tone tilt (bass–treble) | -1 … 1 | 0 | global | live | Overall spectral tilt: −1 = bass-biased, 0 = flat, +1 = treble-biased. A complementary shelf pair on the whole voice before the room. Applies live — the Tone Tilt composite sweeps this. |
+| `bow_mu_s` | static friction | 0.4 … 1.2 | 1.06607 (authored 0.8) | global | in-place | Sets the bow's static friction coefficient, governing how strongly rosin can hold the string.<br>**Low:** Weaker stick grip and a smaller gap from sliding friction.<br>**High:** Stronger stick grip and a larger stick/slip contrast, depending on dynamic friction. |
+| `bow_mu_d` | dynamic friction | 0.1 … 0.6 | 0.184372 (authored 0.3) | global | in-place | Sets friction while the string slips under the bow; its gap from static friction shapes bow capture.<br>**Low:** Less sliding drag and a larger stick/slip contrast.<br>**High:** More sliding drag and a smaller contrast when static friction is held fixed. |
+| `bow_v0` | friction corner | 0.05 … 0.5 | 0.107992 (authored 0.2) | global | in-place | Sets the relative-speed scale over which friction changes from sticking to sliding.<br>**Low:** A sharper transition, often giving a brighter attack edge.<br>**High:** A more gradual transition across a wider range of sliding speeds. |
+| `bow_Zt` | torsional impedance × | 0 … 15 | 11.3381 (authored 7.9) | global | in-place | Sets torsional impedance at the bow contact relative to transverse string impedance.<br>**Low:** More rotational give at the contact.<br>**High:** Less rotational give; the effective contact impedance approaches the transverse value. |
+| `bow_noise` | contact noise | 0 … 0.4 | 0.1 | global | in-place | Sets bow-hair noise fed back into the string's friction loop.<br>**Low:** Less recirculating grain; 0 removes this noise source.<br>**High:** Stronger textured contact noise shaped by the string and body. |
+| `bow_noise_dir` | direct noise | 0 … 0.4 | 0.12 | global | in-place | Sets contact noise radiated directly alongside the pitched String voice.<br>**Low:** Less audible air between harmonics; 0 removes this direct contribution.<br>**High:** More audible bow hiss and grain without increasing the recirculating noise setting. |
 
-### Tanpura
+### String · Damping
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `tp_gain` | output gain | 0 … 0.03 | 0.02 | global | live | The tanpura voice's output trim, applied after its fitted body EQ and before its calibration room. The 0.02 default IS the artifact's fitted trim (tanpura_live.json `gain`) — keep the two in step when the artifact regenerates. |
-| `tp_drone_level` | drone pluck level | 0 … 2 | 1 | global | live | Scales the drone buttons' tanpura pluck displacement (1 = the role's fitted pluck at velocity 100). Only the tanpura drone voice reads it; the sympathetic-swell drone voice keeps its own bow_drone_* calibration. |
-| `tp_drone_cycle` | drone re-pluck period (s) | 0 … 8 | 2.5 | global | live | While a drone button stays held, the tanpura re-plucks its string every this many seconds — the strumming hand. Below 0.1 s the cycle is off (a press is then a single pluck; the string still rings for its full t60 either way). Applies live, mid-hold. |
-| `tp_pluck_level` | played pluck level | 0 … 2 | 1 | global | live | Scales the fret-note tanpura plucks when the tanpura is the MAIN instrument (velocity still shapes each pluck on top). Inert while the String voice is the played instrument. |
-| `tp_rel_t60` | note-off release t60 (s) | 0.05 … 3 | 0.4 | per-note | live | Main-instrument note-off decay: a HELD fret note rings at the string's natural rate, a released one decays to −60 dB in this many seconds — a finger stop, not a hard damp (the jawari buzz cuts at note-off, the pitch rings down). Drone-button strings never read it (release = ring out, their nature). |
-| `tp_pluck_touch` | pluck isolation | 0 … 1 | 0 | global | live | How isolated each pluck is from the string's ringing past. At 0 (the physical default) a pluck lands ON TOP of whatever is still ringing — pluck-to-pluck phase alignment then decides the level and buzz (dense re-plucking builds up several dB and swings the buzz), the tanpura's untamed side. Above 0 every pluck is a SEPARATE STRING: the ringing string moves to the history bank (full jawari simulation at its own pitch, its ring scaled by this value — 1 = it rings on in full) and the new pluck starts from settled state, so attacks are always consistent. tp_poly sets how many history strings stay alive; same-pitch strings still sum in the air, and their slowly drifting phases beat like a jodi pair — the physics of two real strings. A note-off-released string never resurrects. Applies to drone and main-instrument plucks, live, at the next pluck. |
-| `tp_poly` | history string bank | 0 … 16 | 6 | global | live | The size of the tanpura's history bank: how many previous plucks keep ringing as REAL strings (full jawari simulation each — their cascades keep developing) before the oldest is retired to a cheap linear ring-out (natural decay, no further jawari re-pumping) and, below audibility, culled. Each live history string costs about one string's worth of CPU; raise it for dense strumming on a strong machine, lower it if the overload watchdog complains. 0 = no history strings at all: the previous ring goes straight to the linear ring-out with its low partials restarted by the new pluck (the most consistent-volume, least-CPU mode). Only read when pluck isolation (tp_pluck_touch) is above 0. Applies live. |
-| `tp_pluck_drive` | pluck contact drive | 0.25 … 4 | 1 | global | live | The mellow↔buzzy axis at constant loudness: how hard the pluck drives the string into the jawari bone, decoupled from the note's level (the pluck displacement scales by this and the string's output trim by its inverse, together, at the pluck). The jawari contact is a power law, so engagement depth IS the buzz conversion — below 1 the same note rings cleaner and darker, above 1 it buzzes brighter and the cascade develops faster. 1 = the calibrated instrument (bit-exact). Applies live, at the next pluck (drone and main-instrument). |
-| `tp_taraf` | sympathetic taraf drive | 0 … 8 | 4 | global | live | How strongly the tanpura's output drives the sarangi taraf (the modal-jawari web — the Strings tab's rows), as though the tanpura were strung into the bowed instrument: drone-button plucks (and main-instrument tanpura notes) charge the web sympathetically and it rings back through the String voice's body. Same inject ring as the sitar's st_taraf, at its own level (kernel drive, shaped by the voice→taraf FX insert like any drive). 0 = no coupling (byte-exact String-voice parity). The web only rings while the String voice is armed — it always is. |
-| `tp_jiva_comp` | register jawari calibration | 0 … 1 | 1 | global | rebuild | Per-pitch jiva (jawari thread) calibration. The fitted thread geometry gives the low register its sustained graze — the slow, laddered harmonic cascade; higher strings extrapolate that geometry, fall off the bone and ring clean/dark, and no pluck level restores the regime. This retargets each string's thread height the way a player adjusts the cotton thread per string: at 1 every pitch keeps low Sa's buzziness and laddered cascade (pitch cost under a cent); at 0 the fitted geometry is untouched. Edits schedule a debounced full tanpura rebuild (seconds of CPU), like the scale-shape family. |
-| `tp_cascade` | register cascade slowing | 0 … 1 | 1 | global | rebuild | Slows the higher strings' harmonic cascade toward low Sa's unhurried pace. Even register-calibrated, higher pitches develop their overtone ladder faster in real time (the jawari converts on every graze pass, and passes come at the string's frequency). This raises each higher string's jiva thread a touch further toward the fitted height (a gentler graze — the instant harmonic jump becomes a ~1 s bloom) and lets its upper partials ring longer to keep the buzz level, both graded by pitch and zero at and below the 104 Hz anchor. At 1 the octave-up ladder matches low Sa's character; at 0 only the base calibration applies. Edits schedule the debounced full tanpura rebuild, like tp_jiva_comp. |
+| `bow_gut_g` | round-trip retention | 0.99 … 1 | 1 (authored 0.998) | global | in-place | Sets the fraction of string motion retained on each round trip.<br>**Low:** More energy loss and a shorter, deader response.<br>**High:** Less broadband loss and longer sustain; 1 removes this loss term, while other damping remains. |
+| `bow_gut_fc2` | gut top (Hz) | 500 … 12000 | 3172.33 (authored 3500) | global | in-place | Sets the gut string's additional high-frequency loss cutoff.<br>**Low:** Damps upper harmonics earlier, producing a darker string.<br>**High:** Retains more upper harmonics for a brighter string. |
+| `bow_nut_fc` | nut corner (Hz) | 1000 … 12000 | 8921.51 (authored 5500) | global | in-place | Sets the low-pass cutoff at the nut or stopping finger.<br>**Low:** Absorbs more high-frequency energy at that end of the string.<br>**High:** Reflects more upper harmonics back along the string. |
+| `bow_br_fc` | bridge corner (Hz) | 1000 … 12000 | 9000 (authored 6750) | global | in-place | Sets the low-pass cutoff at the bridge termination.<br>**Low:** Absorbs more upper harmonics at the bridge.<br>**High:** Retains more high-frequency string energy. |
+| `bow_loss_reg` | register damping | 0 … 1.5 | 0.7 | global | in-place | Makes string-loss cutoffs follow pitch below the tonic. Notes at or above the tonic are unchanged.<br>**Low:** Less register tracking; 0 keeps fixed cutoffs.<br>**High:** Low notes become progressively darker; 1 tracks pitch proportionally, above 1 darkens more strongly. |
 
-### Sitar
+### String · Torsion
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `st_gain` | output gain | 0 … 0.03 | 0.015186 | global | live | The sitar voice's output trim, applied before its calibration room (the body weighting is baked per mode — the scale-model radiation law). The 0.015186 default IS the artifact's fitted trim (sitar_live.json `gain`, calibrated so a velocity-100 sitar pluck peaks like a tanpura drone pluck) — keep the two in step when the artifact regenerates. |
-| `st_pluck_level` | played pluck level | 0 … 2 | 1 | global | live | Scales the fret-note sitar plucks when the sitar is the MAIN instrument (velocity still shapes each pluck on top). Inert otherwise. |
-| `st_rel_t60` | note-off release t60 (s) | 0.05 … 3 | 0.15 | per-note | live | Note-off decay: a HELD fret note rings at the string's natural rate, a released one decays to −60 dB in this many seconds — a finger lift off the fret. Shorter than the tanpura's default: sitar lines articulate. |
-| `st_pluck_touch` | pluck isolation | 0 … 1 | 1 | global | live | Same axis as tp_pluck_touch (0 = each pluck rides the ringing past; above 0 the old ring moves to a history string and the new pluck starts settled). Defaults to 1 for the sitar: fret runs re-pluck at NEW pitches, and isolation keeps the previous note's tail at its own pitch instead of retuning history with the glide. |
-| `st_poly` | history string bank | 0 … 16 | 4 | global | live | How many previous sitar plucks keep ringing as REAL strings (full jawari simulation each) before the oldest retires to the cheap linear ring-out. Same machinery as tp_poly; only read when st_pluck_touch is above 0. |
-| `st_pluck_drive` | pluck contact drive | 0.25 … 4 | 1 | global | live | The mellow↔buzzy axis at constant loudness — how hard the pluck drives the string into the jawari bridge, decoupled from level (same mechanism as tp_pluck_drive). 1 = the fitted sitar (bit-exact). Applies at the next pluck. |
-| `st_taraf` | sympathetic taraf drive | 0 … 8 | 4 | global | live | How strongly the sitar's output drives the sarangi taraf (the modal-jawari web — the Strings tab's rows ARE the sitar's sympathetic strings). The rendered sitar signal feeds the web's bridge drive alongside the String voice's own (kernel inject ring, shaped by the voice→taraf FX insert like any drive). 0 = no halo (byte-exact String-voice parity). The web only rings while the String voice is armed — it always is. |
+| `bow_tors_c` | torsion coupling | 0 … 0.5 | 0.048906 (authored 0) | global | in-place | Feeds sliding motion into a torsional wave and returns it to the bow contact, adding harmonic detail.<br>**Low:** Less torsional interaction; 0 disables this wave path.<br>**High:** Stronger returning micro-slips and more upper-harmonic texture. |
+| `bow_tors_g` | torsion return | 0.5 … 0.98 | 0.959677 (authored 0.85) | global | in-place | Sets how much torsional-wave energy survives each return. Requires torsion coupling above 0.<br>**Low:** More damping and shorter-lived torsional ripple.<br>**High:** Less damping and stronger, more persistent ripple. |
+| `bow_tors_ratio` | torsion speed × | 3.5 … 8 | 4.46653 (authored 5.2) | global | in-place | Sets torsional wave speed relative to transverse wave speed. Requires torsion coupling above 0.<br>**Low:** Slower torsional travel and a longer return delay.<br>**High:** Faster torsional travel and a shorter delay, shifting the resulting harmonic detail upward. |
+
+### Body · Resonances
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_body_modes` | main mode count | 0 … 16 | 9 (authored 12) | global | rebuild | Sets the number of main body resonances. At 0, both these resonances and the formant bank are omitted.<br>**Low:** Fewer resonances and simpler body coloration; 0 leaves direct radiation.<br>**High:** More resonances and a more detailed pattern of ringing and coloration. |
+| `bow_body_scale` | resonance frequency × | 0.1 … 1.5 | 0.241243 (authored 1) | global | in-place | Multiplies the frequencies of the main body resonances, including the air mode. Formant-band edges stay fixed.<br>**Low:** Shifts these resonances downward, suggesting a larger body.<br>**High:** Shifts them upward, suggesting a smaller body; 1 keeps the base tuning. |
+| `bow_body_air_ratio` | air mode ratio | 0.4 … 2.2 | 0.694463 (authored 1.4) | global | in-place | Sets the air resonance relative to the tonic, before the body-frequency multiplier; the other main modes follow it.<br>**Low:** Lowers the air resonance and the main mode family.<br>**High:** Raises the air resonance and the main mode family. |
+| `bow_body_q` | wood Q | 5 … 60 | 14.9759 (authored 25) | global | in-place | Sets the sharpness and decay of the main wood resonances, excluding the air mode.<br>**Low:** Broad, quickly damped resonances with smoother coloration.<br>**High:** Narrower, longer-ringing resonances with stronger pitch-dependent color. |
+| `bow_body_q_air` | air Q | 4 … 50 | 27.8606 (authored 12) | global | in-place | Sets the sharpness and decay of the lowest air resonance.<br>**Low:** A broad, short-lived low resonance.<br>**High:** A narrower, longer-ringing low resonance. |
+| `bow_body_y` | mobility depth | 0 … 2 | 1.01785 (authored 0.35) | global | in-place | Sets bridge motion at the main body resonances; body return determines how much reaches the strings.<br>**Low:** Less resonant bridge movement; 0 removes this part of the bridge load.<br>**High:** Stronger resonant loading, more attack bloom and possible unstable or uneven notes. |
+| `bow_body_rad` | modal radiation | 0 … 3 | 2.87716 (authored 1) | global | in-place | Sets the audible contribution of the main body resonances relative to direct radiation.<br>**Low:** Less main-mode coloration; 0 silences their radiated contribution.<br>**High:** More prominent resonant peaks and dips, without directly increasing bridge mobility. |
+| `bow_body_c0` | direct radiation | 0 … 1 | 0.464459 (authored 0.3) | global | in-place | Sets the direct bridge-force contribution alongside the resonant body sound.<br>**Low:** Less direct sound; 0 leaves the resonant contributions alone.<br>**High:** More direct sound, filling the gaps between resonances; 1 passes this contribution at unity. |
+
+### Body · Formants
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_body_tail_n` | formant modes | 0 … 256 | 150 | global | rebuild | Sets the number of fixed mid/high formants between the two band edges. Requires main body modes above 0.<br>**Low:** A sparse pattern; 0 removes the formant bank but keeps the main modes.<br>**High:** A denser pattern of peaks and dips, normalized to avoid simply growing with the count. |
+| `bow_body_tail_seed` | formant seed | 1 … 64 | 1 | global | rebuild | Chooses the repeatable pattern of formant peaks and nulls at the same overall statistics.<br>**Low:** Selects an earlier numbered pattern.<br>**High:** Selects a different pattern, not a brighter, stronger or better one. |
+| `bow_body_tail_f0` | formants from (Hz) | 150 … 1500 | 280 | global | rebuild | Sets the lower edge of the formant band in Hz.<br>**Low:** Extends formant coloration into lower frequencies.<br>**High:** Concentrates the same mode count higher in the spectrum. |
+| `bow_body_tail_f1` | formants to (Hz) | 2000 … 12000 | 6500 | global | rebuild | Sets the upper edge of the formant band in Hz.<br>**Low:** Confines formant coloration to a narrower, lower band.<br>**High:** Spreads the formants farther into the upper spectrum. |
+| `bow_body_tail_q` | formant Q | 5 … 80 | 40 | global | rebuild | Sets the sharpness and ring time of the fixed formants.<br>**Low:** Broader, faster-decaying features with gentler spectral detail.<br>**High:** Narrower, longer-ringing features with more pronounced peaks and valleys. |
+| `bow_body_tail_y` | formant mobility | 0 … 1.5 | 0.4 | global | rebuild | Sets how strongly the formant resonances move the bridge and load the played strings.<br>**Low:** Less formant-related loading; 0 removes that part of the bridge movement.<br>**High:** Stronger interaction with the strings, potentially making some pitches uneven or unstable. |
+| `bow_body_tail_rad` | formant radiation | 0 … 8 | 3.5 | global | rebuild | Sets the audible formant contribution relative to direct radiation. It does not set formant bridge mobility.<br>**Low:** Weaker formant color; 0 removes this contribution.<br>**High:** More pronounced formant peaks and nulls as harmonics move through the body response. |
+
+### Body · Bridge interaction
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_w` | excitation level | 0.2 … 2.5 | 0.632167 (authored 1.196) | global | in-place | Scales the played strings' bridge-force contribution before body radiation and taraf excitation.<br>**Low:** Less bridge drive, quieter radiation and weaker sympathetic excitation.<br>**High:** More bridge drive and excitation, also increasing the body feedback load. |
+| `bow_yinf` | bridge give | 0 … 0.4 | 0.021048 (authored 0.05) | global | in-place | Sets broadband bridge mobility underneath the resonant peaks.<br>**Low:** A more rigid baseline; 0 removes this broadband movement.<br>**High:** More bridge movement across the spectrum, returned to the strings through body return. |
+| `bow_kret` | body return | 0 … 0.5 | 0.35 | global | in-place | Sets how much body-driven bridge motion feeds back into the played strings.<br>**Low:** Less body loading; 0 disconnects this return while retaining body radiation.<br>**High:** Stronger interaction with body resonances, including more unevenness or wolf-like notes; the loop cap limits it. |
+
+### Taraf · Shared
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_jt_drive` | drive | 0.001 … 0.3 | 0.03 | global | live | Sets bridge excitation of both taraf banks from played strings and injected Tanpura/Sitar sound. Also scales chromatic burst and drone drive; raga plectrum displacement is separate.<br>**Low:** Gentler excitation and less contact activity.<br>**High:** Stronger excitation and more active jawari contact; drive normalization can compensate the audible level change. |
+| `bow_jt_drive_norm` | drive normalization | 0 … 1 | 0.7 | global | live | Compensates the radiated level change caused by shared taraf drive, while tracking stored energy so existing ring-outs retain their level.<br>**Low:** At 0, keeps the raw loudness changes caused by drive.<br>**High:** At 1, fully compensates the steady-state energy model; intermediate values retain some level change. |
+| `bow_jt_sel` | recruitment | 0 … 1 | 0.5 | global | live | Sets which rows contribute in both taraf banks, with loudness compensation. The fitted natural response is 0.5.<br>**Low:** Toward 0, favors rows harmonically related to the played notes.<br>**High:** Toward 1, flattens contributions toward a uniform haze that depends less on the played pitches. |
+| `bow_jt_damp` | extra damping | 0 … 1 | 0 | global | live | Adds damping to both taraf banks while they ring.<br>**Low:** At 0, preserves each row's natural decay.<br>**High:** Shortens the ring progressively; near 1 the strings are strongly choked. |
+| `bow_jt_lp` | low-pass cutoff (Hz) | 1000 … 20000 | 20000 | global | live | Low-pass filters the combined audible taraf output; played-string sound and physical bridge return are unaffected.<br>**Low:** Removes more high harmonics for a darker wash.<br>**High:** Preserves more brightness; 20000 Hz bypasses the filter. |
+| `bow_jt_hp` | high-pass cutoff (Hz) | 0 … 4000 | 0 | global | live | High-pass filters the combined audible taraf output; played-string sound and physical bridge return are unaffected.<br>**Low:** Retains more low-frequency body; 0 bypasses the filter.<br>**High:** Reduces fundamentals and low harmonics, leaving a thinner, brighter harmonic halo. |
+| `bow_jt_body` | body radiation | 0 … 1 | 0 | global | live | Blends both taraf banks through the same body-radiation response as the played String voice.<br>**Low:** At 0, the taraf radiates directly without this body coloration.<br>**High:** At 1, the taraf fully takes on the body's formants; body edits then color both voice and taraf. |
+| `bow_jt_couple` | bridge coupling | 0 … 1 | 0 | global | live | Returns both taraf banks' bridge force to the played strings and subsequent excitation, creating a shared physical feedback path.<br>**Low:** At 0, disables this return.<br>**High:** Increases mutual bridge loading and sympathetic interaction within the calibrated safe range. |
+| `bow_jt_cap` | voice cap | 0 … 1 | 0 | global | live | Limits each taraf row against the played voice's recent peak, using the voice-cap ratio. A silent voice can hold down drones and injected plucks when this is armed.<br>**Low:** At 0, no relative cap; small values apply gentle restraint.<br>**High:** At 1, enforces the per-row ceiling firmly; the summed bank can still exceed one row's ceiling. |
+| `bow_jt_cap_ratio` | voice cap ratio | 0.1 … 2 | 1 | global | live | Sets each taraf row's permitted level relative to the voice's recent peak. Only affects sound when voice cap is above 0.<br>**Low:** A tighter ceiling; 0.5 allows roughly 6 dB below the voice peak.<br>**High:** A looser ceiling; 1 permits parity and 2 permits roughly 6 dB above it. |
+| `ctl_taraf_adapt` | history adaptation | 0 … 1 | 0 | global | live | Uses recent played-pitch history to attenuate incidental degrees in both taraf banks' radiation. Saved row gains and physical feedback stay intact.<br>**Low:** At 0, uses the saved gains without history-based attenuation.<br>**High:** At 1, can reduce incidental degrees toward 15% of their saved gain; frequently used degrees remain prominent. |
+
+### Taraf · Raga
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_jt_gain` | level | 0 … 3 | 0.3 | global | in-place | Sets the raga taraf's audible level independently of the chromatic bank, preserving ringing state and physical bridge coupling.<br>**Low:** Quieter raga radiation; 0 mutes this bank's output.<br>**High:** Louder raga radiation, including its drone and explicit plucks. |
+| `bow_jt_norm` | decay normalization | 0 … 1.5 | 0 (authored 1) | global | in-place | Weights raga rows by their decay response to reduce level differences between long- and short-ringing rows. Does not alter physical decay.<br>**Low:** At 0, preserves raw row gains and their natural level differences.<br>**High:** Applies stronger decay-based compensation; 1 is full modeled normalization and above 1 goes further. |
+| `bow_jt_dual_mm` | reference pluck (mm) | 0 … 1 | 0.5 | per-note | onset | Sets reference plectrum displacement for raga drone presses and explicit plucks, scaled by register and captured at onset.<br>**Low:** Gentler plucks; 0 adds no plectrum displacement.<br>**High:** Stronger plucks and deeper initial contact; bowed excitation keeps its own drive. |
+| `bow_jt_bow_bloom` | bow bloom | 0 … 1 | 1 | global | live | Lets fresh bridge energy charge raga rows, then reduces sustained forcing over about 2.1 seconds. Direct plectrum gestures are unaffected.<br>**Low:** At 0, maintains continuous bridge drive.<br>**High:** At 1, sustained forcing settles to 3%, emphasizing the initial bloom and subsequent ring. |
+| `bow_jt_dual_lp` | hiss cutoff (Hz) | 2000 … 20000 | 20000 | global | live | Removes high-frequency hiss from each raga row's radiation while retaining harmonic peaks. Contact motion and bridge return are unaffected.<br>**Low:** Cleans a broader upper-frequency region.<br>**High:** Leaves more of the original top end; 20000 Hz bypasses cleanup with matched delay. |
+| `bow_jt_dual_select` | filter selectivity | 0 … 1 | 0 | global | live | Sets how strictly raga hiss cleanup identifies harmonic peaks. Only active when hiss cutoff is below bypass.<br>**Low:** Accepts weaker or less precisely aligned peaks, preserving more residual texture.<br>**High:** Requires stronger peaks nearer the row's harmonics, suppressing more residual noise. |
+| `bow_jt_sav` | SAV contact solver | 0 … 1 | 0 | global | rebuild | Chooses the contact solver for the physical raga rows and rebuilds them.<br>**Low:** 0 selects the Newton solver.<br>**High:** 1 selects the corrected SAV solver; this is an algorithm choice, not an amount or quality scale. |
+
+### Taraf · Chromatic
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_jtc_gain` | level | 0 … 3 | 0.3 | global | in-place | Sets the chromatic taraf and melody follower's audible level independently of the raga bank, preserving ringing state and physical bridge coupling.<br>**Low:** Quieter chromatic radiation; 0 mutes this bank's output.<br>**High:** Louder chromatic radiation, including its drone and explicit plucks. |
+| `bow_jtc_norm` | decay normalization | 0 … 1.5 | 0 | global | in-place | Weights chromatic rows and the melody follower by decay response to reduce level differences. Does not alter physical decay.<br>**Low:** At 0, preserves raw row gains and their natural level differences.<br>**High:** Applies stronger decay-based compensation; 1 is full modeled normalization and above 1 goes further. |
+| `bow_jtc_evolve` | evolution | 0 … 1 | 0.5 | global | live | Moves chromatic rows and the melody follower between pressed and grazing jawari contact. The fitted geometry is 0.5; raga geometry is separate.<br>**Low:** Toward 0, presses the string against the bone.<br>**High:** Toward 1, opens the grazing contact band for evolving harmonics; brightness and sustain depend on the geometry. |
+| `bow_jt_ev_reg` | evolution register | -1 … 1 | 0 | global | live | Offsets chromatic and follower evolution by register relative to the tonic. Zero applies the same evolution at every pitch.<br>**Low:** Negative values press lower rows and open higher rows.<br>**High:** Positive values open lower rows and press higher rows. |
+| `bow_jt_apex` | graze depth (m) | 2e-06 … 5e-05 | 1e-05 | global | in-place | Sets bone protrusion into chromatic and follower strings. Its effect depends on the contact zone and curvature.<br>**Low:** Shallower contact; the string may barely graze or miss the bone.<br>**High:** Deeper contact; beyond the grazing region the string becomes pressed, so more depth does not always mean more buzz. |
+| `bow_jt_zone` | contact zone (m) | 0.002 … 0.02 | 0.006 | global | in-place | Sets the length of bone available for chromatic and follower contact, in metres.<br>**Low:** A shorter, more localized contact region with a sharper knee.<br>**High:** A longer region that lets contact spread, often producing a more diffuse buzz. |
+| `bow_jt_radius` | bone radius (m) | 0.05 … 2 | 0.3 | global | in-place | Sets the bone's curvature radius for chromatic rows and the melody follower.<br>**Low:** A more rounded bone with localized contact, usually a cleaner ring.<br>**High:** A flatter bone that lets the contact point travel farther, opening the jawari character. |
+| `bow_jt_alpha` | contact exponent | 1 … 2 | 1.3 (authored 1.5) | global | in-place | Sets the exponent relating penetration to contact force for chromatic rows and the melody follower.<br>**Low:** Near 1, the contact-force law is closer to linear.<br>**High:** Near 2, force depends more nonlinearly on penetration; the audible result also depends on depth and stiffness, not a simple brightness scale. |
+| `bow_jt_hcb` | contact damping | 1 … 40 | 8 | global | in-place | Sets energy loss during chromatic and follower string-bone contact.<br>**Low:** Less contact damping and sharper, more clangorous transients.<br>**High:** More contact damping, rounding buzz transients and dissipating more motion. |
+| `bow_jt_fhf` | damping corner (Hz) | 800 … 12000 | 4000 | global | in-place | Sets the frequency above which chromatic and follower partials receive progressively stronger damping.<br>**Low:** Upper partials die sooner, leaving a warmer ring.<br>**High:** Upper partials survive longer, keeping the ring brighter. |
+| `bow_jt_bst` | inharmonicity | 0 … 0.001 | 0.0002 | global | in-place | Stretches chromatic and follower upper partials to model stiff wire.<br>**Low:** More harmonic tuning; 0 removes this stiffness stretch.<br>**High:** Sharper upper partials and a more metallic, bell-like character. |
+| `bow_jt_pluck` | pluck excitation | 0 … 0.3 | 0 | per-note | onset | Selects and scales a finite pitched force burst for chromatic drone presses and explicit plucks; raga plucks use reference displacement.<br>**Low:** At exactly 0, keeps the held drone swell; just above 0, switches to a gentle finite burst.<br>**High:** A stronger finite burst on the pressed row, without held drive or spreading the gesture to related rows. |
+| `bow_jt_pluck_decay_ms` | excitation decay (ms) | 1 … 100 | 12 | per-note | onset | Sets the force-burst decay time for chromatic plucks. Requires pluck excitation above 0; the row's natural ring time is separate.<br>**Low:** A shorter impulse with a more abrupt excitation.<br>**High:** A longer push that injects energy for more time; the burst ends after twelve time constants. |
+| `bow_jt_pulse` | evolution pulse | 0 … 1 | 0 | per-note | onset | Makes a chromatic drone press or explicit pluck briefly open that row toward evolution 1, then return to its resting geometry.<br>**Low:** At 0, no evolution excursion.<br>**High:** A larger opening excursion, limited by the remaining distance to evolution 1. |
+| `bow_jt_pulse_attack_ms` | pulse attack (ms) | 1 … 100 | 5 | per-note | onset | Sets how quickly a chromatic evolution pulse moves the bone. Requires evolution pulse above 0.<br>**Low:** Faster movement and a sharper change in contact color.<br>**High:** Slower, smoother movement into the pulse. |
+| `bow_jt_pulse_decay_ms` | pulse decay (ms) | 10 … 2000 | 180 | per-note | onset | Sets how quickly a chromatic evolution pulse returns toward resting geometry. It does not set string decay.<br>**Low:** A brief change in contact color.<br>**High:** A longer evolving contact trajectory before the bone settles back. |
+
+### Tanpura · Voice
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `tp_gain` | output gain | 0 … 0.03 | 0.02 | global | live | Sets Tanpura output trim after its fitted body response and before its calibration room, for both drone and played Tanpura sound.<br>**Low:** Quieter Tanpura output; 0 mutes its new output contribution, while an existing room tail can decay.<br>**High:** Louder Tanpura output without increasing the pluck displacement itself. |
+| `tp_pluck_level` | played pluck level | 0 … 2 | 1 | global | live | Scales fret-note pluck displacement when Tanpura is the selected main instrument.<br>**Low:** Gentler played plucks; 0 adds no new pluck displacement.<br>**High:** Stronger played plucks with more jawari excitation; 1 is the calibrated level. |
+| `tp_rel_t60` | note-off release t60 (s) | 0.05 … 3 | 0.4 | per-note | live | Sets the time for released main-instrument Tanpura notes to fall by 60 dB. Held notes and drone-button strings keep their own natural decay.<br>**Low:** Short, quickly damped note releases.<br>**High:** Longer ring-outs after lifting a fret touch. |
+| `tp_pluck_touch` | pluck isolation | 0 … 1 | 0 | global | live | Controls how a new Tanpura pluck interacts with earlier ringing motion, for both drones and played notes.<br>**Low:** At exactly 0, re-plucks the ringing string; above 0, starts a fresh settled string and keeps a reduced old tail.<br>**High:** At 1, the new pluck stays isolated and the previous tail carries on at full level and its own pitch. |
+| `tp_poly` | history string bank | 0 … 16 | 6 | global | live | Sets how many earlier Tanpura plucks keep their full jawari simulation when pluck isolation is above 0; older tails move to a simpler ring-out.<br>**Low:** Fewer evolving history strings and less CPU use; 0 sends old motion directly to the simpler tail.<br>**High:** More previous plucks keep developing their buzz, with greater CPU cost. |
+| `tp_pluck_drive` | pluck contact drive | 0.25 … 4 | 1 | global | live | Scales Tanpura pluck displacement with inverse output compensation at the next pluck, separating contact character from approximate loudness.<br>**Low:** Below 1, gentler bone contact and a cleaner, mellower ring.<br>**High:** Above 1, deeper contact and a brighter, faster-developing buzz; 1 keeps the fitted character. |
+| `tp_taraf` | sympathetic taraf drive | 0 … 8 | 4 | global | live | Sets how strongly Tanpura sound excites both taraf banks through the Voice → Taraf insert, alongside the shared taraf drive.<br>**Low:** Less sympathetic excitation; 0 disconnects this source from the taraf.<br>**High:** Stronger excitation and a more prominent sympathetic response; bank output levels remain separate. |
+
+### Tanpura · Drones
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `tp_drone_level` | drone pluck level | 0 … 2 | 1 | global | live | Scales the Tanpura drone buttons' pluck displacement. Does not control the separate sympathetic-swell drone mode.<br>**Low:** Gentler drone plucks; 0 adds no new pluck displacement.<br>**High:** Stronger drone plucks with more jawari excitation; 1 uses each role's calibrated displacement. |
+| `tp_drone_cycle` | drone re-pluck period (s) | 0 … 8 | 2.5 | global | live | Sets the interval between Tanpura re-plucks while a drone button remains held.<br>**Low:** Below 0.1 seconds, disables repetition; above that, short intervals produce rapid re-plucking.<br>**High:** Longer intervals leave more space for each pluck to ring before the next. |
+
+### Tanpura · Jawari
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `tp_jiva_comp` | register jawari calibration | 0 … 1 | 1 | global | rebuild | Adjusts the Tanpura jawari thread by pitch to preserve the low register's grazing contact in higher strings.<br>**Low:** At 0, keeps the unadjusted fitted geometry, so high strings can become cleaner and darker.<br>**High:** At 1, applies the full register calibration for more consistent buzz and harmonic development across pitches. |
+| `tp_cascade` | register cascade slowing | 0 … 1 | 1 | global | rebuild | Slows the Tanpura's upper-register harmonic development toward the low string's pace, while retaining upper-partial sustain.<br>**Low:** At 0, leaves the base register calibration alone, with quicker development in higher strings.<br>**High:** At 1, applies the full slowing adjustment above the low-register anchor for a more gradual harmonic bloom. |
+
+### Sitar · Voice
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `st_gain` | output gain | 0 … 0.03 | 0.015186 | global | live | Sets Sitar output trim before its calibration room.<br>**Low:** Quieter Sitar output; 0 mutes its new output contribution, while an existing room tail can decay.<br>**High:** Louder Sitar output without increasing the pluck displacement itself. |
+| `st_pluck_level` | played pluck level | 0 … 2 | 1 | global | live | Scales fret-note pluck displacement when Sitar is the selected main instrument.<br>**Low:** Gentler played plucks; 0 adds no new pluck displacement.<br>**High:** Stronger played plucks with more jawari excitation; 1 is the calibrated level. |
+| `st_rel_t60` | note-off release t60 (s) | 0.05 … 3 | 0.15 | per-note | live | Sets the time for released Sitar notes to fall by 60 dB. Held notes keep their natural decay.<br>**Low:** Short, quickly damped note releases.<br>**High:** Longer ring-outs after lifting a fret touch. |
+| `st_pluck_touch` | pluck isolation | 0 … 1 | 1 | global | live | Controls how a new Sitar pluck interacts with earlier ringing motion.<br>**Low:** At exactly 0, re-plucks the ringing string; above 0, starts a fresh settled string and keeps a reduced old tail.<br>**High:** At 1, the new pluck stays isolated and the previous tail carries on at full level and its own pitch. |
+| `st_poly` | history string bank | 0 … 16 | 4 | global | live | Sets how many earlier Sitar plucks keep their full jawari simulation when pluck isolation is above 0; older tails move to a simpler ring-out.<br>**Low:** Fewer evolving history strings and less CPU use; 0 sends old motion directly to the simpler tail.<br>**High:** More previous plucks keep developing their buzz, with greater CPU cost. |
+| `st_pluck_drive` | pluck contact drive | 0.25 … 4 | 1 | global | live | Scales Sitar pluck displacement with inverse output compensation at the next pluck, separating contact character from approximate loudness.<br>**Low:** Below 1, gentler bone contact and a cleaner, mellower ring.<br>**High:** Above 1, deeper contact and a brighter, faster-developing buzz; 1 keeps the fitted character. |
+| `st_taraf` | sympathetic taraf drive | 0 … 8 | 4 | global | live | Sets how strongly Sitar sound excites both taraf banks through the Voice → Taraf insert, alongside the shared taraf drive.<br>**Low:** Less sympathetic excitation; 0 disconnects this source from the taraf.<br>**High:** Stronger excitation and a more prominent sympathetic response; bank output levels remain separate. |
+
+### Output · Mix & limiter
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_gain` | master gain (String + taraf) | 0 … 4 | 1 | global | live | Sets performance volume for the String engine's played voice, taraf and room together, on top of calibration trim. The output limiter still applies.<br>**Low:** Quieter combined output; 0 mutes it.<br>**High:** Louder combined output; 1 is the calibrated level, and higher values add gain. |
+| `bow_bal` | voice↔taraf balance | -1 … 1 | 0 | global | live | Balances the String engine's played-voice and taraf buses by attenuating one side. Zero keeps the calibrated mix.<br>**Low:** Toward −1, turns down the taraf until only the played-voice bus remains.<br>**High:** Toward +1, turns down the played-voice bus until only the taraf remains; bank levels still set their balance. |
+| `bow_live_trim` | output trim | 0.01 … 0.5 | 0.2332 (authored 0.175) | global | in-place | Sets the String engine's calibration output scale. Master gain is the separate performance-volume control.<br>**Low:** Quieter calibrated output with more headroom before the limiter.<br>**High:** Louder calibrated output with more frequent limiting on strong peaks. |
+| `bow_lim_thresh` | limiter ceiling | 0.1 … 1 | 0.8 | global | in-place | Sets the String engine's linked-stereo peak ceiling after global FX; signals below it pass unchanged.<br>**Low:** A lower ceiling and more gain reduction on peaks.<br>**High:** A higher permitted peak level and less frequent limiting. |
+| `bow_lim_rel_ms` | limiter release (ms) | 20 … 500 | 150 | global | in-place | Sets how quickly the String engine's limiter restores gain after a peak.<br>**Low:** Faster recovery, which can make sustained loud material pump.<br>**High:** Slower recovery, keeping the following sound quieter for longer. |
+
+### Output · Tone & stereo
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_rad_hp` | radiation HP (Hz) | 50 … 600 | 84.8227 (authored 200) | global | in-place | High-pass filters the String engine's combined played-voice and taraf radiation before the room.<br>**Low:** Retains more bass and low-frequency weight.<br>**High:** Removes more low-frequency energy for a leaner sound. |
+| `bow_rad_lp` | radiation LP (Hz) | 500 … 16000 | 10373.7 (authored 8000) | global | in-place | Low-pass filters the String engine's combined played-voice and taraf radiation before the room.<br>**Low:** Darker output with fewer upper harmonics.<br>**High:** Brighter output with more upper-frequency detail. |
+| `bow_tone_tilt` | tone tilt (bass–treble) | -1 … 1 | 0 | global | live | Tilts the String engine's combined spectrum before the room. Zero leaves the spectral balance flat.<br>**Low:** Negative values favor bass over treble.<br>**High:** Positive values favor treble over bass. |
+| `bow_st_width` | instrument width | 0 … 1 | 0.2 | global | rebuild | Sets stereo spread of the String engine's played voice, taraf, drones and bow noise. Low frequencies stay centered and the mono sum is preserved.<br>**Low:** A narrower instrument; 0 gives a point-like mono source.<br>**High:** More left/right difference in the upper spectrum, giving a wider instrument. |
+
+### Output · Room
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_rev_mix` | room mix | 0 … 0.3 | 0.08 | global | in-place | Sets the built-in calibration room's wet contribution to the String engine output, separately from FX-rack reverbs.<br>**Low:** Less room sound; 0 is dry.<br>**High:** More room ambience around the direct sound. |
+| `bow_rev_rt60` | room decay (s) | 0.2 … 2 | 1 | global | rebuild | Sets the built-in room's decay time in seconds to fall by 60 dB. Requires room mix above 0.<br>**Low:** A short, tight room tail.<br>**High:** A longer, more lingering room tail. |
+| `bow_rev_width` | room width | 0 … 1 | 0.8 | global | in-place | Sets left/right differences in the built-in room tail while preserving its mono sum. Requires room mix above 0.<br>**Low:** A narrower room; 0 makes its tail mono.<br>**High:** A more spread-out room tail; it does not pan the instrument to either side. |
+
+### Controls · Fret pad
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `ctl_fret_warp` | pitch warp | 0 … 1 | 0 | global | live | Shapes how touch position maps to pitch between the pad's enabled frets.<br>**Low:** At 0, pitch changes evenly through each gap, supporting continuous slides.<br>**High:** At 1, pitch stays near each fret longer and crosses the middle quickly, making runs more nearly quantized. |
+| `ctl_fret_accent` | pitch accent | 0 … 1 | 0 | global | live | Dips played expression between the pad's enabled frets, then restores it at each fret.<br>**Low:** At 0, expression is unaffected by position between frets.<br>**High:** At 1, expression fades out midway through each gap, separating the notes of a glided run. |
+
+### Controls · Glide
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `ctl_glide_on` | glide enable | 0 … 1 | 0 | per-note | live | Enables the glide queue, which connects qualifying touches into a pitch trajectory.<br>**Low:** Below 0.5, touches use the ordinary independent-note path.<br>**High:** At 0.5 or above, qualifying touches become glide waypoints; this is an on/off choice. |
+| `ctl_glide_grace` | glide grace (ms) | 0 … 500 | 150 | per-note | live | Sets how long a released note remains available to connect to the next touch through the glide queue.<br>**Low:** A smaller gap can still connect; 0 requires touch overlap.<br>**High:** Allows longer gaps between touches to continue the same phrase. |
+| `ctl_glide_rate` | glide rate (st/s) | 2 … 200 | 40 | per-note | live | Sets the base glide speed in semitones per second, before held-note and catch-up multipliers. Requires the glide queue enabled.<br>**Low:** Slower transitions that take longer to reach the next pitch.<br>**High:** Faster transitions and quicker arrivals. |
+| `ctl_glide_held` | held glide × | 0.05 … 1 | 0.3 | per-note | live | Multiplies glide speed while the note being left is still held. Requires the glide queue enabled.<br>**Low:** Slows the transition more strongly while the old touch remains down.<br>**High:** At 1, held and released departures use the same base speed. |
+| `ctl_glide_catchup` | catch-up × | 1 … 16 | 4 | per-note | live | Multiplies glide speed through intermediate waypoints when newer notes are already queued.<br>**Low:** At 1, passes each waypoint at the ordinary rate.<br>**High:** Hurries through intermediate pitches to catch up with the latest touch. |
+| `ctl_glide_over` | overshoot | 0 … 0.3 | 0.08 | per-note | live | Sets how far the final glide passes its target before settling back, as a fraction of the interval, capped at 50 cents.<br>**Low:** Less overshoot; 0 lands directly on the target.<br>**High:** A larger land-and-correct gesture, up to the cap; intermediate waypoints still land directly. |
+
+### Controls · Strum
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `ctl_strum_expr` | chord expression | 0 … 1 | 1 | global | live | Scales expression for the controller's strum chord only: continuously for bowed notes, or at pluck onset for Tanpura/Sitar.<br>**Low:** Quieter chord notes; 0 removes their played excitation.<br>**High:** At 1, chord notes follow the unscaled expression level; melody expression is separate. |
+| `ctl_strum_thresh` | accel trigger threshold | 0 … 1 | 1 | global | live | Sets the iPad strike-envelope threshold that triggers the strum chord. The chord releases below about 60% of that threshold unless the strum button holds it.<br>**Low:** Gentler movements can trigger a strum.<br>**High:** Requires a stronger movement; exactly 1 disables acceleration-triggered strumming. |
+
+### Controls · Strike blend
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `ctl_strike_window` | blend window (s) | 0.25 … 8 | 2 | per-note | live | Sets the per-note handoff from iPad Strike bindings at onset to Acceleration bindings during sustain.<br>**Low:** A quicker handoff, shortening the influence of Strike bindings.<br>**High:** Strike bindings remain influential longer before Acceleration takes over fully. |
+
+### Controls · Acceleration smoothing
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `ctl_ipad_accel_smooth` | iPad smoothing (ms) | 0 … 1000 | 0 | global | live | Adds smoothing to iPad Acceleration bindings on the Mac. Strike response is separate; the source already has an envelope.<br>**Low:** Follows motion more promptly; 0 adds no smoothing.<br>**High:** Smooths short fluctuations more strongly, with a slower response and greater lag. |
+| `ctl_jc_accel_smooth` | Joy-Con smoothing (ms) | 0 … 1000 | 0 | global | live | Adds smoothing to Joy-Con Accel bindings on the Mac, after the source envelope.<br>**Low:** Follows motion more promptly; 0 adds no smoothing.<br>**High:** Smooths short fluctuations more strongly, with a slower response and greater lag. |
 
 ### FX rack
 
@@ -308,10 +390,10 @@ every key is the point's prefix plus a knob from the table below.
 
 | Insert | Key prefix | What it processes |
 |---|---|---|
-| **Voice → Taraf** | `fx_drive_` | the main voice AS THE SYMPATHETIC STRINGS HEAR IT (the recorded taraf-drive signal, mono, kernel rate). Shapes only what excites the taraf; the radiated voice is untouched |
-| **Voice** | `fx_voice_` | the main voice bus (bridge radiation + bow noise) after the taraf tap, before the shared radiation chain |
-| **Taraf** | `fx_taraf_` | the sympathetic web's own radiated output (drones included), before the shared radiation chain |
-| **Global** | `fx_global_` | the final stereo output, after the whole fitted post-chain (radiation, tone tilt, calibration room, level) |
+| **Voice → Taraf** | `fx_drive_` | the excitation feeding both taraf banks, including played strings and injected Tanpura/Sitar sound |
+| **Voice** | `fx_voice_` | the played String voice’s bridge radiation and bow noise, after the taraf excitation tap and before the shared output chain |
+| **Taraf** | `fx_taraf_` | both taraf banks’ audible output, including drones, before the shared output chain |
+| **Global** | `fx_global_` | the String engine’s combined stereo voice, taraf and room output, after tone and gain but before its limiter |
 
 #### The insert (7 knobs × 4 points)
 
@@ -324,11 +406,11 @@ range, default, scope and timing at every point — only the
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `<prefix>eq_on` | EQ on | 0 … 1 | 0 | global | live | Enable the EQ curve at this point — what this insert point processes (the table above). The curve is inferred from the points set on the FX tab (a fitted cascade through them, flat beyond the outermost points); toggling crossfades to/from flat (click-free). |
-| `<prefix>eq_amount` | EQ amount | 0 … 1 | 1 | global | live | Depth of the EQ curve, 0…1: every dB of the curve scaled (1 = as drawn, 0 = flat). Inert while the point's EQ is off. |
-| `<prefix>rev_on` | reverb on | 0 … 1 | 0 | global | live | Enable the reverb at this point — what this insert point processes (the table above). Toggling glides the wet level (click-free). |
-| `<prefix>rev_type` | reverb type | 0 … 1 | 0 | global | live | 0 = Bigverb (sndkit/Costello reverbsc: 8 jittered feedback delay lines — a wide modulated hall, the default), 1 = Room (the Freeverb-style tank, tighter and energy-matched to the dry level). |
-| `<prefix>rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Wet level 0…1. The dry path always passes at unity (a send, not a crossfade). Inert while the point's reverb is off. |
-| `<prefix>rev_size` | reverb size | 0 … 1 | 0.93 | global | live | Decay: Bigverb feedback directly (0.93 = the reference default); the Room maps it onto RT60 0.25 s → 8 s. |
-| `<prefix>rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | global | live | Tail damping low-pass: inside Bigverb's feedback loop (the tail darkens as it recirculates) / the Room's band-limit. |
+| `<prefix>eq_on` | EQ on | 0 … 1 | 0 | global | live | Enables the drawn EQ curve on what this insert point processes (the table above). Changes fade smoothly between the curve and a flat response.<br>**Low:** 0 bypasses the EQ.<br>**High:** 1 enables the EQ at the configured amount. |
+| `<prefix>eq_amount` | EQ amount | 0 … 1 | 1 | global | live | Scales the EQ curve drawn on the FX tab. Requires this insert’s EQ to be enabled.<br>**Low:** At 0, the response is flat; small values soften every boost and cut.<br>**High:** At 1, applies the full curve as drawn. |
+| `<prefix>rev_on` | reverb on | 0 … 1 | 0 | global | live | Enables reverb on what this insert point processes (the table above). The wet contribution fades smoothly when toggled.<br>**Low:** 0 disables the reverb contribution.<br>**High:** 1 enables reverb at the configured mix. |
+| `<prefix>rev_type` | reverb type | 0 … 1 | 0 | global | live | Chooses the reverb algorithm at this insert. Requires reverb to be enabled.<br>**Low:** 0 selects Bigverb, a wide, modulated hall.<br>**High:** 1 selects Room, a tighter room response; this is a choice of character, not reverb strength. |
+| `<prefix>rev_mix` | reverb mix | 0 … 1 | 0.3 | global | live | Adds reverb at this insert while keeping the dry signal at unity. Requires reverb to be enabled.<br>**Low:** Less wet sound; 0 leaves only the dry path.<br>**High:** More wet sound; 1 is the maximum added reverb level, not wet-only output. |
+| `<prefix>rev_size` | reverb size | 0 … 1 | 0.93 | global | live | Sets reverb persistence: feedback for Bigverb, or a 0.25–8 second decay range for Room. Requires reverb to be enabled.<br>**Low:** A shorter, less lingering tail.<br>**High:** A longer, more sustained tail that accumulates more sound during a phrase. |
+| `<prefix>rev_cut` | reverb cutoff (Hz) | 500 … 20000 | 10000 | global | live | Sets the high-frequency damping cutoff in this insert’s reverb. Requires reverb to be enabled.<br>**Low:** A darker tail with more upper-frequency absorption.<br>**High:** A brighter tail retaining more upper-frequency detail. |
 

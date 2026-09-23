@@ -5,16 +5,16 @@ import Foundation
 /// THE GLIDE QUEUE: queued glissandi for the playing voice. `AudioEngine`
 /// funnels its public `touchOn`/`touchGlide`/`touchOff` through ONE
 /// instance, so every touch source gets the same law. With `ctl_glide_on`
-/// armed, an onset that OVERLAPS the sounding chain in time (some member
-/// still physically down) does not mount a fresh string — it is QUEUED as
-/// a waypoint and the sounding voice glides to it. Non-overlapping onsets,
+/// armed, an onset that overlaps the sounding chain or lands within its
+/// release grace period does not mount a fresh string — it is QUEUED as
+/// a waypoint and the sounding voice glides to it. Onsets outside that interval,
 /// exempt touches (`glideExempt` — the strum chord) and everything
-/// non-touch pass through. Releases are NEVER deferred. At the default
+/// non-touch pass through. Releases are immediate; grace remembers the
+/// released string so a following onset can resume it. At the default
 /// `ctl_glide_on` 0 the class is a pure pass-through (the parity contract).
 ///
 /// Laws:
-/// - **Overlap gate** — an onset joins only while the active chain has a
-///   touch still down (owner, parked finger, or unreleased waypoint).
+/// - **Join gate** — a held chain or its release grace accepts onsets.
 /// - **Speed** — `ctl_glide_rate` st/s, × `ctl_glide_held` (< 1) while the
 ///   touch being glided FROM is still down, × `ctl_glide_catchup` (> 1)
 ///   while the target is not the END of the queue.
@@ -28,8 +28,8 @@ import Foundation
 /// - **Repeat tap** — an overlapping tap at the chain's current pitch
 ///   (±25 ¢, queue empty) is a real re-attack.
 /// - **Ownership** — on arrival, the waypoint's touch OWNS the voice: its
-///   drags meend it, its release ends it (mapped onto the voice's original
-///   wire id). Arriving on an already-lifted finger releases on arrival.
+///   drags meend it; the last physical lift releases the original voice id
+///   immediately and starts the grace period.
 /// - **Parked fingers & glide-back** — past members still down are PARKED:
 ///   only the owner's drags drive the voice; a parked finger's movements
 ///   are remembered SILENTLY (the head's id IS the voice's downstream id —
@@ -44,9 +44,11 @@ import Foundation
 /// emitted OUTSIDE the lock in event order.
 public final class GlideSequencer {
     /// Downstream taps (`AudioEngine`'s direct touch path); thread-safe.
-    public var onTouchOn: ((UInt16, Double, Double) -> Void)?
+    public var onTouchOn: ((UInt16, Double) -> Void)?
     public var onTouchGlide: ((UInt16, Double) -> Void)?
     public var onTouchOff: ((UInt16) -> Void)?
+    /// Reopen a released string without mounting or restarting its attack.
+    public var onTouchResume: ((UInt16, Double) -> Void)?
 
     /// Repeat-tap window (semis).
     static let repeatEps = 0.25   // 25 cents
@@ -67,6 +69,7 @@ public final class GlideSequencer {
     private var enabled = false
     private var rateStPerS = 40.0
     private var heldMul = 0.3
+    private var graceS = 0.15
     private var catchUpMul = 4.0
     /// `ctl_glide_over`; must match the registry default.
     private var overFrac = 0.08
@@ -96,8 +99,11 @@ public final class GlideSequencer {
         var segProgress = 0.0
         /// Settling back from an overshoot (`segStart` = the peak).
         var overshooting = false
+        /// Time the last physically held member lifted.
+        var releasedAt: Double?
+        var voiceReleased = false
 
-        /// The OVERLAP gate.
+        /// Whether a physical finger still holds this chain.
         var hasHeldTouch: Bool {
             ownerHeld || !parked.isEmpty || queue.contains { !$0.released }
         }
@@ -111,9 +117,10 @@ public final class GlideSequencer {
         label: "com.tarabdaar.glide-sequencer", qos: .userInteractive)
 
     private enum Action {
-        case on(UInt16, Double, Double)
+        case on(UInt16, Double)
         case glide(UInt16, Double)
         case off(UInt16)
+        case resume(UInt16, Double)
     }
 
     /// `drivesTimer: false` + an injected `clock` = the test harness.
@@ -135,11 +142,14 @@ public final class GlideSequencer {
         switch key {
         case "ctl_glide_on":      enabled = v >= 0.5
         case "ctl_glide_rate":    rateStPerS = v
+        case "ctl_glide_grace":   graceS = v / 1000
         case "ctl_glide_held":    heldMul = v
         case "ctl_glide_catchup": catchUpMul = v
         case "ctl_glide_over":    overFrac = v
         default: break
         }
+        expireReleasedChainsLocked(now: clock())
+        if !needsTicksLocked { stopTimerLocked() }
         lock.unlock()
     }
 
@@ -160,20 +170,22 @@ public final class GlideSequencer {
         lock.unlock()
     }
 
-    public func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) {
+    public func touchOn(_ id: UInt16, pitchSemis: Double) {
         lock.lock()
         let now = clock()
         var actions: [Action] = []
 
         if exempt.contains(id) {
-            actions.append(.on(id, pitchSemis, velocity))
+            actions.append(.on(id, pitchSemis))
             lock.unlock()
             run(actions)
             return
         }
 
+        expireReleasedChainsLocked(now: now)
         let joinable = enabled && !chains.isEmpty
-            && chains[chains.count - 1].hasHeldTouch
+            && (chains[chains.count - 1].hasHeldTouch
+                || withinGrace(chains[chains.count - 1], now: now))
         let repeatTap = joinable && chains[chains.count - 1].queue.isEmpty
             && abs(pitchSemis - chains[chains.count - 1].voicePitch)
                 < Self.repeatEps
@@ -181,6 +193,11 @@ public final class GlideSequencer {
         if joinable && !repeatTap {
             // QUEUE: a waypoint, no fresh string.
             let i = chains.count - 1
+            chains[i].releasedAt = nil
+            if chains[i].voiceReleased {
+                chains[i].voiceReleased = false
+                actions.append(.resume(chains[i].voiceId, chains[i].voicePitch))
+            }
             if chains[i].queue.isEmpty {
                 chains[i].segStart = chains[i].voicePitch
                 chains[i].segProgress = 0
@@ -191,15 +208,20 @@ public final class GlideSequencer {
                 Waypoint(id: id, pitch: pitchSemis, released: false))
             startTickingLocked(now: now)
         } else {
+            // A repeat during grace ends the old voice before re-attacking.
+            if repeatTap, let last = chains.last, !last.hasHeldTouch {
+                if !last.voiceReleased { actions.append(.off(last.voiceId)) }
+                chains.removeLast()
+            }
             // PASS THROUGH: a fresh note and the new active chain. A
             // retrigger of a resting chain's owner releases that voice first.
             if let i = chains.firstIndex(where: {
                 $0.ownerId == id && $0.queue.isEmpty
             }) {
-                actions.append(.off(chains[i].voiceId))
+                if !chains[i].voiceReleased { actions.append(.off(chains[i].voiceId)) }
                 chains.remove(at: i)
             }
-            actions.append(.on(id, pitchSemis, velocity))
+            actions.append(.on(id, pitchSemis))
             chains.append(Chain(voiceId: id, voicePitch: pitchSemis,
                                 ownerId: id, ownerHeld: true,
                                 ownerPitch: pitchSemis))
@@ -259,14 +281,20 @@ public final class GlideSequencer {
                     chains[i].ownerHeld = false
                     startTickingLocked(now: clock())
                 } else {
-                    // Ordinary release, immediately.
-                    actions.append(.off(chains[i].voiceId))
-                    chains.remove(at: i)
+                    chains[i].ownerHeld = false
                 }
             } else {
                 // A parked finger lifting.
                 chains[i].parked.removeAll { $0.id == id }
             }
+            let now = clock()
+            if !chains[i].hasHeldTouch, chains[i].releasedAt == nil {
+                chains[i].releasedAt = now
+                chains[i].voiceReleased = true
+                actions.append(.off(chains[i].voiceId))
+            }
+            expireReleasedChainsLocked(now: now)
+            if needsTicksLocked { startTickingLocked(now: now) }
         } else {
             actions.append(.off(id))
         }
@@ -296,6 +324,11 @@ public final class GlideSequencer {
 
         var i = 0
         while i < chains.count {
+            if chains[i].voiceReleased {
+                if withinGrace(chains[i], now: t) { i += 1 }
+                else { chains.remove(at: i) }
+                continue
+            }
             advanceChainLocked(&chains[i], dt: dt, into: &actions)
             if chains[i].queue.isEmpty, !chains[i].ownerHeld {
                 if let back = chains[i].parked.popLast() {
@@ -307,7 +340,7 @@ public final class GlideSequencer {
                     chains[i].segProgress = 0
                     i += 1
                 } else {
-                    // The run is over — bow up.
+                    // No held member remains — bow up.
                     actions.append(.off(chains[i].voiceId))
                     chains.remove(at: i)
                 }
@@ -418,8 +451,24 @@ public final class GlideSequencer {
         }
     }
 
+    private func withinGrace(_ chain: Chain, now: Double) -> Bool {
+        guard enabled, graceS > 0, let releasedAt = chain.releasedAt else {
+            return false
+        }
+        return now - releasedAt < graceS
+    }
+
+    /// Onsets enforce the deadline even if the timer has not fired yet.
+    private func expireReleasedChainsLocked(now: Double) {
+        for i in chains.indices.reversed() {
+            if chains[i].voiceReleased, !withinGrace(chains[i], now: now) {
+                chains.remove(at: i)
+            }
+        }
+    }
+
     private var needsTicksLocked: Bool {
-        chains.contains { !$0.queue.isEmpty }
+        chains.contains { !$0.queue.isEmpty || $0.releasedAt != nil }
     }
 
     private func startTickingLocked(now: Double) {
@@ -445,9 +494,10 @@ public final class GlideSequencer {
     private func run(_ actions: [Action]) {
         for a in actions {
             switch a {
-            case .on(let id, let p, let v): onTouchOn?(id, p, v)
+            case .on(let id, let p): onTouchOn?(id, p)
             case .glide(let id, let p):     onTouchGlide?(id, p)
             case .off(let id):              onTouchOff?(id)
+            case .resume(let id, let p):    onTouchResume?(id, p)
             }
         }
     }

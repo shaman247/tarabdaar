@@ -14,8 +14,8 @@ public enum TLP {
     /// Protocol version — both apps ship in lockstep; the HELLO range check
     /// refuses a mismatched peer cleanly (the symptom otherwise: "drones and
     /// tilt work, touches are silent").
-    public static let versionMin: UInt16 = 14
-    public static let versionMax: UInt16 = 14
+    public static let versionMin: UInt16 = 19
+    public static let versionMax: UInt16 = 19
     /// Hard cap on an encoded frame.
     public static let maxFrameBytes = 1024
     /// HELLO magic 'TRBL' (LE u32).
@@ -28,6 +28,8 @@ public enum TLP {
     public static let typePanic: UInt8 = 0x08
     public static let typeScaleState: UInt8 = 0x10
     public static let typeFretArrangement: UInt8 = 0x11
+    public static let typeTarafBank: UInt8 = 0x12
+    public static let typeTarafPluck: UInt8 = 0x13
     public static let typeResyncRequest: UInt8 = 0x1F
     public static let typePerfState: UInt8 = 0x40
     public static let typeJoyConState: UInt8 = 0x41
@@ -78,21 +80,29 @@ public enum TLPRole: UInt8, Equatable, Sendable {
     case host = 1   // Mac
 }
 
-/// One active touch inside a PERF_STATE frame — 9 bytes on the wire:
-/// `id u16 · onsetSeq u8 · velocity u8 · radius u8 · pitch f32`.
+/// One active touch inside a PERF_STATE frame — 10 bytes on the wire:
+/// `id u16 · onsetSeq u8 · radius u8 · pitch f32 · fretPosition u16`.
 /// `pitch` is a fractional MIDI note number (69.0 = A440). `onsetSeq`
 /// bumps on each fresh articulation of this id, so a lift + re-press
 /// survives latest-wins coalescing as a retrigger.
 public struct TLPTouch: Equatable, Sendable {
     public var id: UInt16
     public var onsetSeq: UInt8
-    public var velocity: UInt8      // 0–255 onset velocity
     /// FINGERTIP SIZE — `UITouch.majorRadius` in POINTS × 4, clamped to
     /// 255 (0 = unknown: producers without a touchscreen). Quarter-point
     /// steps are far finer than Apple's own quantisation; the Mac maps it
     /// onto the `.touchSize` control axis (`TouchSizeTracker`).
     public var radius: UInt8
     public var pitch: Float         // fractional MIDI note
+    /// Position along the fret: 0 at its inner end, 65535 at its outer end.
+    public var fretPosition: UInt16
+
+    public var fretPosition01: Double { Double(fretPosition) / 65535.0 }
+
+    public static func fretPositionWord(_ value: Double) -> UInt16 {
+        guard value.isFinite else { return 0 }
+        return UInt16((min(1, max(0, value)) * 65535.0).rounded())
+    }
     /// IN-PROCESS ONLY (the Mac strum chord's live loudness): not encoded;
     /// decoded frames carry 1.0.
     public var exprScale: Double
@@ -100,14 +110,15 @@ public struct TLPTouch: Equatable, Sendable {
     /// encoded; decoded frames carry `false`.
     public var glideExempt: Bool
 
-    public init(id: UInt16, onsetSeq: UInt8, velocity: UInt8,
-                radius: UInt8 = 0, pitch: Float, exprScale: Double = 1.0,
+    public init(id: UInt16, onsetSeq: UInt8,
+                radius: UInt8 = 0, pitch: Float, fretPosition: UInt16 = 0,
+                exprScale: Double = 1.0,
                 glideExempt: Bool = false) {
         self.id = id
         self.onsetSeq = onsetSeq
-        self.velocity = velocity
         self.radius = radius
         self.pitch = pitch
+        self.fretPosition = fretPosition
         self.exprScale = exprScale
         self.glideExempt = glideExempt
     }
@@ -190,14 +201,33 @@ public struct TLPPerfState: Equatable, Sendable {
     }
 }
 
-/// Mac→iPad: the display frame — Joy-Con stick, wrist attitude, the
-/// Mac-evaluated ARM axes, the volume readout and the relayed controls.
-/// The pad ACTS on `connected` (flag bit 2, hides the drone buttons),
-/// `fieldWarp` and `octave`. Latest-wins with a heartbeat floor.
-///
-/// Layout: `type u8 · flags u8 · stateSeq u16 · timestampUs u32 · stickX
-/// stickY wrist1 wrist2 wrist3 arm1 arm2 arm3 strikeWin volVoice volTaraf
-/// fieldWarp octave (u8 each)`.
+/// Display-only normalized bow controls for the highest held note (u8 ↔ 0…1).
+public struct TLPNoteControls: Equatable, Sendable {
+    public var active: Bool
+    public var expression: UInt8
+    public var pressure: UInt8
+    public var position: UInt8
+
+    public static let idle = TLPNoteControls(active: false, expression: 0, pressure: 0, position: 0)
+
+    public init(active: Bool, expression: UInt8, pressure: UInt8, position: UInt8) {
+        self.active = active
+        self.expression = expression
+        self.pressure = pressure
+        self.position = position
+    }
+
+    public init(expression: Double, pressure: Double, position: Double) {
+        func byte(_ value: Double) -> UInt8 {
+            UInt8((min(max(value.isFinite ? value : 0, 0), 1) * 255).rounded())
+        }
+        self.init(active: true, expression: byte(expression),
+                  pressure: byte(pressure), position: byte(position))
+    }
+}
+
+/// Mac→iPad display frame, with note-active / expression / pressure / position
+/// bytes appended after accelLevel. Only connected, fieldWarp, and octave act on the pad.
 public struct TLPJoyConState: Equatable, Sendable {
     public static let flagStickLive: UInt8 = 1 << 0
     public static let flagBodyLive: UInt8 = 1 << 1
@@ -226,13 +256,27 @@ public struct TLPJoyConState: Equatable, Sendable {
     /// The playing-range octave shift, i8 bit pattern (−3…+3) — acted on
     /// by the pad.
     public var octave: UInt8
+    /// The wrist tilt rates and the per-axis linear acceleration (centre
+    /// 128) and that acceleration's magnitude (0–255 ↔ 0…1) — display.
+    public var wristRate1: UInt8
+    public var wristRate2: UInt8
+    public var wristRate3: UInt8
+    public var accel1: UInt8
+    public var accel2: UInt8
+    public var accel3: UInt8
+    public var accelLevel: UInt8
+    public var noteControls: TLPNoteControls
 
     public init(flags: UInt8, stateSeq: UInt16, timestampUs: UInt32,
                 stickX: UInt8, stickY: UInt8, wrist1: UInt8, wrist2: UInt8,
                 wrist3: UInt8 = 128, arm1: UInt8 = 128, arm2: UInt8 = 128,
                 arm3: UInt8 = 128, strikeWin: UInt8 = 0,
                 volVoice: UInt8 = 0, volTaraf: UInt8 = 0,
-                fieldWarp: UInt8 = 0, octave: UInt8 = 0) {
+                fieldWarp: UInt8 = 0, octave: UInt8 = 0,
+                wristRate1: UInt8 = 128, wristRate2: UInt8 = 128,
+                wristRate3: UInt8 = 128, accel1: UInt8 = 128,
+                accel2: UInt8 = 128, accel3: UInt8 = 128,
+                accelLevel: UInt8 = 0, noteControls: TLPNoteControls = .idle) {
         self.flags = flags
         self.stateSeq = stateSeq
         self.timestampUs = timestampUs
@@ -249,6 +293,14 @@ public struct TLPJoyConState: Equatable, Sendable {
         self.volTaraf = volTaraf
         self.fieldWarp = fieldWarp
         self.octave = octave
+        self.wristRate1 = wristRate1
+        self.wristRate2 = wristRate2
+        self.wristRate3 = wristRate3
+        self.accel1 = accel1
+        self.accel2 = accel2
+        self.accel3 = accel3
+        self.accelLevel = accelLevel
+        self.noteControls = noteControls
     }
 }
 
@@ -261,6 +313,8 @@ public enum TLPEvent: Equatable, Sendable {
     case panic
     case scaleState(blob: [UInt8])
     case fretArrangement(blob: [UInt8])
+    case tarafBank(TarafBank)
+    case tarafPluck(revision: UInt32, row: UInt8)
     case resyncRequest
 }
 
@@ -283,6 +337,8 @@ public enum TLPFrame: Equatable, Sendable {
             case .panic: return TLP.typePanic
             case .scaleState: return TLP.typeScaleState
             case .fretArrangement: return TLP.typeFretArrangement
+            case .tarafBank: return TLP.typeTarafBank
+            case .tarafPluck: return TLP.typeTarafPluck
             case .resyncRequest: return TLP.typeResyncRequest
             }
         }
@@ -320,9 +376,9 @@ extension TLPFrame {
             for t in s.touches.prefix(255) {
                 out.appendLE(t.id)
                 out.append(t.onsetSeq)
-                out.append(t.velocity)
                 out.append(t.radius)
                 out.appendLE(t.pitch.bitPattern)
+                out.appendLE(t.fretPosition)
             }
         case .joyConState(let s):
             out.append(TLP.typeJoyConState)
@@ -332,7 +388,12 @@ extension TLPFrame {
             out.append(contentsOf: [s.stickX, s.stickY, s.wrist1, s.wrist2,
                                     s.wrist3, s.arm1, s.arm2, s.arm3,
                                     s.strikeWin, s.volVoice, s.volTaraf,
-                                    s.fieldWarp, s.octave])
+                                    s.fieldWarp, s.octave,
+                                    s.wristRate1, s.wristRate2, s.wristRate3,
+                                    s.accel1, s.accel2, s.accel3,
+                                    s.accelLevel, s.noteControls.active ? 1 : 0,
+                                    s.noteControls.expression, s.noteControls.pressure,
+                                    s.noteControls.position])
         case .event(let seq, let e):
             out.append(typeByte)
             out.appendLE(seq)
@@ -349,6 +410,15 @@ extension TLPFrame {
                 out.append(id)
                 out.appendLE(t1)
                 out.appendLE(t2)
+            case .tarafBank(let bank):
+                out.appendLE(bank.revision)
+                out.appendLE(bank.tonic.bitPattern)
+                out.append(UInt8(min(128, bank.rows.count)))
+                for row in bank.rows.prefix(128) {
+                    out.append(row.id); out.appendLE(row.frequency.bitPattern); out.append(row.flags)
+                }
+            case .tarafPluck(let revision, let row):
+                out.appendLE(revision); out.append(row)
             case .panic, .resyncRequest:
                 break
             case .scaleState(let blob), .fretArrangement(let blob):
@@ -380,12 +450,13 @@ extension TLPFrame {
             var touches: [TLPTouch] = []
             touches.reserveCapacity(Int(count))
             for _ in 0..<count {
-                guard let id = r.u16(), let onset = r.u8(), let vel = r.u8(),
+                guard let id = r.u16(), let onset = r.u8(),
                       let rad = r.u8(),
-                      let pitchBits = r.u32() else { return nil }
-                touches.append(TLPTouch(id: id, onsetSeq: onset, velocity: vel,
+                      let pitchBits = r.u32(), let fretPosition = r.u16() else { return nil }
+                touches.append(TLPTouch(id: id, onsetSeq: onset,
                                         radius: rad,
-                                        pitch: Float(bitPattern: pitchBits)))
+                                        pitch: Float(bitPattern: pitchBits),
+                                        fretPosition: fretPosition))
             }
             guard r.isAtEnd else { return nil }
             return .perfState(TLPPerfState(
@@ -403,14 +474,22 @@ extension TLPFrame {
                   let w2 = r.u8(), let w3 = r.u8(), let a1 = r.u8(),
                   let a2 = r.u8(), let a3 = r.u8(), let sw = r.u8(),
                   let vv = r.u8(), let vt = r.u8(), let fw = r.u8(),
-                  let oct = r.u8(),
+                  let oct = r.u8(), let r1 = r.u8(), let r2 = r.u8(),
+                  let r3 = r.u8(), let x1 = r.u8(), let x2 = r.u8(),
+                  let x3 = r.u8(), let al = r.u8(),
+                  let noteActive = r.u8(), noteActive <= 1,
+                  let expression = r.u8(), let pressure = r.u8(), let position = r.u8(),
                   r.isAtEnd
             else { return nil }
             return .joyConState(TLPJoyConState(
                 flags: flags, stateSeq: seq, timestampUs: ts,
                 stickX: sx, stickY: sy, wrist1: w1, wrist2: w2,
                 wrist3: w3, arm1: a1, arm2: a2, arm3: a3, strikeWin: sw,
-                volVoice: vv, volTaraf: vt, fieldWarp: fw, octave: oct))
+                volVoice: vv, volTaraf: vt, fieldWarp: fw, octave: oct,
+                wristRate1: r1, wristRate2: r2, wristRate3: r3,
+                accel1: x1, accel2: x2, accel3: x3, accelLevel: al,
+                noteControls: TLPNoteControls(active: noteActive != 0,
+                    expression: expression, pressure: pressure, position: position)))
         default:
             guard type >= 0x01, type <= 0x3F, let seq = r.u16() else { return nil }
             let event: TLPEvent
@@ -428,6 +507,24 @@ extension TLPFrame {
                 guard let id = r.u8(), let t1 = r.u32(), let t2 = r.u32()
                 else { return nil }
                 event = .pong(id: id, t1: t1, t2: t2)
+            case TLP.typeTarafBank:
+                guard let revision = r.u32(), let tonicBits = r.u32(),
+                      let count = r.u8(), count <= 128 else { return nil }
+                let tonic = Float(bitPattern: tonicBits)
+                guard tonic.isFinite, tonic > 0 else { return nil }
+                var rows: [TarafBank.Row] = []
+                var ids = Set<UInt8>()
+                for _ in 0..<count {
+                    guard let id = r.u8(), id < 128, ids.insert(id).inserted,
+                          let bits = r.u32(), let flags = r.u8(), flags <= 3 else { return nil }
+                    let frequency = Float(bitPattern: bits)
+                    guard frequency.isFinite, frequency > 0 else { return nil }
+                    rows.append(.init(id: id, frequency: frequency, flags: flags))
+                }
+                event = .tarafBank(.init(revision: revision, tonic: tonic, rows: rows))
+            case TLP.typeTarafPluck:
+                guard let revision = r.u32(), let row = r.u8(), row < 128 else { return nil }
+                event = .tarafPluck(revision: revision, row: row)
             case TLP.typePanic:
                 event = .panic
             case TLP.typeResyncRequest:

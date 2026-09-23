@@ -41,16 +41,14 @@ public enum JoyConStickCalResult: Equatable {
     case noDraft
 }
 
-/// The gated stick output. `axes` is non-nil only when the change gate
-/// opened — a held or centred stick is silent.
+/// The stick output. `axes` is non-nil only when the quantized value changes.
 public struct JoyConStickOutput: Equatable {
     public var raw: SIMD2<Double>
-    public var active: Bool
     public var axes: SIMD2<Double>?
 }
 
 /// REPORT → CONTROL. The pure half of the Joy-Con path: button edges,
-/// the stick's deadband / calibration / change gate. No frameworks, no
+/// the stick's calibration / change gate. No frameworks, no
 /// device state, no publishing — the host coordinator owns those and
 /// asks this type what a report MEANS.
 ///
@@ -134,9 +132,6 @@ public final class JoyConMapper {
 
     // MARK: Stick — calibration
 
-    /// Per-axis deflection gate: |v| below this pins the axis to exact
-    /// centre (the neutral drifts). Both axes under threshold = rest.
-    public static let deadzone = 0.1
     public static let calBins = 16
     /// Rim samples closer to rest than this are noise, not the gate.
     public static let calMinRadius = 150.0
@@ -198,7 +193,7 @@ public final class JoyConMapper {
     public static func calMap(dx: Double, dy: Double,
                               cal: JoyConStickCal) -> (Double, Double) {
         let r = (dx * dx + dy * dy).squareRoot()
-        guard r > 1 else { return (0, 0) }
+        guard r > 0 else { return (0, 0) }
         let pos = binPos(dx: dx, dy: dy, bins: cal.rim.count)
         let i0 = Int(pos) % cal.rim.count
         let i1 = (i0 + 1) % cal.rim.count
@@ -265,22 +260,11 @@ public final class JoyConMapper {
 
     private var lastStickSent: SIMD2<Double>?
 
-    /// Deadzone gate, rescaled for continuity (deadzone → 0, full → ±1).
-    public static func gate(_ v: Double) -> Double {
-        guard abs(v) >= deadzone else { return 0 }
-        return (v - (v < 0 ? -deadzone : deadzone)) / (1 - deadzone)
-    }
-
-    /// The stick path → its two axes: gated, quantized (~9 bits),
-    /// change-gated.
+    /// The stick axes, quantized (~9 bits) and sent whenever they change.
     public func gateStick(x: Double, y: Double) -> JoyConStickOutput {
-        let gx = Self.gate(x)
-        let gy = Self.gate(y)
         func q(_ v: Double) -> Double { (v * 256).rounded() / 256 }
-        let s = SIMD2(q(gx), q(gy))
-        var out = JoyConStickOutput(raw: SIMD2(x, y),
-                                    active: gx != 0 || gy != 0,
-                                    axes: nil)
+        let s = SIMD2(q(x), q(y))
+        var out = JoyConStickOutput(raw: SIMD2(x, y), axes: nil)
         if lastStickSent == s { return out }
         lastStickSent = s
         out.axes = s

@@ -19,6 +19,7 @@ final class JoyConBLETransport: JoyConTransport {
     /// Full-report dump on a button change — the clone-mapping tool.
     private var lastAltButtons: [UInt8]?
     private var altMotionLengthLogged = false
+    private var lastNYXIButtons: [UInt8]?
 
     func connect() {
         ble.onStatus = { [weak self] s in self?.onStatus?(s) }
@@ -30,6 +31,8 @@ final class JoyConBLETransport: JoyConTransport {
         ble.onDisconnect = { [weak self] in
             guard let self else { return }
             self.lastAltButtons = nil
+            self.lastNYXIButtons = nil
+            self.altMotionLengthLogged = false
             self.onDisconnect?()
         }
         ble.onNotification = { [weak self] data in
@@ -38,61 +41,38 @@ final class JoyConBLETransport: JoyConTransport {
         ble.onAltNotification = { [weak self] data in
             self?.altNotification(data)
         }
+        ble.onCommandInput = { [weak self] data, forward in
+            guard let self,
+                  let report = JoyConNYXIReport.decode(data, timestamp: CFAbsoluteTimeGetCurrent(),
+                                                       generation: self.generation)
+            else { return false }
+            guard forward else { return true }
+            let buttons = Array(data.dropFirst(9).prefix(2))
+            if buttons != self.lastNYXIButtons {
+                self.lastNYXIButtons = buttons
+                NSLog("Tarabdaar ble: NYXI input, %d bytes, buttons %02x %02x full [%@]",
+                      data.count, buttons[0], buttons[1],
+                      data.map { String(format: "%02x", $0) }.joined(separator: " "))
+            }
+            self.onReport?(report)
+            return true
+        }
         ble.start()
     }
 
     func disconnect() {
         ble.onNotification = nil
         ble.onAltNotification = nil
+        ble.onCommandInput = nil
     }
 
-    /// One Joy-Con 2 report-0x05 notification: buttons as a LE u32 at bytes
-    /// 4–7 — left Joy-Con: dpad Down/Up/Right/Left = bits 16–19, SR 20,
-    /// SL 21, L 22, ZL 23; shared: Minus 8, stick click 11, Capture 13 —
-    /// and the 12-bit packed stick at bytes 10–12, device frame.
-    private func standardNotification(_ d: Data) {
-        guard d.count >= 13 else { return }
-        let b = UInt32(d[4]) | (UInt32(d[5]) << 8)
-              | (UInt32(d[6]) << 16) | (UInt32(d[7]) << 24)
-        var down: Set<JoyConControl> = []
-        if b & (1 << 16) != 0 { down.insert(.dpadDown) }
-        if b & (1 << 17) != 0 { down.insert(.dpadUp) }
-        if b & (1 << 18) != 0 { down.insert(.dpadRight) }
-        if b & (1 << 19) != 0 { down.insert(.dpadLeft) }
-        if b & (1 << 21) != 0 { down.insert(.sl) }
-        if b & (1 << 22) != 0 { down.insert(.l) }
-        if b & (1 << 20) != 0 { down.insert(.sr) }
-        if b & (1 << 23) != 0 { down.insert(.zl) }
-        if b & (1 << 8) != 0 { down.insert(.minus) }
-        if b & (1 << 11) != 0 { down.insert(.stickClick) }
-        if b & (1 << 13) != 0 { down.insert(.capture) }
-        let s0 = Double(Int(d[10]) | (Int(d[11] & 0x0F) << 8))
-        let s1 = Double((Int(d[11]) >> 4) | (Int(d[12]) << 4))
-        // IMU (63-byte report): accel i16 LE ×3 at 0x30, gyro ×3 at 0x36,
-        // classic scales (±8 g → /4096, ±2000 °/s → /16.4). Judge axes
-        // against the FUSED panels, not the raw trails; if a 90°-in-1 s
-        // turn reads ~730 °/s the JC2 gyro scale is 133.3 LSB/°/s instead.
-        let now = CFAbsoluteTimeGetCurrent()
-        var imu: [JoyConIMUSample] = []
-        if d.count >= 0x3C {
-            func i16(_ o: Int) -> Double {
-                Double(Int16(bitPattern: UInt16(d[o]) | (UInt16(d[o + 1]) << 8)))
-            }
-            let accelG = SIMD3(i16(0x30), i16(0x32), i16(0x34)) / 4096.0
-            let gyroDps = SIMD3(i16(0x36), i16(0x38), i16(0x3A)) / 16.4
-            // Magnetometer: i16 ×3 at 0x19, raw units; streams only with
-            // FEATURE_MAGNETOMETER (0x80) in the feature-enable flags. The
-            // panel appears only on non-zero data.
-            let mag: SIMD3<Double>? = d.count >= 0x1F
-                ? SIMD3(i16(0x19), i16(0x1B), i16(0x1D)) : nil
-            imu.append(JoyConIMUSample(t: now, gyroDps: gyroDps,
-                                       accelG: accelG, mag: mag))
+    private let standardDecoder = JoyCon2ReportDecoder()
+
+    private func standardNotification(_ data: Data) {
+        if let report = standardDecoder.decode(data, timestamp: CFAbsoluteTimeGetCurrent(),
+                                                generation: generation, isNYXI: ble.isNYXI) {
+            onReport?(report)
         }
-        onReport?(JoyConReport(
-            source: .ble, timestamp: now, generation: generation,
-            buttons: .snapshot(down), stick: .raw(s0, s1), imu: imu,
-            fuseIMU: true, hexPrefix: "ble: ",
-            hexBytes: Array(d.prefix(13))))
     }
 
     /// THIRD-PARTY ALTERNATE INPUT: report 0x07 on CC1BBBB5-… (the Mobacon
@@ -158,11 +138,6 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// stream their input (`bleAltNotification`).
     static let altInputCharacteristic =
         CBUUID(string: "CC1BBBB5-7354-4D32-A716-A81CB241A32A")
-    /// Nintendo's Bluetooth SIG company identifier — NOT 0x057E (their USB
-    /// vendor ID, which appears further into the payload: a live Joy-Con 2
-    /// (L) advertises `53 05 01 00 03 7e 05 67 20 …`, name empty).
-    private static let nintendoCompanyID: UInt16 = 0x0553
-
     var onStatus: ((String) -> Void)?
     var onConnect: ((String) -> Void)?
     var onDisconnect: (() -> Void)?
@@ -170,6 +145,17 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// Notifications from the alternate input characteristic — forwarded
     /// only while the standard input characteristic stays silent.
     var onAltNotification: ((Data) -> Void)?
+    /// NYXI multiplexes its vendor input with command acknowledgements.
+    /// True only for a recognized input packet; ordinary acks stay on the command path.
+    var onCommandInput: ((Data, Bool) -> Bool)?
+    private var commandInputActive = false
+    private(set) var isNYXI = false
+    private var sessionCharacteristic: CBCharacteristic?
+    private var nyxiSessionStarted = false
+    private static let sessionService = CBUUID(string: "00C5AF5D-1964-4E30-8F51-1956F96BD280")
+    private static let sessionWrite = CBUUID(string: "00C5AF5D-1964-4E30-8F51-1956F96BD282")
+    /// Opt-in full wire capture for identifying third-party sensor formats.
+    private let captureReports = ProcessInfo.processInfo.environment["TARABDAAR_JOYCON_CAPTURE"] == "1"
 
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
@@ -225,19 +211,13 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral,
                         advertisementData ad: [String: Any], rssi: NSNumber) {
-        var nintendo = false
-        if let m = ad[CBAdvertisementDataManufacturerDataKey] as? Data, m.count >= 2 {
-            let bytes = [UInt8](m)
-            let company = UInt16(bytes[0]) | (UInt16(bytes[1]) << 8)
-            nintendo = company == Self.nintendoCompanyID
-        }
         // Name fallback only — a live Joy-Con 2 advertises an EMPTY name.
         let name = (ad[CBAdvertisementDataLocalNameKey] as? String ?? p.name ?? "")
-        if !nintendo {
-            nintendo = name.localizedCaseInsensitiveContains("joy-con")
-        }
-        guard nintendo, peripheral == nil else { return }
+        guard peripheral == nil, JoyConBLEDiscovery.accepts(
+            manufacturerData: ad[CBAdvertisementDataManufacturerDataKey] as? Data,
+            name: name) else { return }
         peripheral = p
+        isNYXI = name.lowercased().hasPrefix("nyxi")
         c.stopScan()
         let mfg = (ad[CBAdvertisementDataManufacturerDataKey] as? Data)?
             .prefix(12).map { String(format: "%02x", $0) }
@@ -250,7 +230,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
         p.delegate = self
-        p.discoverServices([Self.service])
+        p.discoverServices([Self.service, Self.sessionService])
     }
 
     func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral,
@@ -273,6 +253,11 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         probeStarted = false
         probeStep = -1
         altMotionSeen = false
+        commandInputActive = false
+        isNYXI = false
+        sessionCharacteristic = nil
+        nyxiSessionStarted = false
+        deferredNotifyChars = []
         NSLog("Tarabdaar ble: disconnected after %d notifications — %@",
               notifCount, error?.localizedDescription ?? "clean")
         notifCount = 0
@@ -307,6 +292,8 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
               }.joined(separator: ", "))
         for ch in service.characteristics ?? [] {
             switch ch.uuid {
+            case Self.sessionWrite:
+                sessionCharacteristic = ch
             case Self.inputCharacteristic:
                 inputCharacteristic = ch
             case Self.commandResponseCharacteristic:
@@ -334,12 +321,13 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                !deferredNotifyChars.contains(where: { $0.uuid == ch.uuid }) {
                 deferredNotifyChars.append(ch)
             }
-            if ch.properties.contains(.write)
-                || ch.properties.contains(.writeWithoutResponse),
+            if service.uuid == Self.service,
+               ch.properties.contains(.write) || ch.properties.contains(.writeWithoutResponse),
                !probeChars.contains(where: { $0.uuid == ch.uuid }) {
                 probeChars.append(ch)
             }
         }
+        beginNYXISession(p)
         maybeBeginInit(p)
         // A device exposing the input characteristic without the command
         // channel: subscribe directly.
@@ -362,6 +350,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private func scheduleAltFallback(_ p: CBPeripheral) {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.altFallbackDelay) { [weak self] in
             guard let self, self.peripheral === p else { return }
+            // Only a live standard input stream suppresses the fallback.
             guard self.notifCount == 0 else { return }
             NSLog("Tarabdaar ble: standard input silent for %.1f s — subscribing %d alternate characteristic(s) (clone fallback)",
                   Self.altFallbackDelay, self.deferredNotifyChars.count)
@@ -369,6 +358,15 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 p.setNotifyValue(true, for: ch)
             }
         }
+    }
+
+    /// NYXI keeps HID sensors silent until the console opens its session on
+    /// the bootstrap service. This is a runtime handshake, not Bluetooth pairing.
+    private func beginNYXISession(_ p: CBPeripheral) {
+        guard isNYXI, !nyxiSessionStarted, let ch = sessionCharacteristic else { return }
+        nyxiSessionStarted = true
+        NSLog("Tarabdaar ble: opening NYXI input session")
+        p.writeValue(Data([0x01, 0x00]), for: ch, type: .withResponse)
     }
 
     /// CONSOLE-STYLE INIT: a real Joy-Con 2 streams on subscribe alone, but
@@ -479,7 +477,8 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// Walk every write-capable characteristic with both command dialects.
     /// Steps stop the moment `checkAltMotion` fires.
     private func startMotionProbe() {
-        guard peripheral != nil, !altMotionSeen, !probeChars.isEmpty else { return }
+        guard let p = peripheral, !isNYXI,
+              !altMotionSeen, !probeChars.isEmpty else { return }
         let feat: [[UInt8]] = [
             [0x0C, 0x91, 0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x87, 0x00, 0x00, 0x00],
             [0x0C, 0x91, 0x01, 0x04, 0x00, 0x04, 0x00, 0x00, 0x87, 0x00, 0x00, 0x00],
@@ -497,7 +496,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
               steps.count, probeChars.count)
         for (i, step) in steps.enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 1.2) { [weak self] in
-                guard let self, self.peripheral != nil, !self.altMotionSeen
+                guard let self, self.peripheral === p, !self.commandInputActive, !self.altMotionSeen
                 else { return }
                 self.probeStep = i
                 NSLog("Tarabdaar ble: motion probe %d/%d — %@ → %@",
@@ -505,7 +504,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 self.probeWrite(step.1, step.2[0])
                 if step.2.count > 1 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                        guard let self, self.peripheral != nil else { return }
+                        guard let self, self.peripheral === p, !self.commandInputActive else { return }
                         self.probeWrite(step.1, step.2[1])
                     }
                 }
@@ -514,7 +513,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         DispatchQueue.main.asyncAfter(
             deadline: .now() + Double(steps.count) * 1.2 + 1.0
         ) { [weak self] in
-            guard let self, self.peripheral != nil, !self.altMotionSeen
+            guard let self, self.peripheral === p, !self.commandInputActive, !self.altMotionSeen
             else { return }
             NSLog("Tarabdaar ble: motion probe exhausted — IMU region still zero")
         }
@@ -538,6 +537,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic,
                     error: Error?) {
+        guard peripheral === p else { return }
         if let error {
             // An "insufficient authentication" ATT error = a paired link is
             // wanted; macOS follows up by pairing.
@@ -545,7 +545,20 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                   ch.uuid.uuidString, error.localizedDescription)
             return
         }
+        if captureReports, let data = ch.value {
+            NSLog("Tarabdaar ble wire: %@ %d [%@]", ch.uuid.uuidString, data.count,
+                  data.map { String(format: "%02x", $0) }.joined(separator: " "))
+        }
         if ch.uuid == Self.commandResponseCharacteristic {
+            if let data = ch.value, onCommandInput?(data, notifCount == 0) == true {
+                if !commandInputActive {
+                    commandInputActive = true
+                    isNYXI = true
+                    beginNYXISession(p)
+                    NSLog("Tarabdaar ble: NYXI Hyperion input active on command-response channel")
+                }
+                return
+            }
             let hex = (ch.value ?? Data()).prefix(16)
                 .map { String(format: "%02x", $0) }.joined(separator: " ")
             NSLog("Tarabdaar ble: command ack [%@]", hex)
@@ -554,7 +567,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         if ch.uuid == Self.altInputCharacteristic {
             // Report-0x07 stream (clone fallback): forwarded only while the
             // standard characteristic is silent — never races the 0x05 parse.
-            if notifCount == 0, let d = ch.value {
+            if notifCount == 0, !isNYXI, let d = ch.value {
                 onAltNotification?(d)
                 checkAltMotion(d)
                 if !probeStarted {

@@ -17,17 +17,6 @@ class MotionManager: ObservableObject, MotionSource {
     private(set) var userAccelY: Double = 0.0
     private(set) var userAccelZ: Double = 0.0
 
-    // Most recent touch velocity estimate (for display)
-    var lastTouchVelocity: Double = 0.0
-
-    // Timestamped accelerometer buffer for touch correlation
-    private struct AccelSample {
-        let timestamp: TimeInterval
-        let magnitude: Double
-    }
-    private var accelBuffer: [AccelSample] = []
-    private let bufferDuration: TimeInterval = Config.accelBufferDuration
-
     /// Strike-scale envelope (MotionSource): `strikeScale01(magnitude)`
     /// through a fast-attack / slow-decay tracker (τ 150 ms), evolved at
     /// 200 Hz so a tap between 60 Hz ticks registers. Not @Published.
@@ -118,12 +107,6 @@ class MotionManager: ObservableObject, MotionSource {
                 self.strikeHistory.removeFirst(self.strikeHistory.count - 1600)
             }
 
-            // Append to timestamped buffer for touch correlation
-            let sample = AccelSample(timestamp: motion.timestamp, magnitude: mag)
-            self.accelBuffer.append(sample)
-            // Trim old samples
-            let cutoff = motion.timestamp - self.bufferDuration
-            self.accelBuffer.removeAll { $0.timestamp < cutoff }
         }
     }
 
@@ -157,18 +140,6 @@ class MotionManager: ObservableObject, MotionSource {
             noteActivity.removeFirst()
         }
         noteOnsets.removeAll { $0 < cutoff }
-    }
-
-    /// Returns the peak accelerometer magnitude since a given timestamp,
-    /// along with the timestamp when the peak occurred.
-    func peakAccelSince(timestamp: TimeInterval) -> PeakResult {
-        let samplesInWindow = accelBuffer.filter {
-            $0.timestamp >= timestamp
-        }
-        guard let peak = samplesInWindow.max(by: { $0.magnitude < $1.magnitude }) else {
-            return PeakResult(magnitude: 0.0, timestamp: timestamp)
-        }
-        return PeakResult(magnitude: peak.magnitude, timestamp: peak.timestamp)
     }
 
     func stopUpdates() {

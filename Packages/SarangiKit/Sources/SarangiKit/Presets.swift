@@ -20,8 +20,8 @@ public enum Presets {
     /// A full instrument state for the preset: the raga's JI degree ratios
     /// as the scale, its session tonic as the starting tonic, and the
     /// generated string layout — BOTH sets  the raga
-    /// bridge's degree-indexed rows plus the chromatic bridge's fixed
-    /// 15-semitone row (`chromatic: false` = the raga set alone, for
+    /// bridge's five physical rows plus both former layouts on the
+    /// chromatic bridge (`chromatic: false` = the raga set alone, for
     /// scaffolds that measure one bridge).
     public static func state(_ p: Preset, chromatic: Bool = true) -> InstrumentState {
         let raga = RagaTuning.raga(id: p.ragaId)
@@ -29,7 +29,7 @@ public enum Presets {
         return InstrumentState(tonicHz: raga.tonicHint,
                                scaleRatios: scale,
                                strings: RagaTuning.buildSpecs(scaleRatios: scale)
-                                   + (chromatic ? RagaTuning.buildChromaticSpecs() : []))
+                                   + (chromatic ? RagaTuning.buildCombinedChromaticSpecs(scaleRatios: scale) : []))
     }
 
     // MARK: - The String instrument (pure-physics bowed gut string)

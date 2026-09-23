@@ -22,7 +22,7 @@ final class ZipperTests: XCTestCase {
         }
         src.setEngine(e, crossfadeMs: 0)
         src.mapper.setAxis(expr: 64.0 / 127.0)
-        src.mapper.touchOn(1, pitchSemis: 60, velocity: 100.0 / 127.0)
+        src.mapper.touchOn(1, pitchSemis: 60)
         // settle into a steady tone first
         for _ in 0..<4 { _ = src.renderForTesting(frames: 4096) }
 

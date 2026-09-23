@@ -2,6 +2,12 @@
 
 Sound design lives on the Mac (TarabdaarMac). The iPad is a controller — it streams TLP touch/tilt frames ([MIDI & Audio](midi-and-audio.md)) and produces no audio. The Mac renders three voices from the one [Fret Pad](fret-pad.md): the sarangi **String voice** (the default played voice — this page), the [Tanpura](tanpura-voice.md) (default drone voice, optional main instrument) and the [Sitar](sitar-voice.md) (main-instrument only). The String voice is `SarangiKit.BowEngine` driving the `CBowKernel` C friction kernel: a pure-physics bowed gut string that carries the whole instrument in-kernel — played strings, the sympathetic (tarab) web with its modal-jawari buzz, the formula body, radiation and room. There is no hosted plugin and no coupled bridge–body network (not present — see docs/history/).
 
+The Strings tab's **Adaptation** amount (`ctl_taraf_adapt`, default 0) applies
+live per-row radiation attenuation from performance pitch history. It is
+bounded at unity, slews over 250 ms, and leaves saved bank gains and bridge
+feedback intact. Seeding, windows and the gain law are described in
+[Sarangi — Performance pitch profile](sarangi.md#performance-pitch-profile-and-adaptive-gain).
+
 ## Signal path
 
 ```
@@ -21,7 +27,8 @@ The kernel is `bow_kernel_poly.c` (always `-O3`), Tarabdaar's own code; `TarafRe
 - **Register damping** (`bow_loss_reg`, shipped 0.7). The fitted nut/bridge/gut loss corners (`bow_nut_fc`/`bow_br_fc`/`bow_gut_fc2`) are absolute frequencies, so a note below the tonic would keep its corners as sharp as the fitted register — brassy, with a hollowed fundamental. Armed, the corners scale as fc·(f0/tonic)^γ for notes BELOW the tonic only (per sample, continuous at the tonic, at/above untouched). A kernel scalar: pushes in place, rides a tilt. `RegisterDampingTests`.
 - **Slide dulling** (`bow_slide_dull` 0.35 / `bow_slide_rate` 900, Liveness group). A moving finger absorbs more top than a stopped one: the kernel tracks each string's own pitch slew (signed 10 ms pre-smoothing, 80 ¢/s floor — STEADY notes render byte-identically with the key armed), maps r/(r+rate), smooths 15 ms / 120 ms, and scales the loop corners down by dull×env. The tone dulls through the slide and blooms back on arrival.
 - **Slide noise** (`bow_slide_noise` 0.008 / `bow_slide_acc` 25 000 ¢/s²). Finger-slide friction noise injected at the nut write (the finger IS the nut-side termination), driven by the slew's DERIVATIVE — 6000 ¢/s² floor, 10/100 ms envelope, half-saturation at `bow_slide_acc` — so it scrapes where the finger starts, stops or turns and stays quiet through a constant-rate meend. `SlideTextureTests`.
-- **Articulation.** Analytic Schelleng press envelope, place-then-draw + attack bite: sharpness = max(press law, `bow_attack_vel` × onset strike velocity) — per-note martelé/legato from the iPad's accelerometer strike byte or MIDI velocity, fresh attacks only.
+- **Glide grace.** A final finger lift releases immediately. With glide enabled, the next onset within 150 ms reopens the released string and glides from its last pitch. The mapper preserves its serial and waveguide state; the filter skips attack placement, draw and onset color on resume.
+- **Articulation.** Bind `bow_attack_sharpness` to a gesture to shape attacks; its unbound default is 0 (gentle). The onset-captured attack-sharpness parameter drives a finite gentle-to-sharp bow trajectory: 180 ms gentle draw, 5 ms sharp draw and 3 ms sharp force rise, with zero placement delay by default. Sharp attacks briefly draw faster and nearer the bridge; the force wedge follows, and slip-dependent force-change grain adds the bow consonant. All onset excursions return to the same sustained bow. See [Sarangi](sarangi.md) for the controls.
 - **Control rate.** `BowControlFilter` evaluates the whole dynamics / wedge / place law once every 32 kernel samples (~0.33 ms at 96 kHz) on the axes lerped to the segment's end, and lerps its (velocity, force, β) across the segment; pitch, the gate, the vibrato phase and the liveness smoothers advance every sample. Per-sample evaluation cost 6–10 transcendentals per slot-sample for a curve the wire only moves at 120 Hz.
 
 Mechanisms and traps: [Sarangi](sarangi.md).
@@ -30,7 +37,7 @@ Mechanisms and traps: [Sarangi](sarangi.md).
 
 `BowControlFilter`, "Liveness" registry group. Three mechanisms, dB-shaped on the bow controls, all **0 = bit-null**:
 
-1. **Post-onset settle.** The friction loop alone overshoots ~+7 dB for ~0.5 s after capture; `bow_settle_db` 7 / `bow_settle_ms` 130 subtracts a smoothstep-in, exp-out envelope from vbow that is zero through the place+draw window, so the staccato bite is untouched. Every note-on is a fresh mount, so every note settles; `bow_settle_sharp` (default 0) exempts a SHARP attack — depth × (1 − key × sharpness) — so an accented staccato holds its level.
+1. **Post-onset settle.** `bow_settle_db` 7 / `bow_settle_ms` 130 subtracts a smoothstep-in, exp-out envelope from vbow. It builds during the place+gentle-draw window, reaches full depth at that window's end, then recovers with the decay time constant. `bow_settle_sharp` defaults to **1**, scaling depth by (1 − sharpness): gentle notes bloom through the settle while the sharpest attack holds its accent.
 2. **OU drift.** Three independent Ornstein–Uhlenbeck walks (deterministic per-slot xorshift64; panic → `reset()` rewinds, so renders reproduce) at `bow_drift_hz` 1.2, scaling into pitch cents (0.55), vbow dB (0.15) and force dB (0.3) — the not-quite-vibrato life of a held note, its harmonic shimmer arriving through the body slope. **TRAP:** the fitted sarangi body is ~3 dB/¢ steep around D4, so tune drift to the LEVEL outcome (0.55 ¢ ≈ 0.7 dB std), not to a violin's pitch depth — 2 ¢ reads as slow tremolo. Do NOT inject per-harmonic motion directly.
 3. **Glide dip.** The bow eases toward `bow_glide_dip_db` 5 · r/(r+`bow_glide_dip_rate` 900 ¢/s) while the SOUNDING pitch slews (15 ms attack / 120 ms release; full depth on vbow, 0.3× on force — more slows the string's re-capture). Fast finger glides dip 2–7 dB; drift-rate motion (~20 ¢/s) never triggers it.
 
@@ -40,11 +47,19 @@ Guards: `LivenessTests` (settle shape, drift bounds/determinism, dip selectivity
 
 `bow_jt_*`, always on — modal steel strings over grazing jawari bones, driven one block late on their own worker pool (the callback never waits). **This is the instrument's entire RADIATED sympathetic response**: the rows radiate their bridge contact force (there is no separate radiation pickup and no linear comb web — not present, see docs/history/). Tuned from the **Strings tab** rows.
 
-- `bow_jt_evolve` (`.live`, 0.5 = bit-exact): a kernel-slewed bone lift, the one sanctioned runtime bone move, tilt-sweepable without a strum — makes the twang cascade fast-and-reliable (1) or absent (0).
-- `bow_jt_ev_reg` (`.live`, 0 = byte-null): tilts that axis by register — evolve units per octave from the tonic — so the low Sa/Pa anchors' sustained cascade bloom is dialable on its own.
+- `bow_jt_drive` (`.live`, 0.03 = bit-exact): how far the rows swing into the bone — the graze operating point, kernel-slewed ~40 ms so it sweeps under a tilt without a strum. `bow_jt_drive_norm` (`.live`, 0.7) compensates the level swing on the row output — 0 = raw physics (46 dB over the range), 1 = constant loudness — averaged over the energy the web holds, so a sweep never pumps a ring-out.
+- `bow_jtc_evolve` (`.live`, 0.5 = bit-exact): the chromatic bank’s kernel-slewed bone lift, the one sanctioned runtime bone move, tilt-sweepable without a strum — makes the twang cascade fast-and-reliable (1) or absent (0).
+- `bow_jt_ev_reg` (`.live`, 0 = byte-null): tilts chromatic evolution by register — evolve units per octave from the tonic — so the low Sa/Pa anchors' sustained cascade bloom is dialable on its own.
 - `bow_jt_hp` voices the ring as the jawari formant; `bow_jt_body` (`.live`, 0 = byte-exact) blends the radiated taraf through the voice's own body radiation bank — the coherence lever.
 
 Mechanism and measurements: [Sarangi](sarangi.md).
+
+For finite chromatic-row plucks, `bow_jt_pluck` selects a short pitched
+excitation and `bow_jt_pulse` adds a decaying evolution excursion. Both default
+to zero. Excitation decay sets how long energy enters the row; pulse attack
+and decay set how the jawari opens and returns; the row's t60 still sets its
+natural loss. These controls use the String kernel's rows and the
+sympathetic drone routing.
 
 ### The formula body
 
@@ -64,7 +79,7 @@ ONE width law: `bow_st_width` (0.2) — the whole instrument (voice, taraf wash,
 
 ## Sympathetic strings — the editable bank
 
-**Two sets on two bridges** — the raga set (scale-degree strings, the `bow_jt_*` bridge) and the chromatic set (15 semitone strings on the fixed JI grid, the "Chromatic bridge" group: its own level, level norm and live evolution — `bow_jtc_gain`/`_norm`/`_evolve` — over the raga bridge's jawari geometry; resting values equal the raga bridge's, so the split alone adds strings). Full detail: [Sarangi](sarangi.md#sympathetic-strings-the-strings-tab-2). The rest of this section is the raga set.
+**Two sets on two bridges** — the raga set defaults to twelve Pilu strings: all nine main-octave scale notes plus low Sa, low Pa and upper Sa, using the measured two-direction model. The chromatic set holds both former layouts on the original modal-jawari model, with duplicate pitches merged. Its level, level norm and evolution remain `bow_jtc_gain`/`_norm`/`_evolve`; migrated scale rows retain their scale references. Full detail: [Sarangi](sarangi.md#two-bridges-two-sets). Legacy contact-law controls below describe the chromatic model; the raga profile is currently fixed, with a pitch-scaled reference pluck control (0–1 reference mm, default 0.5) and optional harmonic-selective radiation cleanup, bypassed by default. At pitch ratio `r = frequency/561`, actual displacement is reference displacement divided by `r`; the stronger range can yield rough contact motion.
 
 Each row is a `(degree, octave, gain, t60, enabled, set)` string. **Pitches come straight from the centralized scale**: `degree` indexes the Fret Pad scale's ratios, `octave` shifts by whole octaves, and absolute Hz is minted only at resolve time (millihertz grid) against the one tonic — a scale or tonic move retunes the whole bank, always. Owned Mac-side by `SarangiStore` in `InstrumentState`, edited in the Strings tab as one flat table (pitch + octave dropdowns; no ratio or Hz inputs — the app's one Hz input is the tonic on the Fret Pad tab). A row the jawari selection does not pick up is inert.
 
@@ -72,9 +87,9 @@ Each row is a `(degree, octave, gain, t60, enabled, set)` string. **Pitches come
 
 ### The controller strum set
 
-The Strings tab also holds the drone-button mapping and the **strum set** (`InstrumentState.strumStringIds`): the strings the Joy-Con L button sounds all at once as a **held chord in the MAIN voice** — default low Sa · low Pa (`autoStrumMapping`), remappable to raga chords (scale-degree references, so a chord re-voices with the scale). The chord goes through the shared `pitchPad` touch path (`AppController.strum(pressed:)` → `PitchPadEngine.noteOn(ratio:velocity01:)`, firm 0.9 strike velocity), so it sounds on whichever main instrument is selected, allocates fresh strings under the normal laws and charges the taraf like played notes; it sustains while L is held. The set follows the pool invariant (twin folds re-point members, deletions prune, regenerate restores the default — `DroneStringTests`).
+The Strings tab also holds the drone-button mapping and the **strum set** (`InstrumentState.strumStringIds`): the strings the Joy-Con L button sounds all at once as a **held chord in the MAIN voice** — default low Sa · low Pa (`autoStrumMapping`), remappable to raga chords (scale-degree references, so a chord re-voices with the scale). The chord goes through the shared `pitchPad` touch path (`AppController.strum(pressed:)` → `PitchPadEngine.noteOn(ratio:)`), so it sounds on whichever main instrument is selected, allocates fresh strings under the normal laws and charges the taraf like played notes; it sustains while L is held. The set follows the pool invariant (twin folds re-point members, deletions prune, regenerate restores the default — `DroneStringTests`).
 
-- **Its own expression** (`ctl_strum_expr`, Controller group, bound to the Joy-Con stick Y by default): a per-slot expr multiplier in `BowControlMapper`, pushed LIVE to the held notes. The wire's touch record is untouched and every non-strum path multiplies by exactly 1.0; plucked mains consume it at the onset as a pluck-level scale.
+- **Its own expression** (`ctl_strum_expr`, Controller group, bound to the Joy-Con Stick Up / Stick Down by default): a per-slot expr multiplier in `BowControlMapper`, pushed LIVE to the held notes. The wire's touch record is untouched and every non-strum path multiplies by exactly 1.0; plucked mains consume it at the onset as a pluck-level scale. The same per-slot scale carries the **pitch accent** (`ctl_fret_accent`, [Fret Pad](fret-pad.md)) — `AudioEngine` hands the voice the product of the two.
 - **A hard shake can strike it** (`ctl_strum_thresh`, 0…1, default 1 = off): the iPad's strike envelope crossing the threshold triggers as an L press and releases when it falls back below, with a 100 ms retrigger cooldown (the L button ignores the cooldown).
 - **The chord bar overrides the set.** With a chord selected in the strip below the Fret Pad's band ([Fret Pad](fret-pad.md)), the strum plays THAT chord — octave-agnostic, sounded under the **Shepard register law** (`shepardChordNotes`: pitch-class chord tones as raised-cosine-weighted octave copies centered in the octave below the tonic, so a VII chord sits no higher than a I chord); deselecting falls back to the configured set. A selection change while the chord is RINGING retunes it in place — surviving members glide, surplus notes release, extra members strike fresh (`AppController.retuneStrumChord`).
 
@@ -86,7 +101,7 @@ One factory preset ships — **"Default (Sarangi Live) — Pilu"** (`SarangiStor
 
 Four UserDefaults keys hold the editable state: the sarangi `InstrumentState` (`tarabdaar.sarangiState.v8`), every parameter's resting value (`tarabdaar.paramValues.v2` — physics scalars, live knobs and hybrids in one dictionary; a key that is absent rests at its default), composites (`tarabdaar.compositeParams.v1`) and tilt bindings (`tarabdaar_dimensionMapping_v6`). Bindings and composites modulate on top of the resting values and never write them.
 
-They save and load as **one `TarabdaarPreset` document** — one preset is one rig (`Packages/TarabdaarCore/.../PresetDocument.swift`; data, not UI, hence the package) via `AppController.capturePreset(name:)` / `applyPreset(_:)`, driven from the Parameters-tab toolbar (`PresetToolbar`). A preset carries every section: the sarangi document, `paramValues` (every parameter's resting value), the composites and `tiltMapping`. Every section is optional, so a partial file applies exactly the sections it carries; a file from before the one store carries `stringOverrides` too, and both merge on load.
+They save and load as **one `TarabdaarPreset` document** — one preset is one rig (`Packages/TarabdaarCore/.../PresetDocument.swift`; data, not UI, hence the package) via `AppController.capturePreset(name:)` / `applyPreset(_:)`, driven from the Parameters-tab toolbar (`PresetToolbar`). A preset carries every section: the sarangi document, `paramValues` (every parameter's resting value), the composites, `tiltMapping`, voice routing and the Joy-Con `droneSequence` (ordered drone-slot indices, including repeated steps). Every section is optional, so a partial file applies exactly the sections it carries; a file from before the one store carries `stringOverrides` too, and both merge on load.
 
 **No file panels.** Saved presets live in the app-managed **library** (`PresetLibrary`, `Application Support/Tarabdaar/Presets/`, one `.tarabdaar` file per preset named after it): **Save preset…** asks only for a NAME (same name = overwrite, the popover says so), and every saved preset appears in the **Load preset** menu automatically, under the factory default (`AppController.loadFactoryPreset`, which resets the whole rig — bank, physics, parameter values, composites AND tilt bindings). A **Delete preset** submenu removes entries. The menu refreshes on every save/delete and on toolbar appear, so a `.tarabdaar` file dropped into the folder by hand shows up too — that folder IS the import/export surface. Guards: `PresetLibraryTests`, `PresetCodingTests`.
 
@@ -97,11 +112,28 @@ They save and load as **one `TarabdaarPreset` document** — one preset is one r
 
 ## Drones
 
-Three press-to-sound drone buttons inside the Fret Pad's right edge each pluck **one mapped sympathetic string** (Strings tab "Drone buttons" section, `InstrumentState.droneStringIds`; auto-mapped to the loudest strings near low Sa · low Pa · Sa) — on the Tanpura drone voice by default, on the legacy jt swell via the tab's Voice picker. There are no dedicated drone rows: a mapped string sounds exactly as its row is tuned, and an unmapped/disabled/unselected row leaves the button silent. Full treatment and calibrated levels: [Fret Pad](fret-pad.md).
+Three press-to-sound drone buttons inside the Fret Pad's right edge each pluck **one mapped sympathetic string** (Strings tab "Drone buttons" section, `InstrumentState.droneStringIds`; auto-mapped to the loudest strings near low Sa · low Pa · Sa) — on the Tanpura drone voice by default, on the legacy jt swell via the tab's Voice picker. There are no dedicated drone rows: Tanpura drones sound one octave below the mapped row by default, with Joy-Con Up toggling the original octave for subsequent plucks; sympathetic drones sound exactly as their row is tuned, and an unmapped/disabled/unselected row leaves the button silent. Full treatment and calibrated levels: [Fret Pad](fret-pad.md).
 
 ## Levels
 
-Calibration is inside the fitted preset: `bow_live_trim` / `bow_rev_*` set the output level, and **`bow_gain`** (def 1 = bit-exact) multiplies the trim as the PERFORMANCE master volume of the whole radiated instrument — the knob that moves total loudness where expression can't, because the taraf keeps ringing. The Mac pads hold the expression axis at its fitted median (0.25) — a real ±16 dB loudness axis, not a trim.
+Calibration is inside the fitted preset: `bow_live_trim` / `bow_rev_*` set the output level, and **`bow_gain`** (0…4, def 1 = bit-exact) multiplies the trim as the PERFORMANCE master volume of the whole radiated instrument — the knob that moves total loudness where expression can't, because the taraf keeps ringing. Its maximum is about +12 dB relative to the calibrated level, before the safety limiter. The expression command passes through the user-editable Expression transform
+before it controls the physical bow. Pressure and position have matching curves,
+initially identity. The Transforms tab edits freely placed input/output points
+with bounded linear interpolation; Identity restores raw response and Factory
+curve restores the shipped calibration. Curves persist in their own structured
+store and the `bowAxisCurves` section of `.tarabdaar` presets. Older fixed-band
+settings migrate to points without changing their response.
+
+**Factory expression curve.** With taraf disabled, the curve targets equal dB
+steps: −36 dB at command 0.1, then +4 dB per 0.1 up to full level at 1.
+Command 0 is silent; the first tenth fades into that finite range. The fit uses
+the median normalized sustained stereo RMS over five notes from 164.45 to
+657.8 Hz at pressure 0, position 1. Validation at intermediate commands measures
+0.28 dB RMS error in that median curve (0.27 dB at the tonic). This is a dB-based
+loudness progression, not linear amplitude. Low-register regime changes at low
+pressure can depart by as much as 15.9 dB; a shared static curve does not correct
+note-dependent vibration regimes. At factory pressure/position, all-note RMS
+error is 0.54 dB.
 
 **The safety limiter.** Loud peaks are backstopped inside the kernel, and a **linked-stereo output safety limiter** rides the very end of both post-chains (after the global FX insert): instant-attack peak detector, `bow_lim_rel_ms` release, hard clamp at min(1, 1.25 × ceiling) for the attack samples. **Below `bow_lim_thresh` (default 0.8) it is bit-exact passthrough** — the parity phrase peaks ~0.06, so every golden is untouched (`LimiterTests`).
 
@@ -111,7 +143,34 @@ Calibration is inside the fitted preset: `bow_live_trim` / `bow_rev_*` set the o
 
 - **`bow_bal`** (−1…+1, def 0): the voice↔taraf mix as a pure ATTENUATOR pair — −1 = voice only, +1 = taraf only, 0 = the calibrated mix bit-exactly. The favoured side never boosts past its calibrated level, so no new headroom appears and the limiter calibration holds. Slewed ~30 ms with per-sample interpolation; instant like `bow_gain`, so it binds well to a tilt. The iPad volume readout taps post-balance.
 
-**The voice-relative taraf cap** (`bow_jt_cap` / `bow_jt_cap_ratio`) is the runaway-bloom lever: with high `bow_jt_evolve` the web can feed itself and bloom LOUDER than the played voice, and a fixed threshold can't follow a phrase's dynamics. The cap side-chains its ceiling from the VOICE bus itself — an instant-attack peak envelope with a slow ~1.2 s-τ release (≈7 dB/s), so a string may ring on after a note and decay more slowly than the voice but never PEAK above what the voice reached.
+**Independent taraf levels.** `bow_jt_gain` controls raga radiation and
+`bow_jtc_gain` controls chromatic radiation, including the melody follower.
+Either may be zero while the other bank rings. Both use in-place row gain
+slews, with the common output carrier held constant so moving one bank cannot
+pump the other's uncoupled sound. Shared bridge feedback still permits
+physical interaction when coupling is enabled. Parameter ownership and
+model-specific controls are listed in [Sarangi](sarangi.md#parameter-ownership).
+
+**Direct raga plucks.** A pluck-triggered radiation boost balances the physical
+raga strings with chromatic plucks and medium-expression bowed notes. It is
+stronger in the low register, approaches its peak smoothly over 4 ms and
+returns toward the ordinary sympathetic level with a 2 s time constant.
+The plectrum displacement and physical feedback are unchanged. Unplucked rows
+retain their ordinary sympathetic level; the plucked row's shared radiation
+receives the envelope for its tail. The normal row controls and final limiter
+remain downstream.
+
+**Raga bow bloom** (`bow_jt_bow_bloom`, default 1) shapes the energy entering
+physical raga strings: fresh bow energy charges them, then steady forcing
+recedes over a 2.1 s adaptation time so their natural jawari ring changes the
+harmonic balance gradually over several seconds. The raga
+layer settles softer and quieter under a held bow; output gain does not
+compensate that decay. Zero restores continuous drive. This applies to incoming
+bridge energy, including coupled return and plucked-voice injection, but not
+to the direct plectrum gesture. See [Sarangi](sarangi.md) for the envelope and
+the distinction between an isolated pluck and a pluck in a driven bank.
+
+**The voice-relative taraf cap** (`bow_jt_cap` / `bow_jt_cap_ratio`) is the runaway-bloom lever: with high `bow_jtc_evolve` the web can feed itself and bloom LOUDER than the played voice, and a fixed threshold can't follow a phrase's dynamics. The cap side-chains its ceiling from the VOICE bus itself — an instant-attack peak envelope with a slow ~1.2 s-τ release (≈7 dB/s), so a string may ring on after a note and decay more slowly than the voice but never PEAK above what the voice reached.
 
 - Ceiling = voice peak × `bow_jt_cap_ratio` (1 = parity, 0.5 ≈ −6 dB under, 2 = a loose leash). `bow_jt_cap` 0…1 is the hardness — the applied reduction is that fraction of the full dB overshoot: 0 = off (byte-null, the default), 1 = a hard relative limiter. A dimensionless ratio, so it rides `bow_gain` and expression untouched.
 - **Applied INSIDE the kernel, string by string** (`bow_poly_jt_set_cap`): the render loop records the voice peak envelope beside the jt drive (sync buffer and async ring alike — state only, byte-null unarmed); the tick scheduler converts it to a per-tick ROW ceiling (voice env × ratio ÷ the jt output gain), and each row runs its own 150 ms peak envelope and gain (3 ms toward reduction / 120 ms recovery) on its radiated output — a pure output gain after the physics, so the string's ring and the quiescence gate both see the un-capped string. Per-row state is worker-owned; an arm edge bumps a generation counter and each row resets itself on its next tick (no control-thread array writes under running workers). The strings sum AFTER the cap, so the whole web can still stand above one string's ceiling.
@@ -129,15 +188,17 @@ Parameters that are engine-build values (`rebuild`, and `hybrid` pushed above it
 
 | | |
 |---|---|
-| Full rebuild | **~360 ms** (off-thread — latency, never a dropout) |
-| …of which tables + kernel + worker pool | **~4.5 ms** |
-| …of which the **settle pre-roll** | the rest (~98%) |
+| Neutral full-bank rebuild | **~34–36 ms** in the initialization benchmark (off-thread) |
+| Deeply pressed low bank | **~324 ms** in the same benchmark; uses damped fallback |
+| Published idle level | Below **−100 dBFS** in the measured banks; usually exactly zero |
 
-**The settle pre-roll** is the whole cost. A fresh kernel's jawari web relaxes off the builder's `q0` — the analytic static wrap is not an exact equilibrium of the discrete contact — so `buildEngine` renders and discards `StringVoiceSource.settleBlocks` (**5** blocks of ~85 ms) while it dies. **The damped settle** kills the chime at the cause: the taraf is choked (`BowEngine.setJtSettleDamp`, t60 50 ms) while the discarded blocks render — the contact still settles the wrap to its true discrete equilibrium, only the oscillation dies — and the natural ring is restored EXACTLY before publish (a pure per-tick momentum scalar, 0 = byte-null). `RebuildCostTests` holds the publish peak to an absolute **−80 dBFS bar**; five blocks clear it with margin on the bridge-force radiation (three do not). The silent publish also lets the quiescence gate close on the web within ~30 ms of launch. Lengthening the crossfade does not substitute — what remains past the fade is the web's steady idle floor, not a decaying transient; fixing it properly means a `q0` that does not leave the web charged at t = 0.
+**The settle path** uses a residual-checked continuous wrap and, for a neutral bank, a stationary state matched to the existing discrete contact step. Successful preparation starts with **one** 4096-frame warmup block. A failed solve or moved bone retains at least **five** blocks with 50 ms momentum damping. The setup renderer uses an empty control snapshot; held touches stay on the shared mapper and mount when the engine is published. After warmup, natural decay is restored and the output filters and room are reset, preserving the physical kernel state. This discards the synthetic setup chime's room tail rather than waiting for it to die. Each subsequent verification block checks both channels and their sum against **−100 dBFS**; up to 24 verification blocks are allowed, after which a still-noisy build returns nil and the host retains its existing engine. No limiter or gain fade substitutes for the silence check. The gate remains enabled under its normal contract.
+
+`RebuildCostTests` covers crossfaded publication at **−80 dBFS**, tuned banks and neutral/pressed/open bones, and preservation of a held touch through silent setup. The timings above are measurements on one machine, not universal budgets.
 
 **Continuity.** A fresh engine has zero string/taraf/room state, so a hard swap under a held note is a step (96% of level within 43 ms) and a hard swap during the ring cuts it (4.9% of the tail survives). `StringVoiceSource.setEngine` therefore keeps the outgoing engine rendering and equal-power crossfades into the new one over `StringVoiceSource.engineCrossfadeMs` (300 ms): seamless under a note, 69% of a ring survives. That costs 2× voice CPU for the fade window only (at the 128-frame buffer: 11% of realtime for one engine, 19% for two).
 
-**Why the distinction exists internally.** At ~360 ms per build plus a 300 ms fade, build-time parameters are fine under a slider but cannot be swept at tilt rate. `ParamRegistry`'s `apply` field is therefore a routing hint; the user-facing truth is `ParamSpec.timing` (live / in-place / rebuild / hybrid), rendered identically in the Parameters-tab row help and [parameters.md](parameters.md).
+**Why the distinction exists internally.** Rebuilds still construct a fresh physical state and crossfade over 300 ms; difficult contact configurations cost more than neutral banks. They are suitable for structural edits, not tilt-rate sweeps. `ParamRegistry`'s `apply` field is therefore a routing hint; the user-facing truth is `ParamSpec.timing` (live / in-place / rebuild / hybrid), rendered identically in the Parameters-tab row help and [parameters.md](parameters.md).
 
 **Rest fractions.** A `hybrid` parameter's `ParamSpec.restFraction` keeps the shipped sound when its live scaler is at rest: jawari buzz rests at **1.0×** the built depth (the fitted sound), vibrato depth at **0×** (silent until the player asks). Get these wrong and the instrument boots sounding different from the artifact.
 

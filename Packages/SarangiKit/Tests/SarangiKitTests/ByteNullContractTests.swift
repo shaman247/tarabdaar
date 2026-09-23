@@ -28,7 +28,7 @@ final class ByteNullContractTests: XCTestCase {
     private func phrase(_ e: BowEngine) -> [Double] {
         e.mapper.setAxis(expr: 60.0 / 127.0)
         e.mapper.setAxis(press: 80.0 / 127.0)
-        e.mapper.touchOn(60, pitchSemis: 60, velocity: 100.0 / 127.0)
+        e.mapper.touchOn(60, pitchSemis: 60)
         let nBow = Int(0.4 * e.sr), nRing = Int(0.3 * e.sr)
         var l = [Double](repeating: 0, count: nBow + nRing)
         var r = [Double](repeating: 0, count: nBow + nRing)
@@ -51,10 +51,31 @@ final class ByteNullContractTests: XCTestCase {
         return l + r
     }
 
+    /// Performance attenuation reduces the radiated web without generating non-finite output.
+    func testPerformanceProfileAttenuatesRadiation() {
+        let reference = makeEngine()
+        reference.setBusBalance(1)
+        let adapted = makeEngine()
+        adapted.setBusBalance(1)
+        adapted.setPerformanceGains(adapted.jtRowFreqs.map { _ in 0.15 })
+        let a = phrase(reference), b = phrase(adapted)
+        let energy = a.reduce(0) { $0 + $1 * $1 }
+        XCTAssertGreaterThan(energy, 0)
+        XCTAssertTrue(b.allSatisfy(\.isFinite))
+        XCTAssertLessThan(b.reduce(0) { $0 + $1 * $1 }, energy * 0.8)
+    }
+
     func testRestingValuesAreByteNull() {
         let reference = phrase(makeEngine())
         XCTAssertTrue(reference.contains { $0 != 0 }, "the phrase must make sound")
+        XCTAssertEqual(reference, phrase(makeEngine(["bow_tnoise": 0])), "force-change grain 0")
         let cases: [(String, (BowEngine) -> Void)] = [
+            ("raga bow bloom with backend off", { $0.setJtBowBloom(1) }),
+            ("two-direction selectivity with backend off", { $0.setJtDualSelectivity(1) }),
+            ("two-direction tone with backend off", { $0.setJtDualTone(hz: 2000) }),
+            ("two-direction displacement with backend off", { $0.setJtDualDisplacement(mm: 1) }),
+            ("performance profile unity", { $0.setPerformanceGains($0.jtRowFreqs.map { _ in 1 }) }),
+            ("performance profile reset", { $0.setPerformanceGains([]) }),
             ("scope meters armed", { $0.setScopeArmed(true) }),
             ("bus meter armed", { $0.setBusMeter(true) }),
             ("fx rack at rest", { e in FXPoint.allCases.forEach { e.setFX($0, FXSettings()) } }),
@@ -66,6 +87,11 @@ final class ByteNullContractTests: XCTestCase {
             ("jt body 0", { $0.setJtBody(0) }),
             ("bridge coupling 0", { $0.setJtCouple(0) }),
             ("evolve register 0", { $0.setJtEvolveRegister(0) }),
+            ("evolution pulse disabled", {
+                $0.setJtEvolutionPulse(amount: 0, attackMs: 1, decayMs: 2000) }),
+            ("taraf drive at the build value", {
+                $0.setJtDrive(BowedStringEngineTests.stringBP().v("bow_jt_drive", 1.0)) }),
+            ("drive level norm 1", { $0.setJtDriveNorm(1) }),
             ("master gain 1", { $0.setMasterGain(1) }),
             ("jt tone LP bypass", { $0.setJtToneLp(hz: 20000) }),
         ]

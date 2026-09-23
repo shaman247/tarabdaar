@@ -218,12 +218,21 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 if (gutA2e > 0.0) gutA2e = pow(gutA2e, sReg);
             }
         }
-        double h1 = pfrac_read(S->buf1, MAXBOW, S->w1i,
-                               fmax(2.0, L1 * 2.0 - bowWidth));
+        /* LOOP LENGTH = ONE PERIOD. The nut-side read cannot go under 2
+           samples; once beta*T is shorter than the hair ribbon (+2) that
+           floor would lengthen the round trip and the top of the range
+           goes flat, so the excess comes off the bridge-side read instead
+           (the bridge segment always has the room). Exact 0 below the
+           corner: the reads are bit-identical there. */
+        double nutNom = betat * T - bowWidth;
+        double nutD = fmax(2.0, nutNom);
+        double nutExcess = nutD - nutNom;
+        double h1 = pfrac_read(S->buf1, MAXBOW, S->w1i, nutD);
         double dl = kdisp * st->disp;
         if (dl > 0.02) dl = 0.02; else if (dl < -0.02) dl = -0.02;
         double h2 = pfrac_read(S->buf2, MAXBOW, S->w2i,
-                               fmax(2.0, (L2 * 2.0 - bowWidth) * (1.0 + dl)));
+                               fmax(2.0, ((1.0 - betat) * T - bowWidth
+                                          - nutExcess) * (1.0 + dl)));
         double hBA = 0, hAB = 0;
         if (bowCont >= 2.5 && bowWidth >= 2.0) {
             /* three hair-group contacts, own friction solve per group */
@@ -815,13 +824,23 @@ void bow_poly_process3(void *vst, int n, int stride,
     if (st->njt > 0 && st->jtGain != 0.0) {
         if (st->jtAsync && st->jtDLive && n <= JT_ABLK) {
             jtAsyncBlk = 1;
+            /* Coalesce short device callbacks into >=512-kernel-sample jobs
+               for the experimental solver. A partial unpublished slot is
+               exclusively producer-owned. Flush it before an oversized next
+               chunk so no write can cross the ring-slot boundary. */
+            if (st->jtDualPending && st->jtDualPending+n > JT_ABLK) {
+                int w = st->jtDJobW;
+                st->jtDJobN[w & (JT_ARING-1)] = st->jtDualPending;
+                __atomic_store_n(&st->jtDJobW,w+1,__ATOMIC_RELEASE);
+                st->jtDualPending = 0;
+            }
             int wj = st->jtDJobW;
             int rj = __atomic_load_n(&st->jtDJobR, __ATOMIC_ACQUIRE);
             if (wj - rj < JT_ARING) {
                 jtFr = st->jtDrvRing
-                    + (size_t)(wj & (JT_ARING - 1)) * JT_ABLK;
+                    + (size_t)(wj & (JT_ARING - 1)) * JT_ABLK + st->jtDualPending;
                 jtCv = st->jtCapRing
-                    + (size_t)(wj & (JT_ARING - 1)) * JT_ABLK;
+                    + (size_t)(wj & (JT_ARING - 1)) * JT_ABLK + st->jtDualPending;
             } else
                 st->jtDropBlocks++;   /* overload: skip this block's drive (web
                                          decays briefly) */
@@ -956,18 +975,34 @@ void bow_poly_process3(void *vst, int n, int stride,
        behind). SYNC: serial replay (bit-exact) or the caller-blocking pool. */
     if (jtAsyncBlk) {
         if (jtFr) {
-            int wj = st->jtDJobW;
-            st->jtDJobN[wj & (JT_ARING - 1)] = n;
-            __atomic_store_n(&st->jtDJobW, wj + 1, __ATOMIC_RELEASE);
-            if (pthread_mutex_trylock(&st->jtMx) == 0) {
-                pthread_cond_broadcast(&st->jtCvW);
-                pthread_mutex_unlock(&st->jtMx);
+            int count = n + st->jtDualPending;
+            /* A bank amortizes eight worker wakeups over 512 output frames;
+               the one-row diagnostic retains its original 256-frame jobs. */
+            if (st->jtDual && count < (st->jtDualCount > 1 ? 1024 : 512)) st->jtDualPending = count;
+            else {
+                int wj = st->jtDJobW;
+                st->jtDJobN[wj & (JT_ARING - 1)] = count;
+                __atomic_store_n(&st->jtDJobW, wj + 1, __ATOMIC_RELEASE);
+                st->jtDualPending = 0;
+                if (pthread_mutex_trylock(&st->jtMx) == 0) {
+                    pthread_cond_broadcast(&st->jtCvW);
+                    pthread_mutex_unlock(&st->jtMx);
+                }
             }
         }
         long long ww = __atomic_load_n(&st->jtWebW, __ATOMIC_ACQUIRE);
         long long rr = st->jtWebR;
         int avail = (int)(ww - rr);
         int take = avail < n ? avail : n;
+        /* Variable Newton cost plus worker wake jitter needs a reserve.
+           Prime six worker jobs: 32 ms for one physical row, 64 ms for a
+           full physical bank. This is a taraf-audio delay only; mechanical
+           return is separate and the physical timestep is unchanged. */
+        if (st->jtDual && !st->jtDualReady) {
+            const int reserve = st->jtDualCount > 1 ? 6144 : 3072;
+            if (avail >= (n > reserve ? n : reserve)) st->jtDualReady = 1;
+            else take = 0;
+        }
         double g = st->jtMixG;
         for (int t = 0; t < take; t++) {
             double v = st->jtWebRing[(rr + t) & (JT_WEBN - 1)];
@@ -1020,8 +1055,12 @@ void bow_poly_process3(void *vst, int n, int stride,
                     st->jtFacc = 0.0; st->jtPhase = 0;
                     double sacc = 0.0, cacc = 0.0;
                     const double cap = jt_cap_ceiling(st, jtCv[t]);
-                    st->jtHold = jt_tick(st, st->jtFprev * st->jtDrv,
-                                         jt_ev_step(st), cap,
+                    const double d = jt_drive_step(st);
+                    const double dn = jt_drive_norm(st, d);
+                    st->jtHold = jt_tick(st, st->jtFprev * d,
+                                         jt_ev_step(st), cap, dn,
+                                         jt_drive_comp_step(st, dn,
+                                                            st->jtFprev),
                                          stOn ? &sacc : NULL,
                                          st->jtCplOn ? &cacc : NULL);
                     if (stOn) st->jtHoldS = sacc;
@@ -1101,7 +1140,7 @@ void bow_poly_free(void *vst)
             pthread_cond_destroy(&st->jtCvW);
             pthread_cond_destroy(&st->jtCvD);
         }
-        free(st->jtFrBuf); free(st->jtFdv); free(st->jtTkv);
+        free(st->jtFrBuf); free(st->jtFdv); free(st->jtDnV); free(st->jtCmV); free(st->jtTkv);
         free(st->jtEvV);
         free(st->jtHp); free(st->jtHpS); free(st->jtHpC);
         free(st->jtWebScr); free(st->jtWebScrS);
@@ -1118,11 +1157,21 @@ void bow_poly_free(void *vst)
         free(st->jtDnTgt); free(st->jtDnEnv); free(st->jtDnBoost);
         free(st->jtDnLp); free(st->jtDnLp2); free(st->jtDnRng);
         free(st->jtDnPh);
+        free(st->jtPulseRequest); free(st->jtPulseEnv); free(st->jtPulseLift);
+        free(st->jtPulseDecay); free(st->jtPulseAttack); free(st->jtPulseLeft);
+        free(st->jtBurstRequest); free(st->jtBurstEnv); free(st->jtBurstDecay);
+        free(st->jtBurstPhase); free(st->jtBurstLeft);
+        free(st->jtProfileTgt); free(st->jtProfileCur);
+        free(st->jtOutputLevelTgt); free(st->jtOutputLevelCur);
         free(st->jtCapEnv); free(st->jtCapGain); free(st->jtCapRowGen);
         free(st->jtCapV); free(st->jtCapBuf); free(st->jtCapRing);
         free(st->scopeEnv); free(st->scopeMode); free(st->scopeCnt);
         free(st->jtRadScale); free(st->jtRadScaleCur); free(st->jtRadLp);
         free(st->jtRadPinScale); free(st->jtRadPinScaleCur);
+        if(st->jtDual) {
+            for(int row=0;row<st->njt;row++)jt_dual_free(st->jtDual[row]);
+            free(st->jtDual);
+        }
         free(st->jtCplScale); free(st->jtCplRing); free(st->jtCplLast);
         free(st->jtRadPrime);
         free(st->jtGateFdEps); free(st->jtGateCnt); free(st->jtGateSlp);

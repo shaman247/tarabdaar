@@ -212,7 +212,7 @@ extension AudioEngine {
         droneVoiceModeStorage = mode
         let heldOld = droneHeld.indices
             .filter { droneHeld[$0] }
-            .compactMap { droneFreqs[$0] }
+            .compactMap { i in droneFreqs[i].map { (hz: $0, chromatic: droneChromatic[i]) } }
         for i in droneHeld.indices { droneHeld[i] = false }
         for i in droneCycleGen.indices { droneCycleGen[i] += 1 }
         let strSrc = stringVoiceSource
@@ -220,7 +220,7 @@ extension AudioEngine {
         lock.unlock()
         if oldMode == .sympathetic, let engine = strSrc?.currentEngine() {
             for hz in heldOld {
-                if let row = engine.droneRow(forExactHz: hz) {
+                if let row = engine.droneRow(forExactHz: hz.hz, chromatic: hz.chromatic) {
                     engine.droneRelease(row: row)
                 }
             }
@@ -299,11 +299,19 @@ extension AudioEngine {
         }
     }
 
-    /// One drone-button pluck at the mapped pitch's slot (50 ¢ tolerance
+    /// Applies on the next drone pluck, leaving ringing strings at their onset pitch.
+    public func setTanpuraDroneOctaveRaised(_ raised: Bool) {
+        lock.lock()
+        tanpuraDroneOctaveRaised = raised
+        lock.unlock()
+    }
+
+    /// One drone-button pluck at the selected register's slot (50 ¢ tolerance
     /// guards a mid-rebuild mismatch).
     private func tanpuraPluckDrone(_ index: Int) {
         lock.lock()
-        let hz = droneFreqs.indices.contains(index) ? droneFreqs[index] : nil
+        let mappedHz = droneFreqs.indices.contains(index) ? droneFreqs[index] : nil
+        let hz = mappedHz.map { $0 * (tanpuraDroneOctaveRaised ? 1.0 : 0.5) }
         let level = tanpuraDroneLevel
         let touch = tanpuraVoice.pluckTouch
         let drive = tanpuraVoice.pluckDrive
@@ -312,7 +320,7 @@ extension AudioEngine {
         guard let hz, let engine = src?.currentEngine(),
               let slot = engine.nearestSlot(toHz: hz, toleranceCents: 50)
         else { return }
-        engine.pluck(slot: slot, velocity01: 100.0 / 127.0, scale: level,
+        engine.pluck(slot: slot, scale: level,
                      touch: touch, drive: drive)
     }
 
@@ -352,13 +360,14 @@ extension AudioEngine {
 
     /// Update which strings the drone buttons pluck (mapping only — no
     /// rebuild). Any held button is released first.
-    public func setDroneMappedFreqs(_ freqs: [Double?]) {
+    public func setDroneMappedFreqs(_ freqs: [Double?], chromatic: [Bool?] = []) {
         lock.lock()
         let heldOld = droneHeld.indices
             .filter { droneHeld[$0] }
-            .compactMap { droneFreqs[$0] }
+            .compactMap { i in droneFreqs[i].map { (hz: $0, chromatic: droneChromatic[i]) } }
         for i in droneFreqs.indices {
             droneFreqs[i] = freqs.indices.contains(i) ? freqs[i] : nil
+            droneChromatic[i] = chromatic.indices.contains(i) ? chromatic[i] : nil
             droneHeld[i] = false
         }
         for i in droneCycleGen.indices { droneCycleGen[i] += 1 }
@@ -367,7 +376,7 @@ extension AudioEngine {
         lock.unlock()
         guard mode == .sympathetic, let engine = src?.currentEngine() else { return }
         for hz in heldOld {
-            if let row = engine.droneRow(forExactHz: hz) {
+            if let row = engine.droneRow(forExactHz: hz.hz, chromatic: hz.chromatic) {
                 engine.droneRelease(row: row)
             }
         }
@@ -377,9 +386,15 @@ extension AudioEngine {
     /// + starts the re-pluck cycle, release rings out. Sympathetic mode:
     /// hold/release the mapped jt row. Unmapped = inert. MIDI-thread safe.
     public func setDronePressed(_ index: Int, _ pressed: Bool) {
+        setDronePressed(index, pressed, repeating: true)
+    }
+
+    /// Sequenced callers disable the same-slot re-pluck cycle.
+    public func setDronePressed(_ index: Int, _ pressed: Bool, repeating: Bool) {
         lock.lock()
         guard droneHeld.indices.contains(index),
               let hz = droneFreqs[index] else { lock.unlock(); return }
+        let bank = droneChromatic[index]
         let was = droneHeld[index]
         droneHeld[index] = pressed
         let mode = droneVoiceModeStorage
@@ -390,23 +405,23 @@ extension AudioEngine {
         // a release must not silence a row another held button maps to
         let othersHeld = droneHeld.indices
             .filter { $0 != index && droneHeld[$0] }
-            .compactMap { droneFreqs[$0] }
+            .compactMap { i in droneFreqs[i].map { (hz: $0, chromatic: droneChromatic[i]) } }
         let src = stringVoiceSource
         lock.unlock()
         guard pressed != was else { return }
         if mode == .tanpura {
             guard pressed else { return }   // release = ring out
             tanpuraPluckDrone(index)
-            scheduleDroneCycle(index, gen: cycleGen)
+            if repeating { scheduleDroneCycle(index, gen: cycleGen) }
             return
         }
         guard let engine = src?.currentEngine(),
-              let row = engine.droneRow(forExactHz: hz)
+              let row = engine.droneRow(forExactHz: hz, chromatic: bank)
         else { return }
         if pressed {
             engine.dronePress(row: row)
         } else if !othersHeld.contains(where: {
-            engine.droneRow(forExactHz: $0) == row
+            engine.droneRow(forExactHz: $0.hz, chromatic: $0.chromatic) == row
         }) {
             engine.droneRelease(row: row)
         }

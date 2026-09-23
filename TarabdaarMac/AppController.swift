@@ -16,8 +16,11 @@ final class AppController: ObservableObject {
     let midi: MIDIEngine
     let midiIn: MIDIInput
     /// The TarabLink host end: `midiIn` reassembles inbound TLP SysEx,
-    /// `midi` sends outbound (wired-first); frames diff through `ingest`.
+    /// `midi` sends outbound to the peer learned from where the pad's frames
+    /// arrive (wired-first until then); frames diff through `ingest`.
     let link = TarabLink(role: .host)
+    /// The link's handshake state (up / stale / RTT), for the status pills.
+    @Published private(set) var linkStatus = TarabLink.Status()
     let ingest: LinkIngest
 
     /// Joy-Con / game-controller input, wired in `start()` into the same
@@ -75,13 +78,74 @@ final class AppController: ObservableObject {
         }
     }
 
+    @Published var droneSequenceSteps = DroneSequence.normalized(
+        UserDefaults.standard.array(forKey: "tarabdaar.droneSequence.v1") as? [Int]
+            ?? DroneSequence.defaultSteps) {
+        didSet {
+            UserDefaults.standard.set(droneSequenceSteps, forKey: "tarabdaar.droneSequence.v1")
+            droneSequencer.restart()
+        }
+    }
+    private var droneSequencer = DroneSequence()
+    private var droneSequenceTimer: Timer?
+    /// Performance register, reset on launch rather than saved with the rig.
+    @Published private(set) var tanpuraDroneOctaveRaised = false
+    private var droneOctaveButtonDown = false
+
+    private func cancelSequencedDrone() {
+        droneSequenceTimer?.invalidate()
+        droneSequenceTimer = nil
+        if let slot = droneSequencer.cancel() { audio.setDronePressed(slot, false) }
+    }
+
+    private func playDroneStep(_ slot: Int, releasing previous: Int?) {
+        if let previous { audio.setDronePressed(previous, false) }
+        audio.setDronePressed(slot, true, repeating: false)
+    }
+
+    private func sequenceDroneButton(_ control: JoyConControl, pressed: Bool,
+                                     enabled: Bool = true) {
+        if pressed {
+            let previous = droneSequencer.heldSlot
+            let slot = droneSequencer.press(steps: droneSequenceSteps,
+                enabled: enabled, control: control, now: ProcessInfo.processInfo.systemUptime)
+            if let slot {
+                playDroneStep(slot, releasing: previous)
+                scheduleDroneSequenceStep()
+            } else if !droneSequencer.isRunning {
+                droneSequenceTimer?.invalidate()
+                droneSequenceTimer = nil
+                if let previous { audio.setDronePressed(previous, false) }
+            }
+        } else {
+            droneSequencer.release(control: control)
+        }
+    }
+
+    private func scheduleDroneSequenceStep() {
+        droneSequenceTimer?.invalidate()
+        let timer = Timer(timeInterval: DroneSequence.interval, repeats: false) { [weak self] _ in
+            guard let self, self.droneSequencer.isRunning else { return }
+            let previous = self.droneSequencer.heldSlot
+            if let slot = self.droneSequencer.advanceIfDue(steps: self.droneSequenceSteps,
+                now: ProcessInfo.processInfo.systemUptime) {
+                self.playDroneStep(slot, releasing: previous)
+            }
+            self.scheduleDroneSequenceStep()
+        }
+        droneSequenceTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
     /// Control-axis bindings, Mac-owned and Mac-evaluated (`applyTiltAxis`):
-    /// per axis a set of targets with transfer curves, edited in the
+    /// per target a set of curves, one per axis, whose swings about the
+    /// target's resting value ADD (`ControlAxisEvaluator`); edited in the
     /// Controls tab. Nothing syncs to the iPad. Persisted.
     @Published var tiltMapping: DimensionMapping = DimensionMapping.load() {
         didSet {
             tiltMapping.save()
             axes.setMapping(tiltMapping)
+            axes.reapply()
         }
     }
 
@@ -241,6 +305,34 @@ final class AppController: ObservableObject {
         DefaultsStore.save(d, key: paramValuesKey)
     }
 
+    private static let bowAxisCurvesKey = "tarabdaar.bowAxisCurves.v1"
+    @Published private(set) var bowAxisCurves = AppController.loadBowAxisCurves() {
+        didSet { DefaultsStore.save(bowAxisCurves, key: Self.bowAxisCurvesKey) }
+    }
+
+    private static func loadBowAxisCurves() -> [String: [BowAxisPoint]] {
+        var preset = TarabdaarPreset()
+        preset.bowAxisCurves = DefaultsStore.load([String: [BowAxisPoint]].self, key: bowAxisCurvesKey)
+        preset.paramValues = DefaultsStore.load([String: Double].self, key: paramValuesKey)
+        preset.stringOverrides = DefaultsStore.load([String: Double].self, key: legacyOverridesKey)
+        return preset.resolvedBowAxisCurves() ?? TarabdaarPreset.factoryBowAxisCurves()
+    }
+
+    func bowAxisCurve(_ axis: BowAxis) -> [BowAxisPoint] {
+        bowAxisCurves[axis.rawValue] ?? BowAxisTransform.identity
+    }
+
+    func setBowAxisCurve(_ axis: BowAxis, _ points: [BowAxisPoint]) {
+        bowAxisCurves[axis.rawValue] = BowAxisTransform.normalize(points)
+        applyBowAxisCurves()
+    }
+
+    private func applyBowAxisCurves() {
+        // Save migration before a later parameter edit discards the retired band keys.
+        DefaultsStore.save(bowAxisCurves, key: Self.bowAxisCurvesKey)
+        audio.setBowAxisCurves(bowAxisCurves)
+    }
+
     /// THE FX RACK'S EQ CURVES: each insert point's control points, keyed by
     /// the point's key prefix (`fx_voice_`). Not registry parameters — the
     /// curve is inferred from the points (`SarangiKit.EQCurve`), so they
@@ -360,6 +452,9 @@ final class AppController: ObservableObject {
             }
             applyParamToVoice(key, value)
         }
+        // A bound parameter's rest moved: its axes' swings now add to the
+        // new value (a no-op for an unbound key).
+        axes.setParamRest(key, value)
     }
 
     /// Restore a parameter to its default and re-apply.
@@ -387,6 +482,8 @@ final class AppController: ObservableObject {
         paramValues.removeAll()
         stringParams.resetToDefault()
         refreshHybridHeadroom()
+        bowAxisCurves = TarabdaarPreset.factoryBowAxisCurves()
+        applyBowAxisCurves()
         fxEQCurves.removeAll()
         applyRestingParams()
         applyEQCurves()
@@ -433,12 +530,18 @@ final class AppController: ObservableObject {
             // Updates the window, forces a blend re-evaluation, relays to the iPad.
             axes.setStrikeWindow(value)
             DispatchQueue.main.async { [weak self] in self?.sendJoyConDisplay() }
+        case .accelerationSmoothing(let dimension):
+            axes.setAccelerationSmoothing(dimension, milliseconds: value)
         case .strumExpression:
             strumming.setExpression(value)
         case .strumThreshold:
             strumming.setAccelThreshold(value)
         case .glideQueue:
             audio.glideQueue.setControl(key, value)
+        case .tarafAdaptation:
+            DispatchQueue.main.async { [weak self] in self?.pitchProfile.amount = value }
+        case .pitchAccent:
+            audio.setPitchAccent(value)
         case .fretWarp:
             // Published for the Mac pad, relayed to the iPad, shapes the glide queue.
             let v = min(max(value, 0), 1)
@@ -453,6 +556,7 @@ final class AppController: ObservableObject {
 
     // jt overload watchdog (see start())
     private var jtStatsTimer: Timer?
+    lazy var pitchProfile = PerformanceProfileModel(audio: audio, tuning: tuning)
 
     /// VOLUME READOUT relay: 60 Hz poll of `AudioEngine.volumeLevels`
     /// (integrate-and-dump — the ONE poller) → JOYCON_STATE, change-gated.
@@ -465,6 +569,12 @@ final class AppController: ObservableObject {
             },
             send: { [weak self] voice, taraf in
                 self?.link.setVolumeLevels(voice: voice, taraf: taraf)
+            },
+            noteControls: { [weak self] in
+                self?.audio.noteControls() ?? .idle
+            },
+            sendNoteControls: { [weak self] controls in
+                self?.link.setNoteControls(controls)
             })
         relay.start()
         volMeter = relay
@@ -556,12 +666,12 @@ final class AppController: ObservableObject {
         let doc = self.sarangi
         self.strumming = StrumController(
             sink: StrumController.NoteSink(
-                noteOn: { id, ratio, velocity01, expr in
+                noteOn: { id, ratio, expr in
                     // A fixed-register anchor: exempt from the octave shift
                     // and from the glide queue (near-simultaneous onsets
                     // must not chain).
                     pad.noteOn(touchId: id, ratio: ratio,
-                               velocity01: velocity01, octaveShifted: false,
+                               octaveShifted: false,
                                exprScale: expr, glideExempt: true)
                 },
                 noteOff: { pad.noteOff(touchId: $0) },
@@ -609,6 +719,7 @@ final class AppController: ObservableObject {
         axes.setMapping(tiltMapping)
         refreshHybridHeadroom()      // build depths behind the hybrid knobs
         applyRestingParams()         // resting values for every live param
+        applyBowAxisCurves()
         applyEQCurves()              // the FX rack's EQ curves
         // A physics edit can move a hybrid's headroom — keep the cache in step
         // (`@Published` fires before the property updates: use the sink value).
@@ -621,6 +732,7 @@ final class AppController: ObservableObject {
         // Voice/taraf volume readout → iPad (JOYCON_STATE vol bytes).
         startVolMeterRelay()
         startEngineWatchdog()
+        pitchProfile.start()
         wireTuningFollowers()
     }
 
@@ -630,7 +742,7 @@ final class AppController: ObservableObject {
         // The control-axis evaluator's sinks, before anything can drive it
         // (`setMapping` below arms its timers).
         axes.onApply = { [weak self] apps in self?.applyControlBatch(apps) }
-        axes.paramDefault = { [weak self] key in self?.paramDefault(key) ?? 0 }
+        axes.paramRest = { [weak self] key in self?.paramValue(key) ?? 0 }
         // The JOYCON_STATE mirror: the send plus the four acted-on fields.
         joyConDisplay.send = { [weak self] display, immediate in
             self?.link.setJoyConState(display, immediate: immediate)
@@ -692,6 +804,16 @@ final class AppController: ObservableObject {
         pitchPad.localIngest?.onTouchRadius = { [weak self] id, r in
             self?.axes.touchRadius(lane: .local, id: id, radiusPt: r)
         }
+        ingest.onTouchFretPosition = { [weak self] id, value in
+            self?.axes.touchFretPosition(lane: .wire, id: id, value: value)
+        }
+        pitchPad.localIngest?.onTouchFretPosition = { [weak self] id, value in
+            self?.axes.touchFretPosition(lane: .local, id: id, value: value)
+        }
+        fretPad.localIngest?.onTouchGate = pitchPad.localIngest?.onTouchGate
+        fretPad.localIngest?.onTouchPitch = pitchPad.localIngest?.onTouchPitch
+        fretPad.localIngest?.onTouchRadius = pitchPad.localIngest?.onTouchRadius
+        fretPad.localIngest?.onTouchFretPosition = pitchPad.localIngest?.onTouchFretPosition
         // Chord-bar selection edges from both lanes (iPad taps, the Mac bar via
         // `tapChord`) land in `strumChord`; a RINGING chord retunes in place.
         let chordEdge: (ChordSelection?) -> Void = { [weak self] sel in
@@ -707,15 +829,22 @@ final class AppController: ObservableObject {
 
     /// TarabLink: SysEx transport in and out, state frames, events, status.
     private func wireLink() {
-        // TarabLink: inbound TLP SysEx from MIDIInput's reassembler; outbound via
-        // the wired-first SysEx send ("iPad" name match; BLE bypasses the
-        // filter). Events fall back to send-to-all; state frames just drop.
-        midiIn.onSysEx = { [weak self] bytes in
-            self?.link.receivedSysEx(bytes)
+        // TarabLink: inbound TLP SysEx from MIDIInput's reassembler. A frame
+        // from the pad also tells `midi` which source carries the link, so
+        // replies go back on that bearer alone (USB when the cable is in —
+        // the pad's wired-first choice decides both directions). Outbound
+        // rides that learned peer; before it is known, the wired-first
+        // "iPad" name-match send stands in (events fall back to send-to-all,
+        // state frames just drop).
+        midiIn.onSysEx = { [weak self] bytes, source in
+            guard let self else { return }
+            self.link.receivedSysEx(bytes)
+            if TLPPack.senderRole(of: bytes) == .pad {
+                self.midi.noteLinkFrame(from: source)
+            }
         }
         link.sendRaw = { [weak self] bytes, isEvent in
-            self?.midi.sendSysEx(bytes, toDestinationsMatching: "iPad",
-                                 fallbackToAll: isEvent)
+            self?.midi.sendSysExToLinkPeer(bytes, isEvent: isEvent)
         }
         link.onPerfState = { [weak self] frame in
             self?.ingest.apply(frame)
@@ -725,26 +854,30 @@ final class AppController: ObservableObject {
             NSLog("Tarabdaar: link stale — releasing everything held")
             self.ingest.linkDidDrop()
             // No more frames: the strike measurement rests at 0.
-            self.axes.setStrikeMeasure(0)
+            self.axes.resetAcceleration(.acceleration)
             // An accel-held strum chord must not outlive the link.
             self.strumming.accelSense(0)
         }
         link.onEvent = { [weak self] event in
             switch event {
+            case .tarafPluck(let revision, let row):
+                DispatchQueue.main.async { self?.audio.pluckTaraf(revision: revision, row: row) }
             case .resyncRequest:
                 DispatchQueue.main.async { self?.pushCurrentState() }
             case .panic:
                 // Kill the WIRE's touches/drones only — never the Mac's pads.
                 NSLog("TarabLink: panic from pad")
                 self?.ingest.linkDidDrop()
+                self?.axes.resetAcceleration(.acceleration)
             default:
                 break
             }
         }
-        link.onStatus = { status in
+        link.onStatus = { [weak self] status in
             NSLog("TarabLink: up=%d stale=%d rtt=%@",
                   status.isUp ? 1 : 0, status.isStale ? 1 : 0,
                   status.rttMs.map { String(format: "%.1fms", $0) } ?? "–")
+            DispatchQueue.main.async { self?.linkStatus = status }
         }
         // A destination appearing/vanishing → re-greet; scale sync re-pushes.
         midi.$destinationCount
@@ -756,13 +889,10 @@ final class AppController: ObservableObject {
 
     /// The Joy-Con's axes, buttons and connection edge.
     private func wireJoyCon() {
-        // Joy-Con. Control axes: arm 0–2 (the iPad's tilts), stick 3/4, wrist
-        // + acceleration (`wristAxisIndices` / `jcAccelAxisIndex`).
+        // Both calibrations feed the shared tilts; controller presence selects the source.
         joyCon.onArmAxes = { [weak self] t1, t2, t3 in
             guard let self else { return }
-            self.applyTiltAxis(0, t1)
-            self.applyTiltAxis(1, t2)
-            self.applyTiltAxis(2, t3)
+            self.axes.applyTilt(.iPad, SIMD3(t1, t2, t3))
             // Mirror the calibrated arm axes to the iPad's arm square (main
             // thread; the link paces the sends).
             self.joyConDisplay.setArm(t1, t2, t3)
@@ -771,17 +901,17 @@ final class AppController: ObservableObject {
             guard let self else { return }
             self.joyConDisplay.setWrist(wrist)
         }
-        joyCon.onStickAxes = { [weak self] x01, y01 in
+        joyCon.onStickAxes = { [weak self] x, y in
             guard let self else { return }
-            self.applyTiltAxis(3, x01)
-            self.applyTiltAxis(4, y01)
-            self.joyConDisplay.setStick(x01, y01)
+            self.axes.applyStick(x: x, y: y)
+            self.joyConDisplay.setStick(x, y)
         }
         joyCon.onWristAxes = { [weak self] w1, w2, w3 in
             guard let self else { return }
-            self.applyTiltAxis(ControlAxisEvaluator.wristAxisIndices.0, w1)
-            self.applyTiltAxis(ControlAxisEvaluator.wristAxisIndices.1, w2)
-            self.applyTiltAxis(ControlAxisEvaluator.wristAxisIndices.2, w3)
+            self.axes.applyTilt(.controller, SIMD3(w1, w2, w3))
+        }
+        joyCon.onJoyConAccelReset = { [weak self] in
+            self?.axes.resetAcceleration(.jcAccel)
         }
         joyCon.onJoyConAccel = { [weak self] level in
             self?.applyTiltAxis(ControlAxisEvaluator.jcAccelAxisIndex,
@@ -795,14 +925,13 @@ final class AppController: ObservableObject {
                 guard pressed else { return }
                 self.shiftOctave(-1)
             case .dpadDown:
-                // During a capture, ↓ steps BACK one phase (↑ advances); it is
-                // drone button 1 otherwise. The release still clears the drone.
-                if self.joyCon.capturingCalibrator != nil {
-                    if pressed { self.joyCon.redoPreviousCalibrationStep() }
-                    else { self.audio.setDronePressed(1, false) }
-                } else {
-                    self.audio.setDronePressed(1, pressed)
+                let calibrating = self.joyCon.capturingCalibrator != nil
+                self.sequenceDroneButton(control, pressed: pressed, enabled: !calibrating)
+                if pressed && calibrating {
+                    self.joyCon.redoPreviousCalibrationStep()
                 }
+            case .rearZ:
+                self.sequenceDroneButton(control, pressed: pressed)
             case .dpadRight:
                 guard pressed else { return }
                 self.shiftOctave(+1)
@@ -813,22 +942,41 @@ final class AppController: ObservableObject {
                 // ZL re-zeroes the arm AND wrist axes at the current poses.
                 guard pressed else { return }
                 self.joyCon.recenterBody()
-            case .sl, .sr, .stickClick, .minus, .capture:
+            case .minus:
+                if pressed { self.pitchProfile.toggleSeed() }
+            case .capture:
+                if pressed { self.pitchProfile.reset() }
+            case .sl, .sr, .stickClick:
                 // Unassigned — visible in the panel chips.
                 break
             case .dpadUp:
-                // Advances a running calibration (no-op otherwise).
-                guard pressed else { return }
-                self.joyCon.advanceCalibration()
+                let wasDown = self.droneOctaveButtonDown
+                self.droneOctaveButtonDown = pressed
+                guard pressed && !wasDown else { return }
+                if self.joyCon.capturingCalibrator != nil {
+                    self.joyCon.advanceCalibration()
+                } else {
+                    self.tanpuraDroneOctaveRaised.toggle()
+                    self.audio.setTanpuraDroneOctaveRaised(self.tanpuraDroneOctaveRaised)
+                }
             }
         }
-        // The `connected` bit hides the drone buttons on both surfaces, so
-        // its edges must arrive even when no axis moves: push on each.
+        // Select tilt immediately on the connection edge. The display push
+        // waits until @Published has stored the new connected name.
         joyCon.$connectedName
             .map { $0 != nil }
             .removeDuplicates()
+            .handleEvents(receiveOutput: { [weak self] connected in
+                self?.axes.setControllerConnected(connected)
+            })
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.sendJoyConDisplay() }
+            .sink { [weak self] connected in
+                if !connected {
+                    self?.cancelSequencedDrone()
+                    self?.droneOctaveButtonDown = false
+                }
+                self?.sendJoyConDisplay()
+            }
             .store(in: &cancellables)
         joyCon.start()
     }
@@ -923,6 +1071,13 @@ final class AppController: ObservableObject {
         .store(in: &cancellables)
         syncTarabFromScale()        // match the scale on launch
 
+        // The pitch accent's fret grid: a handful of doubles, so it follows
+        // the arrangement and the tuning undebounced (held notes re-accent
+        // at once).
+        Publishers.Merge($fretArrangement.map { _ in () }, tuning.didChange)
+            .sink { [weak self] in self?.syncAccentGridFromFrets() }
+            .store(in: &cancellables)
+
         // Rebuild the tanpura's JI slot grid on a scale/tonic change. Heavier
         // debounce than the tarab push — a tanpura build is ~seconds of CPU.
         tuning.didChange
@@ -930,6 +1085,13 @@ final class AppController: ObservableObject {
             .sink { [weak self] in self?.syncTanpuraFromScale() }
         .store(in: &cancellables)
         syncTanpuraFromScale()      // arm the drone voice on launch
+    }
+
+    /// Push the pad's fret pitches into the pitch accent (`ctl_fret_accent`).
+    private func syncAccentGridFromFrets() {
+        audio.setFretPitchGrid(FretPitchGrid(tonicHz: pitchPad.tonicHz,
+                                             arrangement: fretArrangement,
+                                             degrees: fretDegrees))
     }
 
     /// Last tuning pushed into the tanpura, for the unchanged-skip above.
@@ -1005,6 +1167,7 @@ final class AppController: ObservableObject {
     private func startScaleSync() {
         let triggers: [AnyPublisher<Void, Never>] = [
             tuning.didChange,
+            audio.$tarafBank.map { _ in () }.eraseToAnyPublisher(),
             pitchPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             fretPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             $fretArrangement.map { _ in () }.eraseToAnyPublisher(),
@@ -1054,6 +1217,7 @@ final class AppController: ObservableObject {
             link.send(event: .fretArrangement(
                 blob: FretArrangementSysEx.encodeBlob(fretArrangement)))
         }
+        link.send(event: .tarafBank(audio.tarafBank))
         // A freshly-linked iPad must also learn the JOYCON_STATE fields.
         joyConDisplay.resend()
     }
@@ -1104,7 +1268,7 @@ final class AppController: ObservableObject {
     static let paramCatalog: [(key: String, label: String,
                                lo: Double, hi: Double)] =
         ParamRegistry.all.map {
-            (key: $0.key, label: $0.label, lo: $0.lo, hi: $0.hi)
+            (key: $0.key, label: $0.qualifiedLabel, lo: $0.lo, hi: $0.hi)
         }
 
     static func paramInfo(_ key: String)
@@ -1169,7 +1333,7 @@ final class AppController: ObservableObject {
     /// Every tilt a given target is bound to — the Parameters tab's
     /// per-row mapping badge reads this.
     func tiltDimensions(for target: MapTarget) -> [InputDimension] {
-        ControlAxes.dims.filter { tiltMapping.isConnected(target, $0) }
+        ControlAxes.bindableDims.filter { tiltMapping.isConnected(target, $0) }
     }
 
     /// Bind a target to an axis over its full native range; endpoints are
@@ -1205,19 +1369,23 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// Set a binding's endpoints. `fromCenter` = flat at `lo` through the
-    /// resting half, sweeping to `hi` past neutral; off = plain linear.
-    func setTiltBinding(_ target: MapTarget, dim: InputDimension,
-                        lo: Double, hi: Double, fromCenter: Bool) {
+    /// Set a composite's resting value — what it reads with every bound
+    /// axis at rest; the bindings' swings add to it.
+    func setCompositeRest(slot: Int, _ rest: Double) {
         var m = tiltMapping
-        var pm = m.mapping(for: target)
-        pm.bindings.removeAll { $0.dimension == dim }
-        let pts = fromCenter
-            ? [ControlPoint(x: 0, y: lo), ControlPoint(x: 0.5, y: lo),
-               ControlPoint(x: 1, y: hi)]
-            : [ControlPoint(x: 0, y: lo), ControlPoint(x: 1, y: hi)]
-        pm.bindings.append(DimensionBinding(dimension: dim, controlPoints: pts))
-        m.mappings[target.storageKey] = pm
+        m.setRest(for: MapTarget(compositeSlot: slot),
+                  min(max(rest, 0.0), 1.0))
+        tiltMapping = m
+        if m.mapping(for: MapTarget(compositeSlot: slot)).isEmpty {
+            applyComposite(slot: slot, value: min(max(rest, 0), 1))
+        }
+    }
+
+    func setTiltOffsets(_ target: MapTarget, dim: InputDimension,
+                        lo: Double, hi: Double) {
+        guard let binding = tiltMapping.mapping(for: target).binding(for: dim) else { return }
+        var m = tiltMapping
+        m.setBinding(for: target, dimension: dim, to: binding.withOffsets(lo: lo, hi: hi))
         tiltMapping = m
     }
 
@@ -1247,15 +1415,21 @@ final class AppController: ObservableObject {
         p.instrument = sarangi.state
         p.paramValues = paramValues            // every parameter, one section
         p.fxCurves = fxEQCurves.isEmpty ? nil : fxEQCurves
+        p.bowAxisCurves = bowAxisCurves
         p.composites = composites
         p.tiltMapping = tiltMapping
         p.mainInstrument = mainInstrument.rawValue
         p.droneVoice = droneVoice.rawValue
+        p.droneSequence = droneSequenceSteps
         return p
     }
 
     /// Apply whatever sections `p` carries; missing sections are skipped.
     func applyPreset(_ p: TarabdaarPreset) {
+        if let curves = p.resolvedBowAxisCurves() {
+            bowAxisCurves = curves
+            applyBowAxisCurves()
+        }
         if let inst = p.instrument {
             sarangi.replaceState(inst)
         }
@@ -1278,6 +1452,7 @@ final class AppController: ObservableObject {
         }
         if let c = p.composites { composites = c }
         if let t = p.tiltMapping { tiltMapping = t }
+        if let steps = p.droneSequence { droneSequenceSteps = DroneSequence.normalized(steps) }
         if let m = p.mainInstrument,
            let inst = AudioEngine.MainInstrument(rawValue: m) {
             mainInstrument = inst
@@ -1297,6 +1472,7 @@ final class AppController: ObservableObject {
         tiltMapping = DimensionMapping.makeDefault()
         mainInstrument = .string
         droneVoice = .tanpura
+        droneSequenceSteps = DroneSequence.defaultSteps
     }
 
     // MARK: The preset library — no file panels

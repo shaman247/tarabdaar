@@ -115,22 +115,22 @@ struct LiveVisualizerView: View {
         }
     }
 
+    /// The link: which bearer the iPad's frames arrive on (USB or
+    /// Bluetooth) and the handshake over it.
     private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("MIDI INPUT")
+        let readout = LinkReadout(midi: midi, status: controller.linkStatus)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("LINK")
                 .font(.padCaption.weight(.bold))
                 .foregroundStyle(.secondary)
             HStack(spacing: 10) {
-                Image(systemName: midi.sourceCount > 0 ? "cable.connector"
-                                                       : "cable.connector.slash")
+                Image(systemName: readout.symbol)
                     .font(.system(size: 28))
-                    .foregroundStyle(midi.sourceCount > 0 ? .green : .secondary)
+                    .foregroundStyle(readout.color)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(midi.sourceCount > 0
-                         ? "\(midi.sourceCount) MIDI source(s)"
-                         : "No MIDI input")
+                    Text(readout.headline)
                         .font(.title3)
-                    Text(midi.statusMessage)
+                    Text(readout.detail)
                         .font(.padCaption)
                         .foregroundStyle(.secondary)
                 }

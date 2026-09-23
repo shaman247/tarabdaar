@@ -10,6 +10,8 @@ final class DroneStringTests: XCTestCase {
     /// between resolve and table build breaks the buttons silently.
     func testMappedFreqsResolveToJtRows() throws {
         let state = Presets.state(.sarangiPilu)
+        let tanpuraSlots = TanpuraVoiceSource.slotFrequencies(
+            tonicHz: state.tonicHz, scaleRatios: state.scaleRatios)
         let src = StringVoiceSource()
         guard let e = StringVoiceSource.buildEngine(
             tonicHz: state.tonicHz, strings: state.resolvedStrings,
@@ -20,6 +22,10 @@ final class DroneStringTests: XCTestCase {
             guard let hz else { return XCTFail("default slot unmapped") }
             XCTAssertNotNil(e.droneRow(forExactHz: hz),
                             "mapped string \(hz) Hz not found in the jt web")
+            for droneHz in [hz * 0.5, hz] {
+                XCTAssertTrue(tanpuraSlots.contains { abs(1200 * log2($0 / droneHz)) < 0.01 },
+                              "Tanpura drone \(droneHz) Hz has no slot in its selected register")
+            }
         }
     }
 

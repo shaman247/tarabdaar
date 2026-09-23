@@ -28,7 +28,7 @@ final class RebuildCostTests: XCTestCase {
         }
         src.setEngine(a, crossfadeMs: 0)
         mapper.setAxis(expr: 32.0 / 127.0)
-        mapper.touchOn(1, pitchSemis: 60, velocity: 100.0 / 127.0)
+        mapper.touchOn(1, pitchSemis: 60)
         // the size the app actually requests from CoreAudio
         let frames = Int(Config.preferredOutputBufferFrames)
         let budgetMs = Double(frames) / 48.0
@@ -61,9 +61,7 @@ final class RebuildCostTests: XCTestCase {
                           "the crossfade window overruns the realtime budget")
     }
 
-    /// Publishing a freshly built engine must be SILENT: the settle pre-roll
-    /// chokes the taraf while the discarded blocks render, so the publish peak
-    /// of two idling engines through the crossfade stays under −80 dBFS.
+    /// Fresh banks publish below −80 dBFS through the crossfade across tuning and bone offsets.
     func testPublishingAFreshEngineIsSilent() throws {
         func publishPeak(settle: Int) throws -> Double {
             let saved = StringVoiceSource.settleBlocks
@@ -88,21 +86,64 @@ final class RebuildCostTests: XCTestCase {
             }
             return peak
         }
-        let long = try publishPeak(settle: 6)        // a longer pre-roll
+        let long = try publishPeak(settle: 6)        // a longer minimum warmup
         let short = try publishPeak(settle: StringVoiceSource.settleBlocks)
         print(String(format: """
             PUBLISH CHIME (idle, through the crossfade)
-              6-block pre-roll   %.5f  (%.0f dBFS)
-              %d-block pre-roll   %.5f  (%.0f dBFS)
+              6-block minimum warmup   %.5f  (%.0f dBFS)
+              %d-block minimum warmup   %.5f  (%.0f dBFS)
             """,
             long, 20 * log10(max(long, 1e-9)),
             StringVoiceSource.settleBlocks, short,
             20 * log10(max(short, 1e-9))))
         XCTAssertLessThan(20 * log10(max(long, 1e-9)), -80,
-                          "even the longer pre-roll publishes audibly — the "
-                          + "settle is not choking the taraf")
+                          "the longer minimum warmup publishes above -80 dBFS")
         XCTAssertLessThan(20 * log10(max(short, 1e-9)), -80,
-                          "the shipped pre-roll publishes above -80 dBFS — "
-                          + "settleBlocks fell below what the choke needs")
+                          "the shipped minimum warmup publishes above -80 dBFS")
+        // Tuned banks and moved bones exercise both stationary preparation
+        // and the damped fallback. Measure each channel as well as the fold.
+        for tonic in [164.45, 328.9, 440.0] {
+            var state = Presets.state(.sarangiPilu)
+            state.tonicHz = tonic
+            for evolve in [0.0, 0.5, 1.0] {
+                let engine = try XCTUnwrap(StringVoiceSource.buildEngine(
+                    tonicHz: tonic, strings: state.resolvedStrings, mapper: BowControlMapper(),
+                    overrides: ["bow_jt_evolve": evolve, "bow_jtc_evolve": evolve]))
+                var l = [Double](repeating: 0, count: 4096), r = l
+                var peak = 0.0
+                for _ in 0..<6 {
+                    l.withUnsafeMutableBufferPointer { lp in
+                        r.withUnsafeMutableBufferPointer { rp in
+                            engine.render(frames: 4096, outL: lp.baseAddress!, outR: rp.baseAddress!)
+                        }
+                    }
+                    for i in l.indices {
+                        XCTAssertTrue(l[i].isFinite && r[i].isFinite)
+                        peak = max(peak, abs(l[i]), abs(r[i]), abs(l[i]+r[i]))
+                    }
+                }
+                XCTAssertLessThan(peak, 1e-4, "audible publish at \(tonic) Hz, evolve \(evolve)")
+            }
+        }
+    }
+
+    /// Settling consumes no held touch, and a rendered engine cannot be reinitialized.
+    func testBuildPreservesHeldTouch() throws {
+        let mapper = BowControlMapper()
+        mapper.setAxis(expr: 0.5, press: 0.56)
+        mapper.touchOn(1, pitchSemis: 64)
+        let engine = try XCTUnwrap(build(mapper: mapper))
+        XCTAssertNil(engine.settleForPublication())
+        var l = [Double](repeating: 0, count: 4096), r = l
+        var peak = 0.0
+        for _ in 0..<4 {
+            l.withUnsafeMutableBufferPointer { lp in
+                r.withUnsafeMutableBufferPointer { rp in
+                    engine.render(frames: 4096, outL: lp.baseAddress!, outR: rp.baseAddress!)
+                }
+            }
+            peak = max(peak, l.map { abs($0) }.max() ?? 0)
+        }
+        XCTAssertGreaterThan(peak, 1e-3, "the setup render consumed or discarded the held touch")
     }
 }

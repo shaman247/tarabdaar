@@ -14,7 +14,7 @@ import simd
 /// profile, the raw IOHID side-channel, the Switch 2 vendor GATT — and
 /// each parses its own wire format into the platform-neutral
 /// `JoyConReport`. `JoyConInput` is then a thin coordinator: it hands
-/// reports to `JoyConMapper` (button edges, stick deadband + calibration)
+/// reports to `JoyConMapper` (button edges, stick calibration + change gate)
 /// and `JoyConFusion` (attitude, wrist features, the acceleration axis),
 /// both in TarabdaarCore and unit-tested, and it owns everything the
 /// Setup panel draws plus the two guided `TiltCalibrator` flows. The
@@ -39,7 +39,9 @@ import simd
 /// the moment 0x07 is subscribed, so it is enabled only as the clone
 /// fallback after `altFallbackDelay` of silence — third-party clones
 /// (Mobacon) mimic the GATT, ignore 0x91 commands and stream report 0x07
-/// there with no handshake (`.bleAlt` reports; no IMU). ONE stick
+/// there with no handshake. NYXI Hyperion 3 Ultra instead multiplexes
+/// EA/8B input on the command-response characteristic; its own decoder
+/// feeds the same `.bleAlt` path (buttons and stick; no decoded IMU). ONE stick
 /// calibration is stored — recalibrate after switching generations.
 ///
 /// Handlers fire on the main queue; the host's funnels are thread-safe.
@@ -62,10 +64,12 @@ final class JoyConInput: ObservableObject {
     /// change-gated. Main thread.
     var onStickAxes: ((Double, Double) -> Void)?
     var onButton: ((_ control: Control, _ pressed: Bool) -> Void)?
-    /// WRIST display: the Joy-Con's fused attitude as three −1…+1 axes
-    /// (pitch/roll ±90° full scale, yaw wrapped ±180°) for the iPad's
-    /// wrist square. ~10 Hz, main thread; nil = fusion gone. Display only.
-    var onWristAttitude: (((Double, Double, Double)?) -> Void)?
+    /// WRIST display cluster for the iPad's bars: the wrist tilt (the
+    /// fused attitude — pitch/roll ±90° full scale, yaw wrapped ±180° —
+    /// or the solved wrist axes once calibrated), its rate and the
+    /// gravity-removed acceleration and its magnitude. ~30 Hz,
+    /// main thread; nil = fusion gone. Display only.
+    var onWristAttitude: ((JoyConWristMotion?) -> Void)?
     /// THE WRIST CONTROL AXES: wrist ↕, ↔, ⟲ (−1…+1, rest 0) from
     /// `wristCal` over the fused attitude — fires only while a wrist
     /// calibration exists; change-gated + quantized. Main thread.
@@ -74,15 +78,15 @@ final class JoyConInput: ObservableObject {
     /// the strike law + envelope, 0…1 (unipolar), change-gated at 1/256,
     /// every IMU packet. Main thread. 0 on detach.
     var onJoyConAccel: ((Double) -> Void)?
+    var onJoyConAccelReset: (() -> Void)?
 
     // Setup-tab monitor state. Written on the main queue; the stick and
     // raw-event fields are throttled to ~15 Hz (the control path is not).
     @Published private(set) var connectedName: String?
+    private var bleConnectedName: String?
     /// Raw stick, −1…+1 per axis.
     @Published private(set) var stickX = 0.0
     @Published private(set) var stickY = 0.0
-    /// True while the stick is outside the deadzone.
-    @Published private(set) var stickActive = false
     @Published private(set) var buttonsDown: Set<Control> = []
     /// The last raw element event, named by the OS.
     @Published private(set) var lastEvent = "—"
@@ -126,8 +130,8 @@ final class JoyConInput: ObservableObject {
     private let gc = JoyConGameControllerTransport()
     private let hid = JoyConHIDTransport()
     private let bleTransport = JoyConBLETransport()
-    /// The pure report → control mapping (button edges, stick deadband
-    /// and calibration). TarabdaarCore; `JoyConMapperTests` pins its laws.
+    /// The pure report → control mapping (button edges, stick calibration
+    /// and change gate). TarabdaarCore; `JoyConMapperTests` pins its laws.
     private let mapper = JoyConMapper()
     /// The orientation filter behind the wrist axes and the acceleration
     /// dimension. TarabdaarCore.
@@ -137,6 +141,8 @@ final class JoyConInput: ObservableObject {
     private var lastEventPublish: CFAbsoluteTime = 0
     private var lastIMUPublish: CFAbsoluteTime = 0
     private var lastFusedPublish: CFAbsoluteTime = 0
+    private var lastWristPublish: CFAbsoluteTime = 0
+    private static let wristPublishInterval = 1.0 / 30.0
     private var lastHIDPublish: CFAbsoluteTime = 0
     private static let calKey = "tarabdaar.joyconStickCal.v2"
 
@@ -148,9 +154,12 @@ final class JoyConInput: ObservableObject {
     let wristCal = TiltCalibrator(config: .wrist)
     private var calSinks: [AnyCancellable] = []
     private var lastArmMsgT: CFAbsoluteTime = 0
-    /// The latest calibrated wrist axes — the iPad's wrist square shows
+    /// The latest calibrated wrist axes — the iPad's wrist bars show
     /// these instead of the raw attitude once calibrated.
     private var lastWristAxes: (Double, Double, Double)?
+    /// d/dt of the displayed wrist tilt (the iPad's rate bars).
+    private var wristRate = DisplayRateTracker()
+    private var wristRateCalibrated = false
 
     init() {
         for cal in [armCal, wristCal] {
@@ -250,8 +259,11 @@ final class JoyConInput: ObservableObject {
         jcFusedActive = false
         onWristAttitude?(nil)
         lastWristAxes = nil
+        wristCal.resetInput()
+        wristRate.reset()
         joyConAccelLevel = 0
         if wasSendingAccel { onJoyConAccel?(0) }
+        onJoyConAccelReset?()
     }
 
     /// iPad raw accelerometer in (link receive queue) — display only.
@@ -284,9 +296,8 @@ final class JoyConInput: ObservableObject {
         }
         gc.onDetach = { [weak self] in
             guard let self else { return }
-            self.connectedName = nil
+            self.connectedName = self.bleConnectedName
             self.stickX = 0; self.stickY = 0
-            self.stickActive = false
             self.mapper.clearButtons(source: .gameController)
             self.buttonsDown = []
             self.lastEvent = "—"
@@ -325,12 +336,14 @@ final class JoyConInput: ObservableObject {
         bleTransport.onStatus = { [weak self] s in self?.bleStatus = s }
         bleTransport.onConnect = { [weak self] name in
             guard let self else { return }
+            self.bleConnectedName = name
             self.bleStatus = "connected — \(name)"
             NSLog("Tarabdaar: Joy-Con 2 connected over BLE — %@", name)
             if self.connectedName == nil { self.connectedName = name }
         }
         bleTransport.onDisconnect = { [weak self] in
             guard let self else { return }
+            self.bleConnectedName = nil
             self.deliver(self.mapper.release(source: .ble))
             self.deliver(self.mapper.release(source: .bleAlt))
             self.bleIMU = []
@@ -350,7 +363,7 @@ final class JoyConInput: ObservableObject {
     // MARK: The one report funnel
 
     /// Every bearer lands here (main thread): buttons through the mapper,
-    /// stick through the calibration + deadband law, IMU into the trails
+    /// stick through the calibration + change gate, IMU into the trails
     /// and — where the bearer fuses — the orientation filter.
     private func handle(_ r: JoyConReport) {
         if let update = r.buttons {
@@ -416,8 +429,7 @@ final class JoyConInput: ObservableObject {
         }
     }
 
-    /// The stick path → its two axes: gated, quantized (~9 bits),
-    /// change-gated — a held or centred stick is silent.
+    /// The stick axes, quantized (~9 bits) and sent whenever they change.
     private func handleStick(x: Double, y: Double) {
         // Throttled monitor publish; the rest position always lands.
         let now = CFAbsoluteTimeGetCurrent()
@@ -427,7 +439,6 @@ final class JoyConInput: ObservableObject {
             stickY = y
         }
         let out = mapper.gateStick(x: x, y: y)
-        if out.active != stickActive { stickActive = out.active }
         if let axes = out.axes { onStickAxes?(axes.x, axes.y) }
     }
 
@@ -554,27 +565,81 @@ final class JoyConInput: ObservableObject {
         jcAttitudeBuf.trim(before: now - Self.traceWindow)
         jcLinAccelBuf.trim(before: now - Self.traceWindow)
         gatePanels(fused: true)
-        if now - lastFusedPublish > 0.1 {
-            lastFusedPublish = now
-            let deg = 180.0 / .pi
-            fusedAttitude = [att.x * deg, att.y * deg, att.z * deg]
-            joyConAccelLevel = step.accelEnvelope
-            // Calibrated: the iPad's wrist square shows the SOLVED axes.
-            if wristCal.isCalibrated, let w = lastWristAxes {
-                onWristAttitude?(w)
-                return
-            }
-            // Raw display axes: pitch/roll ±90°, yaw wrapped ±180°, −1…+1.
+        // THE WRIST DISPLAY CLUSTER (the iPad's bars): the displayed tilt —
+        // the SOLVED axes once calibrated, else the raw attitude
+        // (pitch/roll ±90°, yaw wrapped ±180°) — differentiated every
+        // packet, with the linear acceleration and its magnitude (the
+        // combined bar — NOT the strike-law accel axis, whose 0.01–0.5 g log
+        // scale sits at 0.1 on rest noise); on the wire at ~30 Hz.
+        let tilt: SIMD3<Double>
+        let calibrated: Bool
+        if wristCal.isCalibrated, let w = lastWristAxes {
+            tilt = SIMD3(w.0, w.1, w.2)
+            calibrated = true
+        } else {
             func disp(_ rad: Double, fullScale: Double) -> Double {
                 min(max(rad / fullScale, -1), 1)
             }
             var yawWrapped = att.z.truncatingRemainder(dividingBy: 2 * .pi)
             if yawWrapped > .pi { yawWrapped -= 2 * .pi }
             if yawWrapped < -.pi { yawWrapped += 2 * .pi }
-            onWristAttitude?((disp(att.x, fullScale: .pi / 2),
-                              disp(att.y, fullScale: .pi / 2),
-                              disp(yawWrapped, fullScale: .pi)))
+            tilt = SIMD3(disp(att.x, fullScale: .pi / 2),
+                         disp(att.y, fullScale: .pi / 2),
+                         disp(yawWrapped, fullScale: .pi))
+            calibrated = false
         }
+        // The display jumps when a calibration lands or lifts — not a rate.
+        if calibrated != wristRateCalibrated {
+            wristRateCalibrated = calibrated
+            wristRate.reset()
+        }
+        let rate = wristRate.step(tilt, dt: step.dt, wrapZ: !calibrated)
+        if now - lastWristPublish > Self.wristPublishInterval {
+            lastWristPublish = now
+            let one = SIMD3<Double>(repeating: 1)
+            onWristAttitude?(JoyConWristMotion(
+                tilt: tilt,
+                rate: simd_clamp(rate / JoyConWristMotion.rateFullScale,
+                                 -one, one),
+                accel: simd_clamp(step.linearAccel
+                                      / JoyConWristMotion.accelFullScaleG,
+                                  -one, one),
+                accelLevel: min(simd_length(step.linearAccel)
+                                    / JoyConWristMotion.accelFullScaleG, 1)))
+        }
+        if now - lastFusedPublish > 0.1 {
+            lastFusedPublish = now
+            let deg = 180.0 / .pi
+            fusedAttitude = [att.x * deg, att.y * deg, att.z * deg]
+            joyConAccelLevel = step.accelEnvelope
+        }
+    }
+}
+
+// MARK: - DisplayRateTracker
+
+/// d/dt of a −1…+1 display vector, one finite difference per IMU packet,
+/// one-pole smoothed (τ 50 ms) so the bars read a flick rather than the
+/// packet jitter. A wrapped axis (`wrapZ`: the raw yaw at ±1) has its step
+/// unwrapped so the wrap is not a rate.
+private struct DisplayRateTracker {
+    private static let tau = 0.05
+    private var prev: SIMD3<Double>?
+    private(set) var rate = SIMD3<Double>.zero
+
+    mutating func step(_ v: SIMD3<Double>, dt: Double,
+                       wrapZ: Bool) -> SIMD3<Double> {
+        defer { prev = v }
+        guard let p = prev, dt > 0 else { return rate }
+        var d = v - p
+        if wrapZ, abs(d.z) > 1 { d.z -= d.z > 0 ? 2 : -2 }
+        rate += (d / dt - rate) * (1 - exp(-dt / Self.tau))
+        return rate
+    }
+
+    mutating func reset() {
+        prev = nil
+        rate = .zero
     }
 }
 

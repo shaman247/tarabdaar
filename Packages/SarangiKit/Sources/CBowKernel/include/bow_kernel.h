@@ -177,6 +177,9 @@ void bow_poly_jt_track_target(void *vst, double hz);
    set_damp_t60: extra decay as an amplitude t60 in s (<= 0 = off). */
 void bow_poly_jt_set_lp(void *vst, double a);
 void bow_poly_jt_set_damp_t60(void *vst, double t60);
+/* Build-only, before the first render/job: adopt an entire checked stationary
+   bank, or return 0 without changing it. Moving bones use the ordinary settle. */
+int bow_poly_jt_prepare_initial_state(void *vst);
 
 /* VOICE-RELATIVE CAP (`bow_jt_cap*`): each row's RADIATED output held at
    or below ratio × the voice bus's peak (instant attack, ~1.2 s-τ
@@ -254,6 +257,19 @@ void bow_poly_jt_set_couple(void *vst, double g);
    (BowEngine maps 0…1 → m). Clamped ±1e-3; 0 = byte-null. */
 void bow_poly_jt_set_evolve(void *vst, double meters);
 
+/* Row-local pluck gesture toward evolution=1, followed by exponential decay.
+   amount 0..1; attack 1..100 ms and decay 10..2000 ms, passed in SECONDS.
+   Captured at the next row tick; retrigger preserves the current bone lift.
+   Amount 0 is a no-op. Latest request wins before a tick. No allocation. */
+void bow_poly_jt_evolve_pulse(void *vst, int row, double amount,
+                             double attack, double decay);
+
+/* Row-local decaying sine force at the row's fundamental through the existing
+   0.90 L drive tap. Amplitude 0..0.3, decay 1..100 ms passed in SECONDS.
+   Finite after 12 time constants; starts at zero force, leaves modal history
+   intact. Atomic latest-wins onset mailbox; zero amplitude is a no-op. */
+void bow_poly_jt_excite(void *vst, int row, double amplitude, double decay);
+
 /* Per-row SIGNED bone offsets (m) ADDED to the lift, slewed ~40 ms — live
    form of `bow_jt_ev_reg`. Writes min(n, njt) rows, clamped ±1e-3; wakes a
    gated row whose target moves. Never calling / all-zeros = byte-null. */
@@ -277,6 +293,22 @@ void bow_poly_jt_drive_weights(void *vst, const double *w, int n);
 /* Radiated-gain multiplier on the jt output, slewed ~30 ms. Clamped
    [0, 4]; 1 / never calling = byte-null. Drone-setter contract. */
 void bow_poly_jt_set_gain_mul(void *vst, double m);
+/* Smoothed per-row radiation attenuation; missing rows restore unity. */
+void bow_poly_jt_profile_gains(void *vst, const double *gains, int n);
+/* Per-row output levels, outside feedback and before the cap; 40 ms slew.
+   immediate is init-only, before any rendering or worker activity. */
+void bow_poly_jt_output_levels(void *vst, const double *levels, int n, int immediate);
+
+/* BRIDGE DRIVE (`bow_jt_drive`): the scalar on the played strings' bridge
+   force into every row, slewed ~40 ms at the jt tick. Clamped [0, 1]; never
+   calling / re-pushing the build value = byte-null. Drone-setter contract. */
+void bow_poly_jt_set_drive(void *vst, double d);
+
+/* DRIVE LEVEL NORM (`bow_jt_drive_norm`): exponent of the output
+   compensation that keeps the drive's level in hand — 0 = raw physics,
+   1 = constant loudness, clamped [0, 1]. The compensation moves only while
+   the web is being charged. Moot at the build drive (byte-null). */
+void bow_poly_jt_set_drive_norm(void *vst, double g);
 
 /* LIVE PARAMETERS, no rebuild. set_scalars replaces the whole
    `bow_scalars_t` (the same derivations bow_poly_init applies), tables and
@@ -331,5 +363,23 @@ void bow_poly_set_drive_fx(void *vst, void (*fn)(void *ctx, double *buf, int n),
 void bow_poly_jt_inject_gain(void *vst, double g);
 void bow_poly_jt_inject_write(void *vst, const double *x, int n);
 void bow_poly_process3(void *vst, int n, int stride, const double *f0, const double *vb, const double *fb, const double *beta, const double *gate, const double *xv, double *out, double *outS, double *outJt, double *outJtS);
+
+/* Two-direction raga backend; multiple independently owned rows. Build before starting workers.
+   Takes ownership of contact ONLY on success. row is zero-based, must not be
+   the follower. Requires a 96 kHz jt tick and reference-coordinate contact
+   tables at BOW_JT_DUAL_CONTACT_RATE; that clock advances at fundamental_hz/561 times wall time.
+   Pluck displacement is in reference metres (physical displacement * ratio).
+   Return uses normal force only, before the fitted radiation FIR. */
+/* Reference-coordinate rate shared by the contact builder and row clock. */
+#define BOW_JT_DUAL_CONTACT_RATE 96000
+int bow_poly_jt_dual_load(void *vst,int row,void *contact,const double *pluck_tap,
+    int modes,double gain,double force_scale,double bank_norm,const double *fir,int taps,double fundamental_hz);
+void bow_poly_jt_dual_tone(void *vst,double hz);
+void bow_poly_jt_dual_selectivity(void *vst,double value);
+void bow_poly_jt_dual_bloom(void *vst,double value);
+void bow_poly_jt_dual_levels(void *vst,int row,double gain,double bank_norm);
+int bow_poly_jt_dual_pluck(void *vst,int row,double displacement);
+/* Snapshot: first row (or -1), summed failed steps/ticks, maximum Newton iterations. */
+void bow_poly_jt_dual_stats(void *vst,double *stats);
 
 #endif

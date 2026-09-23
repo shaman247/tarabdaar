@@ -22,7 +22,7 @@ final class TouchMapperTests: XCTestCase {
         let m = BowControlMapper()
         m.setSlotLimit(3)
         for n in [60, 64, 67] as [UInt16] {
-            m.touchOn(n, pitchSemis: Double(n), velocity: 0.8)
+            m.touchOn(n, pitchSemis: Double(n))
         }
         var s = snap(m)
         XCTAssertEqual(s.slots[0..<3].map(\.gate), [1.0, 1.0, 1.0])
@@ -30,7 +30,7 @@ final class TouchMapperTests: XCTestCase {
         XCTAssertEqual(s.slots[0].serial, 1)
 
         // no free slot, none released: the OLDEST sounding note is stolen
-        m.touchOn(71, pitchSemis: 71, velocity: 0.8)
+        m.touchOn(71, pitchSemis: 71)
         s = snap(m)
         XCTAssertEqual(s.slots[0].f0Target, f0(71))
         XCTAssertEqual(s.slots[0].serial, 2, "the stolen slot mounts a fresh string")
@@ -41,7 +41,7 @@ final class TouchMapperTests: XCTestCase {
         s = snap(m)
         XCTAssertEqual(s.slots[1].gate, 0.0)
         XCTAssertEqual(s.slots[1].f0Target, f0(64), "the bow lifts; the string rings on")
-        m.touchOn(72, pitchSemis: 72, velocity: 0.8)
+        m.touchOn(72, pitchSemis: 72)
         s = snap(m)
         XCTAssertEqual(s.slots[1].f0Target, f0(72))
         XCTAssertEqual(s.slots[1].gate, 1.0)
@@ -51,12 +51,45 @@ final class TouchMapperTests: XCTestCase {
         XCTAssertEqual(snap(m).slots[0..<3].map(\.gate), [0.0, 0.0, 0.0])
     }
 
+    /// Grace resumes the existing waveguide and sustain controls without a new attack edge.
+    func testResumeKeepsStringSerialAndSkipsAttack() {
+        let m = BowControlMapper()
+        m.setAttackSharpness(1)
+        m.touchOn(1, pitchSemis: 60)
+        let serial = snap(m).slots[0].serial
+        var filter = BowControlFilter(bp: BowedStringEngineTests.stringBP(), srk: 96000)
+        let buffers = (0..<5).map { _ in UnsafeMutablePointer<Double>.allocate(capacity: 256) }
+        defer { buffers.forEach { $0.deallocate() } }
+        func render() {
+            filter.fill(snapshot: m.snapshot(), n: 256, f0: buffers[0], vb: buffers[1],
+                        fb: buffers[2], beta: buffers[3], gate: buffers[4])
+        }
+        render()
+        m.touchOff(1)
+        XCTAssertEqual(snap(m).slots[0].gate, 0)
+        for _ in 0..<40 { render() }
+        XCTAssertTrue(m.touchResume(1))
+        m.touchGlide(1, pitchSemis: 64)
+        render()
+        let resumed = snap(m).slots[0]
+        XCTAssertEqual(resumed.serial, serial, "resume must not reset the kernel string")
+        XCTAssertEqual(resumed.f0Target, f0(64))
+        XCTAssertEqual(resumed.gate, 1)
+        XCTAssertEqual(filter.attackSharp, 0, "no onset bite")
+        XCTAssertGreaterThan(filter.placeClock, filter.placeS + filter.drawS,
+                             "no placement or draw restart")
+        m.touchOff(1)
+        m.touchOn(2, pitchSemis: 67) // steal the only slot
+        XCTAssertFalse(m.touchResume(1), "never revive a stolen string")
+        XCTAssertFalse(snap(m).slots[0].resuming, "fresh notes retain ordinary attacks")
+    }
+
     /// A retrigger on a live id releases the old string and mounts a new one.
     func testRetriggerOnALiveIdMountsAFreshString() {
         let m = BowControlMapper()
         m.setSlotLimit(4)
-        m.touchOn(7, pitchSemis: 60, velocity: 0.8)
-        m.touchOn(7, pitchSemis: 62, velocity: 0.8)     // same id, retrigger
+        m.touchOn(7, pitchSemis: 60)
+        m.touchOn(7, pitchSemis: 62)     // same id, retrigger
         let s = snap(m)
         XCTAssertEqual(s.slots[0].gate, 0.0, "the first string was not released")
         XCTAssertEqual(s.slots[0].f0Target, f0(60), "the released string moved")
@@ -69,8 +102,8 @@ final class TouchMapperTests: XCTestCase {
     func testGlideAndReleaseFollowTheTouchIdentity() {
         let m = BowControlMapper()
         m.setSlotLimit(4)
-        m.touchOn(1, pitchSemis: 60, velocity: 0.8)
-        m.touchOn(2, pitchSemis: 64, velocity: 0.8)
+        m.touchOn(1, pitchSemis: 60)
+        m.touchOn(2, pitchSemis: 64)
         m.touchGlide(1, pitchSemis: 61.5)
         var s = snap(m)
         XCTAssertEqual(s.slots[0].f0Target, f0(61.5))
@@ -85,8 +118,8 @@ final class TouchMapperTests: XCTestCase {
         // distinct ids at the SAME pitch keep distinct identities
         let n = BowControlMapper()
         n.setSlotLimit(4)
-        n.touchOn(1, pitchSemis: 60, velocity: 1.0)
-        n.touchOn(2, pitchSemis: 60, velocity: 1.0)
+        n.touchOn(1, pitchSemis: 60)
+        n.touchOn(2, pitchSemis: 60)
         n.touchOff(1)
         let t = snap(n)
         XCTAssertEqual(t.slots[0].gate, 0.0)

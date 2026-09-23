@@ -56,6 +56,33 @@ public enum RagaTuning {
         }
     }
 
+    /// Up to twelve scale strings: low Sa/Pa, upper Sa, then the main octave and repeats.
+    public static func buildSpecs(scaleRatios: [Double]) -> [StringSpec] {
+        guard !scaleRatios.isEmpty else { return [] }
+        let pa = scaleRatios.indices.min {
+            abs(log2(scaleRatios[$0]/1.5)) < abs(log2(scaleRatios[$1]/1.5))
+        } ?? 0
+        var candidates = [(0, -1), (pa, -1), (0, 1)]
+        for octave in [0, 1, -1, 2, -2] {
+            candidates += scaleRatios.indices.map { ($0, octave) }
+        }
+        var seen = Set<Double>(), rows = [StringSpec]()
+        for (degree, octave) in candidates where rows.count < 12 {
+            let ratio = scaleRatios[degree]*pow(2, Double(octave))
+            guard seen.insert(ratio).inserted else { continue }
+            rows.append(StringSpec(degree: degree, octave: octave, gain: 0.85, t60: 4.0))
+        }
+        return rows.sorted { $0.ratio(in: scaleRatios) < $1.ratio(in: scaleRatios) }
+    }
+
+    /// Both former layouts live on the chromatic bridge; scale references
+    /// remain scale references, fixed JI rows remain fixed JI rows.
+    public static func buildCombinedChromaticSpecs(scaleRatios: [Double]) -> [StringSpec] {
+        buildLegacySpecs(scaleRatios: scaleRatios).map { row in
+            var moved = row; moved.set = .chromatic; return moved
+        } + buildChromaticSpecs()
+    }
+
     /// JI swara ratios for a raga's semitone intervals (degrees from Sa).
     public static func ratios(forIntervals intervals: [Int]) -> [Double] {
         intervals.map { jiRatios[(($0 % 12) + 12) % 12] ?? 1.0 }
@@ -69,7 +96,7 @@ public enum RagaTuning {
     /// of a second. One string per pitch: a duplicate folds into its
     /// strongest twin (higher gain, then longer t60), and the result is
     /// pitch-sorted.
-    public static func buildSpecs(scaleRatios: [Double]) -> [StringSpec] {
+    public static func buildLegacySpecs(scaleRatios: [Double]) -> [StringSpec] {
         guard !scaleRatios.isEmpty else { return [] }
         let n = scaleRatios.count
         // Pa = the degree nearest 3/2; vadi = the 2nd-highest degree.

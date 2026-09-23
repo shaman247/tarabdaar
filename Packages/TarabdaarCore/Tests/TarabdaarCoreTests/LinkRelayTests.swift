@@ -1,12 +1,42 @@
 import XCTest
+import SarangiKit
 @testable import TarabdaarCore
 
 /// The Mac-side relay glue: the JOYCON_STATE display mirror's frame assembly
 /// and the debounced rebuild funnel.
 final class LinkRelayTests: XCTestCase {
 
-    /// An axis that has never reported reads as absent; axis motion is
-    /// link-paced while an acted-on field's edge goes out immediately.
+    /// The note readout follows pitch, includes per-note expression, and clears despite silent volume.
+    func testHighestNoteControlReadout() {
+        let mapper = BowControlMapper()
+        mapper.setSlotLimit(4)
+        mapper.setAxis(expr: 0.8, press: 0.6, pos: 0.3)
+        var sent: [TLPNoteControls] = []
+        let relay = VolumeMeterRelay(levels: { (0, 0) }, send: { _, _ in },
+            noteControls: { AudioEngine.noteControls(mapper: mapper) },
+            sendNoteControls: { sent.append($0) })
+        func poll() { for _ in 0..<4 { relay.tick() } }
+        poll()
+        XCTAssertTrue(sent.isEmpty)
+        mapper.touchOn(1, pitchSemis: 72, exprScale: 0.5)
+        mapper.touchOn(2, pitchSemis: 60, exprScale: 1)
+        poll()
+        XCTAssertEqual(sent.last, TLPNoteControls(expression: 0.4, pressure: 0.6, position: 0.3))
+        let count = sent.count
+        poll()
+        XCTAssertEqual(sent.count, count)
+        mapper.touchGlide(2, pitchSemis: 76)
+        poll()
+        XCTAssertEqual(sent.last, TLPNoteControls(expression: 0.8, pressure: 0.6, position: 0.3))
+        mapper.touchOff(2)
+        poll()
+        XCTAssertEqual(sent.last, TLPNoteControls(expression: 0.4, pressure: 0.6, position: 0.3))
+        mapper.touchOff(1)
+        poll()
+        XCTAssertEqual(sent.last, .idle)
+    }
+
+    /// The connected stick stays live at centre; motion is paced and acted-on edges send immediately.
     func testDisplayFrameReportsLivenessPerAxisGroup() {
         let relay = JoyConDisplayRelay()
         var sent: [(JoyConTiltDisplay, Bool)] = []
@@ -19,13 +49,16 @@ final class LinkRelayTests: XCTestCase {
         let idle = relay.frame()
         XCTAssertFalse(idle.bodyLive)
         XCTAssertFalse(idle.armLive)
-        XCTAssertFalse(idle.stickLive)
+        XCTAssertTrue(idle.stickLive)
         XCTAssertTrue(idle.connected)
         XCTAssertEqual(idle.strikeWindowS, 1.25, accuracy: 1e-12)
         XCTAssertEqual(idle.fieldWarp, 0.5, accuracy: 1e-12)
         XCTAssertEqual(idle.octaveShift, -2)
 
-        relay.setWrist((0.1, 0.2, 0.3))
+        relay.setWrist(JoyConWristMotion(tilt: SIMD3(0.1, 0.2, 0.3),
+                                         rate: SIMD3(-0.5, 0, 0.5),
+                                         accel: SIMD3(0.7, -0.8, 0.9),
+                                         accelLevel: 0.75))
         relay.setArm(0.4, 0.5, 0.6)
         relay.setStick(0.5, 0)
         let f = relay.frame()
@@ -33,6 +66,9 @@ final class LinkRelayTests: XCTestCase {
         XCTAssertTrue(f.armLive)
         XCTAssertTrue(f.stickLive)
         XCTAssertEqual(f.wrist3, 0.3, accuracy: 1e-12)
+        XCTAssertEqual(f.wristRate1, -0.5, accuracy: 1e-12)
+        XCTAssertEqual(f.accel2, -0.8, accuracy: 1e-12)
+        XCTAssertEqual(f.accelLevel, 0.75, accuracy: 1e-12)
         XCTAssertEqual(f.arm2, 0.5, accuracy: 1e-12)
         XCTAssertTrue(sent.first?.1 ?? false, "the first frame is immediate")
         XCTAssertFalse(sent.dropFirst().contains { $0.1 }, "axis pushes are link-paced")
@@ -42,12 +78,14 @@ final class LinkRelayTests: XCTestCase {
         relay.setStick(0.7, 0)
         XCTAssertFalse(sent.last?.1 ?? true, "and the next axis push is paced again")
 
-        // a stick inside the dead zone does not read as live
         let rest = JoyConDisplayRelay()
-        rest.setStick(0.03, -0.03)
         XCTAssertFalse(rest.frame().stickLive)
-        rest.setStick(0.03, -0.05)
+        rest.connected = { true }
         XCTAssertTrue(rest.frame().stickLive)
+        rest.setStick(0.03, -0.03)
+        XCTAssertTrue(rest.frame().stickLive)
+        rest.connected = { false }
+        XCTAssertFalse(rest.frame().stickLive)
     }
 
     /// A burst of rebuild-path values costs ONE flush, last value per key; an

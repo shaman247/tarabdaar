@@ -11,9 +11,8 @@ final class TLPCodecTests: XCTestCase {
         for i in 0..<touches {
             let pitch: Float = 60.0 + Float(i) * 1.01
             list.append(TLPTouch(id: UInt16(i * 7 + 1), onsetSeq: UInt8(i),
-                                 velocity: UInt8(200 - i),
                                  radius: UInt8(i * 3),   // v13: fingertip size
-                                 pitch: pitch))
+                                 pitch: pitch, fretPosition: UInt16(i * 6500)))
         }
         return TLPPerfState(
             flags: TLPPerfState.flagBackgrounded,
@@ -38,13 +37,22 @@ final class TLPCodecTests: XCTestCase {
                 arm3: 200, strikeWin: 40,        // v7: 2 s in 50 ms units
                 volVoice: 173, volTaraf: 91,     // v9: volume readout
                 fieldWarp: 201,                  // v10: fret pitch warp
-                octave: UInt8(bitPattern: -3))), // v11: octave shift (i8)
+                octave: UInt8(bitPattern: -3),   // v11: octave shift (i8)
+                wristRate1: 10, wristRate2: 128, wristRate3: 250,
+                accel1: 3, accel2: 129, accel3: 255,
+                accelLevel: 77,
+                noteControls: TLPNoteControls(active: true, expression: 255,
+                                              pressure: 127, position: 0))),
             .event(seq: 0, .hello(minVer: 1, maxVer: 1, role: .pad)),
             .event(seq: 1, .hello(minVer: 1, maxVer: 3, role: .host)),
             .event(seq: 999, .ping(id: 7, t1: 123_456)),
             .event(seq: 1000, .pong(id: 7, t1: 123_456, t2: 9_999_999)),
             .event(seq: 65535, .panic),
             .event(seq: 2, .resyncRequest),
+            .event(seq: 6, .tarafBank(.init(revision: 0xFEDCBA98, tonic: 261.63,
+                rows: [.init(id: 3, frequency: 561, flags: 1),
+                       .init(id: 0, frequency: 130.815), .init(id: 4, frequency: 220, flags: 2)]))),
+            .event(seq: 7, .tarafPluck(revision: 0xFEDCBA98, row: 3)),
             .event(seq: 3, .scaleState(blob: [])),
             .event(seq: 4, .scaleState(blob: Array(0...255))),
             .event(seq: 5, .fretArrangement(blob: [0xF0, 0x7F, 0x80, 0xFF, 0x00])),
@@ -60,24 +68,22 @@ final class TLPCodecTests: XCTestCase {
         }
     }
 
-    /// v13: the touch record's `radius` byte survives the round trip and
-    /// keeps the record at 9 bytes, and the points↔byte law is exact at
-    /// quarter-point steps (clamped at the ends).
+    /// Ten-byte touch records preserve radius and its quarter-point encoding.
     func testTouchRadiusRoundTrip() {
         let frame = TLPFrame.perfState(samplePerf(touches: 4))
         guard case .perfState(let back)? = TLPFrame.decode(frame.encode()) else {
             return XCTFail("perf state did not decode")
         }
         XCTAssertEqual(back.touches.map(\.radius), [0, 3, 6, 9])
-        // header (1+1+2+4 + 6·2 + 1+1+1+1 + 1 = 25) + 9 per touch
-        XCTAssertEqual(frame.encode().count, 25 + 4 * 9)
+        // header (1+1+2+4 + 6·2 + 1+1+1+1 + 1 = 25) + 10 per touch
+        XCTAssertEqual(frame.encode().count, 25 + 4 * 10)
 
         XCTAssertEqual(TLPTouch.radiusByte(points: 0), 0)
         XCTAssertEqual(TLPTouch.radiusByte(points: -3), 0)
         XCTAssertEqual(TLPTouch.radiusByte(points: 5.25), 21)
         XCTAssertEqual(TLPTouch.radiusByte(points: 1000), 255)
         XCTAssertEqual(TLPTouch.radiusPoints(21), 5.25, accuracy: 1e-12)
-        XCTAssertEqual(TLPTouch(id: 1, onsetSeq: 0, velocity: 0,
+        XCTAssertEqual(TLPTouch(id: 1, onsetSeq: 0,
                                 radius: 92, pitch: 60).radiusPoints,
                        23.0, accuracy: 1e-12)
     }

@@ -45,6 +45,8 @@
 		C100005D /* Views/JoyConStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C200005D /* Views/JoyConStatusView.swift */; };
 		E1000001 /* TarabdaarCore in Frameworks */ = {isa = PBXBuildFile; productRef = E2000001 /* TarabdaarCore */; };
 		E1000002 /* TarabdaarCore in Frameworks */ = {isa = PBXBuildFile; productRef = E2000002 /* TarabdaarCore */; };
+		C1000064 /* Views/PerformanceProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000064 /* Views/PerformanceProfileView.swift */; };
+		C1000065 /* Views/BowTransformsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000065 /* Views/BowTransformsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -87,6 +89,8 @@
 		C2000063 /* JoyConBLE.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoyConBLE.swift; sourceTree = "<group>"; };
 		C200005D /* Views/JoyConStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/JoyConStatusView.swift; sourceTree = "<group>"; };
 		C3000001 /* TarabdaarMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TarabdaarMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C2000064 /* Views/PerformanceProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/PerformanceProfileView.swift; sourceTree = "<group>"; };
+		C2000065 /* Views/BowTransformsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/BowTransformsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -164,6 +168,8 @@
 				C200005E /* Views/ScopeView.swift */,
 				C200005F /* Views/TarafScopeView.swift */,
 				C2000060 /* Views/BodyView.swift */,
+				C2000064 /* Views/PerformanceProfileView.swift */,
+				C2000065 /* Views/BowTransformsView.swift */,
 				C200000E /* CoreAudioDevices.swift */,
 				C200000F /* Views/MIDISettingsView.swift */,
 				C2000010 /* Assets.xcassets */,
@@ -321,6 +327,8 @@
 				C100005E /* Views/ScopeView.swift in Sources */,
 				C100005F /* Views/TarafScopeView.swift in Sources */,
 				C1000060 /* Views/BodyView.swift in Sources */,
+				C1000064 /* Views/PerformanceProfileView.swift in Sources */,
+				C1000065 /* Views/BowTransformsView.swift in Sources */,
 				C100000E /* CoreAudioDevices.swift in Sources */,
 				C100000F /* Views/MIDISettingsView.swift in Sources */,
 				C1000012 /* Views/PresetToolbar.swift in Sources */,

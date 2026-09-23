@@ -42,13 +42,13 @@ enum BusPhrase {
         src.mapper.setAxis(expr: 40.0 / 127.0)
         var out: [Float] = []
         var t = 0.0
-        /// `(at, id, pitch?, velocity)` — a non-nil pitch is a touch-on,
+        /// `(at, id, pitch?)` — a non-nil pitch is a touch-on,
         /// nil is the release of that id.
-        let events: [(Double, UInt16, Double?, Double)] = [
-            (0.05, 1, 64.0, 100.0 / 127.0),
-            (0.60, 2, 71.0, 90.0 / 127.0),
-            (1.10, 1, nil, 0),
-            (1.50, 2, nil, 0),
+        let events: [(Double, UInt16, Double?)] = [
+            (0.05, 1, 64.0),
+            (0.60, 2, 71.0),
+            (1.10, 1, nil),
+            (1.50, 2, nil),
         ]
         var next = 0
         var mid: (voice: Double, taraf: Double) = (0, 0)
@@ -57,7 +57,7 @@ enum BusPhrase {
             while next < events.count, events[next].0 <= t {
                 let e = events[next]
                 if let pitch = e.2 {
-                    src.mapper.touchOn(e.1, pitchSemis: pitch, velocity: e.3)
+                    src.mapper.touchOn(e.1, pitchSemis: pitch)
                 } else {
                     src.mapper.touchOff(e.1)
                 }

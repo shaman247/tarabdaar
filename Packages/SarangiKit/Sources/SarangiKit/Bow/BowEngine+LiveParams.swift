@@ -5,6 +5,25 @@ import CBowKernel
 // the chunk-rate scalar/gain ramp that adopts it, in-place coefficient
 // reloads, and the tone-tilt axis.
 extension BowEngine {
+    /// Curves arrive precomputed; the render thread adopts them at the next chunk.
+    public func setAxisTransforms(_ transforms: [BowAxis: BowAxisTransform]) {
+        os_unfair_lock_lock(&tiltLock)
+        pendingAxisTransforms = transforms
+        os_unfair_lock_unlock(&tiltLock)
+    }
+
+    /// Adopt before filling control arrays so a freshly published engine uses the saved curve immediately.
+    func applyPendingAxisTransforms() {
+        os_unfair_lock_lock(&tiltLock)
+        let curves = pendingAxisTransforms
+        pendingAxisTransforms = nil
+        os_unfair_lock_unlock(&tiltLock)
+        guard let curves else { return }
+        axisTransforms = curves
+        for i in filters.indices { filters[i].setAxisTransforms(curves) }
+        filter.setAxisTransforms(curves)
+    }
+
     /// Seed the gain ramp from the engine's output settings; called once
     /// the host has assigned `outGain` after init.
     public func seedLiveGains() {
@@ -110,8 +129,12 @@ extension BowEngine {
                 b.baseAddress, G.baseAddress, G4.baseAddress,
                 gd.baseAddress, gd4.baseAddress, phys.baseAddress)
             if ok == 1 {
+                bow_poly_jt_output_levels(st, jt.rowOutputLevel, Int32(jt.rowOutputLevel.count), 0)
                 // the per-row contact law and the per-bridge evolve map
                 // follow the reloaded tables (`bow_jt_apex`)
+                for row in jtDualRows where jt.rowOutputGain.indices.contains(row) {
+                    bow_poly_jt_dual_levels(st, Int32(row), jt.rowOutputGain[row], jt.rowCouplingNorm)
+                }
                 jtRowChromatic = jt.rowChromatic
                 jtRowApex = jt.rowApex
                 jtHasChromatic = jt.hasChromatic
@@ -184,6 +207,11 @@ extension BowEngine {
             limRelCoef = OnePole.coefficient(
                 tau: max(bp.v("bow_lim_rel_ms", 150.0), 5.0) * 0.001, sr: sr)
             liveRamping = true
+        }
+
+        if pending != nil {
+            for i in filters.indices { filters[i].setAxisTransforms(axisTransforms) }
+            filter.setAxisTransforms(axisTransforms)
         }
 
         // Gains can ramp before any scalar push has happened (master gain on

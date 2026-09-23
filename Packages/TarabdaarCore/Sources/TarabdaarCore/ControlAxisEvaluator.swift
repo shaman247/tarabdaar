@@ -7,15 +7,22 @@ import Foundation
 ///
 /// It owns three things:
 ///
-///  * **the per-axis binding snapshot** — `DimensionMapping` flattened to
-///    `[axis][(target, binding)]` under its own lock, so the link and
+///  * **the swing law and its binding snapshot** — every target reads
+///    `rest + Σ swing_i`, clamped: the target's resting value (a
+///    composite's `ParameterMapping.defaultValue`, a parameter's resting
+///    store value) plus each bound curve's offset (`DimensionBinding.swing`).
+///    Several axes on one target add instead of overwriting each other;
+///    a one-way axis at zero input contributes its first edited offset.
+///    The snapshot (`DimensionMapping` flattened per target,
+///    the last curve-x per axis) lives under its own lock, so the link and
 ///    CoreMIDI threads never touch the `@Published` mapping;
 ///  * **the strike→acceleration blend** — the `.strike` / `.acceleration`
 ///    pair share ONE measurement and are evaluated JOINTLY (never through
-///    `applyAxis`, which would double-apply): per target
-///    `(1−w)·strike + w·accel` with `w` from `StrikeBlendWindow`, plus the
-///    30 Hz weight timer that keeps the ramp moving while the measurement
-///    is still;
+///    `applyAxis`, which would double-apply): their contribution to a
+///    target's sum is `(1−w)·swing_strike + w·swing_accel` with `w` from
+///    `StrikeBlendWindow` (an unbound side swings 0), plus the 30 Hz
+///    weight timer that keeps the ramp moving while the measurement is
+///    still;
 ///  * **the `.fingerAccel` and `.touchSize` dimensions** — ONE
 ///    sounding-touch registry (two lanes: the wire and the local pump, so
 ///    their u16 id spaces cannot collide) carrying each touch's latest
@@ -48,14 +55,11 @@ public final class ControlAxisEvaluator {
         ControlAxes.dims.firstIndex(of: .acceleration)!
     public static let fingerAxisIndex =
         ControlAxes.dims.firstIndex(of: .fingerAccel)!
+    public static let fretPositionAxisIndex =
+        ControlAxes.dims.firstIndex(of: .fretPosition)!
     /// TOUCH SIZE — UNIPOLAR 0…1, driven as `2·level − 1` like `.jcAccel`.
     public static let touchSizeAxisIndex =
         ControlAxes.dims.firstIndex(of: .touchSize)!
-    /// THE JOY-CON WRIST AXES ↕/↔/⟲ (bipolar).
-    public static let wristAxisIndices = (
-        ControlAxes.dims.firstIndex(of: .tilt4)!,
-        ControlAxes.dims.firstIndex(of: .wrist2)!,
-        ControlAxes.dims.firstIndex(of: .wrist3)!)
     /// Joy-Con Accel — UNIPOLAR 0…1, the caller maps it as `2·level − 1`.
     public static let jcAccelAxisIndex =
         ControlAxes.dims.firstIndex(of: .jcAccel)!
@@ -66,27 +70,86 @@ public final class ControlAxisEvaluator {
     /// composites / parameters and funnels the rebuild-path values.
     public var onApply: ([Application]) -> Void = { _ in }
 
-    /// The registry default for a parameter target — what an UNBOUND side
-    /// of the strike pair reads.
-    public var paramDefault: (String) -> Double = { _ in 0 }
+    /// A parameter target's RESTING value (the owner's store value, native
+    /// units) — resolved on the caller's thread when the mapping is
+    /// snapshotted; later changes arrive through `setParamRest`.
+    public var paramRest: (String) -> Double = { _ in 0 }
 
     // MARK: Binding snapshot
 
-    private let bindLock = NSLock()
-    private var byAxis: [[(target: MapTarget, binding: DimensionBinding)]] =
-        Array(repeating: [], count: ControlAxes.dims.count)
+    /// One target's bound curves: the plain axes by index, the strike pair
+    /// apart (they blend), the rest the swings add to, and the clamp
+    /// (the target's range widened to any endpoint drawn outside it).
+    private struct TargetBindings {
+        var rest: Double
+        var bounds: ClosedRange<Double>
+        var plain: [(axis: Int, binding: DimensionBinding)] = []
+        var strike: DimensionBinding?
+        var accel: DimensionBinding?
+    }
 
-    /// Last value per iPad wire axis (CoreMIDI thread only) — duplicate-drop
-    /// for the uncalibrated passthrough.
-    private var lastRawArmTilt: [Double?] = [nil, nil, nil]
+    private let bindLock = NSLock()
+    private var targets: [MapTarget: TargetBindings] = [:]
+    /// The targets bound on each axis (strike pair axes included, for the
+    /// blend's gating).
+    private var axisTargets: [[MapTarget]] =
+        Array(repeating: [], count: ControlAxes.dims.count)
+    /// The last curve-x per axis — rest until the axis is first driven.
+    private var axisX: [Double] = ControlAxes.dims.map(\.restX)
+    /// Change gate per target (cleared on every mapping edit).
+    private var lastOut: [MapTarget: Double] = [:]
+    public enum TiltSource { case iPad, controller }
+    private var controllerConnected = false
+    private var iPadTilt = SIMD3<Double>.zero
+    private var controllerTilt = SIMD3<Double>.zero
+
+    /// Connection edges immediately select all three cached axes together.
+    public func setControllerConnected(_ connected: Bool) {
+        let (m, w) = strikeState()
+        bindLock.lock()
+        guard connected != controllerConnected else { bindLock.unlock(); return }
+        controllerConnected = connected
+        if !connected { controllerTilt = .zero }
+        let apps = applySelectedTiltLocked(strikeM: m, strikeW: w)
+        bindLock.unlock()
+        if !apps.isEmpty { onApply(apps) }
+    }
+
+    /// Calibrations keep feeding independent caches while only the selected source plays.
+    public func applyTilt(_ source: TiltSource, _ values: SIMD3<Double>) {
+        let (m, w) = strikeState()
+        bindLock.lock()
+        switch source {
+        case .iPad: iPadTilt = values
+        case .controller: controllerTilt = values
+        }
+        let active = (source == .controller) == controllerConnected
+        let apps = active ? applySelectedTiltLocked(strikeM: m, strikeW: w) : []
+        bindLock.unlock()
+        if !apps.isEmpty { onApply(apps) }
+    }
+
+    private func applySelectedTiltLocked(strikeM m: Measurements,
+                                         strikeW w: Double) -> [Application] {
+        let values = controllerConnected ? controllerTilt : iPadTilt
+        var affected: Set<MapTarget> = []
+        for axis in 0..<3 {
+            axisX[axis] = (min(max(values[axis], -1), 1) + 1) / 2
+            affected.formUnion(axisTargets[axis])
+        }
+        return changedLocked(affected, strikeM: m, strikeW: w)
+    }
 
     // MARK: Strike blend state
 
     private let strikeLock = NSLock()
     private var strikeWindow = StrikeBlendWindow(windowS: 2.0)
     private var strikeMeasure = 0.0        // last wire value 0…1
-    private var lastBlendOut: [MapTarget: Double] = [:]
     private var strikeTimer: DispatchSourceTimer?
+    private var ipadSmoothing = AccelerationSmoother()
+    private var joyConSmoothing = AccelerationSmoother()
+    private let now: () -> TimeInterval
+    private typealias Measurements = (strike: Double, accel: Double, joyCon: Double)
 
     // MARK: Finger-accel state
 
@@ -102,11 +165,14 @@ public final class ControlAxisEvaluator {
 
     private var sizeTracker = TouchSizeTracker()
     private var touchRadiusPt: [Int: Double] = [:]
+    private var touchFretPositions: [Int: Double] = [:]
     private var sizeLast = 0.0
     private var sizeActive = false
     private var sizeTimer: DispatchSourceTimer?
 
-    public init() {}
+    public init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.now = now
+    }
 
     deinit {
         strikeTimer?.cancel()
@@ -116,33 +182,51 @@ public final class ControlAxisEvaluator {
 
     // MARK: - Bindings
 
-    /// Re-snapshot the per-axis bindings and re-arm the three auxiliary
+    /// Re-snapshot the bindings per target (resolving each parameter
+    /// target's rest through `paramRest` here, on the caller's thread), clear
+    /// the change gate (an edit must re-apply) and re-arm the three auxiliary
     /// timers (blend weight, finger decay, touch-size estimate). Call on every
     /// mapping edit.
     public func setMapping(_ mapping: DimensionMapping) {
-        var snapshot: [[(target: MapTarget, binding: DimensionBinding)]] =
+        var snapshot: [MapTarget: TargetBindings] = [:]
+        var byAxis: [[MapTarget]] =
             Array(repeating: [], count: ControlAxes.dims.count)
         for target in mapping.boundTargets {
+            let pm = mapping.mapping(for: target)
+            let range = target.defaultRange
+            var lo = min(range.0, range.1), hi = max(range.0, range.1)
+            var tb = TargetBindings(
+                rest: target.paramKey.map(paramRest) ?? pm.defaultValue,
+                bounds: lo...hi)
             for (axis, dim) in ControlAxes.dims.enumerated() {
-                if let b = mapping.mapping(for: target).binding(for: dim) {
-                    snapshot[axis].append((target, b))
+                guard let b = pm.binding(for: dim) else { continue }
+                byAxis[axis].append(target)
+                for pt in b.controlPoints {
+                    lo = min(lo, pt.y); hi = max(hi, pt.y)
+                }
+                switch axis {
+                case Self.strikeAxisIndex: tb.strike = b
+                case Self.accelAxisIndex:  tb.accel = b
+                default: tb.plain.append((axis, b))
                 }
             }
+            tb.bounds = lo...hi
+            snapshot[target] = tb
         }
         bindLock.lock()
-        byAxis = snapshot
+        targets = snapshot
+        axisTargets = byAxis
+        lastOut.removeAll()
         bindLock.unlock()
-        // Strike/accel blend: clear the change gate (an edit must re-apply)
-        // and run the weight timer only while the pair has bindings.
-        let strikeActive = !(snapshot[Self.strikeAxisIndex].isEmpty
-                             && snapshot[Self.accelAxisIndex].isEmpty)
-        strikeLock.lock()
-        lastBlendOut.removeAll()
-        strikeLock.unlock()
+        // Strike/accel blend: run the weight timer only while the pair has
+        // bindings.
+        let strikeActive = !(byAxis[Self.strikeAxisIndex].isEmpty
+                             && byAxis[Self.accelAxisIndex].isEmpty
+                             && byAxis[Self.jcAccelAxisIndex].isEmpty)
         updateStrikeTimer(active: strikeActive)
         // Finger-accel: track/tick only while bound; a fresh binding starts
         // from a clean tracker.
-        let fingerBound = !snapshot[Self.fingerAxisIndex].isEmpty
+        let fingerBound = !byAxis[Self.fingerAxisIndex].isEmpty
         fingerLock.lock()
         if fingerBound != fingerActive {
             fingerTracker.reset()
@@ -154,7 +238,7 @@ public final class ControlAxisEvaluator {
         // Touch size: same gate — a fresh binding starts from a rested
         // ramp, and the tick runs while bound so the limiter keeps moving
         // between (and after) wire frames.
-        let sizeBound = !snapshot[Self.touchSizeAxisIndex].isEmpty
+        let sizeBound = !byAxis[Self.touchSizeAxisIndex].isEmpty
         fingerLock.lock()
         if sizeBound != sizeActive {
             sizeTracker.reset()
@@ -165,47 +249,142 @@ public final class ControlAxisEvaluator {
         updateSizeTimer(active: sizeBound)
     }
 
-    /// The bindings snapshotted for one axis (test/introspection).
-    public func bindings(forAxis axis: Int)
-        -> [(target: MapTarget, binding: DimensionBinding)] {
-        guard axis >= 0, axis < ControlAxes.dims.count else { return [] }
+    public func reapply() {
+        // Edits must be audible even when a change-gated input is stationary.
+        let (m, w) = strikeState()
         bindLock.lock()
-        defer { bindLock.unlock() }
-        return byAxis[axis]
+        let apps = changedLocked(Array(targets.keys), strikeM: m, strikeW: w)
+        bindLock.unlock()
+        if !apps.isEmpty { onApply(apps) }
+    }
+
+    /// A parameter's resting store value changed (main, where the store is
+    /// written): re-anchor its bindings' sum and re-evaluate.
+    public func setParamRest(_ key: String, _ rest: Double) {
+        let target = MapTarget(paramKey: key)
+        let (m, w) = strikeState()
+        bindLock.lock()
+        guard targets[target] != nil else { bindLock.unlock(); return }
+        targets[target]!.rest = rest
+        // The owner's knob path has already applied the base to the voice.
+        // Restore the combined value even if saturation kept it unchanged.
+        lastOut.removeValue(forKey: target)
+        let apps = changedLocked([target], strikeM: m, strikeW: w)
+        bindLock.unlock()
+        if !apps.isEmpty { onApply(apps) }
+    }
+
+    // MARK: - The swing law
+
+    /// One target under `bindLock`: `rest + Σ swing(axis x)` over the plain
+    /// bindings, plus the strike pair's blended swing, clamped.
+    private func evaluateLocked(_ target: MapTarget, _ tb: TargetBindings,
+                                strikeM m: Measurements, strikeW w: Double) -> Double {
+        var v = tb.rest
+        for (axis, b) in tb.plain {
+            v += b.swing(atX: axis == Self.jcAccelAxisIndex ? m.joyCon : axisX[axis])
+        }
+        if tb.strike != nil || tb.accel != nil {
+            let s = tb.strike?.swing(atX: m.strike) ?? 0.0
+            let a = tb.accel?.swing(atX: m.accel) ?? 0.0
+            v += (1.0 - w) * s + w * a
+        }
+        return min(max(v, tb.bounds.lowerBound), tb.bounds.upperBound)
+    }
+
+    /// Evaluate the given targets under `bindLock`, returning only those
+    /// whose value moved (the per-target change gate).
+    private func changedLocked<S: Sequence>(_ ts: S, strikeM m: Measurements,
+                                            strikeW w: Double) -> [Application]
+        where S.Element == MapTarget {
+        var out: [Application] = []
+        for t in ts {
+            guard let tb = targets[t] else { continue }
+            let v = evaluateLocked(t, tb, strikeM: m, strikeW: w)
+            if let prev = lastOut[t], abs(prev - v) < 1e-9 { continue }
+            lastOut[t] = v
+            out.append((t, v))
+        }
+        return out
+    }
+
+    /// The strike pair's shared inputs: the measurement and the blend
+    /// weight now.
+    private func strikeState() -> (Measurements, Double) {
+        strikeLock.lock()
+        defer { strikeLock.unlock() }
+        let t = now()
+        return ((strikeMeasure, ipadSmoothing.value(at: t), joyConSmoothing.value(at: t)),
+                strikeWindow.weight(at: t))
     }
 
     // MARK: - Axis drive
 
-    /// Apply one control-axis value (−1…+1, rest 0 ↔ curve x 0…1): every
-    /// bound target is evaluated in native units and emitted as one batch.
-    /// Off-main; downstream is thread-safe.
-    public func applyAxis(_ axis: Int, _ value: Double) {
-        guard axis >= 0, axis < ControlAxes.dims.count else { return }
-        bindLock.lock()
-        let bindings = byAxis[axis]
-        bindLock.unlock()
-        let curveX = (value + 1) / 2                     // −1…+1 → curve 0…1
-        onApply(bindings.map { ($0.target, $0.binding.evaluate(curveX)) })
+    private static let stickIndices = ControlAxes.stickDimensions.map {
+        ControlAxes.dims.firstIndex(of: $0)!
     }
 
-    /// The iPad's raw (uncalibrated) arm axes 0–2, duplicate-dropped.
-    /// CoreMIDI thread only, like the value it drops against.
+    /// Update all four directions before emitting, including when crossing the centre.
+    public func applyStick(x: Double, y: Double) {
+        let levels = [max(0, -x), max(0, x), max(0, y), max(0, -y)]
+        let (m, w) = strikeState()
+        bindLock.lock()
+        var affected: [MapTarget] = []
+        for (axis, level) in zip(Self.stickIndices, levels) {
+            axisX[axis] = min(level, 1)
+            for target in axisTargets[axis] where !affected.contains(target) {
+                affected.append(target)
+            }
+        }
+        let apps = changedLocked(affected, strikeM: m, strikeW: w)
+        bindLock.unlock()
+        if !apps.isEmpty { onApply(apps) }
+    }
+
+    /// Apply one control-axis value (−1…+1, rest 0 ↔ curve x 0…1): the
+    /// axis' new x is stored and every target bound on it is re-summed in
+    /// native units and emitted as one batch. The strike pair's axes are
+    /// refused here (they blend through `evaluateStrikeBlend`). Off-main;
+    /// downstream is thread-safe.
+    public func applyAxis(_ axis: Int, _ value: Double) {
+        guard axis >= 0, axis < ControlAxes.dims.count,
+              axis != Self.strikeAxisIndex, axis != Self.accelAxisIndex
+        else { return }
+        if axis == Self.jcAccelAxisIndex {
+            strikeLock.lock()
+            joyConSmoothing.setInput((value + 1) / 2, at: now())
+            strikeLock.unlock()
+            evaluateStrikeBlend()
+            return
+        }
+        let x = (value + 1) / 2                          // −1…+1 → curve 0…1
+        let (m, w) = strikeState()
+        bindLock.lock()
+        axisX[axis] = x
+        let apps = changedLocked(axisTargets[axis], strikeM: m, strikeW: w)
+        bindLock.unlock()
+        if !apps.isEmpty { onApply(apps) }
+    }
+
+    /// Uncalibrated iPad passthrough shares the same source selection and cache.
     public func applyRawArmAxis(_ axis: Int, _ value: Double) {
-        guard axis >= 0, axis < lastRawArmTilt.count,
-              lastRawArmTilt[axis] != value else { return }
-        lastRawArmTilt[axis] = value
-        applyAxis(axis, value)
+        guard (0..<3).contains(axis) else { return }
+        let (m, w) = strikeState()
+        bindLock.lock()
+        iPadTilt[axis] = value
+        let apps = controllerConnected ? [] : applySelectedTiltLocked(strikeM: m, strikeW: w)
+        bindLock.unlock()
+        if !apps.isEmpty { onApply(apps) }
     }
 
     // MARK: - The strike → acceleration pair
 
     /// The blend window length, `ctl_strike_window` (clamped ≥ 50 ms).
-    /// Anchors survive the change — only the ramp length moves — and the
-    /// change gate is cleared so the next evaluation re-applies.
+    /// Anchors survive the change — only the ramp length moves; the next
+    /// evaluation re-applies whatever it changes.
     public func setStrikeWindow(_ seconds: Double) {
         strikeLock.lock()
         strikeWindow.windowS = max(seconds, 0.05)
-        lastBlendOut.removeAll()
         strikeLock.unlock()
     }
 
@@ -220,46 +399,52 @@ public final class ControlAxisEvaluator {
     public func setStrikeMeasure(_ v: Double) {
         strikeLock.lock()
         strikeMeasure = v
+        ipadSmoothing.setInput(v, at: now())
         strikeLock.unlock()
         evaluateStrikeBlend()
     }
 
-    /// Evaluate the pair: for every target bound on EITHER dimension,
-    /// (1−w)·strikeOut + w·accelOut, an unbound side reading the target's
-    /// DEFAULT. Change-gated per target. Link thread + blend timer.
+    /// Re-sum every target bound on EITHER side of the pair with the
+    /// current measurement and weight (the pair's swing is
+    /// (1−w)·swing_strike + w·swing_accel, an unbound side 0). Change-gated
+    /// per target. Link thread + blend timer.
     public func evaluateStrikeBlend() {
+        let (m, w) = strikeState()
         bindLock.lock()
-        let sBind = byAxis[Self.strikeAxisIndex]
-        let aBind = byAxis[Self.accelAxisIndex]
-        bindLock.unlock()
-        guard !sBind.isEmpty || !aBind.isEmpty else { return }
-        var sBy: [MapTarget: DimensionBinding] = [:]
-        for (t, b) in sBind { sBy[t] = b }
-        var aBy: [MapTarget: DimensionBinding] = [:]
-        for (t, b) in aBind { aBy[t] = b }
-        func defaultOut(_ t: MapTarget) -> Double {
-            switch t.kind {
-            case .composite: return 0.0    // composite rest convention
-            case .param(let key): return paramDefault(key)
-            }
+        var ts = axisTargets[Self.strikeAxisIndex]
+        for t in axisTargets[Self.accelAxisIndex] + axisTargets[Self.jcAccelAxisIndex]
+            where !ts.contains(t) {
+            ts.append(t)
         }
+        let apps = changedLocked(ts, strikeM: m, strikeW: w)
+        bindLock.unlock()
+        if !apps.isEmpty { onApply(apps) }
+    }
+
+    /// Mac-owned low-pass times; zero bypasses the additional smoothing exactly.
+    public func setAccelerationSmoothing(_ dimension: InputDimension, milliseconds: Double) {
+        guard milliseconds.isFinite else { return }
         strikeLock.lock()
-        let m = strikeMeasure
-        let w = strikeWindow.weight(at: ProcessInfo.processInfo.systemUptime)
-        var changed: [Application] = []
-        for target in Set(sBy.keys).union(aBy.keys) {
-            let s = sBy[target].map { $0.evaluate(m) } ?? defaultOut(target)
-            let a = aBy[target].map { $0.evaluate(m) } ?? defaultOut(target)
-            let v = (1.0 - w) * s + w * a
-            if let prev = lastBlendOut[target], abs(prev - v) < 1e-9 {
-                continue
-            }
-            lastBlendOut[target] = v
-            changed.append((target, v))
+        let t = now()
+        if dimension == .acceleration {
+            ipadSmoothing.setTime(milliseconds / 1000, at: t)
+        } else if dimension == .jcAccel {
+            joyConSmoothing.setTime(milliseconds / 1000, at: t)
         }
         strikeLock.unlock()
-        guard !changed.isEmpty else { return }
-        onApply(changed)
+    }
+
+    /// Disconnects clear the filter tail immediately.
+    public func resetAcceleration(_ dimension: InputDimension) {
+        strikeLock.lock()
+        if dimension == .acceleration {
+            strikeMeasure = 0
+            ipadSmoothing.reset()
+        } else if dimension == .jcAccel {
+            joyConSmoothing.reset()
+        }
+        strikeLock.unlock()
+        evaluateStrikeBlend()
     }
 
     private func updateStrikeTimer(active: Bool) {
@@ -283,7 +468,7 @@ public final class ControlAxisEvaluator {
     /// anchors the per-note blend window.
     public func touchGate(lane: TouchLane, id: UInt16, on: Bool) {
         if lane == .wire {
-            let now = ProcessInfo.processInfo.systemUptime
+            let now = now()
             strikeLock.lock()
             if on { strikeWindow.noteOn(id, at: now) }
             else { strikeWindow.noteOff(id) }
@@ -297,10 +482,13 @@ public final class ControlAxisEvaluator {
         } else {
             fingerPitch[key] = nil
             touchRadiusPt[key] = nil
+            touchFretPositions[key] = nil
         }
         fingerLock.unlock()
         fingerEvaluate()
         sizeEvaluate()
+        if !on { fretPositionEvaluate() }
+        if lane == .wire { evaluateStrikeBlend() }
     }
 
     /// A touch's latest pitch (fractional MIDI semitones).
@@ -323,6 +511,23 @@ public final class ControlAxisEvaluator {
         let isNewest = fingerOrder.last == key
         fingerLock.unlock()
         if isNewest { sizeEvaluate() }
+    }
+
+    /// The newest held finger drives the unipolar fret-position axis.
+    public func touchFretPosition(lane: TouchLane, id: UInt16, value: Double) {
+        let key = lane.rawValue << 16 | Int(id)
+        fingerLock.lock()
+        touchFretPositions[key] = value.isFinite ? min(1, max(0, value)) : 0
+        let isNewest = fingerOrder.last == key
+        fingerLock.unlock()
+        if isNewest { fretPositionEvaluate() }
+    }
+
+    private func fretPositionEvaluate() {
+        fingerLock.lock()
+        let value = fingerOrder.last.flatMap { touchFretPositions[$0] } ?? 0
+        fingerLock.unlock()
+        applyAxis(Self.fretPositionAxisIndex, value * 2 - 1)
     }
 
     /// Every touch currently DOWN with its latest finger pitch, oldest

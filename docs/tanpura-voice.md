@@ -43,8 +43,8 @@ drone-ratio wire range; a 12-degree scale ≈ 49 slots). The per-note
 `pitchCents` wrap correction (the static jawari wrap pulls pitch sharp; the
 builder pre-compensates) is **interpolated in log-pitch space**
 (`TanpuraEngine.centsCorrection`; the +5…+9 ¢ curve is smooth, error
-sub-cent, ends clamped). `pluck(slot:velocity01:scale:)` applies role pluck ×
-high-note softening × the velocity curve (0.3 floor) × a caller scale;
+sub-cent, ends clamped). `pluck(slot:scale:)` applies role pluck ×
+high-note softening × the fixed calibration factor (0.3 + 0.7 × 100/127) × a caller scale;
 `nearestSlot(toHz:toleranceCents:)` is the log-space lookup the drone
 buttons and the main-instrument routing use.
 
@@ -69,16 +69,26 @@ latency on this path only).
 ## Drone mode (default)
 
 A drone button (`setDronePressed`) → tanpura branch: **press** = one
-pluck at the mapped pitch (velocity 100 × `tp_drone_level`); **hold** =
-re-pluck every `tp_drone_cycle` s (default 2.5; below 0.1 = off; read each
-hop, so a live edit applies mid-hold); **release** = the cycle stops and the
-string **rings out**. The pitch comes from the Strings-tab mapping
-(`InstrumentState.droneStringIds` → `droneStringFreqs`); the grid carries
-every scale pitch, so the mapped Hz always has a slot (50 ¢ lookup tolerance
-guards a mid-rebuild mismatch). Switching the drone voice (Strings tab →
-Voice) releases everything and the buttons start clean; the legacy
-sympathetic mode keeps its own `bow_drone_*` calibration
-([fret-pad.md](fret-pad.md)).
+pluck (calibrated level × `tp_drone_level`); **release** stops repeats and lets
+the string **ring out**. The pitch comes from the Strings-tab mapping
+(`InstrumentState.droneStringIds` → `droneStringFreqs`), **one octave lower
+by default**. Joy-Con **↑** toggles between this lower register and the
+original mapped octave; during calibration it advances the capture instead.
+The register starts low each launch, is session-only, and applies at the next
+pluck without retuning ringing strings or resetting the sequence. The Strings
+tab shows **Tanpura octave −1 / 0**. The default drones have mounted slots in
+both registers (50 ¢ lookup tolerance guards a mid-rebuild mismatch).
+
+The controller's **Down / GL** buttons toggle one continuous sequence on/off.
+Switching on plays immediately and advances every **2 seconds**, including
+consecutive steps on the same slot; releasing the button leaves it running.
+The next press of either button stops it and lets the current string ring out. It bypasses the same-slot timer. Holding an **on-screen**
+drone button instead re-plucks that drone every `tp_drone_cycle` s (default
+2.5; below 0.1 = off; read each hop). Both paths use the selected drone octave.
+The main Tanpura instrument follows fret pitches unchanged. Switching the
+drone voice (Strings tab → Voice) releases everything and the buttons start
+clean; sympathetic mode uses the mapped row's own pitch and keeps its own
+`bow_drone_*` calibration ([fret-pad.md](fret-pad.md)).
 
 ## The taraf coupling (`tp_taraf`)
 

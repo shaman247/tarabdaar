@@ -222,6 +222,16 @@ public final class TiltCalibrator: ObservableObject {
 
     // MARK: Stream
 
+    /// Forget a disconnected stream's samples while preserving its calibration.
+    public func resetInput() {
+        smooth = nil
+        smoothPrev = nil
+        lastSent = nil
+        lastMsgT = 0
+        lastPublish = 0
+        axes = []
+    }
+
     /// One feature-stream tick (main thread): smooth, then append to
     /// the running capture phase, or solve and drive the axes.
     public func tick(_ raw: SIMD3<Double>, at now: TimeInterval) {
@@ -251,7 +261,11 @@ public final class TiltCalibrator: ObservableObject {
             }
             return
         }
-        guard let cal = model else { return }
+        publishAxes(at: now)
+    }
+
+    private func publishAxes(at now: TimeInterval, force: Bool = false) {
+        guard let cal = model, let sm = smooth else { return }
         let n = Self.dims
         // the solve, allocation-free: it runs per IMU sample
         var q = SIMD3<Double>(repeating: 0)
@@ -265,7 +279,7 @@ public final class TiltCalibrator: ObservableObject {
             lastSent = q
             onAxes?(q.x, q.y, q.z)
         }
-        if now - lastPublish > 0.1 {
+        if force || now - lastPublish > 0.1 {
             lastPublish = now
             axes = [q.x, q.y, q.z]
         }
@@ -370,6 +384,23 @@ public final class TiltCalibrator: ObservableObject {
         model = cal
         viz?.f0 = sm
         persist()
+    }
+
+    /// Reverse one output axis while preserving its rest pose and physical range.
+    public func reverseAxis(_ axis: Int) {
+        guard step == nil, (0..<Self.dims).contains(axis), var cal = model else { return }
+        cal.m[axis] = cal.m[axis].map { -$0 }
+        (cal.lo[axis], cal.hi[axis]) = (-cal.hi[axis], -cal.lo[axis])
+        model = cal
+        if var geometry = viz {
+            geometry.axes[axis].dir = -geometry.axes[axis].dir
+            geometry.axes[axis].lo = cal.lo[axis]
+            geometry.axes[axis].hi = cal.hi[axis]
+            viz = geometry
+        }
+        persist()
+        info = "Calibrated"
+        publishAxes(at: lastMsgT, force: true)
     }
 
     private func persist() {

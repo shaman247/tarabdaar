@@ -73,7 +73,7 @@ final class TarabLinkTests: XCTestCase {
         final class Sink: LinkPerformanceSink {
             var ons: [(UInt16, Double)] = []
             var offs: [UInt16] = []
-            func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double) {
+            func touchOn(_ id: UInt16, pitchSemis: Double) {
                 ons.append((id, pitchSemis))
             }
             func touchGlide(_ id: UInt16, pitchSemis: Double) {}
@@ -89,7 +89,7 @@ final class TarabLinkTests: XCTestCase {
         // Wire pad's sends into host's receive (the tunnel, minus CoreMIDI).
         pad.sendRaw = { bytes, _ in host.receivedSysEx(bytes) }
 
-        state.touchOn("finger", pitchSemis: 61.25, velocity: 0.9)
+        state.touchOn("finger", pitchSemis: 61.25)
         pad._testTick()
         state.touchOff("finger")
         pad._testTick()
@@ -104,5 +104,39 @@ final class TarabLinkTests: XCTestCase {
         XCTAssertEqual(sink.ons.first?.1 ?? 0, Double(Float(61.25)))
         XCTAssertEqual(sink.offs.count, 1)
         XCTAssertEqual(sink.ons.first?.0, sink.offs.first)
+    }
+
+    /// A compatible host hello requests sync again even when a restarted host still looks up.
+    func testPadResyncsAfterHostEpochChanges() {
+        let pad = TarabLink(role: .pad)
+        var sent: [TLPFrame] = []
+        var received: [TLPEvent] = []
+        pad.sendRaw = { bytes, _ in
+            if let raw = TLPPack.unenvelope(bytes)?.frame,
+               let frame = TLPFrame.decode(raw) { sent.append(frame) }
+        }
+        pad.onEvent = { received.append($0) }
+        let hello = TLPEvent.hello(minVer: TLP.versionMin,
+                                  maxVer: TLP.versionMax, role: .host)
+        pad._testProcess(envelope(.event(seq: 500, hello), from: .host))
+        XCTAssertTrue(sent.contains { if case .event(_, .resyncRequest) = $0 { return true }; return false })
+        XCTAssertTrue(pad._testStatus.isUp)
+        sent.removeAll()
+
+        let layout = TLPEvent.fretArrangement(blob: [2, 0, 0])
+        // The restarted host's early snapshot is stale until its hello lands.
+        pad._testProcess(envelope(.event(seq: 1, layout), from: .host))
+        XCTAssertTrue(received.isEmpty)
+        pad._testProcess(envelope(.event(seq: 2, hello), from: .host))
+        XCTAssertTrue(sent.contains { if case .event(_, .resyncRequest) = $0 { return true }; return false })
+        pad._testProcess(envelope(.event(seq: 3, layout), from: .host))
+        XCTAssertEqual(received, [layout])
+
+        sent.removeAll()
+        pad._testProcess(envelope(.event(seq: 4,
+            .hello(minVer: TLP.versionMax + 1, maxVer: TLP.versionMax + 1,
+                   role: .host)), from: .host))
+        XCTAssertFalse(pad._testStatus.isUp)
+        XCTAssertFalse(sent.contains { if case .event(_, .resyncRequest) = $0 { return true }; return false })
     }
 }

@@ -1,6 +1,20 @@
 # Sensors
 
-The iPad streams raw motion; the Mac evaluates every binding. This page covers the iPad's motion pipeline, the strike estimate and its scopes, the Mac-side tilt calibrations, the control dimensions, and the binding model. The wire that carries the sensor fields is described in [MIDI & Audio](midi-and-audio.md); the binding UI and parameter model in [Parameters](parameters.md).
+The iPad streams raw motion; the Mac evaluates every binding. This page covers the iPad's motion pipeline, the Strike envelope and its scopes, the Mac-side tilt calibrations, the control dimensions, and the binding model. The wire that carries the sensor fields is described in [MIDI & Audio](midi-and-audio.md); the binding UI and parameter model in [Parameters](parameters.md).
+
+## Joy-Con controller input (Mac)
+
+BLE discovery selects the left controller: Nintendo manufacturer data carries vendor `057E` and product `2067` for Joy-Con 2 (L), while `2066` identifies the right half and is ignored. Name fallback also excludes right controllers. This keeps a charging or nearby right half from occupying the instrument's single controller connection.
+
+The Mac accepts GameController profiles, classic Joy-Con raw HID, and Joy-Con 2 vendor BLE. Nintendo's standard BLE input and the Mobacon alternate report retain their own decoders. Discovery selects the left controller, including the manufacturer-data product ID when the advertised name is empty; a nearby right half cannot win the connection.
+
+The **NYXI Hyperion 3 Ultra (left controller)** requires a console-session handshake before it sends sensor reports. `JoyCon2BLE` discovers both the vendor input service and `00C5AF5D-1964-4E30-8F51-1956F96BD280`, then writes `01 00` with response to the latter's `…D282` characteristic for NYXI devices. This opens a runtime input session without changing Bluetooth pairing. The existing feature-mask/enable sequence requests buttons, stick and IMU, and subscribes the standard report-0x05 characteristic last. A live standard stream suppresses the alternate-report fallback; disconnect clears the session state before reconnecting.
+
+`JoyCon2ReportDecoder` decodes the standard report's left buttons, packed 12-bit stick, signed accelerometer values at bytes 48–53 and gyro values at 54–59. These feed the existing `JoyConFusion`, wrist calibration, shared tilt bindings and Joy-Con acceleration bindings. NYXI reports duplicate the rear paddle in GL/GR; the left GL bit becomes **Z (rear)**, which shares the Down button’s continuous drone toggle: press to start immediately and advance every two seconds, press again to stop; release leaves it running. Zero magnetometer data is unavailable rather than a heading measurement. NYXI's sensor timestamp at bytes 42–45 counts **milliseconds**; the decoder unwraps it and uses sample intervals rather than batched BLE arrival intervals. Duplicate sensor timestamps do not advance fusion, and a reconnect or long gap reanchors the clock.
+
+Before that handshake, NYXI sends button/stick telemetry on command-response characteristic `C765A961-D9D8-4D36-A20A-5315B111836A`, interleaved with command acknowledgements. `JoyConNYXIReport` recognizes its `EA 01 00 8B 00 78 00 00 0C` envelope: byte 9 maps Up/Down/Left/Right to `08/04/02/01`, L/ZL to `80/40`, Minus to `20`, and stick click to `10`; byte 10 maps Capture/SL/SR/rear Z to `04/01/02/08`. Signed little-endian stick X/Y at bytes 11–14 are scaled into the shared raw calibration units. The standard stream takes priority once available, with the same mapper source so the switch cannot leave buttons held. The telemetry payload is not interpreted as motion. T produces no standalone input in the captured stream. Recalibrate the stick and wrist after changing controllers.
+
+Captured-packet tests pin both NYXI formats, their button mapping, signed stick/motion decoding, acknowledgement separation and sensor-clock continuity. For third-party protocol investigation, launching with `TARABDAAR_JOYCON_CAPTURE=1` logs complete received BLE packets; normal launches omit this wire capture.
 
 ## MotionManager (iPad)
 
@@ -12,10 +26,6 @@ The iPad streams raw motion; the Mac evaluates every binding. This page covers t
 | `normalizedTilts` | the three angles at a FIXED ±90° full scale, each clamped to −1…+1 — the raw tilt report the wire carries (tilt 1 = pitch, 2 = roll, 3 = corrected yaw) |
 | `userAccelX/Y/Z`, `accelMagnitude` | gravity-removed acceleration in g |
 | `strikeLevel` | the strike envelope (below) |
-
-### Accelerometer ring buffer
-
-A timestamped ring buffer (`accelBuffer`) holds the last 100 ms (`Config.accelBufferDuration`) of magnitude samples. `peakAccelSince(timestamp:)` returns the peak magnitude and its time from all samples after the given time — the onset strike estimate's input.
 
 ### Yaw: high-passed, bias-corrected
 
@@ -30,22 +40,21 @@ Gestures pass untouched; a twist held motionless re-centres over about a minute;
 
 The iPad's GYRO overlay and the Mac Setup tab's "Received motion (3D)" draw the same attitude trail at a fixed ±30° scale centred on the trail mean — the standing sensor-vs-transmission A/B; only yaw may differ (raw on the iPad, corrected on the wire). Each pairs with an **accelerometer twin** (raw `userAcceleration`, origin-centred, fixed ±0.5 g); the Mac's copy reads the PERF_STATE accel fields (±4 g wire scale, display only).
 
-## Strike velocity (iPad)
+## Strike (iPad)
 
-iPads have no pressure-sensitive touch; the strike is estimated from the accelerometer. Two consumers share ONE law, `StrikeLaw.scale01` (`MotionSource.strikeScale01`):
+`StrikeLaw.scale01` maps gravity-removed acceleration magnitude to 0…1
+on a logarithmic scale between `Config.strikeMinG` (0.01 g) and
+`Config.strikeMaxG` (0.5 g), clamped at both ends. The iPad Strike envelope
+and the Joy-Con Accel dimension use this same law.
 
-```
-clamped = clamp(peakG, velocityMinG, velocityMaxG)   // 0.01 g … 0.5 g
-vel01   = log(clamped / minG) / log(maxG / minG)      // at or below minG → 0
-```
-
-Typical readings on the 0–127 display scale: gentle placement ~1–30, medium (~0.05–0.1 g) ~50–80, hard (~0.2–0.5 g) ~100–127.
-
-### Per-onset estimate
-
-The fret-pad onset handler (`FretPadSurfaceIOS.began`) calls `MotionSource.strikeVelocity01(at: now)`, which scans the TRAILING `Config.velocityLookback` window (50 ms, must stay under `accelBufferDuration`) of the ring buffer via `peakAccelSince`. Backward-looking: UIKit delivers a touch ~10–25 ms after the physical impact, so the chassis spike is usually already buffered and **the note-on never waits** (never add an onset delay on the fret path). The result rides the touch's `velocity` byte in every PERF_STATE frame; the Mac mapper stores it per slot for the String voice's `bow_attack_vel` velocity→attack-sharpness law (0 default = inert — see [Sarangi](sarangi.md)). Producers without an accelerometer (the Mac pads) send a flat constant.
-
-Known limit: a tap whose spike lands later than the lookback window under-reads toward legato — a playable failure mode; widen `velocityLookback` before resorting to onset delays.
+The iPad sends the continuous Strike envelope, including its current
+value when a fret touch begins. There is no separate per-touch velocity
+measurement or trailing-window estimate. On the Mac, `LinkIngest` applies
+the frame's sensor values, then anchors each onset's Strike blend window
+before mounting its string. Repeated Strike bytes still re-evaluate on
+new touches and retriggers. This lets `bow_attack_sharpness` capture the
+current bound value at onset without waiting for a timer or engine rebuild.
+Joy-Con Accel can drive the same parameter through its ordinary binding.
 
 ### The strike envelope
 
@@ -54,37 +63,55 @@ Known limit: a tap whose spike lands later than the lookback window under-reads 
 ### The player can see the law
 
 - The toolbar's strike scope is the readout. (The per-touch indicator's onset ripple + 0–127 number were removed 2026-09-04 when the overlay became the fingertip-radius display — see [Fret Pad](fret-pad.md).)
-- The toolbar's **strike scope** (`StrikeScopePane`) draws the envelope — the exact signal the bindings consume — as a scrolling ~4 s trace on the 0–127 scale, the current value at the right, an amber tick holding the last onset. Buckets sit on a TIME-QUANTIZED grid (a moving origin shimmers); decimation is per-pixel PEAK-HOLD, never a sample stride (a stride aliases the 200 Hz stream). It polls the unpublished history at 30 Hz, so motion samples never re-render the toolbar.
+- The toolbar's **strike scope** (`StrikeScopePane`) draws the envelope — the exact signal the bindings consume — as a scrolling ~4 s trace on the 0–127 scale, the current value at the right. Buckets sit on a TIME-QUANTIZED grid (a moving origin shimmers); decimation is per-pixel PEAK-HOLD, never a sample stride (a stride aliases the 200 Hz stream). It polls the unpublished history at 30 Hz, so motion samples never re-render the toolbar.
 - Colour is playing state: pale yellow at onset fading down the magma ramp to violet over the strike blend window (violet = fully handed over to Acceleration), dark gray while nothing plays, a lighter backdrop on note-active frames. The surface reports melody-note begins/ends into `MotionManager.noteBegan/noteEnded` (id-keyed, so drone presses never unbalance it); the window length arrives as the JOYCON_STATE `strikeWin` byte.
 
 ## Control dimensions (Mac)
 
-`ControlAxes.dims` lists the bindable axes in index order. Every axis has exactly one source.
+`ControlAxes.dims` lists the axis slots in index order; `bindableDims` omits retired slots and groups the four stick directions together in the UI. The three generic tilt dimensions use the controller while connected and the iPad otherwise. The Controls tab and binding menus list tilt first, then Joy-Con acceleration and stick, followed by touch dimensions.
 
 | Axis | Dimension | Source | Polarity |
 |---|---|---|---|
-| 0–2 | Arm ↕ / ↔ / ⟲ (`tilt1–3`) | the iPad tilt report through the arm calibration; raw pitch/roll/yaw passthrough (uncentred) when uncalibrated | bipolar, rest 0 |
-| 3–4 | Stick X / Y | the Joy-Con stick, per-axis 0.1 deflection gate, rescaled 0.1 → 0, full → ±1; centre pinned exactly at rest | bipolar, rest 0 |
+| 0–2 | Tilt ↕ / ↔ / ⟲ (`tilt1–3`) | connected controller through wrist calibration; otherwise iPad through arm calibration, or raw uncentred pitch/roll/yaw when uncalibrated | bipolar, rest 0 |
+| 3–4 | Reserved | retired Stick X / Y slots; saved bindings migrate to direction pairs | — |
 | 5–6 | Strike / Acceleration | the PERF_STATE `strike` envelope byte, blended per target by time since note onset (below) | UNIPOLAR, silence at curve x 0 |
 | 7 | Finger Accel (`fingerAccel`) | the playing finger's signed pitch acceleration (below) | bipolar, rest 0 |
-| 8–10 | Wrist ↕ / ↔ / ⟲ (`tilt4`, `wrist2`, `wrist3`) | the Joy-Con's fused attitude through the wrist calibration; silent until calibrated | bipolar, rest 0 |
+| 8–10 | Reserved | retired wrist slots; saved bindings migrate to `tilt1–3` | — |
 | 11 | Joy-Con Accel (`jcAccel`) | the Joy-Con's gravity-removed acceleration magnitude through `StrikeLaw` (same log map + 150 ms envelope), every IMU packet, change-gated at 1/256, 0 on detach; no calibration needed | UNIPOLAR |
 | 12 | Touch Size (`touchSize`) | the newest sounding touch's fingertip contact radius (the PERF_STATE `radius` byte) mapped 31.3 → 73.0 pt through the finger-motion estimator (below) | UNIPOLAR, rest at curve x 0 |
+| 13–16 | Stick Left / Right / Up / Down | the calibrated Joy-Con stick with no deadzone or deflection rescale; each direction measures deflection from centre toward that edge | UNIPOLAR, rest at curve x 0 |
+| 17 | Fret Position (`fretPosition`) | the newest held finger’s position along its fret, from the per-touch TLP position word | UNIPOLAR, inner end 0, outer end 1 |
 
-`InputDimension` also carries `accelPressure`, `keyY`, `slider1`, `slider2` — retired cases kept so saved bindings decode; nothing emits them (see docs/history/).
+Stick directions evaluate together: left = max(−x, 0), right = max(x, 0), up = max(y, 0), down = max(−y, 0). Diagonals activate two directions; centring or disconnecting clears all four. Each affected target is emitted once per stick update. X/Y remain the display and wire coordinates, with no transport change. Saved X/Y bindings split into two independent bindings that evaluate the corresponding half of the original curve, preserving nonlinear curves and the target's base across preset round trips.
+
+`InputDimension` also carries `accelPressure`, `keyY`, `slider1`, `slider2`, `stickX`, `stickY`, `tilt4`, `wrist2`, `wrist3` — retired cases kept so saved bindings decode; nothing emits them (see docs/history/).
 
 Every tilt value is −1…+1 with rest 0, in process and on the wire (s16). Binding curves keep a 0…1 x-domain and map at evaluation: bipolar axes via `(v + 1) / 2`, unipolar axes read rest at x 0.
 
+### Automatic tilt source
+
+**Tilt ↕ / ↔ / ⟲** are three shared dimensions with one set of binding curves. A connected controller supplies them through its wrist calibration. With no controller connected, the iPad supplies them through its arm calibration; without an arm calibration its raw, uncentred angles pass through. A connected controller without a wrist calibration leaves the tilts neutral. Source selection follows connection state automatically.
+
+The arm and wrist calibrations remain independent, including their saved rest poses, ranges and reversals. Both streams continue feeding their calibration and latest-value cache while inactive. `ControlAxisEvaluator` selects all three cached axes together on a connection edge and emits each affected target once. Disconnect immediately selects the latest iPad pose; reconnect starts from neutral until a fresh controller sample arrives. Disconnect clears the wrist calibrator’s input smoothing and duplicate gate, so that first sample emits even if the pose matches the last session. The calibration itself persists. A BLE connection remains active if its GameController alias detaches. Stick, Joy-Con acceleration, touch dimensions and the iPad strike/acceleration pair keep their own input paths.
+
+Saved arm bindings already use `tilt1–3`. Legacy wrist bindings (`tilt4`, `wrist2`, `wrist3`) migrate to the matching shared dimensions. If a target bound both devices on the same dimension, its wrist curve takes precedence; arm-only curves survive. Migration preserves curve points, edited offsets and the target's base, and saves only the shared bindings on the next save. Factory bindings provide one curve per shared tilt. Calibration storage and the wire format are unchanged.
+
 ### Strike / Acceleration — one measurement, two axes
 
-Both ride the strike envelope byte; what separates them is **time since the note started** (`StrikeBlendWindow`, `AppController.evaluateStrikeBlend`). Per bound target the applied value is (1−w)·Strike + w·Acceleration, w ramping linearly 0→1 over the window:
+Both ride the strike envelope byte; what separates them is **time since the note started** (`StrikeBlendWindow`, `ControlAxisEvaluator.evaluateStrikeBlend`). The pair's contribution to a bound target's sum (the swing law below) is (1−w)·swing<sub>Strike</sub> + w·swing<sub>Acceleration</sub>, w ramping linearly 0→1 over the window:
 
 - **`ctl_strike_window`** (Parameters tab, "Strike blend" group, 0.25–8 s, default 2) — a control-layer `.live` key intercepted in `applyParamToVoice`; rides presets; relayed to the iPad scope as the JOYCON_STATE `strikeWin` byte (50 ms units).
-- A side without a binding evaluates to the target's DEFAULT (registry default for a parameter, 0 for a composite): "expression [0, 1] on Strike, unbound on Acceleration (default 0.4)" reads at w = 0.5 as [0.2, 0.7].
+- A side without a binding swings 0: "Expression 0 → +0.3 on Strike, unbound on Acceleration" lifts a hard hit by 0.3 (about +6 dB) at onset and lets the lift fade back into the resting expression over the window.
 - Windows are **per note** (wire touch id; retriggers re-anchor). While notes overlap the NEWEST sounding note's age drives the weight — a fresh tap always gets full Strike, even mid-legato; releasing it falls back to the survivor's own un-reset age; with nothing sounding the last onset keeps aging, so the pair rests on the Acceleration side.
 - Delivery is `LinkIngest.onStrike` + the note-edge `onTouchGate` — deliberately NOT `applyTiltAxis` (that would double-apply the pair) — with a 30 Hz Mac-side timer moving the weight between change-gated wire events while bindings exist. Guard: `StrikeBlendTests`.
 
 Strike is the onset's voice, Acceleration the sustained gesture's: bind accent-flavoured mappings to the first, aftertouch-flavoured ones to the second.
+
+### Acceleration smoothing
+
+The Controls tab's **Acceleration smoothing** panel has independent **iPad smoothing (ms)** (`ctl_ipad_accel_smooth`) and **Joy-Con smoothing (ms)** (`ctl_jc_accel_smooth`) controls. Each is a Mac-owned low-pass time constant from 0–1000 ms, applied live and saved with the preset through the parameter registry. Zero (the default) bypasses this additional filter exactly. Both source envelopes retain their fast attack and 150 ms decay; these controls smooth the envelopes further rather than changing the sensor-side tracking.
+
+The iPad filter feeds only the sustained `.acceleration` binding curves; `.strike`, the strum trigger retain their source response. The Joy-Con filter feeds `.jcAccel` bindings. The evaluator advances both held-input filters on its 30 Hz timer while either acceleration source or Strike is bound, so a change-gated source cannot freeze a ramp. Link loss/panic and Joy-Con IMU reset clear the corresponding tail immediately. The iPad strike scope and Joy-Con diagnostic bars continue to show the source signals before this Mac-side smoothing.
 
 ### Finger Accel
 
@@ -114,7 +141,9 @@ The iPad toolbar shows a matching **finger-accel scope** beside the strike scope
 | Persistence | `tarabdaar.armCal.v2` (a `.v1` record migrates exactly: f0′ = 2·f0−1, extents ×2) | `tarabdaar.wristCal.v1` |
 | Panel | "Arm calibration" — no Joy-Con needed | "Wrist calibration" — appears once the Joy-Con's motion fusion is live (Joy-Con 2 over BLE, or a controller with GC motion) |
 
-The two captures are independent. Joy-Con **dpad-up** advances and **dpad-down** steps back whichever capture is running ("Redo previous": clears the current partial capture and the previous phase's samples; everything earlier stands); **ZL re-zeroes BOTH rest poses** without re-fitting. The iPad's toolbar arm square shows the SOLVED arm axes while a calibration is driving (JOYCON_STATE `arm1–3`, flag `armLive`) and its own raw attitude otherwise; the wrist square likewise shows the solved wrist axes once calibrated.
+The two captures are independent. Joy-Con **dpad-up** advances and **dpad-down** steps back whichever capture is running ("Redo previous": clears the current partial capture and the previous phase's samples; everything earlier stands); **ZL re-zeroes BOTH rest poses** without re-fitting. The iPad's toolbar arm square shows the SOLVED arm axes while a calibration is driving (JOYCON_STATE `arm1–3`, flag `armLive`) and its own raw attitude otherwise; the wrist tilt bars likewise show the solved wrist axes once calibrated (and their d/dt bars differentiate whichever tilt is displayed).
+
+Each calibrated dimension has a **Reverse** button in the calibration panel, including the inferred wrist rotation. It reverses that dimension immediately and saves the result with the calibration, preserving the rest pose and physical ranges. The other dimensions stay unchanged; pressing the button again restores the original direction. Reversal is available outside a running capture and also applies to the arm fallback calibration.
 
 ### The capture
 
@@ -139,24 +168,53 @@ The two captures are independent. Joy-Con **dpad-up** advances and **dpad-down**
 
 ## Binding model
 
-The Mac evaluates every binding itself (`AppController.handleRawTilt` → `applyTiltAxis`; the strike pair through `evaluateStrikeBlend`): composites via `applyComposite`, parameters through the unified `applyParamToVoice`. Nothing syncs to the iPad, so edits take effect immediately.
+The Mac evaluates every binding itself (`AppController.handleRawTilt` → `applyTiltAxis` → `ControlAxisEvaluator`; the strike pair through `evaluateStrikeBlend`): composites via `applyComposite`, parameters through the unified `applyParamToVoice`. Nothing syncs to the iPad, so edits take effect immediately.
 
-- **Editors**: the Controls tab (⌘4, `TiltControlsView`) edits, per axis, an arbitrary set of targets with Lo/Hi endpoints and the "From center" rest-zero shape; the Parameters tab's per-row mapping button makes the same bindings.
+**The swing law.** A target has ONE resting value and every binding is a swing about it:
+
+```
+value(target) = clamp( rest(target) + Σ_i offset_i(x_i) )
+```
+
+- `rest` is a composite's `ParameterMapping.defaultValue` (the Controls tab's Rest slider) or a parameter's resting store value (its Parameters-tab knob; the evaluator re-sums when the knob moves).
+- `x_rest` is the dimension's own rest point (`InputDimension.restX`): 0.5 for the bipolar axes, 0 for the unipolar ones (strike pair, Joy-Con accel, touch size).
+- Edited one-way bindings linearly interpolate `lo + (hi − lo) × x`; zero input contributes `lo`, which may be negative or positive. A base of 0.4 with acceleration offsets [−0.2, +0.4] produces 0.2 at input 0, 0.5 at input 0.5, and 0.8 at input 1. Bipolar bindings anchor offset zero at neutral; unbound dimensions contribute nothing. Several axes on one target add instead of overwriting each other: Expression on Tilt ↕ sets the level, Expression 0 → +0.3 on Strike lifts a hard hit on top, and the selected tilt returning to rest leaves the strike's lift alone.
+- The clamp runs once, after the sum, to the target's range widened to any endpoint drawn outside it. Two full swings can saturate — two hands on one fader.
+- The sum is in the target's own domain: expression units are dB-linear in the kernel (19 dB per unit), so adding expression is adding dB; a composite sums in its 0…1 domain and each member's lo→hi sweep stays the perceptual mapping.
+- Documents saved before the law (no `restLaw` key) applied curves absolutely; on decode each bound target's rest becomes its first curve's reading at rest, so old presets sound identical at rest and under one axis. Guard: `ControlAxisEvaluatorTests`.
+
+- **Editors**: the Controls tab (⌘4, `TiltControlsView`) shows signed endpoint offsets for each binding, with the base value in amber above the zero tick on the offset slider. The base is edited through the composite's Rest control or the parameter's Parameters-tab value. It is shared by every binding to the target; moving it preserves the offsets and immediately re-evaluates stationary inputs. Expression at base 0.5 can have Tilt ↕ offsets −0.5 / +0.5 and Strike offsets 0 / +0.3. Both endpoints are independently editable. One-way inputs interpolate linearly between them; bipolar edits anchor zero at the gesture's centre. Set the first offset to zero for a sweep past neutral. Existing curves display their evaluated offsets without rewriting saved bindings. Editing endpoints stores a fixed `offsetOrigin` with the curve so a nonzero first offset survives subsequent edits and save/load; older curves without that field retain `curve(x) − curve(x_rest)` evaluation until edited. The Parameters tab's per-row mapping button makes the same bindings.
 - **Targets**: `MapTarget` — `.composite(slot:)` or `.param(key:)`; endpoints in the target's native units (0–1 for a composite). "Taraf Purity" and "vibrato depth (¢)" bind the same way; there is no "mappable" subset.
-- **Curves**: each `DimensionBinding` holds an `InputDimension` and 2–4 `ControlPoint`s defining a Catmull-Rom spline, output clamped to the endpoint min/max. Many dimensions may bind one target.
+- **Curves**: each `DimensionBinding` holds an `InputDimension` and 2–4 `ControlPoint`s defining a Catmull-Rom spline, output clamped to the control-point min/max (including the resting anchor); `swing(atX:)` subtracts the stored `offsetOrigin`, or the rest reading for an older curve without that field. Edited one-way curves have two points and use linear interpolation. Many dimensions may bind one target.
 - **Model** (`TiltMapping.swift`): `ParameterMapping` (bindings per target) inside `DimensionMapping`, keyed by the target's `storageKey`, persisted under `tarabdaar_dimensionMapping_v6`. Composite keys keep their legacy spellings (`midiCC71`, `midiCC73`, `midiCC72`, `composite4`…`composite8` — historical strings that persisted bindings depend on, nothing more); parameter targets store as `param:<key>` and drop on load if the key no longer exists.
-- **Threading**: raw tilt reports arrive off-main, so the Mac keeps a lock-protected per-axis snapshot of the bound targets (`tiltEvalByAxis`).
+- **Threading**: raw tilt reports arrive off-main, so `ControlAxisEvaluator` keeps a lock-protected snapshot of the bindings per target, the last curve-x per axis and a per-target change gate; a parameter target's rest is resolved on the main thread when the mapping is snapshotted or the knob moves, never read from the store on the link thread.
 
 ### Default bindings
 
 | Axis | Target | Curve |
 |---|---|---|
-| Arm ↕ | Expression (the bow's loudness axis) — rest sends the fitted median, tilt down fades toward silence, up ≈ +8 dB | linear |
-| Arm ↕ | Taraf Purity (composite slot 1: jt tone LP 16 k → 1.5 kHz, `bow_jt_sel` 0.5 → 0) | 3-point `(0,0) (0.5,0) (1,1)` — sweeps only past neutral |
-| Arm ↔ | Taraf Decay (composite slot 2: taraf damping 0 → 1) | 3-point, as above |
-| Arm ⟲ | Tone Tilt (composite slot 3: tone tilt −1 → 1) | linear, neutral = flat |
+| Tilt ↕ | Expression (the bow's loudness axis) — rest sends the fitted median, tilt down fades toward silence, up ≈ +8 dB | linear |
+| Tilt ↕ | Taraf Purity (composite slot 1: jt tone LP 16 k → 1.5 kHz, `bow_jt_sel` 0.5 → 0) | 3-point `(0,0) (0.5,0) (1,1)` — sweeps only past neutral |
+| Tilt ↔ | Taraf Decay (composite slot 2: taraf damping 0 → 1) | 3-point, as above |
+| Tilt ⟲ | Tone Tilt (composite slot 3: tone tilt −1 → 1) | linear, neutral = flat |
 
 Existing installs adopt these once (flags `tarabdaar.tiltAxes.defaultBindings.v1`, `.v2` for the expression default); unbinding afterwards sticks. Composite slots 4–8 are free macros defined in the Controls tab.
+
+## Fret position
+
+**Fret Position** (`InputDimension.fretPosition`, raw value 21, axis 17) is
+0 at a fret’s inner end and 1 at its outer end: bottom-to-top for upper
+frets and top-to-bottom for lower frets. Each fret uses its own height;
+positions clamp past its ends and interpolate linearly across neighboring
+columns and gaps, independently of pitch warp. The pad sends this geometry
+value in each touch record; the Mac evaluates the binding.
+
+The newest held finger across the wire and local-pad lanes drives the
+axis. Releasing it returns to the newest survivor, and releasing all
+fingers returns the axis to 0. A link drop releases only the wire fingers.
+Position reaches the
+mapping before note onset and updates on vertical movement even at a
+constant pitch. Producers without fret geometry send 0.
 
 ## Touch size dimension
 
@@ -165,7 +223,7 @@ PERF_STATE touch record as the `radius` byte (points × 4, TLP v13), and it
 IS a usable continuous signal. Measured on the instrument: normal playing
 reads **20.8** or **31.3** pt, and a deliberately FLATTENED finger reaches
 **73.0** controllably, sometimes higher. `.touchSize` (raw value 16, axis
-index 12 — the last entry in `ControlAxes.dims`) is that signal as a
+index 12 in `ControlAxes.dims`) is that signal as a
 bindable dimension, one shared law (`TouchSizeTracker`, TarabdaarCore —
 the `FingerAccelTracker` pattern):
 
@@ -194,7 +252,7 @@ overshoot. The estimator LEARNS the speed — the same staircase walked half
 as fast tracks at half the rate, which no fixed ramp can do.
 
 **UNIPOLAR** like `.strike`: rest is the curve's LEFT end (x 0), so a
-binding reads silence with the finger relaxed — unlike the tilts, whose
+binding reads its first offset with the finger relaxed — unlike the tilts, whose
 rest is the centre. The Mac drives it as `2·level − 1` through
 `ControlAxisEvaluator.applyAxis` (the `.jcAccel` convention), never
 through `evaluateStrikeBlend`.

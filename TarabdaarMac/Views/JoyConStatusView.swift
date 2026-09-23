@@ -23,6 +23,9 @@ struct JoyConStatusView: View {
                 .font(.padCaption.weight(.bold))
                 .foregroundStyle(.secondary)
             statusPanel
+            if joyCon.jcFusedActive || joyCon.wristCal.isCalibrated {
+                wristPanel
+            }
             if joyCon.connectedName != nil {
                 inputsPanel
             }
@@ -32,9 +35,8 @@ struct JoyConStatusView: View {
             if joyCon.jcIMUActive {
                 joyConIMUPanels
             }
-            bodyPanel
-            if joyCon.jcFusedActive || joyCon.wristCal.isCalibrated {
-                wristPanel
+            DisclosureGroup("Arm fallback") {
+                bodyPanel
             }
             if joyCon.traceActive {
                 HStack(alignment: .top, spacing: 12) {
@@ -87,10 +89,6 @@ struct JoyConStatusView: View {
                     Text(String(format: "x %+.2f   y %+.2f",
                                 joyCon.stickX, joyCon.stickY))
                         .font(.system(.body).monospacedDigit())
-                    Text(joyCon.stickActive ? "driving tilts" : "deadzone")
-                        .font(.caption)
-                        .foregroundStyle(joyCon.stickActive
-                                         ? Color.accentColor : .secondary)
                 }
                 // Two rows: dpad + the shoulder family, then the misc
                 // inputs (stick click, Minus, Capture).
@@ -268,7 +266,7 @@ struct JoyConStatusView: View {
     }
 
     /// The accelerometer twin — same wire, same A/B purpose against the
-    /// iPad overlay's accel half. Fixed ±0.5 g scale (velocityMaxG —
+    /// iPad overlay's accel half. Fixed ±0.5 g scale (strikeMaxG —
     /// the top of the strike range; harder spikes clip briefly).
     private var accelPanel: some View {
         Panel(title: "Received acceleration (3D)") {
@@ -503,6 +501,16 @@ private struct TiltCalPanel: View {
                         .joined(separator: "  "))
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
+                }
+                if cal.isCalibrated && !cal.isCapturing {
+                    HStack(spacing: 10) {
+                        ForEach(0..<TiltCalibrator.dims, id: \.self) { axis in
+                            Button("Reverse \(cal.config.sweepNames[axis])") {
+                                cal.reverseAxis(axis)
+                            }
+                        }
+                    }
+                    .font(.caption)
                 }
                 if cal.cloud.contains(where: { !$0.isEmpty }) || cal.viz != nil {
                     CalCloudView(cal: cal)

@@ -35,6 +35,10 @@ struct MIDISettingsView: View {
                 }
                 LabeledContent("Status", value: midi.statusMessage)
                 LabeledContent("External destinations", value: "\(midi.destinationCount)")
+                LabeledContent("USB destinations", value: "\(midi.wiredDestinationCount)")
+                LabeledContent("Bluetooth destinations", value: "\(midi.bluetoothDestinationCount)")
+                LabeledContent("Link bearer",
+                               value: (midi.linkPeerTransport ?? midi.linkTransport)?.label ?? "none")
 
                 HStack {
                     if midi.isActive {

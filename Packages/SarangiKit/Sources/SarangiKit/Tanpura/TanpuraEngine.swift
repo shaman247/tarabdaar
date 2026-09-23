@@ -126,22 +126,20 @@ public final class TanpuraEngine: @unchecked Sendable {
         return bestD * 1200.0 <= toleranceCents ? best : nil
     }
 
-    /// Pluck: the role's displacement scaled by velocity (gentle floor)
-    /// and `scale`. `bendRatio` retunes the slot ahead of the pluck (the
+    /// Pluck: the role's displacement at its calibrated level times `scale`. `bendRatio` retunes the slot ahead of the pluck (the
     /// fret's exact Hz; also normalizes a slot left bent). `touch` > 0
     /// migrates the ringing string to a history clone (frozen pitch,
     /// scaled by `touch`) so each pluck is a SEPARATE STRING; 0 = rides
     /// the ring. `drive` (1 = fitted) plucks `drive`-times harder with
     /// output gain 1/drive — the mellow↔buzzy axis at constant level.
-    public func pluck(slot: Int, velocity01: Double, scale: Double = 1.0,
+    public func pluck(slot: Int, scale: Double = 1.0,
                       bendRatio: Double = 1.0, touch: Double = 0.0,
                       drive: Double = 1.0) {
         guard slot >= 0, slot < slotFrequencies.count else { return }
         let f0 = slotFrequencies[slot]
-        let v = max(0.0, min(1.0, velocity01))
         let basePluck = TanpuraTables.role(for: f0, in: p).pluck
         let hi = min(1.0, pow(p.pluckRefF / f0, p.pluckExp))
-        let amp = basePluck * hi * (0.3 + 0.7 * v)
+        let amp = basePluck * hi * (0.3 + 0.7 * (100.0 / 127.0))
             * max(0.0, scale)
         guard amp > 0 else { return }
         scopeRatio.withLock { if slot < $0.count { $0[slot] = bendRatio } }

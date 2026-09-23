@@ -6,6 +6,63 @@ import SarangiKit
 final class RealtimePerformanceTests: XCTestCase {
     override func setUpWithError() throws { try skipUnlessSlowTestsEnabled() }
 
+    /// The twelve-string raga bank meets paced callback and worker deadlines with the chromatic choir.
+    func testDualTarafFullBankRealtime() throws {
+        try checkFullBank(ragaCount: 12)
+    }
+
+    private func checkFullBank(ragaCount: Int) throws {
+        let source = StringVoiceSource()
+        let defaults = Presets.state(.sarangiPilu).resolvedStrings
+        let raga = defaults.filter { !$0.chromatic }
+        let chromatic = defaults.filter(\.chromatic)
+        let strings = raga+chromatic
+        let engine = try XCTUnwrap(StringVoiceSource.buildEngine(tonicHz: 328.9,
+            strings: strings, mapper: source.mapper, overrides: ["bow_jt_couple": 1]))
+        let rows = engine.jtDualRows.sorted()
+        XCTAssertEqual(rows.count, ragaCount)
+        source.setEngine(engine, crossfadeMs: 0)
+        let frames = Int(Config.preferredOutputBufferFrames), scale = 256/frames
+        let count = 900*scale, interval = Double(frames)/48000
+        var left = [Float](repeating: 0, count: frames), right = left
+        var times = [Double](), before = engine.jtAsyncStats()
+        let start = ProcessInfo.processInfo.systemUptime
+        for block in 0..<count {
+            if block == 100*scale {
+                before = engine.jtAsyncStats()
+                source.mapper.setAxis(expr: 1, press: 0.8)
+                source.mapper.touchOn(1, pitchSemis: 64)
+                source.mapper.touchOn(2, pitchSemis: 71)
+                source.mapper.touchOn(3, pitchSemis: 76)
+            }
+            if block >= 100*scale && block < 400*scale && block % (80*scale) == 20*scale {
+                for row in rows { engine.pluckTaraf(row: row) }
+            }
+            if block % (40*scale) == 0 {
+                source.setControl("bow_jt_dual_select", Double(block % (200*scale))/Double(200*scale))
+            }
+            if block == 200*scale { source.setControl("bow_jt_dual_lp", 4000) }
+            if block == 500*scale { source.setControl("bow_jt_dual_lp", 20000) }
+            if block == 400*scale { for id in 1...3 { source.mapper.touchOff(UInt16(id)) } }
+            let now = ProcessInfo.processInfo.systemUptime
+            source.renderForTesting(frames: frames, into: &left, &right)
+            if block >= 100*scale { times.append(ProcessInfo.processInfo.systemUptime-now) }
+            XCTAssertTrue(left.allSatisfy(\.isFinite))
+            let remaining = start+Double(block+1)*interval-ProcessInfo.processInfo.systemUptime
+            if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
+        }
+        times.sort()
+        let after = engine.jtAsyncStats(), p99 = times[Int(Double(times.count)*0.99)]
+        print("DUAL full bank rows", engine.jtRowFreqs.count, "dual rows", rows.map { $0+1 },
+            "p99ms", p99*1000, "maxMs", times.last!*1000, "budgetMs", interval*1000,
+            "drops", after.drops-before.drops, "flat", after.flat-before.flat,
+            "solver", engine.jtDualStats())
+        XCTAssertLessThan(p99, interval)
+        XCTAssertEqual(after.drops, before.drops)
+        XCTAssertEqual(after.flat, before.flat)
+        XCTAssertEqual(engine.jtDualStats()[1], 0)
+    }
+
     // MARK: - Rig
 
     /// Mirrors `AppController`'s routing: `.live` straight to the engine,
@@ -127,8 +184,7 @@ final class RealtimePerformanceTests: XCTestCase {
             let t = Double(done) / sr
             while onIdx < noteOn.count, noteOn[onIdx].at <= t {
                 rig.src.mapper.touchOn(UInt16(noteOn[onIdx].note),
-                                       pitchSemis: Double(noteOn[onIdx].note),
-                                       velocity: 100.0 / 127.0)
+                                       pitchSemis: Double(noteOn[onIdx].note))
                 noteHeld = true; onIdx += 1
             }
             while offIdx < noteOff.count, noteOff[offIdx].at <= t {
@@ -225,7 +281,8 @@ final class RealtimePerformanceTests: XCTestCase {
             rig.apply("bow_pos", 0.25 + 0.5 * x)            // live
             rig.apply("bow_mu_s", 0.6 + 0.5 * x)            // scalar
             rig.apply("bow_body_q", 10 + 40 * x)            // body coeffs
-            rig.apply("bow_jt_drive", 0.01 + 0.08 * x)      // jawari tables
+            rig.apply("bow_jt_drive", 0.01 + 0.08 * x)      // live (kernel slew)
+            rig.apply("bow_jt_apex", (0.6 + 0.8 * x) * 1e-5) // jawari tables
         }
         check("POLYPHONIC + EVERYTHING MOVING", r)
     }

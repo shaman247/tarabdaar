@@ -24,6 +24,8 @@ public enum JoyConControl: String, CaseIterable, Hashable, Sendable {
     case sl = "SL", sr = "SR"
     /// Stick click, Minus, Capture — unassigned, shown as panel chips.
     case stickClick = "Stick", minus = "Minus", capture = "Capture"
+    /// NYXI's independently reported rear paddle (GL); advances the drone sequence.
+    case rearZ = "Z (rear)"
 }
 
 /// How a report carries button state. Report-parsing bearers (HID, BLE)
@@ -76,8 +78,7 @@ public struct JoyConReport {
         case hid
         /// Joy-Con 2 report 0x05 on the standard input characteristic.
         case ble
-        /// Report 0x07 on the controller-specific characteristic (the
-        /// third-party clone stream).
+        /// Third-party input: report 0x07 or NYXI's vendor command-channel stream.
         case bleAlt
     }
 

@@ -3,7 +3,7 @@ import Foundation
 /// What the Mac-side ingest drives (`AudioEngine`; tests use a mock).
 /// Called on the link receive queue — must be thread-safe.
 public protocol LinkPerformanceSink: AnyObject {
-    func touchOn(_ id: UInt16, pitchSemis: Double, velocity: Double)
+    func touchOn(_ id: UInt16, pitchSemis: Double)
     func touchGlide(_ id: UInt16, pitchSemis: Double)
     func touchOff(_ id: UInt16)
     func touchesAllOff()
@@ -29,8 +29,8 @@ extension AudioEngine: LinkPerformanceSink {}
 /// Each frame is the COMPLETE touch set — an id absent from the new frame
 /// is a note-off, a new id is a note-on, a changed onsetSeq on a present
 /// id is a retrigger (an off+on collapsed into one frame by latest-wins
-/// coalescing). Apply order per frame: removals → additions/retriggers →
-/// pitch updates. Every note-on mounts a fresh string.
+/// coalescing). Sensor bindings precede touch diffs; onset blend anchors
+/// precede mounting. Every note-on mounts a fresh string.
 ///
 /// NOT thread-safe — confine to the link receive queue. Sequence gating
 /// (drop-non-newer stateSeq) happens upstream in the link; `apply` assumes
@@ -57,6 +57,8 @@ public final class LinkIngest {
     /// change of the wire byte — the `.touchSize` dimension's feed
     /// (`TouchSizeTracker`). 0 from producers without a touchscreen.
     public var onTouchRadius: ((UInt16, Double) -> Void)?
+    /// Normalized fret position, before onset and on every position change.
+    public var onTouchFretPosition: ((UInt16, Double) -> Void)?
     /// Chord bar selection, on CHANGE only (heartbeat repeats are silent,
     /// so a Mac-local selection is not clobbered by an idle iPad); nil =
     /// deselected.
@@ -65,7 +67,7 @@ public final class LinkIngest {
     private var last: TLPPerfState?
     private var lastTilt: [Double] = [.nan, .nan, .nan]
     private var lastAccel: (Int16, Int16, Int16) = (.min, .min, .min)
-    private var lastStrike: UInt8 = .max
+    private var lastStrike: UInt8?
 
     public init(sink: LinkPerformanceSink? = nil) {
         self.sink = sink
@@ -75,67 +77,6 @@ public final class LinkIngest {
         let prev = last
         last = frame
         guard let sink else { return }
-
-        // Touches: removals → additions/retriggers → glides.
-        // A hand of touches at most: linear scans, no per-frame hashing.
-        let prevTouches = prev?.touches ?? []
-        for t in prevTouches where !frame.touches.contains(where: { $0.id == t.id }) {
-            sink.touchOff(t.id)
-            onTouchGate?(t.id, false)
-        }
-        for t in frame.touches {
-            if let p = prevTouches.first(where: { $0.id == t.id }) {
-                if p.onsetSeq != t.onsetSeq {
-                    // expr before the onset so the pluck level sees it
-                    if t.exprScale != 1.0 || p.exprScale != 1.0 {
-                        sink.touchExpr(t.id, exprScale: t.exprScale)
-                    }
-                    if t.glideExempt { sink.touchGlideExempt(t.id) }
-                    sink.touchOn(t.id, pitchSemis: Double(t.pitch),
-                                 velocity: Double(t.velocity) / 255.0)
-                    onTouchGate?(t.id, true)
-                    onTouchPitch?(t.id, Double(t.pitch))
-                    onTouchRadius?(t.id, t.radiusPoints)
-                } else {
-                    if p.exprScale != t.exprScale {
-                        sink.touchExpr(t.id, exprScale: t.exprScale)
-                    }
-                    if p.pitch != t.pitch {
-                        sink.touchGlide(t.id, pitchSemis: Double(t.pitch))
-                        onTouchPitch?(t.id, Double(t.pitch))
-                    }
-                    if p.radius != t.radius {
-                        onTouchRadius?(t.id, t.radiusPoints)
-                    }
-                }
-            } else {
-                if t.exprScale != 1.0 {
-                    sink.touchExpr(t.id, exprScale: t.exprScale)
-                }
-                if t.glideExempt { sink.touchGlideExempt(t.id) }
-                sink.touchOn(t.id, pitchSemis: Double(t.pitch),
-                             velocity: Double(t.velocity) / 255.0)
-                onTouchGate?(t.id, true)
-                onTouchPitch?(t.id, Double(t.pitch))
-                onTouchRadius?(t.id, t.radiusPoints)
-            }
-        }
-
-        // Drone buttons: mask-bit edges.
-        let prevMask = prev?.droneMask ?? 0
-        if frame.droneMask != prevMask {
-            for i in 0..<FretArrangement.droneCount {
-                let bit: UInt8 = 1 << UInt8(i)
-                if (frame.droneMask ^ prevMask) & bit != 0 {
-                    sink.setDronePressed(i, frame.droneMask & bit != 0)
-                }
-            }
-        }
-
-        // Chord bar selection: change-gated (prev is nil on reconnect).
-        if frame.chordSelection != (prev?.chordSelection ?? nil) {
-            onChordSelect?(frame.chordSelection)
-        }
 
         // Tilt: s16 −32767…32767 ↔ −1…+1, change-gated per axis.
         let axes = [frame.tiltX, frame.tiltY, frame.tiltZ]
@@ -160,6 +101,72 @@ public final class LinkIngest {
             lastStrike = frame.strike
             onStrike?(Double(frame.strike) / 255.0)
         }
+
+        // Touches: removals → additions/retriggers → glides.
+        // A hand of touches at most: linear scans, no per-frame hashing.
+        let prevTouches = prev?.touches ?? []
+        for t in prevTouches where !frame.touches.contains(where: { $0.id == t.id }) {
+            sink.touchOff(t.id)
+            onTouchGate?(t.id, false)
+        }
+        for t in frame.touches {
+            if let p = prevTouches.first(where: { $0.id == t.id }) {
+                if p.onsetSeq != t.onsetSeq {
+                    // expr before the onset so the pluck level sees it
+                    if t.exprScale != 1.0 || p.exprScale != 1.0 {
+                        sink.touchExpr(t.id, exprScale: t.exprScale)
+                    }
+                    if t.glideExempt { sink.touchGlideExempt(t.id) }
+                    onTouchGate?(t.id, true)
+                    onTouchPitch?(t.id, Double(t.pitch))
+                    onTouchRadius?(t.id, t.radiusPoints)
+                    onTouchFretPosition?(t.id, t.fretPosition01)
+                    sink.touchOn(t.id, pitchSemis: Double(t.pitch))
+                } else {
+                    if p.exprScale != t.exprScale {
+                        sink.touchExpr(t.id, exprScale: t.exprScale)
+                    }
+                    if p.fretPosition != t.fretPosition {
+                        onTouchFretPosition?(t.id, t.fretPosition01)
+                    }
+                    if p.pitch != t.pitch {
+                        sink.touchGlide(t.id, pitchSemis: Double(t.pitch))
+                        onTouchPitch?(t.id, Double(t.pitch))
+                    }
+                    if p.radius != t.radius {
+                        onTouchRadius?(t.id, t.radiusPoints)
+                    }
+                }
+            } else {
+                if t.exprScale != 1.0 {
+                    sink.touchExpr(t.id, exprScale: t.exprScale)
+                }
+                if t.glideExempt { sink.touchGlideExempt(t.id) }
+                onTouchGate?(t.id, true)
+                onTouchPitch?(t.id, Double(t.pitch))
+                onTouchRadius?(t.id, t.radiusPoints)
+                onTouchFretPosition?(t.id, t.fretPosition01)
+                sink.touchOn(t.id, pitchSemis: Double(t.pitch))
+            }
+        }
+
+        // Drone buttons: mask-bit edges.
+        let prevMask = prev?.droneMask ?? 0
+        if frame.droneMask != prevMask {
+            for i in 0..<FretArrangement.droneCount {
+                let bit: UInt8 = 1 << UInt8(i)
+                if (frame.droneMask ^ prevMask) & bit != 0 {
+                    sink.setDronePressed(i, frame.droneMask & bit != 0)
+                }
+            }
+        }
+
+        // Chord bar selection: change-gated (prev is nil on reconnect).
+        if frame.chordSelection != (prev?.chordSelection ?? nil) {
+            onChordSelect?(frame.chordSelection)
+        }
+
+
     }
 
     /// The kill path — link dropped/stale, or the peer sent PANIC.
@@ -171,6 +178,7 @@ public final class LinkIngest {
         last = nil
         lastTilt = [.nan, .nan, .nan]
         lastAccel = (.min, .min, .min)
+        lastStrike = nil
         guard let sink else { return }
         for t in prev?.touches ?? [] {
             sink.touchOff(t.id)
