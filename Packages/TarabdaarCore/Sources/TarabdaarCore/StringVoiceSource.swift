@@ -119,6 +119,8 @@ public final class StringVoiceSource {
                     { $0.setJtDualSelectivity($1) }),
         ControlKnob("bow_jt_bow_bloom", unit,
                     { $0.setJtBowBloom($1) }),
+        ControlKnob("bow_jt_dual_pluck_level", unit,
+                    { $0.setJtDualPluckLevel($1) }),
         ControlKnob("bow_jt_dual_mm", unit,
                     { $0.setJtDualDisplacement(mm: $1) }),
         ControlKnob("bow_jt_pluck", reapply: .whenChanged,
@@ -319,10 +321,10 @@ public final class StringVoiceSource {
         currentEngine()?.setBusMeter(on)
     }
 
-    /// The (voice, taraf) bus RMS since the previous call (integrate-and-
-    /// dump); (0, 0) unarmed or meter off. One poller. Any thread.
-    public func busLevels() -> (voice: Double, taraf: Double) {
-        currentEngine()?.busLevels() ?? (0, 0)
+    /// Voice, combined taraf, chromatic and raga RMS since the previous call
+    /// (integrate-and-dump); all zero unarmed or meter off. One poller. Any thread.
+    public func busLevels() -> (voice: Double, taraf: Double, chromatic: Double, raga: Double) {
+        currentEngine()?.busLevels() ?? (0, 0, 0, 0)
     }
 
     /// Voice→taraf inject write — the ONE render-thread entry point: a

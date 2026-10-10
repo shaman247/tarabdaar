@@ -2,6 +2,22 @@
    half is bow_jt.c and the shared state bow_poly_internal.h. */
 #include "bow_poly_internal.h"
 
+
+/* Positive slipping root of v = |v_free-v_bow| - N mu(v)/(2 Z).
+   Rational velocity weakening makes this a quadratic. The stable formula
+   avoids cancellation near stick capture and requires no iteration cap. */
+double bow_friction_slip_force(double dv, double normal, double z,
+                                     double mus, double mud, double corner) {
+    const double u=fabs(dv), a=normal/(2*z);
+    const double b=corner-u+a*mud;
+    const double minusC=corner*fmax(0,u-a*mus);
+    const double discriminant=sqrt(b*b+4*minusC);
+    const double speed=b>=0 ? (discriminant+b>0 ? 2*minusC/(discriminant+b) : 0)
+                           : .5*(discriminant-b);
+    const double coefficient=mud+(mus-mud)/(1+speed/corner);
+    return (dv>0 ? -1 : 1)*normal*coefficient;
+}
+
 /* Mount a fresh string. */
 static void poly_mount_string(bow_poly_state_t *st, bow_pstring_t *S)
 {
@@ -29,7 +45,7 @@ static void poly_load_scalars(bow_poly_state_t *st, const bow_scalars_t *s)
     st->thLeak = s->thLeak; st->thA = s->thA; st->thD = s->thD;
     st->thFloor = s->thFloor;
     st->bowDisp = s->bowDisp; st->zload = s->zload;
-    st->nA = s->nA; st->nT = s->nT; st->nPow = s->nPow;
+    st->nA = s->nA; st->nPow = s->nPow;
     st->nzHi = s->nzHi; st->nzLo = s->nzLo; st->nDir = s->nDir;
     st->nzHiD = s->nzHiD;
     st->gutG = s->gutG; st->dispN = s->dispN; st->nailK = s->nailK;
@@ -48,6 +64,7 @@ static void poly_load_scalars(bow_poly_state_t *st, const bow_scalars_t *s)
     st->nutFc0 = -log(st->nutA) * sr / 6.283185307179586;
     st->kgAtk = kc_pole_tau_sr(0.003, sr);
     st->kgRel = kc_pole_tau_sr(0.008, sr);
+    st->dampSlew = kc_onepole_tau_sr(0.010, sr);
     st->slCD = kc_onepole_tau_sr(0.010, sr);
     st->slAtk = kc_pole_tau_sr(0.015, sr);
     st->slRel = kc_pole_tau_sr(0.120, sr);
@@ -65,7 +82,18 @@ void *bow_poly_init(int nb, double sr,
     bow_poly_state_t *st = (bow_poly_state_t *)calloc(1, sizeof(bow_poly_state_t));
     st->sr = sr;
     st->nb = nb < 1 ? 1 : (nb > 64 ? 64 : nb);   /* chunk scratch is [64] */
-    st->K = K > 96 ? 96 : K;
+    st->K = K > 0 ? K : 0;
+    /* The builder's loop bound and the rendered body use the same modes.
+       A fixed-size state silently discarded the upper formant bank. */
+    size_t modes = (size_t)st->K;
+    st->bodyState = (double *)calloc(modes > 0 ? 12 * modes : 1, sizeof(double));
+    if (!st->bodyState) { free(st); return NULL; }
+    st->bx1 = st->bodyState; st->bx2 = st->bx1 + modes;
+    st->by1 = st->bx2 + modes; st->by2 = st->by1 + modes;
+    st->jbx1 = st->by2 + modes; st->jbx2 = st->jbx1 + modes;
+    st->jby1 = st->jbx2 + modes; st->jby2 = st->jby1 + modes;
+    st->jbsx1 = st->jby2 + modes; st->jbsx2 = st->jbsx1 + modes;
+    st->jbsy1 = st->jbsx2 + modes; st->jbsy2 = st->jbsy1 + modes;
     st->ba1 = kc_dup_d(ba1, K);   st->ba2 = kc_dup_d(ba2, K);
     st->bn0 = kc_dup_d(bn0, K);   st->bA = kc_dup_d(bA, K);
     st->bC = kc_dup_d(bC, K);
@@ -105,12 +133,12 @@ static inline void rg_track(bow_pstring_t *S, double x, double f0t, double sr)
 
 /* One string, one sample: friction contacts + terminations + contact noise
    against this string's state. Returns its transmitted bridge force,
-   accumulates its direct-radiated noise, outputs rdmp/gk for the return. */
+   accumulates its direct-radiated noise, outputs gk for the return. */
 static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                                 double f0t, double vbt, double fbt,
                                 double betat, double gatet,
                                 double *noiseDirAcc,
-                                double *rdmpOut, double *gkOut)
+                                double *gkOut)
 {
     const double sr = st->sr;
     const double bowW = st->bowW, kdisp = st->kdisp;
@@ -120,7 +148,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
     const double nutA = st->nutA, brA = st->brA;
     const double thLeak = st->thLeak, thA = st->thA, thD = st->thD;
     const double thFloor = st->thFloor;
-    const double nA = st->nA, nT = st->nT, nPow = st->nPow;
+    const double nA = st->nA, nPow = st->nPow;
     const double nzHi = st->nzHi, nzLo = st->nzLo;
     const double nDir = st->nDir, nzHiD = st->nzHiD;
     const double gutG = st->gutG, nailK = st->nailK;
@@ -138,11 +166,17 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
     double kga = bowForce > S->kGate ? st->kgAtk : st->kgRel;
     S->kGate = (1.0 - kga) * bowForce + kga * S->kGate;
     double gk = S->kGate >= 0.10 ? 1.0 : S->kGate * 10.0;
-    double rdmp = 1.0 - (0.69 / fmax(f0t, 40.0)) * (1.0 - gk);
     double brAe = brA;
-    const double gutGe = gutG;
+    double gutGe = gutG;
+    if (S->dampTarget != 0.0 || S->dampLoss != 0.0) {
+        S->dampLoss += st->dampSlew * (S->dampTarget - S->dampLoss);
+        if (fabs(S->dampTarget - S->dampLoss) < 1e-15)
+            S->dampLoss = S->dampTarget;
+        gutGe *= 1.0 - S->dampLoss;
+    }
     double gutA2e = gutA2;
-    *rdmpOut = rdmp;
+    /* The host's release damper absorbs returning waves at the nut;
+       bow force and the sympathetic bank retain their own envelopes. */
     *gkOut = gk;
     if (bowOn) {
         double T = sr / fmax(f0t, 40.0);
@@ -263,22 +297,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                     if (fabs(stickF) <= mSg * FbT) {
                         Ffg = stickF;
                     } else {
-                        double sg = dv0 > 0 ? 1.0 : -1.0;
-                        Ffg = -sg * mDg * FbT;
-                        for (int it = 0; it < 8; it++) {
-                            double dv = dv0 + Ffg / (2.0 * Zeff);
-                            double adv = fabs(dv);
-                            double mu = mDg + (mSg - mDg)
-                                / (1.0 + adv / v0g);
-                            double gg = Ffg + sg * mu * FbT;
-                            double dmu = -(mSg - mDg) /
-                                (v0g * (1.0 + adv / v0g)
-                                 * (1.0 + adv / v0g));
-                            double dg = 1.0 + sg * FbT * dmu *
-                                (dv > 0 ? 1.0 : -1.0) / (2.0 * Zeff);
-                            Ffg -= gg / (fabs(dg) > 0.1 ? dg
-                                         : (dg > 0 ? 0.1 : -0.1));
-                        }
+                        Ffg = bow_friction_slip_force(dv0, FbT, Zeff, mSg, mDg, v0g);
                     }
                     double dvh = (vhg - vbt) + Ffg / (2.0 * Zeff);
                     double lk = st->thLeakPow[g];
@@ -309,7 +328,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
             S->bufBM[S->wbm] = inR[2] + inj[2]; S->wbm = (S->wbm + 1) % 64;
             o2 = inL[2] + inj[2];
             S->nutLp = (1.0 - nutAf) * o1v + nutAf * S->nutLp;
-            S->buf1[S->w1i] = -S->nutLp * rdmp * gutGe + slN;
+            S->buf1[S->w1i] = -S->nutLp * gutGe + slN;
             S->w1i = (S->w1i + 1) % MAXBOW;
             S->brLp = (1.0 - brAe) * o2 + brAe * S->brLp;
             if (gutA2e > 0.0) {
@@ -359,19 +378,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 if (fabs(stickF) <= muS * Fb) {
                     Ff = stickF;
                 } else {
-                    double s = dv0 > 0 ? 1.0 : -1.0;
-                    Ff = -s * muD * Fb;
-                    for (int it = 0; it < 8; it++) {
-                        double dv = dv0 + Ff / (2.0 * Zeff);
-                        double adv = fabs(dv);
-                        double mu = muD + (muS - muD) / (1.0 + adv / v0e);
-                        double gg = Ff + s * mu * Fb;
-                        double dmu = -(muS - muD) /
-                            (v0e * (1.0 + adv / v0e) * (1.0 + adv / v0e));
-                        double dg = 1.0 + s * Fb * dmu *
-                            (dv > 0 ? 1.0 : -1.0) / (2.0 * Zeff);
-                        Ff -= gg / (fabs(dg) > 0.1 ? dg : (dg > 0 ? 0.1 : -0.1));
-                    }
+                    Ff = bow_friction_slip_force(dv0, Fb, Zeff, muS, muD, v0e);
                 }
             }
             if (hairHz > 1e-6) {
@@ -388,9 +395,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 S->bufT[S->wti] = torsG * (dvS - tEcho);
                 S->wti = (S->wti + 1) % MAXBOW;
             }
-            S->tEnv = 0.99958 * S->tEnv + fabs(fbt * gatet - S->fbPrev);
-            S->fbPrev = fbt * gatet;
-            if ((nA > 1e-9 || nT > 1e-9 || nDir > 1e-9) && Fb > 1e-6) {
+            if ((nA > 1e-9 || nDir > 1e-9) && Fb > 1e-6) {
                 st->lcg = st->lcg * 6364136223846793005ULL
                     + 1442695040888963407ULL;
                 double xi = (double)((st->lcg >> 33) & 0xFFFFFF)
@@ -404,7 +409,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 double advn = fabs(dvn);
                 double slipg = advn / (advn + v0f);
                 double FbN = pow(Fb, nPow);
-                Ff += (nA * FbN + nT * S->tEnv) * slipg
+                Ff += nA * FbN * slipg
                     * (S->nz1 - S->nz2);
                 *noiseDirAcc += nDir * FbN * slipg
                     * (S->nz2b - S->nz2);
@@ -436,20 +441,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                     if (fabs(stickB) <= mSB * Fb) {
                         FfB = stickB;
                     } else {
-                        double sB = dv0B > 0 ? 1.0 : -1.0;
-                        FfB = -sB * mDB * Fb;
-                        for (int it = 0; it < 8; it++) {
-                            double dvB = dv0B + FfB / (2.0 * ZeffB);
-                            double advB = fabs(dvB);
-                            double muB = mDB + (mSB - mDB) / (1.0 + advB / v0f);
-                            double ggB = FfB + sB * muB * Fb;
-                            double dmuB = -(mSB - mDB) /
-                                (v0f * (1.0 + advB / v0f) * (1.0 + advB / v0f));
-                            double dgB = 1.0 + sB * Fb * dmuB *
-                                (dvB > 0 ? 1.0 : -1.0) / (2.0 * ZeffB);
-                            FfB -= ggB / (fabs(dgB) > 0.1 ? dgB
-                                          : (dgB > 0 ? 0.1 : -0.1));
-                        }
+                        FfB = bow_friction_slip_force(dv0B, Fb, ZeffB, mSB, mDB, v0f);
                     }
                     double dvhB = (vhB - vbt) + FfB / (2.0 * (Z / (1.0 + Z / Zt)));
                     S->Tr3[1] = thLeak * S->Tr3[1]
@@ -465,7 +457,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 o2 = h1 + inj;
             }
             S->nutLp = (1.0 - nutAf) * o1 + nutAf * S->nutLp;
-            S->buf1[S->w1i] = -S->nutLp * rdmp * gutGe + slN;
+            S->buf1[S->w1i] = -S->nutLp * gutGe + slN;
             S->w1i = (S->w1i + 1) % MAXBOW;
             S->brLp = (1.0 - brAe) * o2 + brAe * S->brLp;
             if (gutA2e > 0.0) {
@@ -483,7 +475,7 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
 /* One string, one sample: post-body bridge-motion return + stiffness
    dispersion + reflection write. */
 static void poly_string_return(bow_poly_state_t *st, bow_pstring_t *S,
-                               double V, double rdmp, double gk)
+                               double V, double gk)
 {
     const double kretG = st->kret * gk;
     double vr;
@@ -502,7 +494,7 @@ static void poly_string_return(bow_poly_state_t *st, bow_pstring_t *S,
         double ay = st->bowDisp * apy + S->apXs[kd] - st->bowDisp * S->apYs[kd];
         S->apXs[kd] = apy; S->apYs[kd] = ay; apy = ay;
     }
-    S->buf2[S->w2i] = apy * rdmp * st->gutG;
+    S->buf2[S->w2i] = apy * st->gutG;
     S->w2i = (S->w2i + 1) % MAXBOW;
 }
 
@@ -526,6 +518,7 @@ void bow_poly_set_stereo(void *vst,
                          const double *slotPan, int nSlot)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_set_stereo(st->jtInline, jtPan, nJt, slotPan, nSlot);
     if (!st) return;
     free(st->stSlotPan); free(st->stJtPan);
     st->stSlotPan = (double *)calloc(st->nb, sizeof(double));
@@ -537,10 +530,10 @@ void bow_poly_set_stereo(void *vst,
         memcpy(st->stJtPan, jtPan, sizeof(double) * (size_t)st->njt);
     st->jtLpYS = 0.0;
     st->jtHpYS = 0.0;
-    memset(st->jbsx1, 0, sizeof(st->jbsx1));
-    memset(st->jbsx2, 0, sizeof(st->jbsx2));
-    memset(st->jbsy1, 0, sizeof(st->jbsy1));
-    memset(st->jbsy2, 0, sizeof(st->jbsy2));
+    memset(st->jbsx1, 0, sizeof(double) * (size_t)st->K);
+    memset(st->jbsx2, 0, sizeof(double) * (size_t)st->K);
+    memset(st->jbsy1, 0, sizeof(double) * (size_t)st->K);
+    memset(st->jbsy2, 0, sizeof(double) * (size_t)st->K);
     st->jtHoldS = 0.0;
     st->jtOutHoldS = 0.0;
     st->stOn = 1;
@@ -609,6 +602,7 @@ static inline double poly_width_bank(bow_poly_state_t *st, int b, double x)
 void bow_poly_set_stereo_width(void *vst, double width)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_set_stereo_width(st->jtInline, width);
     if (!st) return;
     st->stWidthTgt = width;
     if (!st->stWidthOn && width <= 1e-9) return;   /* stay byte-null */
@@ -622,6 +616,7 @@ void bow_poly_set_stereo_width(void *vst, double width)
 void bow_poly_scope_arm(void *vst, int on)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_scope_arm(st->jtInline, on);
     if (!st || st->njt <= 0 || !st->scopeEnv) return;
     if (on && !st->scopeOn) {
         memset(st->scopeEnv, 0, sizeof(double) * (size_t)st->njt);
@@ -674,6 +669,7 @@ int bow_poly_regime_slot(void *vst, int b, double out[6])
 void bow_poly_set_scalars(void *vst, const bow_scalars_t *s)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_set_scalars(st->jtInline, s);
     if (!st || !s) return;
     poly_load_scalars(st, s);
 }
@@ -685,6 +681,7 @@ int bow_poly_set_body(void *vst, int K, const double *ba1, const double *ba2,
                 const double *bn0, const double *bA, const double *bC)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_set_body(st->jtInline, K, ba1, ba2, bn0, bA, bC);
     if (!st || K != st->K || K < 0) return 0;
     if (K == 0) return 1;
     if (!ba1 || !ba2 || !bn0 || !bA || !bC) return 0;
@@ -737,7 +734,32 @@ void bow_poly_process3(void *vst, int n, int stride,
                        const double *xv, double *out, double *outS,
                        double *outJt, double *outJtS)
 {
+    bow_poly_process4(vst, n, stride, f0, vb, fb, beta, gate, xv,
+                      out, outS, outJt, outJtS, NULL, NULL);
+}
+
+void bow_poly_process4(void *vst, int n, int stride,
+                       const double *f0, const double *vb, const double *fb,
+                       const double *beta, const double *gate,
+                       const double *xv, double *out, double *outS,
+                       double *outJt, double *outJtS,
+                       double *meterC, double *meterR)
+{
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st->jtInline && n > JT_ABLK) {
+        for (int offset = 0; offset < n; offset += JT_ABLK) {
+            const int count = n-offset < JT_ABLK ? n-offset : JT_ABLK;
+            bow_poly_process4(st, count, stride, f0+offset, vb+offset, fb+offset,
+                beta+offset, gate+offset, xv ? xv+offset : NULL, out+offset,
+                outS ? outS+offset : NULL, outJt ? outJt+offset : NULL,
+                outJtS ? outJtS+offset : NULL, meterC ? meterC+offset : NULL,
+                meterR ? meterR+offset : NULL);
+        }
+        return;
+    }
+
+    if (meterC) memset(meterC, 0, sizeof(double) * (size_t)n);
+    if (meterR) memset(meterR, 0, sizeof(double) * (size_t)n);
     const int stOn = (outS != NULL) && st->stOn;
     if (outS && !stOn)
         memset(outS, 0, sizeof(double) * (size_t)n);
@@ -778,7 +800,7 @@ void bow_poly_process3(void *vst, int n, int stride,
             S->active = 0;
         }
     }
-    double pkArr[64], rdmpArr[64], gkArr[64];
+    double pkArr[64], gkArr[64];
     for (int i = 0; i < nProc; i++) pkArr[i] = 0.0;
 
     /* ---- TWO-WAY BRIDGE COUPLING: pop the previous post-pass block's
@@ -854,6 +876,21 @@ void bow_poly_process3(void *vst, int n, int stride,
         }
     }
 
+    double *jtJobFr = jtFr, *jtJobCv = jtCv;
+    bow_poly_state_t *chroma = st->jtInline;
+    if (chroma && st->jtGain != 0.0) {
+        jtFr = st->jtInlineDrive;
+        jtCv = st->jtInlineCap;
+    }
+    if (chroma) {
+        if (cplOn && !chroma->jtCplOn) {
+            chroma->jtCplR = chroma->jtCplW;
+            chroma->jtCplOut = 0;
+        }
+        chroma->jtCplOn = cplOn;
+        if (!cplOn) chroma->jtCplOut = chroma->jtCplHold = 0;
+    }
+
     for (int t = 0; t < n; t++) {
         double F = 0.0;
         double noiseDir = 0.0;
@@ -866,7 +903,7 @@ void bow_poly_process3(void *vst, int n, int stride,
             double nd0 = noiseDir;
             F += poly_string_force(st, S, f0[o], vb[o], fb[o], beta[o],
                                    gate[o], &noiseDir,
-                                   &rdmpArr[i], &gkArr[i]);
+                                   &gkArr[i]);
             /* the bow-contact noise sounds AT the played string's position; its
                bridge force radiates from the one body and stays mid-only */
             if (stOn) noiseDirS += stSp[b] * (noiseDir - nd0);
@@ -896,6 +933,13 @@ void bow_poly_process3(void *vst, int n, int stride,
                 + st->jtCplA * (st->jtCplG - st->jtCplCur);
             if (st->jtCplG == 0.0 && gc < 1e-12 && gc > -1e-12) gc = 0.0;
             st->jtCplCur = gc;
+            if (chroma) {
+                double cc = chroma->jtCplOut * 0.9995;
+                if (chroma->jtCplR < chroma->jtCplW)
+                    cc = chroma->jtCplRing[chroma->jtCplR++ & (JT_WEBN-1)];
+                chroma->jtCplOut = cc;
+                c += cc;
+            }
             F += gc * c;
         }
         /* ---- body: admittance V + radiation ---- */
@@ -914,7 +958,7 @@ void bow_poly_process3(void *vst, int n, int stride,
         if (bowOn) {
             for (int i = 0; i < nProc; i++) {
                 bow_pstring_t *S = &st->strs[st->proc[i]];
-                poly_string_return(st, S, V, rdmpArr[i], gkArr[i]);
+                poly_string_return(st, S, V, gkArr[i]);
             }
         }
         st->disp = 0.99967 * st->disp + V;
@@ -970,6 +1014,12 @@ void bow_poly_process3(void *vst, int n, int stride,
     }
     if (jtFr && st->fxDriveFn)
         st->fxDriveFn(st->fxDriveCtx, jtFr, n);
+    if (chroma) {
+        if (jtJobFr) memcpy(jtJobFr, jtFr, sizeof(double) * (size_t)n);
+        if (jtJobCv) memcpy(jtJobCv, jtCv, sizeof(double) * (size_t)n);
+        jtFr = jtJobFr;
+        jtCv = jtJobCv;
+    }
     /* ---- modal-jawari POST-PASS. ASYNC live: publish the job (no wait) and
        mix the FIFO's completed samples (flat-fill when the dispatcher is
        behind). SYNC: serial replay (bit-exact) or the caller-blocking pool. */
@@ -1009,6 +1059,12 @@ void bow_poly_process3(void *vst, int n, int stride,
             if (g < 1.0) { g += 3.0e-5; if (g > 1.0) g = 1.0; }
             jo[t] += g * v;
             st->jtOutHold = v;
+            if (st->jtMeterChromatic) {
+                st->jtMeterOutC = st->jtMeterRingC[(rr + t) & (JT_WEBN - 1)];
+                st->jtMeterOutR = st->jtMeterRingR[(rr + t) & (JT_WEBN - 1)];
+                if (meterC) meterC[t] = g * st->jtMeterOutC;
+                if (meterR) meterR[t] = g * st->jtMeterOutR;
+            }
             if (stOn) {
                 double vs = st->jtWebRingS[(rr + t) & (JT_WEBN - 1)];
                 joS[t] += g * vs;
@@ -1021,6 +1077,8 @@ void bow_poly_process3(void *vst, int n, int stride,
         for (int t = take; t < n; t++) {
             if (g < 1.0) { g += 3.0e-5; if (g > 1.0) g = 1.0; }
             jo[t] += g * st->jtOutHold;
+            if (meterC) meterC[t] = g * st->jtMeterOutC;
+            if (meterR) meterR[t] = g * st->jtMeterOutR;
             if (stOn) {
                 joS[t] += g * st->jtOutHoldS;
                 if (st->stWidthOn)
@@ -1071,6 +1129,9 @@ void bow_poly_process3(void *vst, int n, int stride,
                 const double g = jt_gain_step(st);
                 double jv = g * jt_lp_step(st, st->jtHold);
                 jo[t] += jv;
+                const double chromatic = g * st->jtMeterFilteredC;
+                if (meterC) meterC[t] = chromatic;
+                if (meterR) meterR[t] = jv - chromatic;
                 if (stOn) {
                     joS[t] += g * jt_lp_stepS(st, st->jtHoldS);
                     if (st->stWidthOn)
@@ -1094,6 +1155,8 @@ void bow_poly_process3(void *vst, int n, int stride,
                 for (int t = 0; t < cn; t++) {
                     const double jv = web[t];
                     jo[c0 + t] += jv;
+                    if (meterC && st->jtMeterChromatic) meterC[c0 + t] = st->jtMeterWebC[t];
+                    if (meterR && st->jtMeterChromatic) meterR[c0 + t] = st->jtMeterWebR[t];
                     if (stOn) {
                         joS[c0 + t] += webS[t];
                         if (st->stWidthOn)
@@ -1110,6 +1173,40 @@ void bow_poly_process3(void *vst, int n, int stride,
         if (jtCv != st->jtCapBuf)
             free(jtCv);
     }
+    if (chroma && st->jtGain != 0.0) {
+        long long cw = chroma->jtCplW;
+        for (int t = 0; t < n; t++) {
+            const double F = st->jtInlineDrive[t];
+            chroma->jtFdc += 2e-4 * (F - chroma->jtFdc);
+            chroma->jtFacc += F - chroma->jtFdc;
+            if (++chroma->jtPhase >= chroma->jtDiv) {
+                const double Fd = chroma->jtFacc / chroma->jtDiv;
+                chroma->jtFacc = 0; chroma->jtPhase = 0;
+                double side = 0, returned = 0;
+                const double cap = jt_cap_ceiling(chroma, st->jtInlineCap[t]);
+                const double drive = jt_drive_step(chroma);
+                const double dn = jt_drive_norm(chroma, drive);
+                chroma->jtHold = jt_tick(chroma, chroma->jtFprev * drive,
+                    jt_ev_step(chroma), cap, dn,
+                    jt_drive_comp_step(chroma, dn, chroma->jtFprev),
+                    stOn ? &side : NULL, cplOn ? &returned : NULL);
+                chroma->jtHoldS = side;
+                chroma->jtCplHold = returned;
+                chroma->jtFprev = Fd;
+            }
+            if (cplOn) jt_cpl_put(chroma, &cw, chroma->jtCplHold);
+            const double gain = jt_gain_step(chroma);
+            const double value = gain * jt_lp_step(chroma, chroma->jtHold);
+            jo[t] += value;
+            if (meterC) meterC[t] += value;
+            if (stOn) {
+                joS[t] += gain * jt_lp_stepS(chroma, chroma->jtHoldS);
+                if (st->stWidthOn)
+                    joS[t] += st->stWidthCur * poly_width_bank(chroma, 1, value);
+            }
+        }
+        chroma->jtCplW = cw;
+    }
 }
 
 void bow_poly_reset_string(void *vst, int b)
@@ -1117,6 +1214,16 @@ void bow_poly_reset_string(void *vst, int b)
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     if (b < 0 || b >= st->nb) return;
     poly_mount_string(st, &st->strs[b]);
+}
+
+void bow_poly_set_string_damping(void *vst, int b, double t60, double f0)
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (b < 0 || b >= st->nb) return;
+    /* One loss per string round trip: the decay time is register-independent.
+       A resting zero bypasses the multiply exactly. Called at chunk rate. */
+    st->strs[b].dampTarget = t60 > 0.0
+        ? -expm1(-6.907755278982137 / (fmax(t60, 0.02) * fmax(f0, 40.0))) : 0.0;
 }
 
 int bow_poly_active(const void *vst, int b)
@@ -1134,6 +1241,10 @@ void bow_poly_free(void *vst)
         bow_poly_jt_set_async(vst, 0);   /* dispatcher first: it may be waiting
                                             on the pool */
         jt_pool_stop(st);
+        bow_poly_free(st->jtInline);
+        st->jtInline = NULL;
+        free(st->jtInlineDrive);
+        free(st->jtInlineCap);
         if (st->jtPoolInit) {
             pthread_mutex_destroy(&st->jtMx);
             pthread_mutex_destroy(&st->jtDispMx);
@@ -1167,6 +1278,7 @@ void bow_poly_free(void *vst)
         free(st->jtCapV); free(st->jtCapBuf); free(st->jtCapRing);
         free(st->scopeEnv); free(st->scopeMode); free(st->scopeCnt);
         free(st->jtRadScale); free(st->jtRadScaleCur); free(st->jtRadLp);
+        free(st->jtRadSmooth);
         free(st->jtRadPinScale); free(st->jtRadPinScaleCur);
         if(st->jtDual) {
             for(int row=0;row<st->njt;row++)jt_dual_free(st->jtDual[row]);
@@ -1179,7 +1291,12 @@ void bow_poly_free(void *vst)
         free(st->jtEvOfsTgt); free(st->jtEvOfsCur);
         free(st->jtRowAlpha); free(st->jtRowHcB); free(st->jtRowDeep);
     }
+    free(st->jtMeterBody);
+    free(st->jtMeterChromatic); free(st->jtMeterPartials);
+    free(st->jtMeterWebC); free(st->jtMeterWebR);
+    free(st->jtMeterRingC); free(st->jtMeterRingR);
     free(st->ba1); free(st->ba2); free(st->bn0); free(st->bA); free(st->bC);
+    free(st->bodyState);
     free(st->stSlotPan); free(st->stJtPan);
     free(st->strs); free(st->proc);
     free(st);

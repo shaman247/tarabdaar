@@ -35,7 +35,7 @@ final class TLPCodecTests: XCTestCase {
                 stateSeq: 2, timestampUs: 43, stickX: 128, stickY: 128,
                 wrist1: 0, wrist2: 255, wrist3: 1, arm1: 254, arm2: 2,
                 arm3: 200, strikeWin: 40,        // v7: 2 s in 50 ms units
-                volVoice: 173, volTaraf: 91,     // v9: volume readout
+                volVoice: 173, volChromatic: 91, volRaga: 237,
                 fieldWarp: 201,                  // v10: fret pitch warp
                 octave: UInt8(bitPattern: -3),   // v11: octave shift (i8)
                 wristRate1: 10, wristRate2: 128, wristRate3: 250,

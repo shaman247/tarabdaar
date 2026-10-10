@@ -72,7 +72,6 @@ typedef struct {
     double zload;      /* fraction of the -Z*V bridge load each string takes */
     /* --- contact noise --- */
     double nA;         /* slip-noise amplitude into the string */
-    double nT;         /* thermal-envelope noise amplitude */
     double nPow;       /* bow-force exponent of the noise laws */
     double nzHi;       /* noise band: high one-pole coefficient */
     double nzLo;       /* noise band: low one-pole coefficient */
@@ -102,6 +101,11 @@ typedef struct {
     double slideAcc;   /* its half-acceleration (cents/s^2; <= 1 -> 25000) */
 } bow_scalars_t;
 
+/* Slipping friction for positive normal, impedance and corner, after the
+   static bound |2 Z dv| > mu_s normal has been exceeded. */
+double bow_friction_slip_force(double dv, double normal, double impedance,
+                               double mu_s, double mu_d, double corner);
+
 void *bow_poly_init(int nb, double sr, /* body */ int K, const double *ba1, const double *ba2, const double *bn0, const double *bA, const double *bC, /* per-sample scalars */ const bow_scalars_t *s);
 
 void bow_poly_process(void *vst, int n, int stride, const double *f0, const double *vb, const double *fb, const double *beta, const double *gate, const double *xv, double *out);
@@ -110,6 +114,10 @@ void bow_poly_free(void *vst);
 
 /* Mount a fresh gut string on slot b. */
 void bow_poly_reset_string(void *vst, int b);
+
+/* Render-thread release damper: additional t60 in seconds (0 = off),
+   calculated at this string's current Hz and slewed over 10 ms. */
+void bow_poly_set_string_damping(void *vst, int b, double t60, double f0);
 
 /* 1 while string b is ringing or bowed; 0 once silent (the host may skip
    filling its controls). */
@@ -140,6 +148,10 @@ int bow_poly_active(const void *vst, int b);
      gd gd4          ΣJ    its diagonals
      phys[7]         kc, alpha, hcB, deep, gain, drive, div
      q0              ΣM    static-wrap modal displacement at rest */
+/* Construction only: parent takes ownership of a loaded callback bank.
+   Both use identical row-indexed tables and meter-bank flags. */
+void bow_poly_jt_inline_attach(void *parent, void *chromatic);
+
 void bow_poly_jt_load(void *vst, int njt, int J, const int *M, const double *ca, const double *cb, const double *ca4, const double *cb4, const double *wd, const double *radScale, const double *pinScale, const double *cplScale, const double *phiD, const double *phiU, const double *phiF, const double *b, const double *G, const double *G4, const double *gd, const double *gd4, const double *phys, const double *q0);
 
 /* Persistent jt worker pool for the deferred post-pass (off the audio
@@ -364,6 +376,11 @@ void bow_poly_jt_inject_gain(void *vst, double g);
 void bow_poly_jt_inject_write(void *vst, const double *x, int n);
 void bow_poly_process3(void *vst, int n, int stride, const double *f0, const double *vb, const double *fb, const double *beta, const double *gate, const double *xv, double *out, double *outS, double *outJt, double *outJtS);
 
+/* Display-only bank radiation taps after shared body/tone, before shared FX. Configure
+   the row mask once, after loading rows and before starting workers. */
+void bow_poly_jt_meter_banks(void *vst, const unsigned char *chromatic, int count);
+void bow_poly_process4(void *vst, int n, int stride, const double *f0, const double *vb, const double *fb, const double *beta, const double *gate, const double *xv, double *out, double *outS, double *outJt, double *outJtS, double *meterC, double *meterR);
+
 /* Two-direction raga backend; multiple independently owned rows. Build before starting workers.
    Takes ownership of contact ONLY on success. row is zero-based, must not be
    the follower. Requires a 96 kHz jt tick and reference-coordinate contact
@@ -377,6 +394,8 @@ int bow_poly_jt_dual_load(void *vst,int row,void *contact,const double *pluck_ta
 void bow_poly_jt_dual_tone(void *vst,double hz);
 void bow_poly_jt_dual_selectivity(void *vst,double value);
 void bow_poly_jt_dual_bloom(void *vst,double value);
+/* Direct-pluck loudness: 0 = original, 1 = calibrated boost, 0.5 = dB midpoint. */
+void bow_poly_jt_dual_pluck_level(void *vst,double value);
 void bow_poly_jt_dual_levels(void *vst,int row,double gain,double bank_norm);
 int bow_poly_jt_dual_pluck(void *vst,int row,double displacement);
 /* Snapshot: first row (or -1), summed failed steps/ticks, maximum Newton iterations. */

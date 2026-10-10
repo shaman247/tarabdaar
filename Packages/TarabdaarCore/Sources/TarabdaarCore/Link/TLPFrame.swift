@@ -14,8 +14,8 @@ public enum TLP {
     /// Protocol version — both apps ship in lockstep; the HELLO range check
     /// refuses a mismatched peer cleanly (the symptom otherwise: "drones and
     /// tilt work, touches are silent").
-    public static let versionMin: UInt16 = 19
-    public static let versionMax: UInt16 = 19
+    public static let versionMin: UInt16 = 21
+    public static let versionMax: UInt16 = 21
     /// Hard cap on an encoded frame.
     public static let maxFrameBytes = 1024
     /// HELLO magic 'TRBL' (LE u32).
@@ -248,9 +248,10 @@ public struct TLPJoyConState: Equatable, Sendable {
     public var arm1: UInt8
     public var arm2: UInt8
     public var arm3: UInt8
-    /// The Mac's radiated voice and taraf levels (`TLPVolume` log scale).
+    /// The Mac's main voice, chromatic and raga levels (`TLPVolume` log scale).
     public var volVoice: UInt8
-    public var volTaraf: UInt8
+    public var volChromatic: UInt8
+    public var volRaga: UInt8
     /// `ctl_fret_warp` (0–255 ↔ 0…1) — acted on by the pad's fret field.
     public var fieldWarp: UInt8
     /// The playing-range octave shift, i8 bit pattern (−3…+3) — acted on
@@ -271,7 +272,7 @@ public struct TLPJoyConState: Equatable, Sendable {
                 stickX: UInt8, stickY: UInt8, wrist1: UInt8, wrist2: UInt8,
                 wrist3: UInt8 = 128, arm1: UInt8 = 128, arm2: UInt8 = 128,
                 arm3: UInt8 = 128, strikeWin: UInt8 = 0,
-                volVoice: UInt8 = 0, volTaraf: UInt8 = 0,
+                volVoice: UInt8 = 0, volChromatic: UInt8 = 0, volRaga: UInt8 = 0,
                 fieldWarp: UInt8 = 0, octave: UInt8 = 0,
                 wristRate1: UInt8 = 128, wristRate2: UInt8 = 128,
                 wristRate3: UInt8 = 128, accel1: UInt8 = 128,
@@ -290,7 +291,8 @@ public struct TLPJoyConState: Equatable, Sendable {
         self.arm3 = arm3
         self.strikeWin = strikeWin
         self.volVoice = volVoice
-        self.volTaraf = volTaraf
+        self.volChromatic = volChromatic
+        self.volRaga = volRaga
         self.fieldWarp = fieldWarp
         self.octave = octave
         self.wristRate1 = wristRate1
@@ -387,7 +389,7 @@ extension TLPFrame {
             out.appendLE(s.timestampUs)
             out.append(contentsOf: [s.stickX, s.stickY, s.wrist1, s.wrist2,
                                     s.wrist3, s.arm1, s.arm2, s.arm3,
-                                    s.strikeWin, s.volVoice, s.volTaraf,
+                                    s.strikeWin, s.volVoice, s.volChromatic, s.volRaga,
                                     s.fieldWarp, s.octave,
                                     s.wristRate1, s.wristRate2, s.wristRate3,
                                     s.accel1, s.accel2, s.accel3,
@@ -473,7 +475,7 @@ extension TLPFrame {
                   let sx = r.u8(), let sy = r.u8(), let w1 = r.u8(),
                   let w2 = r.u8(), let w3 = r.u8(), let a1 = r.u8(),
                   let a2 = r.u8(), let a3 = r.u8(), let sw = r.u8(),
-                  let vv = r.u8(), let vt = r.u8(), let fw = r.u8(),
+                  let vv = r.u8(), let vc = r.u8(), let vr = r.u8(), let fw = r.u8(),
                   let oct = r.u8(), let r1 = r.u8(), let r2 = r.u8(),
                   let r3 = r.u8(), let x1 = r.u8(), let x2 = r.u8(),
                   let x3 = r.u8(), let al = r.u8(),
@@ -485,7 +487,7 @@ extension TLPFrame {
                 flags: flags, stateSeq: seq, timestampUs: ts,
                 stickX: sx, stickY: sy, wrist1: w1, wrist2: w2,
                 wrist3: w3, arm1: a1, arm2: a2, arm3: a3, strikeWin: sw,
-                volVoice: vv, volTaraf: vt, fieldWarp: fw, octave: oct,
+                volVoice: vv, volChromatic: vc, volRaga: vr, fieldWarp: fw, octave: oct,
                 wristRate1: r1, wristRate2: r2, wristRate3: r3,
                 accel1: x1, accel2: x2, accel3: x3, accelLevel: al,
                 noteControls: TLPNoteControls(active: noteActive != 0,

@@ -84,11 +84,42 @@ final class TarabSetTests: XCTestCase {
         XCTAssertEqual(kept.strings.count, custom.strings.count)
     }
 
+    /// Pitch-class toggles preserve row settings and mappings across octaves, bridges and presets.
+    func testFretRagaTogglePreservesIdentity() throws {
+        let raga = StringSpec(degree: 0, gain: 0.25, t60: 7)
+        let upper = StringSpec(degree: 0, octave: 1, gain: 0.6, t60: 5)
+        let chromatic = StringSpec(degree: 0, gain: 0.8, t60: 3, set: .chromatic)
+        var state = InstrumentState(tonicHz: 220, scaleRatios: [1, 1.5],
+            strings: [raga, upper, chromatic], droneStringIds: [raga.id, nil, nil], strumStringIds: [raga.id])
+        state.toggleRagaString(degree: 0, octave: -1)
+        XCTAssertEqual(state.enabledRagaRatios, [])
+        XCTAssertEqual(state.strings(in: .chromatic), [chromatic])
+        XCTAssertEqual(state.droneStringIds[0], raga.id)
+        XCTAssertEqual(state.strumStringIds, [raga.id])
+        state = try JSONDecoder().decode(InstrumentState.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(state.enabledRagaRatios, [])
+        state.toggleRagaString(degree: 0, octave: 2)
+        XCTAssertEqual(state.strings.first { $0.id == raga.id }, raga)
+        XCTAssertEqual(state.strings.first { $0.id == upper.id }, upper)
+        XCTAssertEqual(state.enabledRagaRatios, [1, 2])
+        state.strings[state.strings.firstIndex { $0.id == upper.id }!].enabled = false
+        state.toggleRagaString(degree: 0, octave: 1)
+        XCTAssertEqual(state.enabledRagaRatios, [], "one enabled octave makes the whole pitch class on")
+        state.toggleRagaString(degree: 1, octave: -1)
+        let added = try XCTUnwrap(state.strings.first { $0.set == .raga && $0.degree == 1 })
+        XCTAssertEqual(added.octave, -1)
+        state.toggleRagaString(degree: 1, octave: 1)
+        state.toggleRagaString(degree: 1, octave: 0)
+        XCTAssertEqual(state.strings.first { $0.id == added.id }, added)
+        XCTAssertEqual(state.enabledRagaRatios, [0.75])
+        XCTAssertEqual(state.strings.count, 4, "clicking octave copies must not create extra strings")
+    }
+
     // MARK: - Model
 
     // MARK: - Row plan + tables
 
-    /// Chromatic level and normalization leave raga radiation and shared contact geometry unchanged.
+    /// Chromatic approximation and mix controls preserve raga tables and bank isolation.
     func testChromaticKnobsBakeOnlyChromaticRows() throws {
         var bp = try bp()
         let srk = 96000.0
@@ -101,22 +132,24 @@ final class TarabSetTests: XCTestCase {
             rows: rows, srk: srk, bp: bp, chromatic: flags))
         XCTAssertTrue(base.hasChromatic)
         XCTAssertEqual(base.rowChromatic, flags)
-        // resting chromatic bridge == the raga bridge's shipped values
+        // The callback approximation leaves raga rows on their existing tables.
         let allRaga = try XCTUnwrap(BowTables.buildJawariTables(
             rows: rows, srk: srk, bp: bp))
         XCTAssertFalse(allRaga.hasChromatic)
-        XCTAssertEqual(base.b, allRaga.b)
-        // the per-row level law rides the force-radiation scale
-        XCTAssertEqual(base.rowForceScale, allRaga.rowForceScale)
-        XCTAssertEqual(base.phiD, allRaga.phiD)
-        XCTAssertEqual(base.ca, allRaga.ca)
+        let ragaModes = Int(base.M[0]), contacts = Int(base.J)
+        XCTAssertEqual(base.b.prefix(contacts), allRaga.b.prefix(contacts))
+        XCTAssertEqual(base.rowForceScale[0], allRaga.rowForceScale[0])
+        XCTAssertEqual(base.phiD.prefix(ragaModes), allRaga.phiD.prefix(ragaModes))
+        XCTAssertEqual(base.ca.prefix(ragaModes), allRaga.ca.prefix(ragaModes))
+        XCTAssertEqual(base.phiU.prefix(ragaModes * contacts), allRaga.phiU.prefix(ragaModes * contacts))
+        XCTAssertEqual(base.q0.prefix(ragaModes), allRaga.q0.prefix(ragaModes))
         XCTAssertEqual(base.rowApex, [Double](repeating: bp.v("bow_jt_apex", 1e-5), count: 3))
 
         bp.num["bow_jtc_gain"] = 0.6
         bp.num["bow_jtc_norm"] = 0.8
         let moved = try XCTUnwrap(BowTables.buildJawariTables(
             rows: rows, srk: srk, bp: bp, chromatic: flags))
-        // the bone geometry is SHARED now — every row's bone is untouched
+        // Neither bank's mix controls alter its contact geometry.
         XCTAssertEqual(moved.b, base.b)
         // raga row 0: untouched
         XCTAssertEqual(moved.rowForceScale[0], base.rowForceScale[0])
@@ -128,8 +161,7 @@ final class TarabSetTests: XCTestCase {
         XCTAssertEqual(moved.rowOutputLevel[0], base.rowOutputLevel[0])
         XCTAssertEqual(moved.rowApex,
                        [Double](repeating: bp.v("bow_jt_apex", 1e-5), count: 3))
-        XCTAssertEqual(moved.rowAlpha,
-                       [Double](repeating: bp.v("bow_jt_alpha", 1.3), count: 3))
+        XCTAssertEqual(moved.rowAlpha, base.rowAlpha)
         // The common output carrier is constant while either bank level moves.
         XCTAssertEqual(moved.phys, base.phys)
     }

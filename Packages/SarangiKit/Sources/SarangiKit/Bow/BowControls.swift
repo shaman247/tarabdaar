@@ -27,11 +27,15 @@ public final class BowControlMapper: @unchecked Sendable {
     /// Fixed slot-table size (the engine's `maxPoly` is clamped to this).
     public static let maxSlots = 16
 
+    /// The factory onset shared by bare mappers and the host's live-control default.
+    public static let defaultAttackSharpness = min(max(
+        Presets.bowedStringParams()?.v("bow_attack_sharpness", 0.0) ?? 0.0, 0.0), 1.0)
+
     /// One voice slot = one gut string on the shared bridge. EVERY note-on
     /// mounts a FRESH string (unused slot, else longest-released, else the
     /// oldest sounding note is stolen) and bumps `serial` — the engine
     /// zeroes that kernel string and snaps its pitch, so pitch never glides
-    /// BETWEEN notes. Note-off only lifts the bow; the string rings on.
+    /// BETWEEN notes. Released strings ring until the next fresh onset damps them.
     private struct Slot {
         /// The TarabLink touch id that owns this slot (meaningless while
         /// `used` is false).
@@ -44,6 +48,7 @@ public final class BowControlMapper: @unchecked Sendable {
         /// Direct attack sharpness captured when this string is mounted.
         var attackSharpness: Double = 0.0
         var resuming = false
+        var damped = false
         /// The slot's pitch, fractional MIDI (69.0 = A440): updated by
         /// `touchGlide` while gated, FROZEN on release.
         var touchSemis: Double = 69.0
@@ -65,7 +70,7 @@ public final class BowControlMapper: @unchecked Sendable {
     /// Player vibrato = depth 0..1 into bow_vib_cents at bow_vib_hz —
     /// never free-running.
     private var vibAT = 0.0
-    private var onsetSharpness = 0.0
+    private var onsetSharpness = BowControlMapper.defaultAttackSharpness
 
     /// Tilt axis dB mapping: the 0…1 axis spans [tiltMinDb, tiltMaxDb];
     /// neutral 0 dB ≈ 0.33.
@@ -106,10 +111,13 @@ public final class BowControlMapper: @unchecked Sendable {
         evt += 1
         let lim = slotLimit
         // a note-on for an id already gated = a retrigger: release that
-        // slot, the old string rings on at its frozen pitch
+        // slot before damping released strings at their frozen pitches.
         for i in 0..<lim where slots[i].gateOn && slots[i].touchId == id {
             slots[i].gateOn = false
             slots[i].lastOff = evt
+        }
+        for i in 0..<lim where slots[i].used && !slots[i].gateOn {
+            slots[i].damped = true
         }
         // fresh string: unused slot, else longest-released, else steal
         // the oldest sounding note
@@ -132,6 +140,7 @@ public final class BowControlMapper: @unchecked Sendable {
         slots[i].lastOn = evt
         slots[i].attackSharpness = onsetSharpness
         slots[i].resuming = false
+        slots[i].damped = false
         // a reused slot must not inherit a strum note's expression scale
         slots[i].exprScale = 1.0
         return i
@@ -200,7 +209,8 @@ public final class BowControlMapper: @unchecked Sendable {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
         guard let i = (0..<slotLimit).filter({ slots[$0].used && slots[$0].touchId == id })
-            .max(by: { slots[$0].lastOn < slots[$1].lastOn }), !slots[i].gateOn else {
+            .max(by: { slots[$0].lastOn < slots[$1].lastOn }),
+              !slots[i].gateOn, !slots[i].damped else {
             return false
         }
         evt += 1
@@ -260,6 +270,8 @@ public final class BowControlMapper: @unchecked Sendable {
         /// Captured attack sharpness 0…1 (see `Snapshot.attackSharpness`).
         public var attackSharpness: Double = 0.0
         public var resuming = false
+        /// A fresh onset has taken over from this released string.
+        public var damped = false
         /// Per-slot expression scale (see `Slot.exprScale`); 1 = neutral.
         public var exprScale: Double = 1.0
     }
@@ -317,6 +329,7 @@ public final class BowControlMapper: @unchecked Sendable {
                 serial: s.serial,
                 attackSharpness: s.attackSharpness,
                 resuming: s.resuming,
+                damped: s.damped,
                 exprScale: s.exprScale)
         }
         for i in lim..<snap.slots.count {
@@ -346,7 +359,7 @@ public final class BowControlMapper: @unchecked Sendable {
 public struct BowControlFilter: Sendable {
     let srk: Double
     // baked mapping constants
-    let aGate: Double            // 25 ms release / gentle contact pole
+    let aGate: Double            // 25 ms release / glide reconnection pole
     var vLo = 0.0, vHi = 0.0
     var betaLo = 0.0, betaHi = 0.0
     var pressUnder = 0.0, pressOver = 0.0   // wedge-edge overshoot factors
@@ -355,33 +368,23 @@ public struct BowControlFilter: Sendable {
     private var pressureTransform = BowAxisTransform(bp: BowParams(num: [:]), axis: "press")
     private var positionTransform = BowAxisTransform(bp: BowParams(num: [:]), axis: "pos")
     var exprLift = 0.0           // expression below which the bow lifts to silence
+    var releaseT60 = 8.0         // additional loss after touch release; 0 = natural decay
     var schellengC = 0.0, schellengMargin = 0.0
     var schellengZ = 0.0, schellengDmu = 0.0   // analytic fmax = 2Zv/(βΔμ)
     var tiltBeta = 0.0, tiltForce = 0.0, tiltKnee = 0.0
     var betaF0Gamma = 0.0
     var fReg = 0.0, tonicHz = 261.63   // register force (f0/tonic)^k
-    // A finite velocity draw follows any requested placement. Zero placement
-    // starts the draw immediately; each onset captures its own sharpness.
-    var placeS = 0.0, drawS = 0.0
-    // Sharpness interpolates the gentle/sharp draw and force rise times;
-    // bite, position and speed excursions decay back into the sustained bow.
-    var drawMinS = 0.0, attackBite = 0.0
-    var attackBiteTau = 0.0
-    var attackBeta = 0.0, attackSpeedDb = 0.0
-    // settle depth × (1 − settleSharp·sharp): accents keep their level.
-    var settleSharp = 0.0
+    // One finite bow engagement: sharpness selects its duration. Force and
+    // speed share the trajectory, preserving the commanded force/speed ratio.
     // player vibrato: vibCents at vibHz on the sounding pitch
     var vibCents = 0.0, vibHz = 0.0
     // SUSTAIN LIVENESS, as dB on the bow controls (0 = bit-null):
-    //   settle — settleDb·smoothstep(t/t0)·exp(-(t-t0)/tau) off the bow
-    //     velocity after the place+draw window t0; restarts per attack.
     //   drift — three unit-variance OU walks (deterministic per-slot
     //     xorshift64, ~driftHz) into pitch cents, velocity dB, force dB;
     //     the body + friction chain makes the per-harmonic shimmer itself.
     //   glide dip — lightening while the pitch MOVES: glideDipDb·r/(r+rate),
     //     r = |pitch slew| cents/s (~15 ms attack, ~120 ms release); full on
     //     vbow, 0.3× on force.
-    var settleDb = 0.0, settleTauS = 0.0
     var driftCents = 0.0, driftDb = 0.0, driftForceDb = 0.0
     var driftHz = 0.0
     var glideDipDb = 0.0, glideDipRate = 0.0
@@ -401,8 +404,7 @@ public struct BowControlFilter: Sendable {
     let pitchRefLog2: Double
     var lf0 = 0.0                // sounding log2 f0 at the last sample
     var gateState = 0.0
-    var attackFms = 0.0
-    var placeClock = 1.0e9       // seconds since the current attack began
+    var onsetClock = 1.0e9       // seconds since the current attack began
     var attackSharp = 0.0        // onset sharpness of the current attack
     var vibPhase = 0.0
     // liveness state (drift walks, dip smoother, per-slot deterministic RNG)
@@ -471,6 +473,7 @@ public struct BowControlFilter: Sendable {
         pressureTransform = BowAxisTransform(bp: bp, axis: "press")
         positionTransform = BowAxisTransform(bp: bp, axis: "pos")
         exprLift = bp.v("bow_expr_lift", 0.0)
+        releaseT60 = max(bp.v("bow_release_t60", 8.0), 0.0)
         schellengC = bp.v("bow_schelleng_c", 0.055)
         schellengMargin = bp.v("bow_schelleng_margin", 1.2)
         schellengZ = bp.v("bow_Z", 1.0)
@@ -480,20 +483,8 @@ public struct BowControlFilter: Sendable {
         tiltKnee = bp.v("bow_tilt_knee", 0.0)
         betaF0Gamma = bp.v("bow_beta_f0", 0.0)
         fReg = bp.v("bow_f_reg", 0.0)
-        placeS = bp.v("bow_place_ms", 0.0) / 1000.0
-        drawS = max(bp.v("bow_draw_ms", 1.0), 1.0) / 1000.0
-        drawMinS = max(bp.v("bow_draw_min_ms", bp.v("bow_draw_ms", 1.0)),
-                       1.0) / 1000.0
-        attackBite = bp.v("bow_attack_bite", 0.0)
-        attackBiteTau = max(bp.v("bow_attack_bite_ms", 60.0), 5.0) / 1000.0
-        attackFms = max(bp.v("bow_attack_fms", 15.0), 2.0) / 1000.0
-        attackBeta = min(max(bp.v("bow_attack_beta", 0.0), 0.0), 0.7)
-        attackSpeedDb = min(max(bp.v("bow_attack_speed_db", 0.0), 0.0), 12.0)
         vibCents = bp.v("bow_vib_cents", 0.0)
         vibHz = bp.v("bow_vib_hz", 5.5)
-        settleDb = bp.v("bow_settle_db", 0.0)
-        settleTauS = max(bp.v("bow_settle_ms", 150.0), 10.0) / 1000.0
-        settleSharp = min(max(bp.v("bow_settle_sharp", 0.0), 0.0), 1.0)
         driftCents = bp.v("bow_drift_cents", 0.0)
         driftDb = bp.v("bow_drift_db", 0.0)
         driftForceDb = bp.v("bow_drift_force_db", 0.0)
@@ -560,7 +551,7 @@ public struct BowControlFilter: Sendable {
     public mutating func notePrime(f0Target: Double) {
         lf0 = log2(max(f0Target, 40.0))
         gateState = 0.0
-        placeClock = 0.0             // a fresh string gets a fresh placement
+        onsetClock = 0.0             // a fresh string gets a fresh bow engagement
         freshMount = true
         primed = true
         dipDb = 0.0                  // a pitch SNAP is not a glide
@@ -587,40 +578,39 @@ public struct BowControlFilter: Sendable {
             lf0 = lfTarget
             gateState = 0.0
             if snap.gate > 0.5 {                       // born mid-attack
-                placeClock = 0.0
+                onsetClock = 0.0
                 attackSharp = min(max(snap.attackSharpness, 0.0), 1.0)
             }
             prev = snap
             primed = true
         }
         // fresh attack (gate rising edge, or a fresh mount whose gate never
-        // fell): restart the placement clock, capture the onset sharpness
+        // fell): restart the onset clock, capture the onset sharpness
         if snap.gate > 0.5, !snap.resuming,
            freshMount || (prev?.gate ?? 0.0) <= 0.5 {
-            placeClock = 0.0
+            onsetClock = 0.0
             attackSharp = min(max(snap.attackSharpness, 0.0), 1.0)
         }
         if snap.resuming {
             attackSharp = 0
-            placeClock = max(placeClock, placeS + drawS + 8 * attackBiteTau)
+            onsetClock = max(onsetClock, 1.0)
         }
         freshMount = false
         let p = prev ?? snap
         let vRef = 0.75 * vHi
         let dtk = 1.0 / srk
-        // Contact can arrive quickly without shortening the released string's
-        // lift. The onset's captured sharpness owns this pole for the note.
-        let contactTau = 0.025 + (min(attackFms, 0.025) - 0.025) * attackSharp
-        let gatePole = snap.gate > 0.5 ? OnePole.pole(tau: contactTau, sr: srk) : aGate
-        let drawEff = drawS * pow(drawMinS / drawS, attackSharp)
-        let forceEff = drawS * pow(attackFms / drawS, attackSharp)
+        // A fresh bow has one engagement ramp, applied below to speed and
+        // force. Gate smoothing is only the lift/reconnection of an existing
+        // string; applying it at onset would add a second force envelope.
+        let gatePole = snap.gate > 0.5 && !snap.resuming ? 0.0 : aGate
+        let drawSeconds = 0.320 * pow(0.020 / 0.320, attackSharp)
         // regime grip decision, once per block (the kernel's fraction is a
         // ~4-period running value): engage under the threshold, release
         // above 1.25× it, never inside the attack window or off the bow
         var gripTarget = 0.0
         if gripArmed {
             let blockS = Double(n) / srk
-            if snap.gate > 0.5, placeClock > gripWaitS {
+            if snap.gate > 0.5, onsetClock > gripWaitS {
                 if capture < gripThresh {
                     // a transient dip is not a lock: the reading must stay
                     // low for gripConfirmS before the grip engages
@@ -657,10 +647,10 @@ public struct BowControlFilter: Sendable {
         let vibW = 2.0 * Double.pi * vibHz / srk
         // ramp log2 f0 linearly from the last block's end to the target
         let lfStart = lf0
-        // THE LAW AT CONTROL RATE. The dynamics / wedge / place law — every
+        // THE LAW AT CONTROL RATE. The dynamics / wedge / engagement law — every
         // transcendental — is evaluated once per `controlDiv` kernel
         // samples, on the axes lerped to the segment's END and the slow
-        // state (placement clock, drift walks, dip, grip) at its START,
+        // state (onset clock, drift walks, dip, grip) at its START,
         // and its (vb, fb, beta) is lerped across the segment from the
         // previous evaluation. Pitch, the gate, the vibrato phase and the
         // smoothers advance every sample.
@@ -718,18 +708,6 @@ public struct BowControlFilter: Sendable {
                 betaK *= 1.0 - gripBeta * gripCur
                     * (1.0 - min(max(pressE, 0.0), 1.0))
             }
-            // A firm onset draws faster near the bridge, then returns to the
-            // sustained bow. Compute its force wedge at that actual position
-            // and speed; this excites the string before any output processing.
-            let biteWindow = max(placeClock, 0.0) / attackBiteTau
-            let attackTail = biteWindow < 8 ? exp(-biteWindow) : 0.0
-            let attackPulse = attackSharp * attackTail
-            if attackBeta > 1e-9 {
-                betaK = max(0.04, betaK * (1.0 - attackBeta * attackPulse))
-            }
-            if attackSpeedDb > 1e-9 {
-                vbK *= exp(attackSpeedDb * attackPulse * 0.11512925464970229)
-            }
             // press = log-force position across the analytic Schelleng
             // wedge at this (f0, β, v): fmin = M·C·v/β² (Helmholtz floor),
             // fmax = 2Zv/(β·Δμ) (raucous ceiling). The edges are reachable
@@ -757,33 +735,16 @@ public struct BowControlFilter: Sendable {
                 fbK *= lift
                 vbK *= lift
             }
-            // Both endpoints have a finite draw. Zero placement begins the
-            // draw immediately; it never disables articulation. Log time
-            // interpolation gives intermediate strikes useful rise times.
-            let ud = min(max((placeClock - placeS * (1.0 - attackSharp)) / drawEff, 0.0), 1.0)
-            let uf = min(max(placeClock / forceEff, 0.0), 1.0)
-            vbK *= ud * ud * (3.0 - 2.0 * ud)
-            fbK *= uf * uf * (3.0 - 2.0 * uf)
-            if attackBite > 1e-6, attackSharp > 1e-6 {
-                fbK *= 1.0 + attackBite * attackPulse
-            }
-            fbK = min(fbK, fCap)
-            // liveness: wander + settle + glide lightening + grip, as dB
+            // The same finite, zero-slope engagement scales both bow
+            // controls. Friction, string capture and body radiation produce
+            // the audible attack; there is no output envelope or overshoot.
+            let uDraw = min(max(onsetClock / drawSeconds, 0.0), 1.0)
+            let engagement = uDraw * uDraw * (3.0 - 2.0 * uDraw)
+            vbK *= engagement
+            fbK *= engagement
+            // liveness: wander + glide lightening + grip, as dB
             var vbDb = driftDb * ouLevel
             var fbDb = driftForceDb * ouForce
-            if settleDb > 1e-9 {
-                // the guard keeps settleSharp 0 bit-exact
-                let sDb = settleSharp > 1e-9
-                    ? settleDb * max(1.0 - settleSharp * attackSharp, 0.0)
-                    : settleDb
-                let t0 = max(placeS + drawS, 0.02)
-                if placeClock < t0 + 6.0 * settleTauS {
-                    let us = min(max(placeClock / t0, 0.0), 1.0)
-                    let shape = us * us * (3.0 - 2.0 * us)
-                    vbDb -= sDb * shape
-                        * exp(-max(placeClock - t0, 0.0) / settleTauS)
-                }
-            }
             if dipDb > 1e-12 {
                 vbDb -= dipDb
                 // light force coupling: a heavy cut slows re-capture
@@ -831,9 +792,9 @@ public struct BowControlFilter: Sendable {
                 }
                 let corr = pitchCorrection(lf)
                 let f0 = exp2(lf + vibOct + corr / 1200.0)
-                // Sharp contact can arrive quickly; release keeps its 25 ms lift.
+                // Release and glide reconnection retain the shared 25 ms lift.
                 gateState = (1.0 - gatePole) * snap.gate + gatePole * gateState
-                placeClock += dtk
+                onsetClock += dtk
                 let w = Double(i - segStart + 1) / segLen
                 f0Out[i] = f0
                 vbOut[i] = from.vb + w * (vbK - from.vb)

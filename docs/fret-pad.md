@@ -9,10 +9,13 @@ from the frets.
 
 ## Taraf pluck strip
 
-A 64-point strip above the pad shows the running taraf bank on both Mac and
-iPad, low pitch to high pitch. Each target carries its scale-derived name and
-one-based kernel row number; the two-direction raga rows are orange and the melody
-follower uses an arrow. Tap for a single pluck; drag either way to strum every
+A 64-point strip immediately above the playable fret band shows only the
+running raga taraf strings on both Mac and iPad, low pitch to high pitch.
+The strip aligns with the fret band's left edge inside the pad surface and
+reserves space for the right-side drone buttons when they are visible. Each orange
+target carries its scale-derived name and one-based kernel row number;
+chromatic rows and the melody follower are omitted. Tap for a single pluck;
+drag either way to strum every
 crossed string. A fast drag visits intermediate cells even when input events
 skip them. Holding still does not re-pluck; reversing direction plucks strings
 again as they are crossed. The strip remains available with a Joy-Con attached.
@@ -20,12 +23,12 @@ Melody touches on the pad remain independent.
 
 These gestures directly call the row pluck path, regardless of the selected
 main or drone voice. They need no drone-slot assignment. Each target is a
-running kernel row, so two banks with the same pitch retain separate targets.
+running raga kernel row, retaining its identity in the full bank snapshot.
 An engine rebuild publishes a new bank identity and cancels the old gesture;
 late plucks for that old bank are ignored. The iPad receives only this display
 snapshot (not editable tuning or physics), and sends discrete `TARAF_PLUCK`
 events over TLP. The snapshot clears when the link is unavailable. Both apps
-must use protocol version 19. Guards: `TarafStripTests`, `TLPCodecTests`.
+must use protocol version 21. Guards: `TarafStripTests`, `TLPCodecTests`.
 
 ## The pitch field
 
@@ -49,8 +52,8 @@ slew-limited and additive on top.
 ## Pitch warp
 
 **`ctl_fret_warp`** ("pitch warp", the "Fret pad" registry group; the Mac
-toolbar's **Warp** slider edits the same value, 0…100 %) reshapes every
-fret-to-fret interpolation — the x-blend between columns AND the y-blend
+toolbar's **Warp** slider edits the same value, 0…100 %) reshapes the raga
+side of each fret-to-fret interpolation — the x-blend between columns AND the y-blend
 across a stacked gap — through a **normalized logistic** (`fretWarp`):
 
 ```
@@ -65,6 +68,15 @@ boundary is warp-invariant) and monotone, so the field keeps its continuity
 guarantees; the extrapolation beyond the outermost columns stays linear. At
 the top (g = 14) the center slope is ≈ 3.5× linear and the quarter-gap
 point sounds ≈ 3 % of the interval instead of 25 %.
+
+An enabled raga string in any octave enables warp for every octave copy
+of that pitch class.
+Each half-gap uses the membership of its nearer endpoint: a gray fret's
+half stays linear, while a colored fret's half uses the logistic. The
+midpoint stays fixed and the field stays continuous, including mixed pairs.
+Across stacked gaps, horizontal warp influence blends continuously between
+the two endpoints. Contours use the same selective inverse. Snapping and
+drag assist still include every fret, including gray frets.
 
 The amount is a **live control param** (`.live`, def 0), not layout state.
 Like `ctl_strike_window` it never reaches the voice:
@@ -260,12 +272,20 @@ the finger-accel scope — which are unaffected.
 ## Layout
 
 The editable **base** frets live in a central **band**; the surface
-extends `ghostExtentOctaves` band-widths (default **0.5**; 0–2 in 0.25
-steps, toolbar "Octave ±") past it on each side, tiled with read-only
+extends `ghostExtentOctaves` band-widths (default **0.75**) past it on each
+side, tiled with read-only
 **octave-repeat ghost copies of the whole base layout** — left an octave
 down, right an octave up — drawn faint in edit mode. The surface spans
 `1 + 2·extent` band-widths; pixel x is `(x + shift + extent) / span · width`
 (`fretPixelX(forBandX:)`).
+
+The Mac toolbar's **Octaves** slider controls the total span from **1 to 5
+octaves**, in **0.5-octave** steps. The factory span is **2.5 octaves**;
+increasing it fits more octave copies into the same surface width. The
+setting is part of the arrangement, autosaved and synced to the iPad over
+`FRET_ARRANGEMENT`, with the same range on both surfaces. Saved layouts
+retain their explicit range; new built-ins, Reset to Scale and the
+never-synced iPad fallback use the factory span.
 
 ### C Keyboard — the default
 
@@ -277,16 +297,24 @@ so the naturals are spaced like white keys and each komal/tivra fret
 **stacks above** its shuddha partner:
 
 - **S and P**: duplicated in both rows, at the same pitch and x position
-  and drawn toward the center (upper y 0.188–0.492, lower y 0.508–0.812).
-  Each keeps the ordinary fret height, with a narrow 0.016 gap between them.
-- **shuddha** (R G m D N): lower middle (y 0.588–0.892)
-- **komal/tivra** (r g M d n): upper middle (y 0.108–0.412)
+  and drawn toward the center (upper y 0.196–0.500, lower y 0.500–0.804).
+  Each keeps the ordinary fret height; the pair meets at the center with no gap.
+- **shuddha** (R G m D N): lower middle (y 0.544–0.848)
+- **komal/tivra** (r g M d n): upper middle (y 0.152–0.456)
 
-The 0.176 gap inside a komal/tivra–shuddha pair is the column's **y-interpolation zone**
+The 0.088 gap inside a komal/tivra–shuddha pair is the column's **y-interpolation zone**
 (sliding down bends r → R); the space toward the edges is open approach
-room. The drag-assist constants are fitted on this layout.
+room. Every fret has height 0.304; the rows sit symmetrically around the center.
 
-### C Equal Freq — the other built-in
+### C♯ Keyboard
+
+`FretLayoutPreset.keyboardSharp` mirrors C Keyboard vertically: every
+fret's y interval becomes `1 − bottomY` through `1 − topY`. Shuddha frets
+sit in the upper row and komal/tivra in the lower row. S and P remain in
+both rows. Pitches, the seven columns and octave repeats stay the same;
+the layout does not transpose the scale. C Keyboard remains the default.
+
+### C Equal Freq
 
 `FretArrangement.defaultArrangement` (the name is historic; Layout menu →
 Built-in) is **pitch-aligned**: a fret's `x` is `log2(ratio)` — position
@@ -307,7 +335,7 @@ ghost with a 2.5 px-half-width sounding glow.
 Layouts are **their own saved state**, independent of the scale — a layout
 loads onto whatever scale is active, and a degree the scale lacks skips its
 fret. The **Layout** menu mirrors the Scale menu: *Save As…* (name prompt,
-no file panel), *Save "name"*, **Built-in** (C Equal Freq · C Keyboard,
+no file panel), *Save "name"*, **Built-in** (C Equal Freq · C Keyboard · C♯ Keyboard,
 generated from the current scale), the saved layouts with a checkmark, and
 *Delete*. Loading panics the fret engine first. (The Scale menu's **Reset
 to Default** is the full factory reset: bundled default scale AND C
@@ -337,8 +365,21 @@ endpoint handles and the scale editor, styling ghosts like base frets.
   x clamped to the base band)
 - **shift-click empty space** — add a 0.15-tall fret on the degree nearest
   the field pitch there (multiple segments per degree allowed)
-- **right-click** — delete
+- **right-click a fret** — toggle its raga string, in Edit or Perform mode
+- **option-right-click a base fret** — delete the fret in Edit mode
 - **drag empty space** — play (grabbing a fret sounds its exact pitch)
+
+Frets with an enabled raga string keep their pitch color; the others are
+gray on both surfaces. Membership spans octaves: one enabled raga string
+colors and enables warp for every fret of that pitch class. Right-clicking
+any copy disables all existing raga rows of that pitch class if any are on,
+or re-enables them if all are off. Existing rows keep their identity, gain,
+decay, and drone/strum mappings. If the pitch class has no raga rows, one is
+created at the clicked octave with the raga defaults. The Strings tab and presets own this state. Layout files do
+not save it. The Mac sends the same membership for every octave copy in the one-way
+arrangement snapshot, so the iPad colors and warps the same frets without
+owning editable string state. Membership follows the row's enabled flag,
+independent of its gain or whether an audio rebuild has finished.
 
 The Mac surface's emitter is a `PitchPadEngine` (`AppController.fretPad`,
 in-process `init(audio:)`, tonic kept in step with `pitchPad`); each fret
@@ -568,7 +609,8 @@ The frets live in a **band** (`fretPadBandRect`): a full-width strip
 spanning `Config.fretPadHeightFraction` (0.5) of the surface height with
 its top at `Config.fretPadBandTopFraction` (0.3 — a little below centred),
 with a hairline border. The space above/below
-is dead except the **drone buttons** (and the **chord bar** when it is
+is dead except the **raga taraf pluck strip** immediately above the band,
+the **drone buttons** (and the **chord bar** when it is
 shown). Both surfaces draw the whole
 picture, and the Mac tab letterboxes to `iPadSurfaceAspect`, so **what you
 see on the iPad is exactly what the Fret Pad tab shows**.
@@ -580,15 +622,16 @@ rate and the Joy-Con's linear acceleration, three bars each, plus its
 magnitude) · the **strike scope** (accelerometer strike
 envelope, 0–127, its onset fade tracking `ctl_strike_window`) · the
 **finger-accel scope** (the `.fingerAccel` −1…+1 law, computed locally —
-[Sensors](sensors.md)) · the **volume scope** (the Mac's radiated voice and
-taraf levels from the JOYCON_STATE volume bytes; flat while the link is
+[Sensors](sensors.md)) · the **volume scope** (separate Main, Chromatic and Raga
+levels from the JOYCON_STATE volume bytes; flat while the link is
 down) · sounding readout · octave-shift chip · read-only tonic · transport
 indicators.
 
-**Mac toolbar** (`FretPadView.swift`): Panic · Scale menu · Layout menu ·
-Reset to Scale · Octave ± · Perform · Rec · sounding readout · Snap · Warp ·
-Velocity · Prime ≤ (the scale editor's prime limit) · Tonic (a typed Hz
-field + a note menu of the surrounding half-octave — see
+**Mac toolbar** (`FretPadView.swift`) uses two rows. The first holds Panic ·
+Scale menu · Layout menu · Reset to Scale · Perform · Rec · sounding
+readout. The second holds Octaves · Snap · Warp · Prime ≤ (the scale
+editor's prime limit) · Tonic (a typed Hz field + a note menu of the
+surrounding half-octave — see
 [Scales & Tuning](scales-and-tuning.md#the-tonic-tarabdaarmac-fret-pad-tab)).
 
 ## Code map

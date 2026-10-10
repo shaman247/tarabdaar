@@ -212,7 +212,21 @@ extension AudioEngine {
     public func pluckTaraf(revision: UInt32, row: UInt8) {
         guard tarafBank.contains(revision: revision, row: row),
               let engine = stringVoiceSource?.currentEngine() else { return }
-        engine.pluckTaraf(row: Int(row))
+        guard let capture = pluckCapture else {
+            engine.pluckTaraf(row: Int(row))
+            return
+        }
+        armPluckDiagnosticCapture(capture)
+        let submittedAt = ProcessInfo.processInfo.systemUptime
+        let referenceMM = engine.pluckTaraf(row: Int(row))
+        let frequencies = engine.jtRowFreqs
+        capture.recordEvent([
+            "kind": "stripPluck",
+            "uptime": submittedAt, "revision": revision, "row": row,
+            "frequencyHz": frequencies.indices.contains(Int(row))
+                ? frequencies[Int(row)] as Any : NSNull(),
+            "referenceMM": referenceMM as Any? ?? NSNull()
+        ])
     }
 
     // MARK: - Tarab tuning (Strings tab) → String voice

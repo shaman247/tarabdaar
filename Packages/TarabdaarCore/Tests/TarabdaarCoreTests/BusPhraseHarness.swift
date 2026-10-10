@@ -17,8 +17,8 @@ enum BusPhrase {
     /// bus RMS up to 0.9 s (`mid`) and from there to the end (`tail`).
     struct Reading {
         let out: [Float]
-        let mid: (voice: Double, taraf: Double)
-        let tail: (voice: Double, taraf: Double)
+        let mid: (voice: Double, taraf: Double, chromatic: Double, raga: Double)
+        let tail: (voice: Double, taraf: Double, chromatic: Double, raga: Double)
     }
 
     /// Uncached render. `configure` runs after the engine is published;
@@ -51,7 +51,7 @@ enum BusPhrase {
             (1.50, 2, nil),
         ]
         var next = 0
-        var mid: (voice: Double, taraf: Double) = (0, 0)
+        var mid: (voice: Double, taraf: Double, chromatic: Double, raga: Double) = (0, 0, 0, 0)
         var midTaken = false
         while t < 2.5 {
             while next < events.count, events[next].0 <= t {

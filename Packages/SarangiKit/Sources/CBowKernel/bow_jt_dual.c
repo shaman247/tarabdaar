@@ -59,7 +59,8 @@ typedef struct {
     int primed,input_index,output_index,input_taps;
     double ratio,phase,damp_cached,damp_step;
     double drive_power,drive_memory,bloom;
-    double pluck_level,pluck_mix,pluck_gain;
+    double pluck_level,pluck_mix,pluck_gain,pluck_amount;
+    _Atomic double pluck_amount_target;
     _Atomic double bloom_target;
     double input_history[2*INPUT_HISTORY];
     double output_audio[2*OUTPUT_HISTORY],output_force[2*OUTPUT_HISTORY];
@@ -102,6 +103,7 @@ int bow_poly_jt_dual_load(void *vst,int row,void *contact,const double *tap,
     bow_contact_disable_energy_audit(contact);
     atomic_init(&d->tone_target,20000);
     atomic_init(&d->bloom_target,0);
+    atomic_init(&d->pluck_amount_target,.5);
     atomic_init(&d->selectivity_target,0);
     atomic_init(&d->request,0);atomic_init(&d->rendered,0);
     atomic_init(&d->failures,0);atomic_init(&d->iterations,0);
@@ -142,6 +144,10 @@ void bow_poly_jt_dual_stats(void *vst,double *out) {
 
 double jt_dual_tick(bow_poly_state_t *st,int row,double drive,double *returned) {
     Dual *d=st->jtDual[row];
+    double pluck_target=atomic_load_explicit(&d->pluck_amount_target,memory_order_relaxed);
+    if(!d->ticks)d->pluck_amount=pluck_target;
+    else d->pluck_amount+=(1-exp(-1/(96000.0*.04)))*(pluck_target-d->pluck_amount);
+    if(fabs(pluck_target-d->pluck_amount)<1e-12)d->pluck_amount=pluck_target;
     // Follow incoming energy, not an oscillator or a synthetic pluck. New
     // excitation charges the row; sustained forcing recedes so contact can
     // redistribute its stored energy. A gap re-arms the response naturally.
@@ -255,7 +261,11 @@ double jt_dual_tick(bow_poly_state_t *st,int row,double drive,double *returned) 
         d->pluck_level*=exp(-1/(96000.0*2));
         if(d->pluck_level<1e-12 && d->pluck_mix<1e-12)
             d->pluck_level=d->pluck_mix=0;
-        y*=1+(d->pluck_gain-1)*d->pluck_mix;
+        if(d->pluck_amount>0) {
+            double boost=1+(d->pluck_gain-1)*d->pluck_mix;
+            // Interpolate loudness in dB; the endpoints preserve both renders.
+            y*=d->pluck_amount==1?boost:pow(boost,d->pluck_amount);
+        }
     }
     return y*d->gain;
 }
@@ -295,5 +305,15 @@ void bow_poly_jt_dual_bloom(void *vst,double value) {
     for(int row=0;row<st->njt;row++) {
         Dual *d=st->jtDual[row];if(!d)continue;
         atomic_store_explicit(&d->bloom_target,value,memory_order_relaxed);
+    }
+}
+
+void bow_poly_jt_dual_pluck_level(void *vst,double value) {
+    bow_poly_state_t *st=vst;
+    if(!st || !st->jtDual || !isfinite(value))return;
+    value=fmin(1,fmax(0,value));
+    for(int row=0;row<st->njt;row++) {
+        Dual *d=st->jtDual[row];if(!d)continue;
+        atomic_store_explicit(&d->pluck_amount_target,value,memory_order_relaxed);
     }
 }

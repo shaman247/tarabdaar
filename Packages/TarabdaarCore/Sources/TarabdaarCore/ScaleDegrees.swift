@@ -64,18 +64,16 @@ public func scaleLabel(forRatio ratio: Double,
 }
 
 
-/// Common selectable scales — the modes plus major/minor variants and
-/// pentatonics, and the **12-TET chromatic** scale. These are
-/// **shared**: a preset loads into the one Pitch Pad `PitchScale`
-/// (`PitchPadEngine.loadPreset`), so both the Pitch Pad and the Chord Pad
-/// use it. Each preset is defined by its semitone intervals from the tonic
-/// and rendered as a just-intonation `PitchScale` (the same 12-tone JI ratio
-/// table as `PitchScale.defaultJI`), matching the Pitch Pad's JI design
-/// surface; the Chord Pad reads the degrees back as the nearest 12-TET
-/// semitones.
+/// Common selectable scales loaded into the shared `PitchScale` through
+/// `PitchPadEngine.loadPreset`. Modes, major/minor variants and pentatonics
+/// select semitone intervals from the same JI table as `PitchScale.defaultJI`.
+/// `.justIntonation` loads that default scale directly.
+/// The full chromatic variants keep the default's sargam labels and layout:
+/// `.pythagorean` uses exact ratios built from pure fifths; `.equalTempered`
+/// uses rational approximations to equal temperament. The Ma-rotated JI and
+/// Pythagorean variants place those base intervals above Ma at 4/3 of Sa.
 ///
-/// The one exception is `.equalTempered`: the full chromatic scale in equal
-/// temperament, for playing alongside instruments tuned to 12-TET. The scale
+/// Equal temperament supports playing alongside instruments tuned to 12-TET. The scale
 /// model carries every pitch as a `num/den` rational (JSON on disk, 14-bit
 /// integers in the scale-sync blob — `PitchScaleSysEx`), and a tempered
 /// semitone is irrational, so each degree ships as the best rational
@@ -88,7 +86,11 @@ public func scaleLabel(forRatio ratio: Double,
 /// keeps the default scale's sargam labels and keyboard layout, since it is
 /// the default's twelve pitches, tempered.
 public enum ScalePreset: String, CaseIterable, Identifiable {
+    case justIntonation
+    case justIntonationMa
     case equalTempered
+    case pythagorean
+    case pythagoreanMa
     case major
     case minor
     case dorian
@@ -105,7 +107,11 @@ public enum ScalePreset: String, CaseIterable, Identifiable {
 
     public var label: String {
         switch self {
+        case .justIntonation:  return "Just Intonation (Default)"
+        case .justIntonationMa: return "Just Intonation (Ma-rotated)"
         case .equalTempered:   return "12-TET Chromatic"
+        case .pythagorean:     return "Pythagorean Chromatic"
+        case .pythagoreanMa:   return "Pythagorean Chromatic (Ma-rotated)"
         case .major:           return "Major"
         case .minor:           return "Minor"
         case .dorian:          return "Dorian"
@@ -123,7 +129,8 @@ public enum ScalePreset: String, CaseIterable, Identifiable {
     /// Semitone degrees from the tonic (ascending).
     public var intervals: [Int] {
         switch self {
-        case .equalTempered:   return Array(0..<12)
+        case .justIntonation, .justIntonationMa, .equalTempered, .pythagorean, .pythagoreanMa:
+            return Array(0..<12)
         case .major:           return [0, 2, 4, 5, 7, 9, 11]
         case .minor:           return [0, 2, 3, 5, 7, 8, 10]
         case .dorian:          return [0, 2, 3, 5, 7, 9, 10]
@@ -158,21 +165,33 @@ public enum ScalePreset: String, CaseIterable, Identifiable {
         (14900, 7893),   // 11    2^(11/12)
     ]
 
+    /// Pure 3/2 fifths from −5 through +6 relative to the tonic, reduced
+    /// into `[1, 2)` and sorted. The lowered degrees r/g/d/n and raised M
+    /// follow the default's sargam roles; M is the augmented fourth 729/512.
+    public static let pythagoreanRatios: [(num: Int, den: Int)] = [
+        (1, 1), (256, 243), (9, 8), (32, 27), (81, 64), (4, 3),
+        (729, 512), (3, 2), (128, 81), (27, 16), (16, 9), (243, 128),
+    ]
+
     /// The preset as a `PitchScale` — each interval mapped to its 12-tone JI
     /// ratio. Degrees alternate between two layout rows and are labeled by
     /// scale-degree number so the Pitch Pad shows a clean keyboard-like row.
-    /// `.equalTempered` instead maps each semitone to its tempered ratio and
-    /// takes the default scale's sargam labels + white/black keyboard rows.
+    /// Chromatic variants replace only the default scale's ratios, keeping
+    /// its sargam labels and white/black keyboard rows.
     public var pitchScale: PitchScale {
-        if self == .equalTempered {
-            let labels = ["S", "r", "R", "g", "G", "m", "M", "P", "d", "D", "n", "N"]
-            let black: Set<Int> = [1, 3, 6, 8, 10]
-            let points = Self.equalTemperedRatios.enumerated().map { (k, r) -> PitchPoint in
-                PitchPoint(num: r.num, den: r.den,
-                           y: black.contains(k) ? 2.0 / 6.0 : 5.0 / 6.0,
-                           label: labels[k])
+        if self == .justIntonation { return .defaultJI }
+        if self == .justIntonationMa || self == .pythagoreanMa {
+            let base = self == .justIntonationMa ? Self.justIntonation : .pythagorean
+            return Self.maRotated(base.pitchScale)
+        }
+        if self == .equalTempered || self == .pythagorean {
+            let ratios = self == .equalTempered ? Self.equalTemperedRatios : Self.pythagoreanRatios
+            var scale = PitchScale.defaultJI
+            for k in scale.points.indices {
+                scale.points[k].num = ratios[k].num
+                scale.points[k].den = ratios[k].den
             }
-            return PitchScale(points: points)
+            return scale
         }
         // 12-tone JI ratio per semitone (matches `PitchScale.defaultJI`).
         let table: [(Int, Int)] = [
@@ -185,5 +204,22 @@ public enum ScalePreset: String, CaseIterable, Identifiable {
             return PitchPoint(num: n, den: d, y: y, label: "\(i + 1)")
         }
         return PitchScale(points: points)
+    }
+
+    /// Transpose the base intervals onto Ma, fold into Sa's octave and retain Sa-relative labels/layout.
+    private static func maRotated(_ base: PitchScale) -> PitchScale {
+        let ratios = base.points.map { point -> (num: Int, den: Int) in
+            let num = point.num * 4
+            var den = point.den * 3
+            if num >= 2 * den { den *= 2 }
+            let divisor = gcd(num, den)
+            return (num / divisor, den / divisor)
+        }.sorted { $0.num * $1.den < $1.num * $0.den }
+        var scale = base
+        for k in scale.points.indices {
+            scale.points[k].num = ratios[k].num
+            scale.points[k].den = ratios[k].den
+        }
+        return scale
     }
 }

@@ -36,13 +36,17 @@ final class ParamUnificationTests: XCTestCase {
         guard let bp = Presets.bowedStringParams() else {
             throw XCTSkip("bowed_string.json not available in this bundle")
         }
+        // A neutral live knob is not re-pushed on publication: its mapper
+        // must already sound the same onset that the registry advertises.
+        let mapper = BowControlMapper()
+        mapper.touchOn(1, pitchSemis: 64)
+        var snapshot = BowControlMapper.PolySnapshot(count: 1)
+        mapper.snapshotPoly(into: &snapshot)
+        XCTAssertEqual(snapshot.slots[0].attackSharpness,
+                       ParamRegistry.spec("bow_attack_sharpness")?.def)
         // Mirrors the fallbacks in BowControls.swift (init/updateLiveParams).
         let engineFallback: [String: Double] = [
-            "bow_draw_min_ms": bp.num["bow_draw_ms"] ?? 1.0, // follows the draw
-            "bow_attack_bite": 0.0,
-            "bow_attack_bite_ms": 60.0,
-            "bow_attack_fms": 15.0,
-            "bow_settle_sharp": 0.0,
+            "bow_jt_dual_pluck_level": 0.5, // BowEngine
             "bow_body_tail_seed": 1.0,      // BowTables.buildOpenString
         ]
         for (key, expect) in engineFallback where bp.num[key] == nil {
@@ -65,16 +69,8 @@ final class ParamUnificationTests: XCTestCase {
             "bow_jt_pulse",
             "bow_jt_pulse_attack_ms",
             "bow_jt_pulse_decay_ms",
-            "bow_place_ms",
-            "bow_draw_ms",
-            "bow_draw_min_ms",
-            "bow_attack_bite",
-            "bow_attack_bite_ms",
-            "bow_attack_fms",
             "bow_attack_sharpness",
-            "bow_attack_beta",
-            "bow_attack_speed_db",
-            "bow_tnoise",
+            "bow_release_t60",
             "bow_grip_beta",
             "bow_grip_v_db",
             "bow_grip_db",
@@ -94,9 +90,6 @@ final class ParamUnificationTests: XCTestCase {
             "ctl_glide_held",
             "ctl_glide_catchup",
             "ctl_glide_over",
-            "bow_settle_db",
-            "bow_settle_ms",
-            "bow_settle_sharp",
             "bow_drift_cents",
             "bow_drift_hz",
             "bow_drift_db",

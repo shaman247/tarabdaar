@@ -7,6 +7,39 @@ import CBowKernel
 /// releases. Hosts `stringBP()` / `testTaraf`, the scaffold other DSP tests use.
 final class BowedStringEngineTests: XCTestCase {
 
+    /// A body mode renders identically at any table index, including beyond 96 modes.
+    func testKernelPreservesAllBodyModes() throws {
+        func impulse(count: Int, reload: Bool = false) throws -> [Double] {
+            let a1 = [Double](repeating: 1.7, count: count)
+            let a2 = [Double](repeating: -0.81, count: count)
+            var numerator = [Double](repeating: 0, count: count)
+            var radiation = numerator
+            numerator[count - 1] = 0.1
+            radiation[count - 1] = 1
+            var s = bow_scalars_t()
+            s.pgain = 1
+            let state = try XCTUnwrap(bow_poly_init(1, 96000, Int32(count),
+                a1, a2, numerator, [Double](repeating: 0, count: count),
+                reload ? [Double](repeating: 0, count: count) : radiation, &s))
+            defer { bow_poly_free(state) }
+            if reload {
+                XCTAssertEqual(bow_poly_set_body(state, Int32(count), a1, a2, numerator,
+                    [Double](repeating: 0, count: count), radiation), 1)
+            }
+            let zero = [Double](repeating: 0, count: 256)
+            var drive = zero, output = zero
+            drive[0] = 1
+            bow_poly_process(state, 256, 256, zero, zero, zero, zero, zero, drive, &output)
+            return output
+        }
+        let single = try impulse(count: 1)
+        XCTAssertGreaterThan(single.map(abs).max()!, 0.01)
+        for count in [97, 159, 272] {
+            XCTAssertEqual(try impulse(count: count), single)
+            XCTAssertEqual(try impulse(count: count, reload: true), single)
+        }
+    }
+
     /// The initial wrap balances contact and restoring forces, including low rows where fixed-point iteration oscillates.
     func testJawariInitialWrapBalancesContactForce() throws {
         let bp = try XCTUnwrap(Presets.bowedStringParams())
@@ -66,8 +99,7 @@ final class BowedStringEngineTests: XCTestCase {
             // formula radiation
             "bow_rad_hp": 200.0, "bow_rad_hp_ord": 2,
             "bow_rad_lp": 8000.0, "bow_rad_lp_ord": 1,
-            // articulation: place-then-draw + aftertouch vibrato
-            "bow_place_ms": 35.0, "bow_draw_ms": 60.0,
+            // aftertouch vibrato
             "bow_vib_cents": 25.0, "bow_vib_hz": 5.5,
         ])
     }
@@ -147,7 +179,7 @@ final class BowedStringEngineTests: XCTestCase {
     func testFormulaBodyShippedLockstep() {
         let bp = Self.shippedBodyBP()
         let t = BowTables.buildOpenString(sr: 96000.0, tonic: 261.63, bp: bp)
-        XCTAssertEqual(bow_scalars_t.fieldCount, 52)
+        XCTAssertEqual(bow_scalars_t.fieldCount, 51)
         XCTAssertEqual(t.scalars.yinf, 0.08)         // bridge mobility
         XCTAssertEqual(t.scalars.c0, 0.3)            // direct radiation
         XCTAssertEqual(t.scalars.pgain, 0.0)         // no voice force

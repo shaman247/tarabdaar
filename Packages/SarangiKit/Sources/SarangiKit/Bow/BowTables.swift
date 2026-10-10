@@ -69,6 +69,7 @@ extension bow_scalars_t {
 public struct JtTables: Sendable {
     /// Physical two-direction rows selected by the application bank plan.
     public var dualRows: [Int] = []
+    /// Storage stride; chromatic rows pack up to four contacts and pad the rest.
     public var J: Int32 = 0
     public var M: [Int32] = []
     public var ca: [Double] = [], cb: [Double] = []
@@ -237,10 +238,16 @@ public enum BowTables {
         T.apexRef = apexR
         for (ri, row) in rows.enumerated() {
             let chrom = chromatic.map { $0.indices.contains(ri) && $0[ri] } ?? false
+            // Pack the reduced contact grid at the front of its fixed-width ABI slot.
+            // Raga/unbanked fixtures retain their existing contact geometry.
+            let storageJ = J
+            let J = chrom ? min(4, storageJ) : storageJ
             let zoneW = zoneWR
             let radius = radiusR
             let apex = apexR
-            let alpha = alphaR
+            let alpha = chrom ? 2.0 : alphaR
+            // Match the original elastic force at ten micrometres penetration.
+            let rowKc = chrom ? kc * pow(1e-5, alphaR - 2) : kc
             let fHf = fHfR
             let norm = chrom ? normC : normR
             T.rowChromatic.append(chrom)
@@ -251,7 +258,7 @@ public enum BowTables {
             T.rowFreqs.append(f0s)
             let L = min(0.30, max(0.08, 0.25 * 296.0 / f0s))
             let fx = min(fmax, 0.42 * srk / Double(div))
-            let M = max(16, min(mcap, Int(fx / f0s)))
+            let M = chrom ? max(1, min(24, Int(fx / f0s))) : max(16, min(mcap, Int(fx / f0s)))
             let bst = bstR
             // the row's modes, HF-rolled damping (t60hf = t60) and rotations
             let w0 = ModalString.modeFrequencies(f0: f0s, count: M, inharmonicity: bst)
@@ -266,10 +273,14 @@ public enum BowTables {
             T.cb4.append(contentsOf: rot4.cb)
             var xz = [Double](repeating: 0, count: J)
             let x0 = L - zoneW, x1 = L - 0.0008
-            for j in 0..<J {
-                xz[j] = x0 + Double(j) * (x1 - x0) / Double(J - 1)
+            if J == 1 {
+                xz[0] = L - 0.0015
+            } else {
+                for j in 0..<J {
+                    xz[j] = x0 + Double(j) * (x1 - x0) / Double(J - 1)
+                }
             }
-            let wj = xz[1] - xz[0]
+            let wj = J == 1 ? (x1 - x0) * 8.0 / 7.0 : xz[1] - xz[0]
             var phi = [Double](repeating: 0, count: M * J)
             let amp2 = (2.0 / L).squareRoot()      // the shapes' unit norm
             for k in 0..<M {
@@ -339,7 +350,7 @@ public enum BowTables {
             // only a fallback for configurations the Newton solve cannot handle.
             let solved = JawariEquilibrium.solve(phi: phi,
                 force: phi.map { $0 * wj / mu }, omega: w0,
-                bone: bprof, stiffness: kc, alpha: alpha)
+                bone: bprof, stiffness: rowKc, alpha: alpha)
             var q0 = solved ?? [Double](repeating: 0, count: M)
             if solved == nil {
                 T.equilibriumConverged = false
@@ -352,7 +363,7 @@ public enum BowTables {
                     var fst = [Double](repeating: 0, count: J)
                     for j in 0..<J {
                         let eta = bprof[j] - u[j]
-                        fst[j] = eta > 0.0 ? kc * pow(eta, alpha) : 0.0
+                        fst[j] = eta > 0.0 ? rowKc * pow(eta, alpha) : 0.0
                     }
                     for k in 0..<M {
                         var s = 0.0
@@ -361,6 +372,15 @@ public enum BowTables {
                         q0[k] = q0[k] + 0.5 * (qn - q0[k])
                     }
                 }
+            }
+            if chrom {
+                T.phiU.append(contentsOf: repeatElement(0, count: M * (storageJ - J)))
+                T.phiF.append(contentsOf: repeatElement(0, count: M * (storageJ - J)))
+                T.b.append(contentsOf: repeatElement(0, count: storageJ - J))
+                T.gd.append(contentsOf: repeatElement(0, count: storageJ - J))
+                T.gd4.append(contentsOf: repeatElement(0, count: storageJ - J))
+                T.G.append(contentsOf: repeatElement(0, count: storageJ * storageJ - J * J))
+                T.G4.append(contentsOf: repeatElement(0, count: storageJ * storageJ - J * J))
             }
             T.q0.append(contentsOf: q0)
             T.M.append(Int32(M))
@@ -544,7 +564,6 @@ public enum BowTables {
         s.bowDisp = bp.v("bow_disp", 0.0)
         s.zload = bp.v("bow_zload", 1.0)
         s.nA = bp.v("bow_noise", 0.0)
-        s.nT = bp.v("bow_tnoise", 0.0)
         s.nPow = bp.v("bow_noise_pow", 1.0)
         s.nzHi = OnePole.coefficient(hz: bp.v("bow_noise_hi", 8590.0), sr: sr)
         s.nzLo = OnePole.coefficient(hz: bp.v("bow_noise_lo", 402.0), sr: sr)

@@ -27,6 +27,8 @@ public struct FretSegment: Identifiable, Equatable {
     public var topY: Double
     public var bottomY: Double
     public var enabled: Bool
+    /// One-way raga membership for octave copies −2…+2; omitted from layout files.
+    public var ragaOctaves: UInt8 = 0x1F
 
     public init(id: UUID = UUID(), degreeIndex: Int, x: Double, topY: Double,
                 bottomY: Double, enabled: Bool = true) {
@@ -59,13 +61,32 @@ public struct FretArrangement: Equatable {
 
     public static let defaultDroneRatios = [0.5, 3.0 / 4.0, 1.0]
 
-    public init(segments: [FretSegment], ghostExtentOctaves: Double = 0.5,
+    /// A 2.5-octave surface, including the one-octave base band.
+    public static let defaultGhostExtentOctaves = 0.75
+
+    public init(segments: [FretSegment],
+                ghostExtentOctaves: Double = FretArrangement.defaultGhostExtentOctaves,
                 droneRatios: [Double] = FretArrangement.defaultDroneRatios) {
         self.segments = segments
         self.ghostExtentOctaves = max(0, min(2, ghostExtentOctaves))
         var r = droneRatios.map { max(0.25, min(4.0, $0)) }
         if r.count != FretArrangement.droneCount { r = FretArrangement.defaultDroneRatios }
         self.droneRatios = r
+    }
+
+    /// Any enabled raga octave colors and warps every copy of the same pitch class.
+    public func withRagaStrings(ratios: [Double], degrees: [(ratio: Double, label: String)]) -> Self {
+        var snapshot = self
+        for i in snapshot.segments.indices {
+            snapshot.segments[i].ragaOctaves = 0
+            guard let base = fretRatio(snapshot.segments[i], degrees: degrees) else { continue }
+            let hasRaga = ratios.contains {
+                let octaves = log2($0 / base)
+                return abs(octaves - octaves.rounded()) < 1e-9
+            }
+            snapshot.segments[i].ragaOctaves = hasRaga ? 0x1F : 0
+        }
+        return snapshot
     }
 
     /// `FretLayoutPreset.equalFreq` ("C Equal Freq"): **pitch-aligned x** —
@@ -99,7 +120,7 @@ public struct FretArrangement: Equatable {
     /// shuddha partner like black keys over white, with S and P in both rows
     /// (the field y-interpolates inside a column, so sliding down bends r → R).
     public static func keyboardArrangement(
-        degrees: [(ratio: Double, label: String)]) -> FretArrangement {
+        degrees: [(ratio: Double, label: String)], invertedRows: Bool = false) -> FretArrangement {
         // Column per svara (pitch class): S | R/r | G/g | m/M | P | D/d | N/n.
         let columnForPC = [0: 0, 1: 1, 2: 1, 3: 2, 4: 2, 5: 3, 6: 3,
                            7: 4, 8: 5, 9: 5, 10: 6, 11: 6]
@@ -111,13 +132,14 @@ public struct FretArrangement: Equatable {
             let x = (Double(columnForPC[pc] ?? 0) + 0.5) / 7.0
             let bands: [(top: Double, bottom: Double)]
             switch pc {
-            case 0, 7:            bands = [(0.188, 0.492), (0.508, 0.812)] // S, P — close pair
-            case 2, 4, 5, 9, 11:  bands = [(0.588, 0.892)] // shuddha — lower middle
-            default:              bands = [(0.108, 0.412)] // komal/tivra — upper middle
+            case 0, 7:            bands = [(0.196, 0.500), (0.500, 0.804)] // S, P — touching pair
+            case 2, 4, 5, 9, 11:  bands = [(0.544, 0.848)] // shuddha — lower middle
+            default:              bands = [(0.152, 0.456)] // komal/tivra — upper middle
             }
             for band in bands {
-                segments.append(FretSegment(degreeIndex: i, x: x, topY: band.top,
-                                            bottomY: band.bottom))
+                segments.append(FretSegment(degreeIndex: i, x: x,
+                                            topY: invertedRows ? 1 - band.bottom : band.top,
+                                            bottomY: invertedRows ? 1 - band.top : band.bottom))
             }
         }
         return FretArrangement(segments: segments)
@@ -127,12 +149,14 @@ public struct FretArrangement: Equatable {
 // MARK: - Built-in layouts
 
 /// The built-in fret layouts (Layout menu, beside `FretArrangementStore`'s
-/// saved ones). Both are built from the current scale's degrees.
+/// saved ones). All are built from the current scale's degrees.
 public enum FretLayoutPreset: String, CaseIterable, Identifiable {
     /// Pitch-aligned: `x = log2(ratio)`.
     case equalFreq
     /// The default: 7 svara columns, komal/tivra stacked above shuddha.
     case keyboard
+    /// The keyboard layout with its upper and lower rows exchanged.
+    case keyboardSharp
 
     public var id: String { rawValue }
 
@@ -140,6 +164,7 @@ public enum FretLayoutPreset: String, CaseIterable, Identifiable {
         switch self {
         case .equalFreq: return "C Equal Freq"
         case .keyboard:  return "C Keyboard"
+        case .keyboardSharp: return "C♯ Keyboard"
         }
     }
 
@@ -151,6 +176,8 @@ public enum FretLayoutPreset: String, CaseIterable, Identifiable {
         case .keyboard:
             return "7 evenly-spaced svara columns, komal/tivra stacked above "
                 + "their shuddha partner — a piano keyboard's key spacing."
+        case .keyboardSharp:
+            return label
         }
     }
 
@@ -159,6 +186,7 @@ public enum FretLayoutPreset: String, CaseIterable, Identifiable {
         switch self {
         case .equalFreq: return .defaultArrangement(degrees: degrees)
         case .keyboard:  return .keyboardArrangement(degrees: degrees)
+        case .keyboardSharp: return .keyboardArrangement(degrees: degrees, invertedRows: true)
         }
     }
 }
@@ -230,14 +258,17 @@ public struct FretPlacement: Identifiable {
     public let segmentID: UUID
     public let isGhost: Bool
     public let ratio: Double
+    public let hasRagaString: Bool
     public let name: String
     public let x: CGFloat
     public let topY: CGFloat
     public let bottomY: CGFloat
 
     public init(id: String, segmentID: UUID, isGhost: Bool, ratio: Double,
-                name: String, x: CGFloat, topY: CGFloat, bottomY: CGFloat) {
+                name: String, x: CGFloat, topY: CGFloat, bottomY: CGFloat,
+                hasRagaString: Bool = true) {
         self.id = id; self.segmentID = segmentID; self.isGhost = isGhost
+        self.hasRagaString = hasRagaString
         self.ratio = ratio; self.name = name; self.x = x
         self.topY = topY; self.bottomY = bottomY
     }
@@ -268,7 +299,8 @@ public func fretPlacements(arrangement: FretArrangement,
                                                       octave: shift,
                                                       degrees: degrees), x: x,
                                      topY: CGFloat(segment.topY) * size.height,
-                                     bottomY: CGFloat(segment.bottomY) * size.height))
+                                     bottomY: CGFloat(segment.bottomY) * size.height,
+                                     hasRagaString: segment.ragaOctaves & (1 << (shift + 2)) != 0))
         }
     }
     return out
@@ -362,33 +394,44 @@ public func fretPosition(at pt: CGPoint, placements: [FretPlacement],
 /// `fretColumnEps`) resolves its pitch at the touch's y (`fretColumnLog`),
 /// and the field interpolates log-pitch between the columns flanking `pt.x`
 /// (extrapolating beyond the outermost). Continuous, exact on a fret line.
-/// `warp` (`ctl_fret_warp`, 0…1) shapes every blend through `fretWarp`; 0 is
-/// exactly linear. `nil` with no frets.
+/// `warp` (`ctl_fret_warp`, 0…1) shapes each raga endpoint’s half of a blend;
+/// gray endpoints stay linear. Zero is exactly linear. `nil` with no frets.
 public func fretFieldLog(at pt: CGPoint,
                          placements: [FretPlacement],
                          warp: Double = 0) -> Double? {
     guard !placements.isEmpty else { return nil }
     let columns = fretColumnXs(placements)
-    func pitch(atColumn cx: CGFloat) -> Double {
-        fretColumnLog(atY: pt.y, columnX: cx, placements: placements, warp: warp)
+    func sample(atColumn cx: CGFloat) -> (pitch: Double, raga: Double) {
+        fretColumnSample(atY: pt.y, columnX: cx, placements: placements, warp: warp)
     }
-    guard columns.count >= 2 else { return pitch(atColumn: columns[0]) }
+    guard columns.count >= 2 else { return sample(atColumn: columns[0]).pitch }
     // The pair the touch's x falls between — or the outermost pair, whose
     // line extrapolates past the edges (t outside 0..1).
     let upper = columns.firstIndex(where: { $0 > pt.x }) ?? columns.count
     let i = min(max(upper - 1, 0), columns.count - 2)
     let (a, b) = (columns[i], columns[i + 1])
-    let l = pitch(atColumn: a)
-    let r = pitch(atColumn: b)
+    let l = sample(atColumn: a)
+    let r = sample(atColumn: b)
     let t = Double((pt.x - a) / (b - a))
-    let tw = (t >= 0 && t <= 1) ? fretWarp(t, amount: warp) : t
-    return l + (r - l) * tw
+    let tw = (t >= 0 && t <= 1)
+        ? fretWarp(t, amount: warp * (t < 0.5 ? l.raga : r.raga)) : t
+    return l.pitch + (r.pitch - l.pitch) * tw
 }
 
 /// A column's log2 pitch at `y`: a fret's pitch inside its extent, a
 /// `fretWarp`-shaped blend between stacked frets, clamped beyond the ends.
 func fretColumnLog(atY y: CGFloat, columnX cx: CGFloat,
                    placements: [FretPlacement], warp: Double = 0) -> Double {
+    fretColumnSample(atY: y, columnX: cx, placements: placements, warp: warp).pitch
+}
+
+/// Raga influence blends through stacked gaps so the horizontal field stays continuous.
+private func fretColumnSample(atY y: CGFloat, columnX cx: CGFloat,
+                              placements: [FretPlacement], warp: Double)
+    -> (pitch: Double, raga: Double) {
+    func sample(_ p: FretPlacement) -> (pitch: Double, raga: Double) {
+        (log2(p.ratio), p.hasRagaString ? 1 : 0)
+    }
     var inside: FretPlacement? = nil       // extent contains y, nearest center
     var above: FretPlacement? = nil        // bottomY ≤ y, greatest bottomY
     var below: FretPlacement? = nil        // topY ≥ y, smallest topY
@@ -407,19 +450,21 @@ func fretColumnLog(atY y: CGFloat, columnX cx: CGFloat,
             below = p
         }
     }
-    if let inside { return log2(inside.ratio) }
+    if let inside { return sample(inside) }
     switch (above, below) {
     case (let a?, let b?):
         let gap = b.topY - a.bottomY
-        guard gap > 1e-6 else { return log2(a.ratio) }
-        let t = fretWarp(Double((y - a.bottomY) / gap), amount: warp)
-        return log2(a.ratio) + (log2(b.ratio) - log2(a.ratio)) * t
+        guard gap > 1e-6 else { return sample(a) }
+        let u = Double((y - a.bottomY) / gap)
+        let l = sample(a), r = sample(b)
+        let t = fretWarp(u, amount: warp * (u < 0.5 ? l.raga : r.raga))
+        return (l.pitch + (r.pitch - l.pitch) * t, l.raga + (r.raga - l.raga) * u)
     case (let a?, nil):
-        return log2(a.ratio)
+        return sample(a)
     case (nil, let b?):
-        return log2(b.ratio)
+        return sample(b)
     case (nil, nil):
-        return 0   // unreachable: the column was picked from `placements`
+        return (0, 0)   // unreachable: the column was picked from `placements`
     }
 }
 
@@ -468,9 +513,9 @@ public func fretFieldContours(placements: [FretPlacement], size: CGSize,
     let ys = (0...ySamples).map {
         CGFloat($0) / CGFloat(ySamples) * size.height
     }
-    let columnLogs: [[Double]] = ys.map { y in
+    let columnSamples = ys.map { y in
         columns.map {
-            fretColumnLog(atY: y, columnX: $0, placements: placements,
+            fretColumnSample(atY: y, columnX: $0, placements: placements,
                           warp: warp)
         }
     }
@@ -491,8 +536,8 @@ public func fretFieldContours(placements: [FretPlacement], size: CGSize,
                 run.removeAll(keepingCapacity: true)
             }
             for (yi, y) in ys.enumerated() {
-                let l = columnLogs[yi][pair]
-                let r = columnLogs[yi][pair + 1]
+                let left = columnSamples[yi][pair], right = columnSamples[yi][pair + 1]
+                let l = left.pitch, r = right.pitch
                 guard abs(r - l) > 1e-9 else { flush(); continue }
                 let w = (level - l) / (r - l)
                 let t: Double
@@ -505,7 +550,7 @@ public func fretFieldContours(placements: [FretPlacement], size: CGSize,
                     t = w
                 default:
                     guard w >= 0, w <= 1 else { flush(); continue }
-                    t = fretWarpInverse(w, amount: warp)
+                    t = fretWarpInverse(w, amount: warp * (w < 0.5 ? left.raga : right.raga))
                 }
                 let x = a + CGFloat(t) * (b - a)
                 guard x >= 0, x <= size.width else { flush(); continue }

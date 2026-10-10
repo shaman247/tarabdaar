@@ -41,6 +41,7 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     st->jtG = kc_dup_f(G, njt * J * J); st->jtG4 = kc_dup_f(G4, njt * J * J);
     st->jtGd = kc_dup_f(gd, njt * J);   st->jtGd4 = kc_dup_f(gd4, njt * J);
     st->jtKc = phys[0]; st->jtAlpha = phys[1]; st->jtHcB = phys[2];
+    st->jtQuadraticKc = st->jtKc * pow(1e-5, st->jtAlpha - 2);
     st->jtDeep = phys[3]; st->jtGain = phys[4]; st->jtDrv = phys[5];
     st->jtGainCur = st->jtGain;
     st->jtGainA = kc_onepole_tau_sr(0.040, st->sr);
@@ -111,6 +112,7 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     st->jtRadScaleCur = kc_dup_d(radScale, njt);
     st->jtRadSlewA = kc_onepole_dt((double)st->jtDiv / st->sr, 0.040);
     st->jtRadLp = (double *)calloc(njt, sizeof(double));
+    st->jtRadSmooth = calloc((size_t)njt * 2, sizeof(double));
     st->jtRadPrime = (unsigned char *)malloc((size_t)njt);
     memset(st->jtRadPrime, 1, (size_t)njt);
     /* termination (pin) force: the builder's per-row unit match, permanent */
@@ -192,14 +194,14 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
         st->jtBodyA = kc_onepole_tau_sr(0.030, st->sr);
         st->jtBodyTgt = 0.0;
         st->jtBodyCur = 0.0;
-        memset(st->jbx1, 0, sizeof(st->jbx1));
-        memset(st->jbx2, 0, sizeof(st->jbx2));
-        memset(st->jby1, 0, sizeof(st->jby1));
-        memset(st->jby2, 0, sizeof(st->jby2));
-        memset(st->jbsx1, 0, sizeof(st->jbsx1));
-        memset(st->jbsx2, 0, sizeof(st->jbsx2));
-        memset(st->jbsy1, 0, sizeof(st->jbsy1));
-        memset(st->jbsy2, 0, sizeof(st->jbsy2));
+        memset(st->jbx1, 0, sizeof(double) * (size_t)st->K);
+        memset(st->jbx2, 0, sizeof(double) * (size_t)st->K);
+        memset(st->jby1, 0, sizeof(double) * (size_t)st->K);
+        memset(st->jby2, 0, sizeof(double) * (size_t)st->K);
+        memset(st->jbsx1, 0, sizeof(double) * (size_t)st->K);
+        memset(st->jbsx2, 0, sizeof(double) * (size_t)st->K);
+        memset(st->jbsy1, 0, sizeof(double) * (size_t)st->K);
+        memset(st->jbsy2, 0, sizeof(double) * (size_t)st->K);
         for (int s = 0; s < njt; s++) {
             st->jtDwTgt[s] = 1.0;
             st->jtDwCur[s] = 1.0;
@@ -326,18 +328,45 @@ static int jt_solve(int J, const float *b_, const float *ustar,
     return 1;
 }
 
-/* zone snapshot: u/udot at the J points from the double state
-   (float matmuls; elementwise over j — vectorizes without fast-math) */
-/* contact core at step dts on tables (G, gd): solve on the zone snapshot,
-   Hunt-Crossley (dissipative-only), impulse into q/p (double accumulation) */
+/* Maintain the coupled residual instead of recomputing each dot product.
+   Updates with zero force change do no work; contact count remains bounded. */
+static inline __attribute__((always_inline)) void jt_solve_quadratic(int J, const float *b, const float *u,
+    const float *G, const float *gd, float kc, float *F)
+{
+    float residual[JT_MAXJ];
+    int any=0;
+    for(int j=0;j<J;j++) { residual[j]=b[j]-u[j];F[j]=0;any|=residual[j]>0; }
+    if(!any) return;
+    for(int sweep=0;sweep<4;sweep++) {
+        for(int idx=0;idx<J;idx++) {
+            int j=(sweep&1)?J-1-idx:idx;
+            float z=residual[j]+gd[j]*F[j];
+            float eta=z>0 ? 2*z/(1+sqrtf(1+4*kc*gd[j]*z)) : 0;
+            float next=kc*eta*eta;
+            float change=next-F[j];F[j]=next;
+            if(change!=0) for(int k=0;k<J;k++) residual[k]-=G[k*J+j]*change;
+        }
+    }
+}
+
+/* Solve on the zone snapshot, apply dissipative Hunt-Crossley loss, then
+   accumulate the impulse into the double modal state. */
 static void jt_core(int M, int J, const float *u, const float *ud,
                     const float *phiF, const float *b_,
                     const float *G, const float *gd,
-                    float kc, float alpha, float hcB,
+                    float kc, float alpha, float hcB, int quadratic,
                     double dts, double *q, double *p, float *fsum)
 {
     float F[JT_MAXJ];
-    if (!jt_solve(J, b_, u, G, gd, kc, alpha, F)) return;
+    if (J == 1 && alpha == 2.0f) {
+        /* eta + G*kc*eta² = b-u; rationalized root avoids cancellation. */
+        const double c = (double)b_[0] - u[0];
+        const double eta = c > 0 ? 2*c / (1 + sqrt(1 + 4*(double)kc*gd[0]*c)) : 0;
+        F[0] = (float)((double)kc * eta * eta);
+    } else if (quadratic && alpha == 2.0f) {
+        if (J == 4) jt_solve_quadratic(4, b_, u, G, gd, kc, F);
+        else jt_solve_quadratic(J, b_, u, G, gd, kc, F);
+    } else if (!jt_solve(J, b_, u, G, gd, kc, alpha, F)) return;
     for (int j = 0; j < J; j++) {
         float hc = 1.0f + hcB * (-ud[j]);
         if (hc < 0.15f) hc = 0.15f;
@@ -406,7 +435,7 @@ void jt_track_retune(bow_poly_state_t *st)
     if (f == st->jtTrkApplied && !st->jtTrkDirty) return;
     st->jtTrkDirty = 0;
     st->jtTrkApplied = f;
-    const int J = st->jtJ;
+    const int J = jt_row_contacts(st, s);
     const int mo = st->jtMOff[s], zo = st->jtZOff[s];
     const int Mall = st->jtM[s];
     const double dtj = (double)st->jtDiv / st->sr;
@@ -449,10 +478,10 @@ void jt_track_retune(bow_poly_state_t *st)
         }
         /* contact compliance = prefix sum over the active modes: G[a][b] =
            (dt^2/2) * sum_k phiU[k][a]*phiF[k][b] (phiF carries wj/mu) */
-        float *G = st->jtG + (size_t)s * (size_t)J * J;
-        float *G4 = st->jtG4 + (size_t)s * (size_t)J * J;
-        float *gd = st->jtGd + (size_t)s * J;
-        float *gd4 = st->jtGd4 + (size_t)s * J;
+        float *G = st->jtG + (size_t)s * (size_t)st->jtJ * st->jtJ;
+        float *G4 = st->jtG4 + (size_t)s * (size_t)st->jtJ * st->jtJ;
+        float *gd = st->jtGd + (size_t)s * st->jtJ;
+        float *gd4 = st->jtGd4 + (size_t)s * st->jtJ;
         const float *phiU = st->jtPhiU + zo;
         const float *phiF = st->jtPhiF + zo;
         const double h2 = dtj * dtj / 2.0;
@@ -549,7 +578,7 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         if (st->scopeOn) st->scopeEnv[s] = peak_env(st->scopeEnv[s], fabs(y), st->scopeRel);
         return y;
     }
-    const int J = st->jtJ;
+    const int J = jt_row_contacts(st, s);
     const double dtj = (double)st->jtDiv / st->sr;
     uint64_t pulse = atomic_load_explicit(&st->jtPulseRequest[s], memory_order_relaxed);
     if (pulse) pulse = atomic_exchange_explicit(&st->jtPulseRequest[s], 0, memory_order_relaxed);
@@ -597,6 +626,9 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
                 if (c < 1e-30 && c > -1e-30) c = 0.0;
                 st->jtCplLast[s] = c;
                 if (cplOut) *cplOut += c;
+            }
+            if (jt_row_quadratic(st, s)) {
+                st->jtRadSmooth[s * 2] = st->jtRadSmooth[s * 2 + 1] = 0;
             }
             return 0.0;
         }
@@ -713,11 +745,11 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         const double *wi_ = st->jtWdI + mo;
         const float *phiU = st->jtPhiU + zo;
         const float *phiF = st->jtPhiF + zo;
-        const float *b_ = st->jtB + (size_t)s * J;
-        const float *G_ = st->jtG + (size_t)s * (size_t)J * J;
-        const float *G4_ = st->jtG4 + (size_t)s * (size_t)J * J;
-        const float *gd_ = st->jtGd + (size_t)s * J;
-        const float *gd4_ = st->jtGd4 + (size_t)s * J;
+        const float *b_ = st->jtB + (size_t)s * st->jtJ;
+        const float *G_ = st->jtG + (size_t)s * (size_t)st->jtJ * st->jtJ;
+        const float *G4_ = st->jtG4 + (size_t)s * (size_t)st->jtJ * st->jtJ;
+        const float *gd_ = st->jtGd + (size_t)s * st->jtJ;
+        const float *gd4_ = st->jtGd4 + (size_t)s * st->jtJ;
         /* TILT bone lift: the bone drops jtLift below its profile and the row
            rings as a pure modal taraf; composed with the signed evolution lift.
            0 = the bit-exact contact. */
@@ -730,7 +762,7 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         }
         /* TWO BRIDGES: the row's own contact law when armed, else the exact
            global scalars */
-        const float kcR = (float)st->jtKc;
+        const float kcR = (float)jt_row_kc(st, s);
         const float alphaR = (float)(st->jtRowContactOn
                                      ? st->jtRowAlpha[s] : st->jtAlpha);
         const float hcBR = (float)(st->jtRowContactOn
@@ -750,7 +782,8 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             p[k] = -cb_[k] * (wd_[k] * qk) + ca_[k] * pk;
         }
         float u[JT_MAXJ], ud[JT_MAXJ];
-        kc_zone(Ms, J, phiU, q, p, u, ud);
+        if (J == 4) kc_zone(Ms, 4, phiU, q, p, u, ud);
+        else kc_zone(Ms, J, phiU, q, p, u, ud);
         float pen = -1e30f;
         for (int j = 0; j < J; j++) {
             float d = bc_[j] - u[j];
@@ -771,14 +804,15 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
                     q[k] = ca4_[k] * qk + cb4_[k] * (pk * wi_[k]);
                     p[k] = -cb4_[k] * (wd_[k] * qk) + ca4_[k] * pk;
                 }
-                kc_zone(Ms, J, phiU, q, p, u, ud);
+                if (J == 4) kc_zone(Ms, 4, phiU, q, p, u, ud);
+                else kc_zone(Ms, J, phiU, q, p, u, ud);
                 jt_core(Ms, J, u, ud, phiF, bc_, G4_, gd4_,
-                        kcR, alphaR, hcBR, dt4, q, p, &fsum);
+                        kcR, alphaR, hcBR, jt_row_quadratic(st, s), dt4, q, p, &fsum);
             }
             fsum *= 0.25f;   /* mean over the substeps */
         } else {
             jt_core(Ms, J, u, ud, phiF, bc_, G_, gd_,
-                    kcR, alphaR, hcBR, dtj, q, p, &fsum);
+                    kcR, alphaR, hcBR, jt_row_quadratic(st, s), dtj, q, p, &fsum);
         }
         {
             /* the fitted 0.90 L drive tap — the ONE drive shape */
@@ -860,6 +894,16 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
             st->jtCplLast[s] = c;
             *cplOut += c;
         }
+        /* Suppress sample-scale contact chatter in radiation only. The two
+           half-sample averages add one kernel sample (10.4 us at 96 kHz);
+           the physical return above retains its unfiltered force. */
+        if (jt_row_quadratic(st, s)) {
+            double *history = st->jtRadSmooth + s * 2;
+            double half = 0.5 * (yjt + history[0]);
+            history[0] = yjt;
+            yjt = 0.5 * (half + history[1]);
+            history[1] = half;
+        }
         if (outputLevel != 1.0) yjt *= outputLevel;
         /* PER-STRING CAP: pure output gain after the physics; a fresh arm
            (generation bump) resets the row here, on its own worker. */
@@ -893,31 +937,53 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
     }
 }
 
+void bow_poly_jt_meter_banks(void *vst, const unsigned char *chromatic, int count)
+{
+    bow_poly_state_t *st = vst;
+    if (count != st->njt || count <= 0 || st->jtPoolN || st->jtDLive) return;
+    if (!st->jtMeterChromatic) {
+        st->jtMeterChromatic = calloc((size_t)count, 1);
+        st->jtMeterBody = calloc((size_t)st->K * 4, sizeof(double));
+        st->jtMeterWebC = calloc(65536, sizeof(double));
+        st->jtMeterWebR = calloc(65536, sizeof(double));
+        st->jtMeterRingC = calloc(JT_WEBN, sizeof(double));
+        st->jtMeterRingR = calloc(JT_WEBN, sizeof(double));
+    }
+    memcpy(st->jtMeterChromatic, chromatic, (size_t)count);
+}
+
 /* sideOut (nullable): accumulates the pan-weighted row sum for the stereo side
    path */
 double jt_tick(bow_poly_state_t *st, double Fd, double ev,
                       double cap, double dn, double comp,
                       double *sideOut, double *cplOut)
 {
-    double jrad = 0.0;
+    double jrad = 0.0, chromatic = 0.0;
     double pen = st->jtPenMax;
     double cpl = 0.0;
     double *cp = cplOut ? &cpl : NULL;
     if (sideOut && st->stJtPan) {
         double side = 0.0;
         for (int s = 0; s < st->njt; s++) {
+            if (!jt_row_active(st, s)) continue;
             double y = jt_tick_string(st, s, Fd, ev, cap, dn, comp, &pen, cp);
             jrad += y;
+            if (st->jtMeterChromatic && st->jtMeterChromatic[s]) chromatic += y;
             side += st->stJtPan[s] * y;
         }
         *sideOut = side;
     } else {
-        for (int s = 0; s < st->njt; s++)
-            jrad += jt_tick_string(st, s, Fd, ev, cap, dn, comp, &pen, cp);
+        for (int s = 0; s < st->njt; s++) {
+            if (!jt_row_active(st, s)) continue;
+            double y = jt_tick_string(st, s, Fd, ev, cap, dn, comp, &pen, cp);
+            jrad += y;
+            if (st->jtMeterChromatic && st->jtMeterChromatic[s]) chromatic += y;
+        }
         if (sideOut) *sideOut = 0.0;
     }
     if (cplOut) *cplOut = cpl;
     st->jtPenMax = pen;
+    st->jtMeterHoldC = chromatic;
     return jrad;
 }
 
@@ -969,6 +1035,7 @@ static void *jt_pool_run(void *va)
         if (s1 > st->njt) s1 = st->njt;
         double pen = st->jtWPen[idx];
         double *hp = st->jtHp + (size_t)idx * JT_POOL_CH;
+        double *meter = st->jtMeterPartials ? st->jtMeterPartials + (size_t)idx * JT_POOL_CH : NULL;
         const double *fd = st->jtFdv;
         const double *evv = st->jtEvV;
         const double *capv = st->jtCapV;
@@ -987,18 +1054,21 @@ static void *jt_pool_run(void *va)
                 if (task >= st->njt) break;
                 s = st->jtOrder[task];
                 hp = st->jtHp + (size_t)s * JT_POOL_CH;
+                if (meter) meter = st->jtMeterPartials + (size_t)s * JT_POOL_CH;
                 if (hpS) hpS = st->jtHpS + (size_t)s * JT_POOL_CH;
                 if (hpC) hpC = st->jtHpC + (size_t)s * JT_POOL_CH;
             } else {
                 if (next >= s1) break;
                 s = next++;
             }
+            if (!jt_row_active(st, s)) continue;
             const double pn = hpS ? st->stJtPan[s] : 0.0;
             for (int k = 0; k < nT; k++) {
                 double y = jt_tick_string(st, s, fd[k], evv[k],
                                           capv[k], dnv[k], cmv[k], &pen,
                                           hpC ? hpC + k : NULL);
                 hp[k] += y;
+                if (meter && st->jtMeterChromatic[s]) meter[k] += y;
                 if (hpS) hpS[k] += pn * y;
             }
         }
@@ -1062,6 +1132,7 @@ void bow_poly_jt_set_threads(void *vst, int nth)
            after stopping an initially legacy-only pool. */
         const size_t outputCount = (size_t)(st->njt > 16 ? st->njt : 16) * JT_POOL_CH;
         st->jtHp = (double *)malloc(sizeof(double) * outputCount);
+        if (st->jtMeterChromatic) st->jtMeterPartials = calloc(outputCount, sizeof(double));
         st->jtHpS = (double *)malloc(sizeof(double) * outputCount);
         st->jtHpC = (double *)malloc(sizeof(double) * outputCount);
         st->jtWebScr = (double *)malloc(sizeof(double) * JT_POOL_CH);
@@ -1113,12 +1184,14 @@ void bow_poly_jt_inject_write(void *vst, const double *x, int n)
 void bow_poly_jt_set_lp(void *vst, double a)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_lp(st->jtInline, a);
     st->jtLpA = a;
 }
 
 void bow_poly_jt_set_hp(void *vst, double a)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_hp(st->jtInline, a);
     st->jtHpA = a;
 }
 
@@ -1131,6 +1204,7 @@ void bow_poly_jt_set_hp(void *vst, double a)
 void bow_poly_jt_set_couple(void *vst, double g)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_couple(st->jtInline, g);
     if (!st) return;
     if (g < 0.0) g = 0.0;
     if (g > 4.0) g = 4.0;
@@ -1140,6 +1214,7 @@ void bow_poly_jt_set_couple(void *vst, double g)
 void bow_poly_jt_set_body(void *vst, double mix)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_body(st->jtInline, mix);
     if (!st || st->njt <= 0) return;
     if (mix < 0.0) mix = 0.0;
     if (mix > 1.0) mix = 1.0;
@@ -1155,6 +1230,7 @@ void bow_poly_jt_set_body(void *vst, double mix)
 void bow_poly_jt_set_gain_mul(void *vst, double m)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_gain_mul(st->jtInline, m);
     if (!st || st->njt <= 0) return;
     if (m < 0.0) m = 0.0;
     if (m > 4.0) m = 4.0;
@@ -1167,6 +1243,7 @@ void bow_poly_jt_set_gain_mul(void *vst, double m)
 void bow_poly_jt_drive_weights(void *vst, const double *w, int n)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_drive_weights(st->jtInline, w, n);
     if (!st || st->njt <= 0 || !st->jtDwTgt || !w || n <= 0) return;
     if (n > st->njt) n = st->njt;
     for (int s = 0; s < n; s++) {
@@ -1184,6 +1261,7 @@ void bow_poly_jt_drive_weights(void *vst, const double *w, int n)
 void bow_poly_jt_set_drive(void *vst, double d)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_drive(st->jtInline, d);
     if (!st || st->njt <= 0) return;
     if (d < 0.0) d = 0.0;
     if (d > 1.0) d = 1.0;
@@ -1198,6 +1276,7 @@ void bow_poly_jt_set_drive(void *vst, double d)
 void bow_poly_jt_set_drive_norm(void *vst, double g)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_drive_norm(st->jtInline, g);
     if (!st || st->njt <= 0) return;
     if (g < 0.0) g = 0.0;
     if (g > 1.0) g = 1.0;
@@ -1209,6 +1288,7 @@ void bow_poly_jt_set_drive_norm(void *vst, double g)
 void bow_poly_jt_set_evolve(void *vst, double meters)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_evolve(st->jtInline, meters);
     if (!st || st->njt <= 0) return;
     if (meters > 1e-3) meters = 1e-3;
     if (meters < -1e-3) meters = -1e-3;
@@ -1228,6 +1308,7 @@ void bow_poly_jt_set_evolve(void *vst, double meters)
 void bow_poly_jt_set_evolve_ofs(void *vst, const double *ofs, int n)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_evolve_ofs(st->jtInline, ofs, n);
     if (!st || st->njt <= 0 || !st->jtEvOfsTgt || !ofs || n <= 0) return;
     if (n > st->njt) n = st->njt;
     for (int s = 0; s < n; s++) {
@@ -1250,6 +1331,7 @@ void bow_poly_jt_set_row_contact(void *vst, const double *alpha,
                                  int n)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_row_contact(st->jtInline, alpha, hcb, deep, n);
     if (!st || st->njt <= 0 || !st->jtRowAlpha || n <= 0) return;
     if (n > st->njt) n = st->njt;
     for (int s = 0; s < n; s++) {
@@ -1276,6 +1358,7 @@ void bow_poly_jt_set_row_contact(void *vst, const double *alpha,
 void bow_poly_jt_set_damp_t60(void *vst, double t60)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_damp_t60(st->jtInline, t60);
     if (!st || st->njt <= 0) return;
     if (t60 > 0.0) {
         double dtj = (double)st->jtDiv / st->sr;
@@ -1291,6 +1374,7 @@ void bow_poly_jt_set_damp_t60(void *vst, double t60)
 void bow_poly_jt_set_cap(void *vst, double hard, double ratio)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_cap(st->jtInline, hard, ratio);
     if (!st || st->njt <= 0) return;
     if (hard > 0.0) {
         if (st->jtCapHard <= 0.0) st->jtCapGen++;
@@ -1326,6 +1410,7 @@ void jt_gate_eps(bow_poly_state_t *st, double refDisp)
 void bow_poly_jt_set_gate(void *vst, double refDisp)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_gate(st->jtInline, refDisp);
     if (!st || st->njt <= 0 || !st->jtGateFdEps) return;
     if (refDisp <= 0.0) {
         st->jtGateRef = 0.0;
@@ -1351,12 +1436,18 @@ void bow_poly_jt_gate_probe(void *vst, double out[5])
     if (!st || st->njt <= 0 || !st->jtGateSlp || st->jtGateRef <= 0.0)
         return;
     int n = 0;
-    for (int s = 0; s < st->njt; s++) n += st->jtGateSlp[s];
+    for (int s = 0; s < st->njt; s++) if (jt_row_active(st, s)) n += st->jtGateSlp[s];
+    if (st->jtInline) n += bow_poly_jt_gate_asleep(st->jtInline);
     out[0] = (double)n;
     out[1] = (double)st->njt;
     out[2] = st->jtGateAmR;  st->jtGateAmR = 0.0;
     out[3] = st->jtGateFdR;  st->jtGateFdR = 0.0;
     out[4] = (double)st->jtGateDnHot;  st->jtGateDnHot = 0;
+    if (st->jtInline) {
+        double child[5];
+        bow_poly_jt_gate_probe(st->jtInline, child);
+        for (int i = 2; i < 5; i++) out[i] = fmax(out[i], child[i]);
+    }
 }
 
 /* rows currently asleep under the quiescence gate (0 unarmed) —
@@ -1367,7 +1458,8 @@ int bow_poly_jt_gate_asleep(void *vst)
     if (!st || st->njt <= 0 || !st->jtGateSlp || st->jtGateRef <= 0.0)
         return 0;
     int n = 0;
-    for (int s = 0; s < st->njt; s++) n += st->jtGateSlp[s];
+    for (int s = 0; s < st->njt; s++) if (jt_row_active(st, s)) n += st->jtGateSlp[s];
+    if (st->jtInline) n += bow_poly_jt_gate_asleep(st->jtInline);
     return n;
 }
 
@@ -1379,23 +1471,24 @@ int bow_poly_scope_jt(void *vst, int nrows, double *f0, double *level,
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     if (!st || st->njt <= 0 || !st->scopeEnv || !st->scopeOn) return 0;
-    double g = fabs(st->jtGain);
-    if (st->jtGMulOn) g *= fabs(st->jtGMulCur);
     const int n = nrows < st->njt ? nrows : st->njt;
     const int SK = st->scopeK;
     for (int s = 0; s < n; s++) {
-        const int mo = st->jtMOff[s];
-        const int slp = (st->jtGateRef > 0.0 && st->jtGateSlp
-                         && st->jtGateSlp[s]) ? 1 : 0;
+        bow_poly_state_t *owner = st->jtInline && st->jtMeterChromatic[s] ? st->jtInline : st;
+        double g = fabs(owner->jtGain);
+        if (owner->jtGMulOn) g *= fabs(owner->jtGMulCur);
+        const int mo = owner->jtMOff[s];
+        const int slp = (owner->jtGateRef > 0.0 && owner->jtGateSlp
+                         && owner->jtGateSlp[s]) ? 1 : 0;
         if (f0) {
-            double f = st->jtWd[mo] / (2.0 * M_PI);
-            if (s == st->jtTrkRow && st->jtTrkF0 > 0.0) f = st->jtTrkF0;
+            double f = owner->jtWd[mo] / (2.0 * M_PI);
+            if (s == owner->jtTrkRow && owner->jtTrkF0 > 0.0) f = owner->jtTrkF0;
             f0[s] = f;
         }
-        if (level) level[s] = slp ? 0.0 : st->scopeEnv[s] * g;
+        if (level) level[s] = slp ? 0.0 : owner->scopeEnv[s] * g;
         if (asleep) asleep[s] = (unsigned char)slp;
         if (modes && K > 0) {
-            const float *me = st->scopeMode + (size_t)s * (size_t)SK;
+            const float *me = owner->scopeMode + (size_t)s * (size_t)SK;
             for (int k = 0; k < K; k++)
                 modes[(size_t)s * (size_t)K + k] =
                     (k < SK && !slp) ? me[k] : 0.0f;
@@ -1418,6 +1511,7 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
               const double *gd, const double *gd4, const double *phys)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_set_coeffs(st->jtInline, njt, J, M, ca, cb, ca4, cb4, wd, radScale, pinScale, cplScale, phiD, phiU, phiF, b, G, G4, gd, gd4, phys);
     if (!st || njt != st->njt || J != st->jtJ || njt <= 0) return 0;
     if (!M || !ca || !cb || !ca4 || !cb4 || !wd || !radScale || !pinScale
         || !cplScale
@@ -1455,6 +1549,7 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
         st->jtG4[i] = (float)G4[i];
     }
     st->jtKc = phys[0]; st->jtAlpha = phys[1]; st->jtHcB = phys[2];
+    st->jtQuadraticKc = st->jtKc * pow(1e-5, st->jtAlpha - 2);
     st->jtDeep = phys[3]; st->jtGain = phys[4];
     /* (jtGainCur keeps gliding toward the new jtGain — no reset) */
     /* the live drive owns its scalar once armed; a reload of the OTHER
@@ -1515,6 +1610,10 @@ void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
         for (int t = 0; t < n; t++) {
             const double g = jt_gain_step(st);
             web[t] = g * jt_lp_step(st, st->jtHold);
+            if (st->jtMeterChromatic) {
+                st->jtMeterWebC[t] = g * st->jtMeterFilteredC;
+                st->jtMeterWebR[t] = web[t] - st->jtMeterWebC[t];
+            }
             if (webS)
                 webS[t] = g * jt_lp_stepS(st, st->jtHoldS);
             if (st->jtCplOn) jt_cpl_put(st, &cw, st->jtCplHold);
@@ -1532,6 +1631,9 @@ void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
         for (int th = 0; th < sums; th++) {
             memset(hp + (size_t)th * JT_POOL_CH, 0,
                    sizeof(double) * (size_t)nT);
+            if (st->jtMeterPartials)
+                memset(st->jtMeterPartials + (size_t)th * JT_POOL_CH, 0,
+                       sizeof(double) * (size_t)nT);
             if (hpS)
                 memset(hpS + (size_t)th * JT_POOL_CH, 0,
                        sizeof(double) * (size_t)nT);
@@ -1559,21 +1661,27 @@ void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
         int ki = 0;
         for (int t = 0; t < n; t++) {
             if (ki < nT && t == tkv[ki]) {
-                double H = 0.0, HS = 0.0, HC = 0.0;
+                double H = 0.0, HS = 0.0, HC = 0.0, chromatic = 0.0;
                 for (int th = 0; th < sums; th++) {
                     H += hp[(size_t)th * JT_POOL_CH + ki];
+                    if (st->jtMeterPartials) chromatic += st->jtMeterPartials[(size_t)th * JT_POOL_CH + ki];
                     if (hpS)
                         HS += hpS[(size_t)th * JT_POOL_CH + ki];
                     if (hpC)
                         HC += hpC[(size_t)th * JT_POOL_CH + ki];
                 }
                 hold = H;
+                st->jtMeterHoldC = chromatic;
                 holdS = HS;
                 if (hpC) holdC = HC;
                 ki++;
             }
             const double g = jt_gain_step(st);
             web[t] = g * jt_lp_step(st, hold);
+            if (st->jtMeterChromatic) {
+                st->jtMeterWebC[t] = g * st->jtMeterFilteredC;
+                st->jtMeterWebR[t] = web[t] - st->jtMeterWebC[t];
+            }
             if (webS)
                 webS[t] = g * jt_lp_stepS(st, holdS);
             if (st->jtCplOn) jt_cpl_put(st, &cw, holdC);
@@ -1600,6 +1708,10 @@ void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
             }
             const double g = jt_gain_step(st);
             web[t] = g * jt_lp_step(st, hold);
+            if (st->jtMeterChromatic) {
+                st->jtMeterWebC[t] = g * st->jtMeterFilteredC;
+                st->jtMeterWebR[t] = web[t] - st->jtMeterWebC[t];
+            }
             if (webS)
                 webS[t] = g * jt_lp_stepS(st, holdS);
             if (st->jtCplOn) jt_cpl_put(st, &cw, holdC);
@@ -1610,17 +1722,6 @@ void jt_run_job_locked(bow_poly_state_t *st, const double *drv,
         if (st->jtCplOn)
             __atomic_store_n(&st->jtCplW, cw, __ATOMIC_RELEASE);
     }
-}
-
-/* One jt-web computer at a time (jtDispMx); the dispatcher always has
-   jtPoolInit set */
-void jt_run_job(bow_poly_state_t *st, const double *drv,
-                       const double *cv, int n,
-                       double *web, double *webS)
-{
-    pthread_mutex_lock(&st->jtDispMx);
-    jt_run_job_locked(st, drv, cv, n, web, webS);
-    pthread_mutex_unlock(&st->jtDispMx);
 }
 
 static void *jt_dispatch_run(void *va)
@@ -1652,16 +1753,24 @@ static void *jt_dispatch_run(void *va)
         const int n = st->jtDJobN[slot];
         pthread_mutex_unlock(&st->jtMx);
         const int sOn = st->stOn && st->jtWebRingS && st->stJtPan;
-        jt_run_job(st, st->jtDrvRing + (size_t)slot * JT_ABLK,
+        /* Keep the bank scratch protected until it reaches the FIFO;
+           an oversized callback may run the synchronous fallback. */
+        pthread_mutex_lock(&st->jtDispMx);
+        jt_run_job_locked(st, st->jtDrvRing + (size_t)slot * JT_ABLK,
                    st->jtCapRing + (size_t)slot * JT_ABLK, n,
                    webBuf, sOn ? webBufS : NULL);
         long long w = st->jtWebW;
         for (int t = 0; t < n; t++) {
             st->jtWebRing[(w + t) & (JT_WEBN - 1)] = webBuf[t];
+            if (st->jtMeterChromatic) {
+                st->jtMeterRingC[(w + t) & (JT_WEBN - 1)] = st->jtMeterWebC[t];
+                st->jtMeterRingR[(w + t) & (JT_WEBN - 1)] = st->jtMeterWebR[t];
+            }
             if (sOn)
                 st->jtWebRingS[(w + t) & (JT_WEBN - 1)] = webBufS[t];
         }
         __atomic_store_n(&st->jtWebW, w + n, __ATOMIC_RELEASE);
+        pthread_mutex_unlock(&st->jtDispMx);
         pthread_mutex_lock(&st->jtMx);
         st->jtDJobR++;
     }
@@ -1700,6 +1809,7 @@ void bow_poly_jt_set_async(void *vst, int on)
         st->jtWebW = 0; st->jtWebR = 0;
         st->jtDualReady = 0; st->jtDualPending = 0;
         st->jtOutHold = 0.0;
+        st->jtMeterOutC = st->jtMeterOutR = 0.0;
         st->jtOutHoldS = 0.0;
         st->jtMixG = 0.0;
         st->jtDropBlocks = 0; st->jtFlatSamples = 0;
@@ -1734,6 +1844,7 @@ void bow_poly_jt_async_stats(void *vst, double *out4)
 void bow_poly_jt_drone(void *vst, int s, double level)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_drone(st->jtInline, s, level);
     if (!st || s < 0 || s >= st->njt || !st->jtDnTgt) return;
     st->jtDnTgt[s] = level > 0.0 ? level : 0.0;
 }
@@ -1741,6 +1852,7 @@ void bow_poly_jt_drone(void *vst, int s, double level)
 void bow_poly_jt_pluck(void *vst, int s, double amp)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_pluck(st->jtInline, s, amp);
     if (!st || s < 0 || s >= st->njt || !st->jtDnBoost) return;
     st->jtDnBoost[s] = amp > 0.0 ? amp : 0.0;
 }
@@ -1749,6 +1861,7 @@ void bow_poly_jt_evolve_pulse(void *vst, int s, double amount,
                              double attack, double decay)
 {
     bow_poly_state_t *st = vst;
+    if (st && st->jtInline) bow_poly_jt_evolve_pulse(st->jtInline, s, amount, attack, decay);
     if (!st || s < 0 || s >= st->njt || !isfinite(amount)
         || !isfinite(attack) || !isfinite(decay) || amount <= 0) return;
     /* One complete event is published atomically; repeated requests before
@@ -1764,6 +1877,7 @@ void bow_poly_jt_evolve_pulse(void *vst, int s, double amount,
 void bow_poly_jt_excite(void *vst, int s, double amplitude, double decay)
 {
     bow_poly_state_t *st = vst;
+    if (st && st->jtInline) bow_poly_jt_excite(st->jtInline, s, amplitude, decay);
     if (!st || s < 0 || s >= st->njt || !isfinite(amplitude)
         || !isfinite(decay) || amplitude <= 0) return;
     uint64_t a = (uint64_t)llround(fmin(amplitude, 0.3) / 0.3 * UINT32_MAX);
@@ -1779,6 +1893,7 @@ void bow_poly_jt_track_config(void *vst, int row, double f0, double t60,
                               double fHf, double bst)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_track_config(st->jtInline, row, f0, t60, fHf, bst);
     if (!st || st->njt <= 0) return;
     if (row < 0 || row >= st->njt) { st->jtTrkRow = -1; return; }
     st->jtTrkT60 = t60;
@@ -1806,6 +1921,7 @@ void bow_poly_jt_track_config(void *vst, int row, double f0, double t60,
 void bow_poly_jt_track_target(void *vst, double hz)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_track_target(st->jtInline, hz);
     if (!st || st->jtTrkRow < 0) return;
     if (hz > 0.0) st->jtTrkTarget = hz;
 }
@@ -1816,6 +1932,7 @@ void bow_poly_jt_drone_env(void *vst, double atkSec, double relSec,
                            double onsetDecaySec)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_drone_env(st->jtInline, atkSec, relSec, onsetDecaySec);
     if (!st || st->njt <= 0) return;
     double dtj = (double)st->jtDiv / st->sr;
     if (atkSec > 0.0) st->jtDnAAtk = kc_onepole_dt(dtj, atkSec);
@@ -1830,6 +1947,7 @@ void bow_poly_jt_drone_tone(void *vst, double lpHz, double hpHz,
                             double toneMix)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_drone_tone(st->jtInline, lpHz, hpHz, toneMix);
     if (!st || st->njt <= 0) return;
     double dtj = (double)st->jtDiv / st->sr;
     if (lpHz > 0.0)
@@ -1844,6 +1962,7 @@ void bow_poly_jt_drone_tone(void *vst, double lpHz, double hpHz,
 void bow_poly_jt_profile_gains(void *vst, const double *gains, int n)
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st && st->jtInline) bow_poly_jt_profile_gains(st->jtInline, gains, n);
     if (!st || !st->jtProfileTgt) return;
     for (int s = 0; s < st->njt; s++) {
         double gain = gains && s < n && isfinite(gains[s]) ? gains[s] : 1.0;
@@ -1856,6 +1975,7 @@ void bow_poly_jt_profile_gains(void *vst, const double *gains, int n)
 void bow_poly_jt_output_levels(void *vst, const double *levels, int n, int immediate)
 {
     bow_poly_state_t *st = vst;
+    if (st && st->jtInline) bow_poly_jt_output_levels(st->jtInline, levels, n, immediate);
     if (!st || !st->jtOutputLevelTgt) return;
     for (int s = 0; s < st->njt; s++) {
         double level = levels && s < n && isfinite(levels[s]) ? levels[s] : 1.0;
@@ -1863,4 +1983,15 @@ void bow_poly_jt_output_levels(void *vst, const double *levels, int n, int immed
         atomic_store_explicit(&st->jtOutputLevelTgt[s], level, memory_order_relaxed);
         if (immediate) st->jtOutputLevelCur[s] = level;
     }
+}
+
+void bow_poly_jt_inline_attach(void *parent, void *chromatic) {
+    bow_poly_state_t *st = parent, *c = chromatic;
+    if (!st || !c || st->jtInline || st->jtPoolN || st->jtDLive
+        || st->njt != c->njt || !st->jtMeterChromatic || !c->jtMeterChromatic) abort();
+    st->jtInline = c;
+    c->jtInlineOnly = 1;
+    st->jtInlineDrive = calloc(JT_ABLK, sizeof(double));
+    st->jtInlineCap = calloc(JT_ABLK, sizeof(double));
+    if (!st->jtInlineDrive || !st->jtInlineCap) abort();
 }

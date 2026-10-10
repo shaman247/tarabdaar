@@ -18,6 +18,7 @@ public class AudioEngine: ObservableObject {
     /// Summing stage for the three source nodes, pinned at unity.
     let symGain = AVAudioMixerNode()
     let lock = NSLock()
+    var pluckCapture: PluckDiagnosticCapture?
 
     // MARK: - String voice source
 
@@ -166,6 +167,7 @@ public class AudioEngine: ObservableObject {
         engine.attach(symGain)
         engine.connect(symGain, to: engine.mainMixerNode, format: format)
         symGain.outputVolume = 1
+        installPluckDiagnosticCapture(format: format)
 
         do {
             try engine.start()
@@ -255,6 +257,7 @@ public class AudioEngine: ObservableObject {
         storeMeter(snap)
         voice?.touchOn(id, pitchSemis: pitchSemis,
                        exprScale: exprScale)
+        recordPlayingDiagnosticEvent(kind: "touchOn", id: id, pitchSemis: pitchSemis)
     }
 
     /// Restore tracking and reopen the released voice without a new attack.
@@ -363,6 +366,7 @@ public class AudioEngine: ObservableObject {
     /// Touch release, the DIRECT path. String: bow lift. Plucked mains:
     /// fast-release the slot (`tp_rel_t60`), even after a switch back to String.
     private func touchOffDirect(_ id: UInt16) {
+        recordPlayingDiagnosticEvent(kind: "touchOff", id: id)
         lock.lock()
         performanceProfile.setPitch(nil, for: id, at: ProcessInfo.processInfo.systemUptime)
         profileExcludedTouches.remove(id)

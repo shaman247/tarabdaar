@@ -1,10 +1,41 @@
 import XCTest
+import CBowKernel
 @testable import SarangiKit
 
 /// THE BYTE-NULL CONTRACT: every optional path of the String voice, armed at
 /// its resting value, renders bit-identically to an engine that never heard of
 /// it. A failure names the "0 = off" knob that is no longer off.
 final class ByteNullContractTests: XCTestCase {
+    /// Zero release damping preserves a freely ringing kernel sample for sample.
+    func testZeroStringDampingIsByteNull() throws {
+        func render(setZero: Bool) throws -> [Double] {
+            var t = BowTables.buildOpenString(sr: 96000, tonic: 261.63,
+                                              bp: BowedStringEngineTests.stringBP())
+            let state = try XCTUnwrap(bow_poly_init(1, 96000, 0, nil, nil,
+                                                   nil, nil, nil, &t.scalars))
+            defer { bow_poly_free(state) }
+            let frames = 256
+            let pitch = [Double](repeating: 261.63, count: frames)
+            let speed = [Double](repeating: 0.1, count: frames)
+            let force = [Double](repeating: 0.2, count: frames)
+            let position = [Double](repeating: 0.1, count: frames)
+            var gate = [Double](repeating: 1, count: frames)
+            let zero = [Double](repeating: 0, count: frames)
+            var output = zero, result: [Double] = []
+            for block in 0..<160 {
+                if block == 80 { gate = zero }
+                if setZero { bow_poly_set_string_damping(state, 0, 0, pitch[0]) }
+                bow_poly_process(state, Int32(frames), Int32(frames), pitch,
+                                 speed, force, position, gate, zero, &output)
+                result += output
+            }
+            return result
+        }
+        let reference = try render(setZero: false)
+        XCTAssertTrue(reference.suffix(256).contains { abs($0) > 1e-8 })
+        XCTAssertEqual(try render(setZero: true), reference)
+    }
+
     private func makeEngine(_ overrides: [String: Double] = [:]) -> BowEngine {
         var bp = BowedStringEngineTests.stringBP()
         bp.num["bow_jt_gain"] = 1.0
@@ -68,8 +99,8 @@ final class ByteNullContractTests: XCTestCase {
     func testRestingValuesAreByteNull() {
         let reference = phrase(makeEngine())
         XCTAssertTrue(reference.contains { $0 != 0 }, "the phrase must make sound")
-        XCTAssertEqual(reference, phrase(makeEngine(["bow_tnoise": 0])), "force-change grain 0")
         let cases: [(String, (BowEngine) -> Void)] = [
+            ("raga pluck loudness with backend off", { $0.setJtDualPluckLevel(1) }),
             ("raga bow bloom with backend off", { $0.setJtBowBloom(1) }),
             ("two-direction selectivity with backend off", { $0.setJtDualSelectivity(1) }),
             ("two-direction tone with backend off", { $0.setJtDualTone(hz: 2000) }),

@@ -133,19 +133,21 @@ public final class TarabLink {
     /// Host role: the voice/taraf volume-readout bytes riding every
     /// JOYCON_STATE frame. Change-gated, so a silent instrument dirties
     /// nothing.
-    public func setVolumeLevels(voice: UInt8, taraf: UInt8) {
+    public func setVolumeLevels(voice: UInt8, chromatic: UInt8, raga: UInt8) {
         queue.async {
-            guard voice != self.volVoice || taraf != self.volTaraf
+            guard voice != self.volVoice || chromatic != self.volChromatic || raga != self.volRaga
             else { return }
             self.volVoice = voice
-            self.volTaraf = taraf
+            self.volChromatic = chromatic
+            self.volRaga = raga
             // The frame needs a display to ride — seed the idle one.
             if self.joyCon == nil { self.joyCon = .idle }
             self.joyConDirty = true
         }
     }
     private var volVoice: UInt8 = 0
-    private var volTaraf: UInt8 = 0
+    private var volChromatic: UInt8 = 0
+    private var volRaga: UInt8 = 0
     private var noteControls: TLPNoteControls = .idle
 
     public func setNoteControls(_ controls: TLPNoteControls) {
@@ -203,7 +205,7 @@ public final class TarabLink {
         joyConSeq &+= 1
         var frame = j.frame(
             stateSeq: joyConSeq, timestampUs: LinkClock.nowUs(),
-            volVoice: volVoice, volTaraf: volTaraf)
+            volVoice: volVoice, volChromatic: volChromatic, volRaga: volRaga)
         frame.noteControls = noteControls
         outbox.enqueue(.joyConState(frame))
     }

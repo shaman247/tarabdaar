@@ -9,12 +9,14 @@ import SwiftUI
 /// starting within the Snap distance of a fret and inside its extent snaps to
 /// it; elsewhere it plays the field pitch; drags are continuous (field plus
 /// the onset offset). Editing: drag an endpoint to set the extent, drag the
-/// line to move, shift-click to add on the nearest degree, right-click to
-/// delete. Plays through `controller.fretPad`, reads the scale + tonic from
+/// line to move, shift-click to add on the nearest degree, option-right-click
+/// to delete. Right-click toggles the matching raga string. Plays through
+/// `controller.fretPad`, reads the scale + tonic from
 /// `controller.pitchPad`; the arrangement syncs to the iPad's `FretPadViewIOS`
 /// as the `FRET_ARRANGEMENT` TLP event. See [docs/fret-pad.md](../../docs/fret-pad.md).
 struct FretPadView: View {
     @ObservedObject var controller: AppController
+    @ObservedObject var sarangi: SarangiStore
     @ObservedObject var audio: AudioEngine
     /// The note emitter (`fretPad`): `marginPixels`, `sounding`.
     @ObservedObject var engine: PitchPadEngine
@@ -31,6 +33,7 @@ struct FretPadView: View {
 
     init(controller: AppController) {
         self.controller = controller
+        self.sarangi = controller.sarangi
         self.audio = controller.audio
         self.engine = controller.fretPad
         self.pitchPad = controller.pitchPad
@@ -44,18 +47,27 @@ struct FretPadView: View {
     var body: some View {
         VStack(spacing: 8) {
             toolbar
-            TarafPluckStrip(bank: audio.tarafBank, scale: pitchPad.scale) { revision, row in
-                audio.pluckTaraf(revision: revision, row: row)
-            }
             HStack(alignment: .top, spacing: 12) {
                 FretPadSurface(engine: engine,
                                arrangement: $controller.fretArrangement,
                                degrees: degrees,
                                warp: controller.fretFieldWarp,
+                               ragaRatios: sarangi.state.enabledRagaRatios,
+                               toggleRaga: { degree, octave in
+                                   if sarangi.state.scaleRatios != degrees.map(\.ratio)
+                                       || sarangi.state.tonicHz != pitchPad.tonicHz {
+                                       controller.syncTarabFromScale()
+                                   }
+                                   sarangi.toggleRagaString(degree: degree, octave: octave)
+                               },
                                recorder: recorder,
                                joyCon: controller.joyCon,
                                chordActive: controller.strumChord,
-                               onChordTap: { controller.tapChord($0) })
+                               onChordTap: { controller.tapChord($0) },
+                               tarafBank: audio.tarafBank,
+                               pluckTaraf: { revision, row in
+                                   audio.pluckTaraf(revision: revision, row: row)
+                               })
                     .aspectRatio(Config.iPadSurfaceAspect, contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 // The scale list editor — edits `pitchPad.scale`, which the
@@ -90,27 +102,32 @@ struct FretPadView: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 12) {
-            Button("Panic") { engine.panic() }
-            scaleMenu
-            layoutMenu
-            Button("Reset to Scale") {
-                controller.loadFretLayout(preset: .keyboard)
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                Button("Panic") { engine.panic() }
+                scaleMenu
+                layoutMenu
+                Button("Reset to Scale") {
+                    controller.loadFretLayout(preset: .keyboard)
+                }
+                .help("Rebuild the default fret layout (C Keyboard) from the current scale: 7 evenly-spaced svara columns, komal/tivra stacked above their shuddha partner — a piano keyboard's key spacing.")
+                Toggle("Perform", isOn: $engine.performanceMode)
+                    .toggleStyle(.button)
+                    .help("Clean playing surface: editing off, octave gridlines + labels + endpoint handles hidden, octave-repeat frets shown identically to the editable ones, and the scale editor hidden.")
+                recordControl
+                Spacer()
+                SoundingReadout(sounding: engine.sounding,
+                                tonicFractionalMidi: pitchPad.tonicFractionalMidi,
+                                style: .capsule)
             }
-            .help("Rebuild the default fret layout (C Keyboard) from the current scale: 7 evenly-spaced svara columns, komal/tivra stacked above their shuddha partner — a piano keyboard's key spacing.")
-            octaveControl
-            Toggle("Perform", isOn: $engine.performanceMode)
-                .toggleStyle(.button)
-                .help("Clean playing surface: editing off, octave gridlines + labels + endpoint handles hidden, octave-repeat frets shown identically to the editable ones, and the scale editor hidden.")
-            recordControl
-            Spacer()
-            SoundingReadout(sounding: engine.sounding,
-                            tonicFractionalMidi: pitchPad.tonicFractionalMidi,
-                            style: .capsule)
-            snapControl
-            warpControl
-            primeLimitControl
-            tonicControl
+            HStack(spacing: 12) {
+                octaveControl
+                snapControl
+                warpControl
+                primeLimitControl
+                Spacer()
+                tonicControl
+            }
         }
     }
 
@@ -237,20 +254,20 @@ struct FretPadView: View {
         .help("Prime-limit cap for the scale editor's scroll-to-next-gridline snap targets.")
     }
 
-    /// Flank past the base band each side, in band-widths.
+    /// Total octave span; half-octave steps keep the quarter-octave flanks exact on the wire.
     private var octaveControl: some View {
-        HStack(spacing: 4) {
-            Text("Octave ±").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
-            Stepper(value: $controller.fretArrangement.ghostExtentOctaves,
-                    in: 0...2, step: 0.25) {
-                Text(String(format: "%.2f", controller.fretArrangement.ghostExtentOctaves))
-                    .font(.padCaption.monospacedDigit())
-                    .frame(width: Typography.scaledWidth(30), alignment: .trailing)
-            }
-            .controlSize(.small)
-            .fixedSize()
+        HStack(spacing: 6) {
+            Text("Octaves").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
+            Slider(value: Binding(
+                get: { 1 + 2 * controller.fretArrangement.ghostExtentOctaves },
+                set: { controller.fretArrangement.ghostExtentOctaves = ($0 - 1) / 2 }),
+                   in: 1...5, step: 0.5)
+                .frame(width: 80)
+                .accessibilityLabel("Octaves")
+            Text(String(format: "%.1f", 1 + 2 * controller.fretArrangement.ghostExtentOctaves))
+                .font(.padCaption.monospacedDigit())
+                .frame(width: Typography.scaledWidth(24), alignment: .trailing)
         }
-        .help("How far the surface extends past the base fret layout on each side, in band-widths (read-only octave-repeat copies of the whole layout). 0.5 = half a band of flank each side.")
     }
 
     /// Record play strokes to JSONL for offline assist fitting.
@@ -350,7 +367,7 @@ struct FretPadView: View {
         HStack {
             Text(engine.performanceMode
                  ? "Perform: start on a fret (inside its height) to snap to its pitch; start elsewhere to approach the note freely (pitch interpolates between frets). Drags always glide continuously."
-                 : "Edit: drag a fret = move (any direction)  ·  drag an endpoint = set its extent  ·  drag empty space = play  ·  Shift-click = add a fret  ·  Right-click = delete  ·  Faint frets are octave repeats (read-only)")
+                 : "Edit: drag a fret = move (any direction)  ·  drag an endpoint = set its extent  ·  drag empty space = play  ·  Shift-click = add a fret  ·  Option-right-click = delete  ·  Faint frets are octave repeats (read-only)")
                 .font(.padCaption2)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -366,6 +383,8 @@ private struct FretPadSurface: View {
     let degrees: [(ratio: Double, label: String)]
     /// The LIVE fret warp (`controller.fretFieldWarp`, binding included).
     let warp: Double
+    let ragaRatios: [Double]
+    let toggleRaga: (Int, Int) -> Void
     /// Stroke recorder for offline assist fitting (no-op unless armed).
     let recorder: FretGestureRecorder
     /// NOT `@ObservedObject` (stick axes publish at input rate); only
@@ -374,6 +393,8 @@ private struct FretPadSurface: View {
     /// The active strum chord and the chord bar's tap route.
     let chordActive: ChordSelection?
     let onChordTap: (ChordSelection) -> Void
+    let tarafBank: TarafBank
+    let pluckTaraf: (UInt32, UInt8) -> Void
 
     /// While a Joy-Con is attached its arrows pluck the drones, so the
     /// on-screen buttons hide (visual + hit-test).
@@ -404,9 +425,12 @@ private struct FretPadSurface: View {
                               height: max(1, geo.size.height - 2 * edgePad))
             // The playable band — the frets' coordinate space (the iPad's too).
             let band = fretPadBandRect(in: size)
+            let pluckWidth = joyConConnected ? band.width
+                : max(1, (droneButtonRects(size: size).first?.minX ?? band.maxX) - 8)
             // `body` does NOT re-run during a glide (fills live on `SoundingState`).
-            let placements = fretPlacements(arrangement: arrangement,
-                                            degrees: degrees, size: band.size)
+            let placements = fretPlacements(
+                arrangement: arrangement.withRagaStrings(ratios: ragaRatios, degrees: degrees),
+                degrees: degrees, size: band.size)
             let basePlacements = placements.filter { !$0.isGhost }
             let chordCells = chordBarCells(arrangement: arrangement,
                                            degrees: degrees,
@@ -457,8 +481,9 @@ private struct FretPadSurface: View {
 
                     for p in placements {
                         let dim = !perform && p.isGhost
-                        let hue = pitchColor(forRatio: p.ratio, lightness: 0.82,
-                                             chroma: 0.20).opacity(dim ? 0.45 : 1.0)
+                        let hue = (p.hasRagaString
+                            ? pitchColor(forRatio: p.ratio, lightness: 0.82, chroma: 0.20)
+                            : Color.gray).opacity(dim ? 0.45 : 1.0)
                         ctx.stroke(p.linePath, with: .color(hue), lineWidth: dim ? 1 : 1.5)
                         if !perform {
                             if !p.isGhost {
@@ -518,11 +543,17 @@ private struct FretPadSurface: View {
                     },
                     onMouseUp: { handleUp() },
                     onRightMouseDown: { pt in
-                        handleRightDown(at: toLocal(pt), base: basePlacements,
+                        handleRightDown(at: toLocal(pt), placements: placements,
                                         band: band)
                     }
                 )
             )
+            .overlay(alignment: .topLeading) {
+                TarafPluckStrip(bank: tarafBank, scale: engine.scale, pluck: pluckTaraf)
+                    .frame(width: pluckWidth)
+                    .offset(x: edgePad + band.minX,
+                            y: edgePad + band.minY - TarafPluckStrip.height)
+            }
         }
     }
 
@@ -664,19 +695,28 @@ private struct FretPadSurface: View {
         moveOffsetY = 0
     }
 
-    /// Right-click deletes a (base) fret. Disabled in perform mode.
-    private func handleRightDown(at spt: CGPoint, base: [FretPlacement],
+    /// Right-click toggles the raga pitch class across all octave copies.
+    /// Option-right-click retains base-fret deletion in edit mode.
+    private func handleRightDown(at spt: CGPoint, placements: [FretPlacement],
                                  band: CGRect) {
-        if engine.performanceMode { return }
         let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
-        let grab = fretGrab(at: pt, placements: base, handleRadius: handleHitRadius)
-        let id: UUID?
-        switch grab {
-        case .move(let i), .resizeTop(let i), .resizeBottom(let i): id = i
-        case .none: id = nil
+        guard band.contains(spt) else { return }
+        let deleting = NSEvent.modifierFlags.contains(.option)
+        guard !deleting || !engine.performanceMode else { return }
+        let candidates = placements.filter {
+            (!deleting || !$0.isGhost) && abs(pt.x - $0.x) <= handleHitRadius
+                && pt.y >= $0.topY - handleHitRadius && pt.y <= $0.bottomY + handleHitRadius
         }
-        guard let segmentID = id, let idx = segmentIndex(segmentID) else { return }
-        arrangement.segments.remove(at: idx)
+        guard let fret = candidates.min(by: {
+            hypot(pt.x - $0.x, max($0.topY - pt.y, pt.y - $0.bottomY, 0))
+                < hypot(pt.x - $1.x, max($1.topY - pt.y, pt.y - $1.bottomY, 0))
+        }), let idx = segmentIndex(fret.segmentID) else { return }
+        if deleting {
+            arrangement.segments.remove(at: idx)
+        } else if let baseRatio = fretRatio(arrangement.segments[idx], degrees: degrees) {
+            toggleRaga(arrangement.segments[idx].degreeIndex,
+                       Int(log2(fret.ratio / baseRatio).rounded()))
+        }
     }
 
     /// Shift-click: add a fret at the click, on the degree nearest the field

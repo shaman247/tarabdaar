@@ -66,14 +66,17 @@ static double init_residual(const init_equation *c, const double *x,
 }
 
 static int init_row(bow_poly_state_t *st,int s,double *q,double *p) {
-    const int m=st->jtM[s],j=st->jtJ,n=2*j,mo=st->jtMOff[s],zo=st->jtZOff[s];
+    const int m=st->jtM[s],j=jt_row_contacts(st,s),n=2*j,mo=st->jtMOff[s],zo=st->jtZOff[s];
     const double dt=(double)st->jtDiv/st->sr;
     init_equation c={0}; c.j=j;
     // The running contact step rounds these to float as well.
-    c.kc=(float)st->jtKc;
+    c.kc=(float)jt_row_kc(st,s);
     c.alpha=(float)(st->jtRowContactOn?st->jtRowAlpha[s]:st->jtAlpha);
     c.hcb=(float)(st->jtRowContactOn?st->jtRowHcB[s]:st->jtHcB);
-    c.b=st->jtB+s*j;c.G=st->jtG+s*j*j;
+    float bone[JT_MAXJ];
+    const double ev=st->jtEvTgt+st->jtEvOfsTgt[s];
+    for(int i=0;i<j;i++) bone[i]=st->jtB[s*st->jtJ+i]-(float)(st->jtLift+ev);
+    c.b=bone;c.G=st->jtG+s*st->jtJ*st->jtJ;
     c.es=1e-12;c.fs=1e-12;
     const float *phi=st->jtPhiU+zo,*force=st->jtPhiF+zo;
     double Q[JT_MAXM*JT_MAXJ],P[JT_MAXM*JT_MAXJ];
@@ -113,7 +116,7 @@ static int init_row(bow_poly_state_t *st,int s,double *q,double *p) {
             }
             // This fixed point describes the full step, not the deep-contact
             // quarter-step branch. Reject any state that would select it.
-            const double deep=st->jtRowContactOn?st->jtRowDeep[s]:st->jtDeep;
+            const double deep=fmax(1e-7,(st->jtRowContactOn?st->jtRowDeep[s]:st->jtDeep)-2.5*ev);
             for(int i=0;i<j;i++) {
                 double u=0;
                 for(int z=0;z<j;z++) u+=c.U[i*j+z]*x[j+z]*c.fs;
@@ -136,19 +139,36 @@ static int init_row(bow_poly_state_t *st,int s,double *q,double *p) {
 int bow_poly_jt_prepare_initial_state(void *vst) {
     bow_poly_state_t *st=vst;
     if(!st || st->njt==0) return 1;
-    // Moving bones retain the normal slewed settle path. Never reset an
-    // already rendered row or race a dispatcher with this build-only API.
-    if(st->jtEvTgt!=0 || st->jtLift!=0 || st->jtDampMul!=0) return 0;
+    // Solve the requested resting bone position before publication. Never reset
+    // an already rendered row or race a dispatcher with this build-only API.
+    if(st->jtDampMul!=0) return 0;
+    if(st->jtInline && !bow_poly_jt_prepare_initial_state(st->jtInline)) return 0;
     int count=0;
     for(int s=0;s<st->njt;s++) {
-        if(st->jtEvOfsTgt[s]!=0 || st->jtM[s]>JT_MAXM) return 0;
+        if(st->jtM[s]>JT_MAXM) return 0;
         count+=st->jtM[s];
     }
     if(st->jtJ<1 || st->jtJ>JT_MAXJ) return 0;
     double *q=calloc(count,sizeof(double)),*p=calloc(count,sizeof(double));
     if(!q || !p) {free(q);free(p);return 0;}
     int ok=1;
-    for(int s=0;s<st->njt && ok;s++) ok=init_row(st,s,q+st->jtMOff[s],p+st->jtMOff[s]);
-    if(ok) {memcpy(st->jtQ,q,count*sizeof(double));memcpy(st->jtP,p,count*sizeof(double));}
+    for(int s=0;s<st->njt && ok;s++) {
+        if(!jt_row_active(st,s) || (st->jtDual && st->jtDual[s])) {
+            memcpy(q+st->jtMOff[s],st->jtQ+st->jtMOff[s],st->jtM[s]*sizeof(double));
+            memcpy(p+st->jtMOff[s],st->jtP+st->jtMOff[s],st->jtM[s]*sizeof(double));
+        } else { ok=init_row(st,s,q+st->jtMOff[s],p+st->jtMOff[s]);
+        }
+    }
+    if(ok) {
+        memcpy(st->jtQ,q,count*sizeof(double));memcpy(st->jtP,p,count*sizeof(double));
+        st->jtEvCur=st->jtEvTgt;
+        for(int s=0;s<st->njt;s++) {
+            st->jtEvOfsCur[s]=st->jtEvOfsTgt[s];
+            /* A newly solved resting row has no played energy. Freeze it at
+               that equilibrium when the normal quiescence gate is enabled;
+               drive, pluck or a later bone move wakes it through the usual path. */
+            if(st->jtGateRef>0 && jt_row_active(st,s) && jt_row_quadratic(st,s)) st->jtGateSlp[s]=1;
+        }
+    }
     free(q);free(p);return ok;
 }

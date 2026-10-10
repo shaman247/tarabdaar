@@ -75,9 +75,8 @@ final class TouchMapperTests: XCTestCase {
         XCTAssertEqual(resumed.serial, serial, "resume must not reset the kernel string")
         XCTAssertEqual(resumed.f0Target, f0(64))
         XCTAssertEqual(resumed.gate, 1)
-        XCTAssertEqual(filter.attackSharp, 0, "no onset bite")
-        XCTAssertGreaterThan(filter.placeClock, filter.placeS + filter.drawS,
-                             "no placement or draw restart")
+        XCTAssertEqual(filter.attackSharp, 0, "no fresh attack")
+        XCTAssertGreaterThanOrEqual(filter.onsetClock, 1, "no bow engagement restart")
         m.touchOff(1)
         m.touchOn(2, pitchSemis: 67) // steal the only slot
         XCTAssertFalse(m.touchResume(1), "never revive a stolen string")
@@ -93,8 +92,35 @@ final class TouchMapperTests: XCTestCase {
         let s = snap(m)
         XCTAssertEqual(s.slots[0].gate, 0.0, "the first string was not released")
         XCTAssertEqual(s.slots[0].f0Target, f0(60), "the released string moved")
+        XCTAssertTrue(s.slots[0].damped, "a retrigger must damp its old string")
         XCTAssertEqual(s.slots[1].gate, 1.0)
         XCTAssertEqual(s.slots[1].f0Target, f0(62))
+    }
+
+    /// Fresh onsets damp released tails, preserve held chords and prevent stale grace resurrection.
+    func testNewOnsetDampsOnlyReleasedStrings() {
+        let m = BowControlMapper()
+        m.setSlotLimit(4)
+        m.touchOn(1, pitchSemis: 60)
+        m.touchOn(2, pitchSemis: 64)
+        m.touchOff(1)
+        XCTAssertFalse(snap(m).slots[0].damped)
+        XCTAssertTrue(m.touchResume(1))
+        XCTAssertFalse(snap(m).slots[0].damped)
+        m.touchOff(1)
+        // Off/on can reach the mapper before the next audio snapshot.
+        m.touchOn(3, pitchSemis: 67)
+        var s = snap(m)
+        XCTAssertTrue(s.slots[0].damped)
+        XCTAssertFalse(s.slots[1].damped)
+        XCTAssertEqual(s.slots[1].gate, 1)
+        XCTAssertFalse(s.slots[2].damped)
+        XCTAssertFalse(m.touchResume(1))
+        m.touchOff(2)
+        s = snap(m)
+        XCTAssertFalse(s.slots[1].damped, "a later release gets its ordinary ring")
+        m.touchOn(4, pitchSemis: 72)
+        XCTAssertTrue(snap(m).slots[1].damped)
     }
 
     /// One touch = one identity: a glide moves only its own slot (a released

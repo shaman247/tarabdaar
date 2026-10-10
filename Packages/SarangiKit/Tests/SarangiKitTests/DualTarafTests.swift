@@ -6,18 +6,21 @@ import CBowKernel
 final class DualTarafTests: XCTestCase {
     private func engine(threads: Int = 0, enabled: Bool = true,
                         frequency: Double = 561, drive: Double = 0.03, cutoff: Double = 20000,
-                        both: Bool = false, sav: Bool = false, bloom: Double = 1) throws -> BowEngine {
+                        both: Bool = false, sav: Bool = false, bloom: Double = 1,
+                        pluckLevel: Double? = nil, chromaticSecond: Bool = false) throws -> BowEngine {
         var bp = try XCTUnwrap(Presets.bowedStringParams())
         bp.num["bow_jt_threads"] = Double(threads)
         bp.num["bow_jt_async"] = 0
         bp.num["bow_jt_drive"] = drive
         bp.num["bow_jt_dual_lp"] = cutoff
         bp.num["bow_jt_bow_bloom"] = bloom
+        if let pluckLevel { bp.num["bow_jt_dual_pluck_level"] = pluckLevel }
         bp.num["bow_jt_dual_row"] = enabled ? 1 : 0
         if sav { bp.num["bow_jt_sav"] = 1 }
         var t = BowTables.buildOpenString(sr: 96000, tonic: frequency/2, bp: bp)
         t.jt = BowTables.buildJawariTables(rows: [(frequency, 1, 4), (frequency+1, 1, 4)], srk: 96000, bp: bp)
         if both { t.jt?.dualRows = [0, 1] }
+        if chromaticSecond { t.jt?.rowChromatic = [false, true] }
         let e = BowEngine(tables: t, mapper: BowControlMapper(), bp: bp, sr: 48000,
             rfir: [], eLp: 20000, reverbRT60: 1, reverbPredelayMs: 0,
             reverbMix: 0, reverbWidth: 0, maxPoly: 3)
@@ -27,19 +30,47 @@ final class DualTarafTests: XCTestCase {
         return e
     }
     @discardableResult
-    private func render(_ e: BowEngine, seconds: Double) -> [Double] {
+    private func render(_ e: BowEngine, seconds: Double, paced: Bool = false) -> [Double] {
         let frames = Int(seconds*48000)
         var output = [Double](repeating: 0, count: frames), right = [Double](repeating: 0, count: 128)
         output.withUnsafeMutableBufferPointer { l in
             right.withUnsafeMutableBufferPointer { r in
                 for from in stride(from: 0, to: frames, by: 128) {
                     e.render(frames: min(128, frames-from), outL: l.baseAddress!+from, outR: r.baseAddress!)
+                    if paced { Thread.sleep(forTimeInterval: 128.0 / 48000) }
                 }
             }
         }
         return output
     }
     private func energy(_ x: ArraySlice<Double>) -> Double { x.reduce(0) { $0+$1*$1 } / Double(x.count) }
+
+    /// Isolated bank meters follow radiation, preserve rendered bytes, and agree across worker paths.
+    func testBankMeterIsolation() throws {
+        for (threads, async) in [(0, false), (2, false), (2, true)] {
+            for row in [0, 1] {
+                let metered = try engine(threads: threads, chromaticSecond: true)
+                let plain = try engine(threads: threads, chromaticSecond: true)
+                for e in [metered, plain] {
+                    bow_poly_jt_output_levels(e.pkernel, row == 0 ? [1, 0] : [0, 1], 2, 1)
+                    e.setJtCouple(0)
+                    e.pluckTaraf(row: row)
+                }
+                if async { bow_poly_jt_set_async(metered.pkernel, 1) }
+                metered.setBusMeter(true)
+                let output = render(metered, seconds: 0.25, paced: async)
+                if !async { XCTAssertEqual(output, render(plain, seconds: 0.25)) }
+                let levels = metered.busLevels()
+                XCTAssertGreaterThan(levels.taraf, 1e-12)
+                XCTAssertEqual(row == 0 ? levels.raga : levels.chromatic, levels.taraf,
+                               accuracy: levels.taraf * 1e-10)
+                XCTAssertLessThan(row == 0 ? levels.chromatic : levels.raga, levels.taraf * 1e-10)
+                metered.setBusMeter(false)
+                XCTAssertEqual(metered.busLevels().chromatic, 0)
+                XCTAssertEqual(metered.busLevels().raga, 0)
+            }
+        }
+    }
 
     /// Bow bloom changes the sustained spectrum, preserves unforced plucks, and replays on workers.
     func testBowBloomReleasesHarmonicsWithoutChangingPlucks() throws {
@@ -141,14 +172,15 @@ final class DualTarafTests: XCTestCase {
 
     /// A shared row replays on workers, captures its pluck, and survives a moving-string retrigger.
     func testSharedRowWorkerParityAndRetrigger() throws {
-        let a = try engine(frequency: 293.66), b = try engine(threads: 2, frequency: 293.66)
+        let a = try engine(frequency: 293.66, pluckLevel: 1)
+        let b = try engine(threads: 2, frequency: 293.66, pluckLevel: 1)
         render(a, seconds: 0.05); render(b, seconds: 0.05)
         a.pluckTaraf(row: 0); b.dronePress(row: 0)
         let pluck = render(a, seconds: 0.1)
         XCTAssertEqual(pluck, render(b, seconds: 0.1))
         let hash = pluck.withUnsafeBytes { SHA256.hash(data: Data($0)) }
             .map { String(format: "%02x", $0) }.joined()
-        XCTAssertEqual(hash, "3a4d6cc2f02d1285a8f5a12b6278fc9af06f2e4dda8fffe5a9ef2df3ddac98b9", "direct-pluck radiation calibration")
+        XCTAssertEqual(hash, "9b29baa76e47687570a4f91ede39fe63e99ceacf2b38bfe503c3bc391430e712", "direct-pluck radiation calibration")
         a.setJtDualDisplacement(mm: 0.1)
         XCTAssertEqual(render(a, seconds: 0.1), render(b, seconds: 0.1), "pluck settings are captured")
         a.setJtDualDisplacement(mm: 0.5)
@@ -163,6 +195,43 @@ final class DualTarafTests: XCTestCase {
         XCTAssertTrue(strong.allSatisfy(\.isFinite))
         XCTAssertEqual(a.jtDualStats()[1], 0)
         XCTAssertEqual(b.jtDualStats()[1], 0)
+    }
+
+    /// Pluck loudness changes radiation only, bypasses unplucked rows, and converges after a live edit.
+    func testPluckLoudnessPreservesPhysicsAndLiveBypass() throws {
+        let original = try engine(pluckLevel: 0)
+        let midpoint = try engine()
+        let explicitMidpoint = try engine(threads: 2, pluckLevel: 0.5)
+        let full = try engine(pluckLevel: 1)
+        let engines = [original, midpoint, explicitMidpoint, full]
+        for e in engines {
+            e.mapper.setAxis(expr: 0.5)
+            e.mapper.touchOn(1, pitchSemis: 69+12*log2(561/440))
+        }
+        let bow = render(original, seconds: 0.2)
+        for e in engines.dropFirst() { XCTAssertEqual(bow, render(e, seconds: 0.2)) }
+        for e in engines { e.mapper.touchOff(1); e.setBusBalance(1); e.pluckTaraf(row: 0) }
+        let quiet = render(original, seconds: 0.3)
+        let half = render(midpoint, seconds: 0.3)
+        XCTAssertEqual(half, render(explicitMidpoint, seconds: 0.3))
+        let loud = render(full, seconds: 0.3)
+        XCTAssertGreaterThan(energy(half[...]), energy(quiet[...]))
+        XCTAssertLessThan(energy(half[...]), energy(loud[...]))
+        func motion(_ e: BowEngine) -> [Float] {
+            var values = [Float](repeating: 0, count: 32)
+            _ = bow_poly_scope_jt(e.pkernel, 2, nil, nil, nil, &values, 16)
+            return values
+        }
+        let physical = motion(original)
+        XCTAssertTrue(physical.contains { $0 != 0 })
+        for e in engines.dropFirst() { XCTAssertEqual(physical, motion(e)) }
+        for e in engines { e.setJtDualPluckLevel(0); render(e, seconds: 1.5) }
+        let settled = render(original, seconds: 0.1)
+        for e in engines.dropFirst() {
+            let actual = render(e, seconds: 0.1)
+            let peak = settled.map(abs).max()!
+            XCTAssertLessThan(zip(actual, settled).map { abs($0-$1) }.max()!, peak*1e-8)
+        }
     }
 
     /// Multiple physical rows keep independent pluck state and replay identically on workers.
@@ -216,7 +285,7 @@ final class DualTarafTests: XCTestCase {
         XCTAssertEqual(cut.jtDualStats()[1], 0)
     }
 
-    /// Harmonic cleanup preserves integer partials off the FFT grid, rejects noise and delays bypass exactly.
+    /// Harmonic cleanup preserves partials, rejects noise and resumes from zero-delay bypass.
     func testOvertoneFilterRejectsNoiseWithoutDullingPartials() throws {
         let filter = try XCTUnwrap(bow_tonal_create(561))
         let bypass = try XCTUnwrap(bow_tonal_create(561))
@@ -235,8 +304,8 @@ final class DualTarafTests: XCTestCase {
             input[i] = clean[i] + 0.15*(Double(rng >> 11)/9007199254740992.0 - 0.5)
             output[i] = bow_tonal_tick(filter, input[i], 4000, 0)
             reactivated[i] = bow_tonal_tick(resumed, input[i], i < 24000 ? 20000 : 4000, 0)
-            if i < 24000 { XCTAssertEqual(reactivated[i], i < latency ? 0 : input[i-latency]) }
-            XCTAssertEqual(bow_tonal_tick(bypass, input[i], 20000, 1), i < latency ? 0 : input[i-latency])
+            if i < 24000+latency { XCTAssertEqual(reactivated[i], input[i]) }
+            XCTAssertEqual(bow_tonal_tick(bypass, input[i], 20000, 1), input[i])
         }
         let samples = 48000..<(count-latency)
         var before = 0.0, after = 0.0, afterResume = 0.0
@@ -255,6 +324,21 @@ final class DualTarafTests: XCTestCase {
                 reB += output[i+latency]*cos(phase); imB += output[i+latency]*sin(phase)
             }
             XCTAssertLessThan(abs(20*log10(hypot(reB, imB)/hypot(reA, imA))), 1)
+        }
+    }
+
+    /// Every analysis size bypasses immediately and returns to exact passthrough after a live toggle.
+    func testToneBypassHasNoRegisterDependentDelay() throws {
+        for frequency in [71.0, 140, 293.66, 561] {
+            let tone = try XCTUnwrap(bow_tonal_create(frequency))
+            defer { bow_tonal_destroy(tone) }
+            for i in 0..<192000 {
+                let input = sin(Double(i)*0.137)*0.25 + (i == 0 ? 0.5 : 0)
+                let enabled = (24000..<48000).contains(i)
+                let output = bow_tonal_tick(tone, input, enabled ? 4000 : 20000, 1)
+                XCTAssertTrue(output.isFinite)
+                if i < 24000 || i >= 144000 { XCTAssertEqual(output, input) }
+            }
         }
     }
 
@@ -314,8 +398,9 @@ final class DualTarafTests: XCTestCase {
         XCTAssertLessThan(energy[2], energy[0]*0.7)
     }
 
-    /// Bridge drive wakes the row and the returned force changes another row without sustained growth.
+    /// Fresh default and maximum attacks preserve coupled row excitation and decay without contact failures.
     func testBridgeInputReturnAndDecay() throws {
+        for sharpness in [BowControlMapper.defaultAttackSharpness, 1.0] {
         for (frequency, drive) in [(561.0, 0.03), (1400.0, 0.3)] {
         let off = try engine(frequency: frequency, drive: drive)
         let on = try engine(frequency: frequency, drive: drive)
@@ -336,6 +421,7 @@ final class DualTarafTests: XCTestCase {
                 "plucking the upgraded row must physically charge a different row through the bridge")
         }
         for e in [off, on] {
+            e.mapper.setAttackSharpness(sharpness)
             e.mapper.setAxis(expr: 0.8, press: 0.7)
             e.mapper.touchOn(1, pitchSemis: 69+12*log2(frequency/440))
             render(e, seconds: 0.15)
@@ -351,6 +437,7 @@ final class DualTarafTests: XCTestCase {
         XCTAssertEqual(off.jtDualStats()[1], 0)
         print("DUAL coupling frequency/drive/early/late RMS", frequency, drive,
             sqrt(energy(b.prefix(24000))), sqrt(energy(b.suffix(24000))))
+        }
         }
     }
 }

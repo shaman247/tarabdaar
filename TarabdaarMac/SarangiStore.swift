@@ -81,6 +81,11 @@ final class SarangiStore: ObservableObject {
         }
     }
 
+    func toggleRagaString(degree: Int, octave: Int) {
+        state.toggleRagaString(degree: degree, octave: octave)
+        scheduleRebuild()
+    }
+
     func removeStrings(_ ids: Set<UUID>) {
         state.strings.removeAll { ids.contains($0.id) }
         scheduleRebuild()

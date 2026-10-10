@@ -27,25 +27,25 @@ The kernel is `bow_kernel_poly.c` (always `-O3`), Tarabdaar's own code; `TarafRe
 - **Register damping** (`bow_loss_reg`, shipped 0.7). The fitted nut/bridge/gut loss corners (`bow_nut_fc`/`bow_br_fc`/`bow_gut_fc2`) are absolute frequencies, so a note below the tonic would keep its corners as sharp as the fitted register — brassy, with a hollowed fundamental. Armed, the corners scale as fc·(f0/tonic)^γ for notes BELOW the tonic only (per sample, continuous at the tonic, at/above untouched). A kernel scalar: pushes in place, rides a tilt. `RegisterDampingTests`.
 - **Slide dulling** (`bow_slide_dull` 0.35 / `bow_slide_rate` 900, Liveness group). A moving finger absorbs more top than a stopped one: the kernel tracks each string's own pitch slew (signed 10 ms pre-smoothing, 80 ¢/s floor — STEADY notes render byte-identically with the key armed), maps r/(r+rate), smooths 15 ms / 120 ms, and scales the loop corners down by dull×env. The tone dulls through the slide and blooms back on arrival.
 - **Slide noise** (`bow_slide_noise` 0.008 / `bow_slide_acc` 25 000 ¢/s²). Finger-slide friction noise injected at the nut write (the finger IS the nut-side termination), driven by the slew's DERIVATIVE — 6000 ¢/s² floor, 10/100 ms envelope, half-saturation at `bow_slide_acc` — so it scrapes where the finger starts, stops or turns and stays quiet through a constant-rate meend. `SlideTextureTests`.
-- **Glide grace.** A final finger lift releases immediately. With glide enabled, the next onset within 150 ms reopens the released string and glides from its last pitch. The mapper preserves its serial and waveguide state; the filter skips attack placement, draw and onset color on resume.
-- **Articulation.** Bind `bow_attack_sharpness` to a gesture to shape attacks; its unbound default is 0 (gentle). The onset-captured attack-sharpness parameter drives a finite gentle-to-sharp bow trajectory: 180 ms gentle draw, 5 ms sharp draw and 3 ms sharp force rise, with zero placement delay by default. Sharp attacks briefly draw faster and nearer the bridge; the force wedge follows, and slip-dependent force-change grain adds the bow consonant. All onset excursions return to the same sustained bow. See [Sarangi](sarangi.md) for the controls.
-- **Control rate.** `BowControlFilter` evaluates the whole dynamics / wedge / place law once every 32 kernel samples (~0.33 ms at 96 kHz) on the axes lerped to the segment's end, and lerps its (velocity, force, β) across the segment; pitch, the gate, the vibrato phase and the liveness smoothers advance every sample. Per-sample evaluation cost 6–10 transcendentals per slot-sample for a curve the wire only moves at 120 Hz.
+- **Glide grace.** A final finger lift releases immediately. With glide enabled, the next onset within 150 ms reopens the released string and glides from its last pitch. The mapper preserves its serial and waveguide state; the filter skips the fresh bow engagement on resume.
+- **Release decay** (`bow_release_t60`, String · Damping, factory 8 s, in-place). Adds a gentle broadband loss only after lifting a touch. Shorter positive values shorten the ring; 0 keeps natural decay. This t60 describes the added loss, which combines with the string's existing losses. A fresh note smoothly damps all earlier released played strings with a 120 ms additional t60, preserving held chord notes and the sympathetic/room tails. Glide grace reconnects the existing string instead.
+- **Articulation.** `bow_attack_sharpness` is the only attack parameter, captured at each fresh touch. It selects one **320–20 ms** bow engagement; speed and force follow the same finite smoothstep. The factory **0.8** gives a **34.8 ms** draw, while the string and body determine the audible rise. Expression, pressure and position set its tone through the ordinary bow law. Release and continuous glide reconnection retain the **25 ms** gate smoother. See [Sarangi](sarangi.md#articulation-and-sustain) and the reference experiment (local research: `tools/experiments/reference_onsets/README.md`).
+- **Control rate.** `BowControlFilter` evaluates the whole dynamics / wedge / engagement law once every 32 kernel samples (~0.33 ms at 96 kHz) on the axes lerped to the segment's end, and lerps its (velocity, force, β) across the segment; pitch, the gate, the vibrato phase and the liveness smoothers advance every sample. Per-sample evaluation cost 6–10 transcendentals per slot-sample for a curve the wire only moves at 120 Hz.
 
 Mechanisms and traps: [Sarangi](sarangi.md).
 
 ### The sustain-liveness layer
 
-`BowControlFilter`, "Liveness" registry group. Three mechanisms, dB-shaped on the bow controls, all **0 = bit-null**:
+`BowControlFilter`, "Liveness" registry group. Two mechanisms, dB-shaped on the bow controls, all **0 = bit-null**:
 
-1. **Post-onset settle.** `bow_settle_db` 7 / `bow_settle_ms` 130 subtracts a smoothstep-in, exp-out envelope from vbow. It builds during the place+gentle-draw window, reaches full depth at that window's end, then recovers with the decay time constant. `bow_settle_sharp` defaults to **1**, scaling depth by (1 − sharpness): gentle notes bloom through the settle while the sharpest attack holds its accent.
-2. **OU drift.** Three independent Ornstein–Uhlenbeck walks (deterministic per-slot xorshift64; panic → `reset()` rewinds, so renders reproduce) at `bow_drift_hz` 1.2, scaling into pitch cents (0.55), vbow dB (0.15) and force dB (0.3) — the not-quite-vibrato life of a held note, its harmonic shimmer arriving through the body slope. **TRAP:** the fitted sarangi body is ~3 dB/¢ steep around D4, so tune drift to the LEVEL outcome (0.55 ¢ ≈ 0.7 dB std), not to a violin's pitch depth — 2 ¢ reads as slow tremolo. Do NOT inject per-harmonic motion directly.
-3. **Glide dip.** The bow eases toward `bow_glide_dip_db` 5 · r/(r+`bow_glide_dip_rate` 900 ¢/s) while the SOUNDING pitch slews (15 ms attack / 120 ms release; full depth on vbow, 0.3× on force — more slows the string's re-capture). Fast finger glides dip 2–7 dB; drift-rate motion (~20 ¢/s) never triggers it.
+1. **OU drift.** Three independent Ornstein–Uhlenbeck walks (deterministic per-slot xorshift64; panic → `reset()` rewinds, so renders reproduce) at `bow_drift_hz` 1.2, scaling into pitch cents (0.55), vbow dB (0.15) and force dB (0.3) — the not-quite-vibrato life of a held note, its harmonic shimmer arriving through the body slope. **TRAP:** the fitted sarangi body is ~3 dB/¢ steep around D4, so tune drift to the LEVEL outcome (0.55 ¢ ≈ 0.7 dB std), not to a violin's pitch depth — 2 ¢ reads as slow tremolo. Do NOT inject per-harmonic motion directly.
+2. **Glide dip.** The bow eases toward `bow_glide_dip_db` 5 · r/(r+`bow_glide_dip_rate` 900 ¢/s) while the SOUNDING pitch slews (15 ms attack / 120 ms release; full depth on vbow, 0.3× on force — more slows the string's re-capture). Fast finger glides dip 2–7 dB; drift-rate motion (~20 ¢/s) never triggers it.
 
-Guards: `LivenessTests` (settle shape, drift bounds/determinism, dip selectivity, absent-keys bit-null); `BowControlsTests` strips the liveness keys for the law tests.
+The optional drift and glide lightening act on the physical bow controls. Onset contracts are covered by `BowAttackTests`; zero-valued optional render paths are covered by `ByteNullContractTests`.
 
 ### The modal-jawari taraf, fused in-kernel
 
-`bow_jt_*`, always on — modal steel strings over grazing jawari bones, driven one block late on their own worker pool (the callback never waits). **This is the instrument's entire RADIATED sympathetic response**: the rows radiate their bridge contact force (there is no separate radiation pickup and no linear comb web — not present, see docs/history/). Tuned from the **Strings tab** rows.
+`bow_jt_*`, always on — modal steel strings over grazing jawari bones. Raga rows run on their worker pool with a 64 ms audio reserve; chromatic rows use a 24-mode, four-contact quadratic model in the current callback at 96 kHz. **This is the instrument's entire RADIATED sympathetic response**: the rows radiate their bridge contact force (there is no separate radiation pickup and no linear comb web — not present, see docs/history/). Tuned from the **Strings tab** rows.
 
 - `bow_jt_drive` (`.live`, 0.03 = bit-exact): how far the rows swing into the bone — the graze operating point, kernel-slewed ~40 ms so it sweeps under a tilt without a strum. `bow_jt_drive_norm` (`.live`, 0.7) compensates the level swing on the row output — 0 = raw physics (46 dB over the range), 1 = constant loudness — averaged over the energy the web holds, so a sweep never pumps a ring-out.
 - `bow_jtc_evolve` (`.live`, 0.5 = bit-exact): the chromatic bank’s kernel-slewed bone lift, the one sanctioned runtime bone move, tilt-sweepable without a strum — makes the twang cascade fast-and-reliable (1) or absent (0).
@@ -54,11 +54,22 @@ Guards: `LivenessTests` (settle shape, drift bounds/determinism, dip selectivity
 
 Mechanism and measurements: [Sarangi](sarangi.md).
 
+The raga harmonic-cleanup filter is an immediate, exact passthrough at its
+20000 Hz bypass setting (the default). Enabled cleanup adds a pitch-dependent
+21–171 ms analysis delay; bypass adds none. This keeps the unfiltered raga
+response closer to the played voice and avoids spreading its onsets by register.
+The asynchronous bank retains its 64 ms worker reserve, and the fitted radiation
+response and natural sympathetic buildup still shape the attack. Live cleanup
+toggles crossfade between the two timings after filling the analysis window.
+
 For finite chromatic-row plucks, `bow_jt_pluck` selects a short pitched
 excitation and `bow_jt_pulse` adds a decaying evolution excursion. Both default
 to zero. Excitation decay sets how long energy enters the row; pulse attack
 and decay set how the jawari opens and returns; the row's t60 still sets its
-natural loss. These controls use the String kernel's rows and the
+natural loss. The taraf sitar study (local research: `tools/experiments/taraf_sitar/README.md`)
+includes local comparisons and reproducible measurements. Its original preset
+was rejected by listening; use the current measurement report (local research: `tools/experiments/taraf_sitar/measurement_v2/README.md`)
+for the remaining differences. It uses the String kernel's rows and the
 sympathetic drone routing.
 
 ### The formula body
@@ -79,7 +90,7 @@ ONE width law: `bow_st_width` (0.2) — the whole instrument (voice, taraf wash,
 
 ## Sympathetic strings — the editable bank
 
-**Two sets on two bridges** — the raga set defaults to twelve Pilu strings: all nine main-octave scale notes plus low Sa, low Pa and upper Sa, using the measured two-direction model. The chromatic set holds both former layouts on the original modal-jawari model, with duplicate pitches merged. Its level, level norm and evolution remain `bow_jtc_gain`/`_norm`/`_evolve`; migrated scale rows retain their scale references. Full detail: [Sarangi](sarangi.md#two-bridges-two-sets). Legacy contact-law controls below describe the chromatic model; the raga profile is currently fixed, with a pitch-scaled reference pluck control (0–1 reference mm, default 0.5) and optional harmonic-selective radiation cleanup, bypassed by default. At pitch ratio `r = frequency/561`, actual displacement is reference displacement divided by `r`; the stronger range can yield rough contact motion.
+**Two sets on two bridges** — the raga set defaults to twelve Pilu strings: all nine main-octave scale notes plus low Sa, low Pa and upper Sa, using the measured two-direction model. The chromatic set holds both former layouts on the reduced distributed-contact model, with duplicate pitches merged. Its level, level norm and evolution remain `bow_jtc_gain`/`_norm`/`_evolve`; migrated scale rows retain their scale references. Full detail: [Sarangi](sarangi.md#two-bridges-two-sets). Legacy contact-law controls below describe the chromatic model; the raga profile is currently fixed, with a pitch-scaled reference pluck control (0–1 reference mm, default 0.5) and optional harmonic-selective radiation cleanup, bypassed by default. At pitch ratio `r = frequency/561`, actual displacement is reference displacement divided by `r`; the stronger range can yield rough contact motion.
 
 Each row is a `(degree, octave, gain, t60, enabled, set)` string. **Pitches come straight from the centralized scale**: `degree` indexes the Fret Pad scale's ratios, `octave` shifts by whole octaves, and absolute Hz is minted only at resolve time (millihertz grid) against the one tonic — a scale or tonic move retunes the whole bank, always. Owned Mac-side by `SarangiStore` in `InstrumentState`, edited in the Strings tab as one flat table (pitch + octave dropdowns; no ratio or Hz inputs — the app's one Hz input is the tonic on the Fret Pad tab). A row the jawari selection does not pick up is inert.
 
@@ -133,7 +144,8 @@ the median normalized sustained stereo RMS over five notes from 164.45 to
 loudness progression, not linear amplitude. Low-register regime changes at low
 pressure can depart by as much as 15.9 dB; a shared static curve does not correct
 note-dependent vibration regimes. At factory pressure/position, all-note RMS
-error is 0.54 dB.
+error is 0.54 dB. Measurement procedure, plots and limitations:
+expression calibration (local research: `tools/experiments/expression_response/README.md`).
 
 **The safety limiter.** Loud peaks are backstopped inside the kernel, and a **linked-stereo output safety limiter** rides the very end of both post-chains (after the global FX insert): instant-attack peak detector, `bow_lim_rel_ms` release, hard clamp at min(1, 1.25 × ceiling) for the attack samples. **Below `bow_lim_thresh` (default 0.8) it is bit-exact passthrough** — the parity phrase peaks ~0.06, so every golden is untouched (`LimiterTests`).
 
@@ -141,7 +153,7 @@ error is 0.54 dB.
 
 **Voice↔taraf balance.** One `.live` lever at the SPLIT-BUS merge — the same point as the FX voice/taraf inserts and the iPad volume-readout meter tap (the `bow_poly_process3` split path's `bus + bus` sum is bit-exact against the fused path; `BusMeterTests`):
 
-- **`bow_bal`** (−1…+1, def 0): the voice↔taraf mix as a pure ATTENUATOR pair — −1 = voice only, +1 = taraf only, 0 = the calibrated mix bit-exactly. The favoured side never boosts past its calibrated level, so no new headroom appears and the limiter calibration holds. Slewed ~30 ms with per-sample interpolation; instant like `bow_gain`, so it binds well to a tilt. The iPad volume readout taps post-balance.
+- **`bow_bal`** (−1…+1, def 0): the voice↔taraf mix as a pure ATTENUATOR pair — −1 = voice only, +1 = taraf only, 0 = the calibrated mix bit-exactly. The favoured side never boosts past its calibrated level, so no new headroom appears and the limiter calibration holds. Slewed ~30 ms with per-sample interpolation; instant like `bow_gain`, so it binds well to a tilt. The iPad's separate main, chromatic and raga readouts include this balance. The bank taps precede shared taraf FX; see [MIDI & Audio](midi-and-audio.md).
 
 **Independent taraf levels.** `bow_jt_gain` controls raga radiation and
 `bow_jtc_gain` controls chromatic radiation, including the melody follower.
@@ -151,14 +163,17 @@ pump the other's uncoupled sound. Shared bridge feedback still permits
 physical interaction when coupling is enabled. Parameter ownership and
 model-specific controls are listed in [Sarangi](sarangi.md#parameter-ownership).
 
-**Direct raga plucks.** A pluck-triggered radiation boost balances the physical
-raga strings with chromatic plucks and medium-expression bowed notes. It is
+**Direct raga plucks.** **Pluck loudness** (`bow_jt_dual_pluck_level`, in
+Taraf · Raga) controls a pluck-triggered radiation boost: 0 is the original
+level, 1 is the full calibrated boost, and the default 0.5 is halfway in
+decibels. Changes slew over 40 ms and apply to ringing plucks. The boost is
 stronger in the low register, approaches its peak smoothly over 4 ms and
 returns toward the ordinary sympathetic level with a 2 s time constant.
 The plectrum displacement and physical feedback are unchanged. Unplucked rows
 retain their ordinary sympathetic level; the plucked row's shared radiation
 receives the envelope for its tail. The normal row controls and final limiter
-remain downstream.
+remain downstream. Calibration and measurements:
+raga pluck balance (local research: `docs/history/Codex-2026-09-23-raga-pluck-levels.md`).
 
 **Raga bow bloom** (`bow_jt_bow_bloom`, default 1) shapes the energy entering
 physical raga strings: fresh bow energy charges them, then steady forcing
@@ -194,7 +209,7 @@ Parameters that are engine-build values (`rebuild`, and `hybrid` pushed above it
 
 **The settle path** uses a residual-checked continuous wrap and, for a neutral bank, a stationary state matched to the existing discrete contact step. Successful preparation starts with **one** 4096-frame warmup block. A failed solve or moved bone retains at least **five** blocks with 50 ms momentum damping. The setup renderer uses an empty control snapshot; held touches stay on the shared mapper and mount when the engine is published. After warmup, natural decay is restored and the output filters and room are reset, preserving the physical kernel state. This discards the synthetic setup chime's room tail rather than waiting for it to die. Each subsequent verification block checks both channels and their sum against **−100 dBFS**; up to 24 verification blocks are allowed, after which a still-noisy build returns nil and the host retains its existing engine. No limiter or gain fade substitutes for the silence check. The gate remains enabled under its normal contract.
 
-`RebuildCostTests` covers crossfaded publication at **−80 dBFS**, tuned banks and neutral/pressed/open bones, and preservation of a held touch through silent setup. The timings above are measurements on one machine, not universal budgets.
+`RebuildCostTests` covers crossfaded publication at **−80 dBFS**, tuned banks and neutral/pressed/open bones, and preservation of a held touch through silent setup. The timings above are measurements on one machine, not universal budgets. The implementation record (local research: `docs/history/Codex-2026-09-08-jawari-initialization.md`) has the before/after measurements and deliberate parity update.
 
 **Continuity.** A fresh engine has zero string/taraf/room state, so a hard swap under a held note is a step (96% of level within 43 ms) and a hard swap during the ring cuts it (4.9% of the tail survives). `StringVoiceSource.setEngine` therefore keeps the outgoing engine rendering and equal-power crossfades into the new one over `StringVoiceSource.engineCrossfadeMs` (300 ms): seamless under a note, 69% of a ring survives. That costs 2× voice CPU for the fade window only (at the 128-frame buffer: 11% of realtime for one engine, 19% for two).
 

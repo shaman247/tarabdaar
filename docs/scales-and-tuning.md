@@ -5,7 +5,7 @@
 Tarabdaar is a just-intonation instrument with **one configured scale** and **one tonic**. Every pitch the app plays — Fret Pad frets, tarab strings, drones, chord-bar triads — is a degree of that scale resolved against that tonic.
 
 - **Playing scale.** A `PitchScale` of JI ratios (`num/den` over the tonic) spanning the half-open octave `[1, 2)` and repeating up and down. **Edited on the Mac** (the Fret Pad tab's scale list editor) and **synced to the iPad** as a TLP event, where it is performed — the iPad has no editor. Persisted as JSON via `ScaleStore` on the Mac; the iPad keeps a one-way mirror (`SyncedScaleStore`). See [Fret Pad](fret-pad.md) and [MIDI & Audio — Scale sync](midi-and-audio.md#scale-sync-mac--ipad).
-- **Sympathetic-string tuning** (Mac). The tarab is an editable `[StringSpec]` table (the **Strings tab**) whose every raga row is a **scale degree + octave** of the playing scale — there is no per-string ratio or Hz, and following the scale is unconditional. The row *layout* regenerates when the scale's degree count changes (or via the tab's "Regenerate from scale" button); hand edits to gains, decays and rows otherwise stand. The **chromatic set** sits on its own bridge as semitones of a fixed JI grid off the tonic. See [Sound Design — Sympathetic strings](sound-design.md#sympathetic-strings--the-editable-bank) and [Sarangi](sarangi.md).
+- **Sympathetic-string tuning** (Mac). The tarab is an editable `[StringSpec]` table (the **Strings tab**) whose every raga row is a **scale degree + octave** of the playing scale — there is no per-string ratio or Hz, and following the scale is unconditional. An enabled raga row in any octave colors and enables warp for all fret copies of its pitch class. Right-clicking any copy toggles the existing raga rows of that pitch class together (creating one at the clicked octave if absent); a pitch class with no enabled raga rows stays gray without losing its snap targets. The row *layout* regenerates when the scale's degree count changes (or via the tab's "Regenerate from scale" button); hand edits to gains, decays and rows otherwise stand. The **chromatic set** sits on its own bridge as semitones of a fixed JI grid off the tonic. See [Sound Design — Sympathetic strings](sound-design.md#sympathetic-strings--the-editable-bank) and [Sarangi](sarangi.md).
 
 ## The playing scale (Fret Pad tab → iPad)
 
@@ -32,7 +32,22 @@ The scale is the set of `PitchPoint` ratios edited in `ScaleListEditor`: add/rem
 
 ### Scale presets
 
-The Scale menu's **Scales** submenu holds the built-in presets (`ScalePreset`, `ScaleDegrees.swift`): the modes, major/minor variants and pentatonics, each rendered from the same 12-tone JI ratio table as the default and labelled by degree number — plus **12-TET Chromatic**, the full equal-tempered scale for playing alongside equal-tempered instruments. It keeps the default scale's sargam labels; only the ratios differ.
+The Scale menu's **Scales** submenu holds the built-in presets (`ScalePreset`, `ScaleDegrees.swift`): the modes, major/minor variants and pentatonics, each rendered from the same 12-tone JI ratio table as the default and labelled by degree number — plus **Just Intonation (Default)**, **Pythagorean Chromatic**, their **Ma-rotated** variants and **12-TET Chromatic**. All five chromatic presets keep the default scale's twelve sargam labels and keyboard rows; only the ratios differ. **Just Intonation (Default)** loads `PitchScale.defaultJI` through the ordinary preset path, preserving the current fret arrangement. **Reset to Default** also restores the C Keyboard arrangement.
+
+**Pythagorean Chromatic** builds its twelve pitches from pure 3/2 fifths, five below and six above the tonic, reduced into one octave and sorted. In `S r R g G m M P d D n N` order the exact ratios are `1/1, 256/243, 9/8, 32/27, 81/64, 4/3, 729/512, 3/2, 128/81, 27/16, 16/9, 243/128`. The lowered degrees use their flat forms, and tivra `M` uses the augmented fourth `729/512`. These [Pythagorean intervals](https://math.ucr.edu/home/baez/tuning_book/) use only factors of 2 and 3 and fit the scale-sync blob exactly. `ScalePresetTests` checks the fifth-chain tuning, default labels/layout and exact ratio round-trip for both chromatic variants. Loading either preserves the twelve-degree raga row layout and retunes its pitches; the chromatic taraf set retains its fixed JI grid.
+
+**Just Intonation (Ma-rotated)** and **Pythagorean Chromatic (Ma-rotated)** tune the other notes relative to shuddha Ma as the base scale tunes them relative to Sa. Sa remains the tonic at `1/1`, and Ma (`m`) remains `4/3` of Sa. Each variant multiplies its base ratios by `4/3`, folds them into `[1, 2)`, reduces the fractions and sorts them back into Sa-relative degree order, retaining the original labels and layout. Thus the base scale's `S r R …` intervals measured above Ma belong to `m M P …` in the resulting scale. These presets load through the ordinary scale path and preserve the current tonic and fret arrangement.
+
+Only these pitches differ from their respective base scales; every other ratio stays the same:
+
+| Variant | Degree | Base ratio | Ma-rotated ratio |
+|---------|--------|------------|------------------|
+| Just Intonation | R | 9/8 | 10/9 |
+| Just Intonation | g | 6/5 | 32/27 |
+| Just Intonation | M | 45/32 | 64/45 |
+| Pythagorean | M | 729/512 | 1024/729 |
+
+`ScalePresetTests` checks every rotated interval relative to Ma with exact rational arithmetic, the Sa/Ma anchors, default labels/layout and exact ratio round-trip through scale sync.
 
 **How a tempered scale fits a rational model.** Every scale pitch is a `num/den` rational — in the JSON on disk and as two 14-bit integers in the [scale-sync blob](midi-and-audio.md#scale-sync-mac--ipad) — and a tempered semitone is irrational, so the preset ships each `2^(k/12)` as its best rational approximation with both terms under the blob's 16383 bound (`ScalePreset.equalTemperedRatios`, e.g. 11011/10393 for the semitone). The residual is below 0.0001 ¢, three orders of magnitude under the tonic's 0.01 ¢ wire resolution, so nothing in the app can tell it from true equal temperament, and the wire format, the persisted scale, the iPad's decode and the tarab's `(degree, octave)` references are all untouched. `ScalePresetTests` pins the bound and the accuracy. The editor shows the big fractions in its ratio fields, which is honest: retune one and it is that rational; "snap to simple fractions" pulls it back to JI. Loading the preset keeps the tarab's row layout (twelve degrees) and retunes every raga row to the tempered pitch; the **chromatic taraf set** stays on its fixed JI grid by design, so under the tempered scale its strings sit up to ~16 ¢ from the played pitches, as a sarangi's fixed tarab would.
 
@@ -45,7 +60,7 @@ The tonic is the app's ONE absolute pitch, and the Fret Pad toolbar is the only 
 
 A "+12.0¢" readout follows the fields whenever the tonic sits off its note anchor (blank when exact). The iPad's tonic is read-only, mirrored over the sync.
 
-**The tonic starts at D4 on every Mac launch** (`PitchPadEngine.defaultTonicMidi` = MIDI 62, 293.665 Hz). It is **deliberately not persisted**: the session tonic is a per-sitting decision, and a stale restored one would silently retune the whole instrument, since the frets, the tarab and the drones all resolve against it. Everything else about the scale — the degrees, their labels, the layout — *is* persisted, so a session opens on your scale at D4. The iPad opens on the last state the Mac pushed and takes the Mac's tonic on the next connect.
+**The tonic starts at E4 on every Mac launch** (`PitchPadEngine.defaultTonicMidi` = MIDI 64, 329.628 Hz). It is **deliberately not persisted**: the session tonic is a per-sitting decision, and a stale restored one would silently retune the whole instrument, since the frets, the tarab and the drones all resolve against it. Everything else about the scale — the degrees, their labels, the layout — *is* persisted, so a session opens on your scale at E4. The iPad opens on the last state the Mac pushed and takes the Mac's tonic on the next connect.
 
 ## Pitch on the wire and in the engine
 

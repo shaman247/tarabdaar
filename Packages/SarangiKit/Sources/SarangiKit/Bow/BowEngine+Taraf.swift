@@ -148,6 +148,12 @@ extension BowEngine {
         bow_poly_jt_dual_selectivity(pk, value)
     }
 
+    /// Adjust direct-pluck radiation between the original and boosted levels in dB.
+    public func setJtDualPluckLevel(_ value: Double) {
+        guard let pk = pkernel, value.isFinite else { return }
+        bow_poly_jt_dual_pluck_level(pk, value)
+    }
+
     /// Let new bridge excitation bloom and then recede into the row's natural ring.
     public func setJtBowBloom(_ value: Double) {
         guard let pk = pkernel, value.isFinite else { return }

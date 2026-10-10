@@ -59,7 +59,7 @@ struct PadToolbarIOS: View {
                 }
             }
             // The Mac's radiated voice/taraf levels (JOYCON_STATE).
-            ScopeTracePane(width: 120) {
+            ScopeTracePane(width: 120, labelFooter: 42) {
                 ScopeTraces.volume(history: scaleSync.volumeHistory,
                                    motion: motion)
             }
@@ -434,14 +434,18 @@ private struct ScopeTraceFrame {
 /// traces, the tick and the labels over `ScopePane`'s grid.
 private struct ScopeTracePane: View {
     let width: CGFloat
+    var labelFooter: CGFloat = 0
     let sample: () -> ScopeTraceFrame
 
     var body: some View {
-        ScopePane(width: width, sample: sample, draw: Self.draw)
+        ScopePane(width: width, footerHeight: labelFooter, sample: sample) { ctx, size, frame in
+            Self.draw(ctx, canvasSize: size, frame: frame, labelFooter: labelFooter)
+        }
     }
 
-    private static func draw(_ ctx: GraphicsContext, size: CGSize,
-                             frame: ScopeTraceFrame) {
+    private static func draw(_ ctx: GraphicsContext, canvasSize: CGSize,
+                             frame: ScopeTraceFrame, labelFooter: CGFloat) {
+        let size = CGSize(width: canvasSize.width, height: canvasSize.height - labelFooter)
         let w = size.width, h = size.height
         let newest = frame.traces.compactMap { $0.samples.last?.t }.max()
         guard let newest else { return }
@@ -503,8 +507,10 @@ private struct ScopeTracePane: View {
             readouts = held.map { $0[bins.count - 1] }
         }
         for label in frame.labels(readouts) {
-            ScopeTrace.drawValueLabel(ctx, label.text, size: size,
-                                      measureIn: label.box, y: label.y)
+            let y = labelFooter > 0 ? size.height + 6 + (label.y ?? label.box.height / 2)
+                                    : label.y
+            ScopeTrace.drawValueLabel(ctx, label.text, size: canvasSize,
+                                      measureIn: label.box, y: y)
         }
     }
 }
@@ -566,48 +572,47 @@ private enum ScopeTraces {
             labels: { v in [wireLabel(v[0], width: 44)] })
     }
 
-    /// The volume scope: the Mac's radiated voice and taraf levels on the
+    /// The volume scope: the Mac's main voice, chromatic and raga levels on the
     /// wire's 0…1 log scale (−60…0 dBFS, `TLPVolume`; guides = 20 dB) with
     /// the current dB at the right. Samples are unsmoothed RMS, change-gated
     /// on the wire, so bins peak-hold and forward-fill and the window
-    /// scrolls with NOW rather than the last (sparse) sample. Voice orange
-    /// over taraf cyan while a note sounds.
+    /// scrolls with NOW rather than the last (sparse) sample. Main orange,
+    /// chromatic cyan, raga purple; colors persist through ringing tails.
     static func volume(history: VolumeHistory,
                        motion: MotionManager?) -> ScopeTraceFrame {
         let samples = history.snapshot()
-        let voiceColor = Color.orange, tarafColor = Color.cyan
-        let voiceIdle = Color(white: 0.55).opacity(0.9)
-        let tarafIdle = Color(white: 0.35).opacity(0.9)
+        let now = ProcessInfo.processInfo.systemUptime
+        let voiceColor = Color.orange, chromaticColor = Color.cyan
+        let ragaColor = Color.purple
         func trace(_ value: @escaping (VolumeHistory.Sample) -> Double,
-                   active: Color, idle: Color) -> ScopeTraceFrame.Trace {
-            .init(samples: samples.map { (t: $0.t, v: value($0)) },
+                   color: Color) -> ScopeTraceFrame.Trace {
+            .init(samples: samples.isEmpty ? [(t: now, v: 0)]
+                    : samples.map { (t: $0.t, v: value($0)) },
                   signedPeak: false, forwardFill: true,
-                  color: { _, sounding in sounding ? active : idle })
+                  color: { _, _ in color })
         }
-        // Current dB values, voice above taraf; silence prints nothing.
-        func label(_ v01: Double, _ color: Color,
-                   y: CGFloat) -> ScopeTraceFrame.Label? {
-            guard v01 > 0 else { return nil }
-            let db = Int(TLPVolume.db(from01: v01).rounded())
-            return .init(text: Text("\(db)")
+        func label(_ name: String, _ v01: Double, _ color: Color,
+                   y: CGFloat) -> ScopeTraceFrame.Label {
+            let db = v01 > 0 ? "\(Int(TLPVolume.db(from01: v01).rounded()))" : "−∞"
+            return .init(text: Text("\(name) \(db)")
                             .font(.padSmall(9).monospacedDigit())
                             .foregroundColor(color.opacity(0.95)),
-                         box: CGSize(width: 40, height: 14), y: y)
+                         box: CGSize(width: 84, height: 12), y: y)
         }
         return ScopeTraceFrame(
-            traces: [trace({ $0.taraf }, active: tarafColor, idle: tarafIdle),
-                     trace({ $0.voice }, active: voiceColor, idle: voiceIdle)],
+            traces: [trace({ $0.raga }, color: ragaColor),
+                     trace({ $0.chromatic }, color: chromaticColor),
+                     trace({ $0.voice }, color: voiceColor)],
             activity: motion?.noteActivity ?? [],
             endsAtNow: true,
-            // Guide lines at thirds (20 dB steps).
             guides: [(1.0 / 3.0, 0.12), (2.0 / 3.0, 0.12)],
             y01: { $0 },
             tick: nil,
             readout: .lastBin,
             labels: { v in
-                [label(v[1], voiceColor, y: 7),
-                 label(v[0], tarafColor, y: ScopeTrace.paneHeight - 7)]
-                    .compactMap { $0 }
+                [label("Main", v[2], voiceColor, y: 6),
+                 label("Chromatic", v[1], chromaticColor, y: 18),
+                 label("Raga", v[0], ragaColor, y: 30)]
             })
     }
 
@@ -660,15 +665,15 @@ struct FretPadViewIOS: View {
                           midi: midi, recorder: recorder, motion: motion,
                           fingerAccel: fingerAccel,
                           showGyro: $showGyro)
-            TarafPluckStrip(bank: scaleSync.tarafBank, scale: engine.scale, pluck: pluckTaraf)
-            // The playable band (`fretPadBandRect`) is the centered half-height
-            // strip; the rest is dead except the drone buttons, which hide
-            // while a Joy-Con is attached to the Mac (JOYCON_STATE).
+            // The raga pluck strip sits immediately above the playable band.
+            // Drone buttons hide while a Joy-Con is attached to the Mac.
             FretPadSurfaceIOS(engine: engine, arrangement: arrangement,
                               fieldWarp: scaleSync.joyConTilt.fieldWarp,
                               recorder: recorder,
                               dronesHidden: scaleSync.joyConTilt.connected,
-                              motion: motion)
+                              motion: motion,
+                              tarafBank: scaleSync.tarafBank,
+                              pluckTaraf: pluckTaraf)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .topLeading) {
                     NoteControlReadout(display: scaleSync.noteControls)
@@ -848,6 +853,8 @@ private struct FretPadSurfaceIOS: View {
     let dronesHidden: Bool
     /// Motion source for the Strike envelope and scope activity.
     let motion: MotionManager?
+    let tarafBank: TarafBank
+    let pluckTaraf: (UInt32, UInt8) -> Void
     /// The touch pipeline (onset, drag, settle tick, release).
     @State private var player = FretTouchPlayer()
     /// Touches holding a drone button (touchId → button index).
@@ -867,6 +874,8 @@ private struct FretPadSurfaceIOS: View {
                               height: max(1, geo.size.height - 2 * edgePad))
             // The playable band — the frets' coordinate space.
             let band = fretPadBandRect(in: size)
+            let pluckWidth = dronesHidden ? band.width
+                : max(1, (droneButtonRects(size: size).first?.minX ?? band.maxX) - 8)
             let (degrees, placements, chordCells) = layout.resolve(
                 arrangement: arrangement, scale: engine.scale, size: size)
 
@@ -880,8 +889,9 @@ private struct FretPadSurfaceIOS: View {
                     ctx.strokeFretBand(band)
                     ctx.translateBy(x: band.minX, y: band.minY)
                     for p in placements {
-                        let hue = pitchColor(forRatio: p.ratio,
-                                             lightness: 0.82, chroma: 0.20)
+                        let hue = p.hasRagaString
+                            ? pitchColor(forRatio: p.ratio, lightness: 0.82, chroma: 0.20)
+                            : Color.gray
                         ctx.stroke(p.linePath, with: .color(hue), lineWidth: 1.5)
                     }
                 }
@@ -931,6 +941,11 @@ private struct FretPadSurfaceIOS: View {
                     }
                 )
                 .padding(edgePad)
+
+                TarafPluckStrip(bank: tarafBank, scale: engine.scale, pluck: pluckTaraf)
+                    .frame(width: pluckWidth)
+                    .offset(x: edgePad + band.minX,
+                            y: edgePad + band.minY - TarafPluckStrip.height)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .clipped()

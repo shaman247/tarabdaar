@@ -277,40 +277,48 @@ int bow_contact_render(void *ptr,int n,double *out,double *energies,double *stat
         if(s->sav) {
             if(!sav_step(s,old,star,eta,f)){s->failed++;return frame;}
         } else {
-            memcpy(eta,old,sizeof(double)*j);
             // The old endpoint is invariant throughout Newton and line search.
             // Cache its potential without changing any force arithmetic.
             for(int z=0;z<j;z++)oldPotential[z]=old[z]>0?pow(old[z],s->alpha+1):0;
-            double norm=residual(s,old,oldPotential,eta,star,f,df,r);int iter=0;
-            for(;iter<24 && norm>1e-13;iter++){
-                double jac[JJ*JJ],delta[JJ],active_delta[JJ];int active[JJ],na=0;
-                for(int z=0;z<j;z++)if(df[z]!=0)active[na++]=z;
-                for(int z=0;z<na;z++){
-                    active_delta[z]=-r[active[z]];
-                    for(int l=0;l<na;l++)jac[z*na+l]=compliance[active[z]*j+active[l]]*df[active[l]]+(z==l);
-                }
-                if(!linear(na,jac,active_delta))break;
-                for(int z=0;z<j;z++)delta[z]=-r[z];
-                const double *transpose=s->pulling?s->motor_GT:s->GT;
-                for(int l=0;l<na;l++) {
-                    const double *g=transpose+active[l]*j;
-                    for(int z=0;z<j;z++)delta[z]-=g[z]*df[active[l]]*active_delta[l];
-                }
-                for(int z=0;z<na;z++)delta[active[z]]=active_delta[z];
-                int accepted=0;
-                for(double step=1;step>=1.0/4096;step*=.5){
-                    double next[JJ],nf[JJ],nd[JJ],nr[JJ];
-                    for(int z=0;z<j;z++)next[z]=eta[z]+step*delta[z];
-                    double nn=residual(s,old,oldPotential,next,star,nf,nd,nr);
-                    if(nn<norm){
-                        memcpy(eta,next,sizeof(double)*j);memcpy(f,nf,sizeof(double)*j);
-                        memcpy(df,nd,sizeof(double)*j);memcpy(r,nr,sizeof(double)*j);
-                        norm=nn;accepted=1;break;
+            double norm=INFINITY;int iterations=0;
+            // Keep the ordinary solve unchanged. If a sharp transient defeats
+            // its old-position guess, retry this same step from the free endpoint.
+            // No physical state advances and neither tolerance nor force is relaxed.
+            for(int attempt=0;attempt<2;attempt++) {
+                memcpy(eta,attempt?star:old,sizeof(double)*j);
+                norm=residual(s,old,oldPotential,eta,star,f,df,r);int iter=0;
+                for(;iter<24 && norm>1e-13;iter++){
+                    double jac[JJ*JJ],delta[JJ],active_delta[JJ];int active[JJ],na=0;
+                    for(int z=0;z<j;z++)if(df[z]!=0)active[na++]=z;
+                    for(int z=0;z<na;z++){
+                        active_delta[z]=-r[active[z]];
+                        for(int l=0;l<na;l++)jac[z*na+l]=compliance[active[z]*j+active[l]]*df[active[l]]+(z==l);
                     }
+                    if(!linear(na,jac,active_delta))break;
+                    for(int z=0;z<j;z++)delta[z]=-r[z];
+                    const double *transpose=s->pulling?s->motor_GT:s->GT;
+                    for(int l=0;l<na;l++) {
+                        const double *g=transpose+active[l]*j;
+                        for(int z=0;z<j;z++)delta[z]-=g[z]*df[active[l]]*active_delta[l];
+                    }
+                    for(int z=0;z<na;z++)delta[active[z]]=active_delta[z];
+                    int accepted=0;
+                    for(double step=1;step>=1.0/4096;step*=.5){
+                        double next[JJ],nf[JJ],nd[JJ],nr[JJ];
+                        for(int z=0;z<j;z++)next[z]=eta[z]+step*delta[z];
+                        double nn=residual(s,old,oldPotential,next,star,nf,nd,nr);
+                        if(nn<norm){
+                            memcpy(eta,next,sizeof(double)*j);memcpy(f,nf,sizeof(double)*j);
+                            memcpy(df,nd,sizeof(double)*j);memcpy(r,nr,sizeof(double)*j);
+                            norm=nn;accepted=1;break;
+                        }
+                    }
+                    if(!accepted)break;
                 }
-                if(!accepted)break;
+                iterations+=iter;
+                if(norm<=1e-11 && isfinite(norm))break;
             }
-            if(iter>s->max_iterations)s->max_iterations=iter;
+            if(iterations>s->max_iterations)s->max_iterations=iterations;
             s->max_residual=fmax(s->max_residual,norm);
             if(norm>1e-11||!isfinite(norm)){s->failed++;return frame;}
         }

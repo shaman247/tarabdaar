@@ -13,6 +13,26 @@ is re-blessed with a before/after render for an A/B by ear.
 
 ## Open items
 
+### Numerical accuracy
+
+1. **Modal taraf contact integration adds excess damping.** The split
+   rotation/contact step in `bow_jt.c` contracts the small-signal state even
+   with physical loss and contact damping disabled. In the selected sarangi
+   fit, the roughly 2 kHz Sa mode decays at 33.94 dB/s instead of the explicit
+   modal loss of 2.28 dB/s. The precontact stage velocity also biases the
+   contact-damping clamp at equilibrium. Four quarter steps reduce the error
+   but remain unconverged and regress parts of the full recording comparison.
+   Correct the integration and its stationary initializer together, preserving
+   the physical contact law; verify energy/loss convergence, finite-amplitude
+   stability, realtime cost and complete auditions before replacing the
+   selected model. Evidence and reproductions:
+   selected-model refinement (local research: `docs/history/Codex-2026-10-04-selected-refinement.md`)
+   and energy-consistent research step (local research: `docs/history/Codex-2026-10-04-discrete-gradient-taraf.md`).
+   The isolated research step removes the excess loss and passes core energy
+   and fixed-instrument stability checks. It remains an offline prototype:
+   recording agreement, live coefficient-cache invalidation, moving-contact
+   work and realtime cost still need resolution before production replacement.
+
 ### Efficiency
 
 1. **Reuse fixed raga model data across rows.** Each physical row rebuilds the
@@ -26,4 +46,5 @@ is re-blessed with a before/after render for an A/B by ear.
    may reduce remaining contact work. Both need evidence: extra nonlinear
    iterations can erase factorization savings, and differing row clocks and
    contact states complicate batching. Keep Newton's convergence check and
-   mechanical timing intact.
+   mechanical timing intact. Details and the retained implementation:
+   repeated-equation opportunities (local research: `docs/history/Codex-2026-09-20-taraf-reduced-newton.md`).

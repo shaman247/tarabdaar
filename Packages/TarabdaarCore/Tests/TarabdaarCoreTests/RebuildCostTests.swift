@@ -108,7 +108,8 @@ final class RebuildCostTests: XCTestCase {
             for evolve in [0.0, 0.5, 1.0] {
                 let engine = try XCTUnwrap(StringVoiceSource.buildEngine(
                     tonicHz: tonic, strings: state.resolvedStrings, mapper: BowControlMapper(),
-                    overrides: ["bow_jt_evolve": evolve, "bow_jtc_evolve": evolve]))
+                    overrides: ["bow_jt_evolve": evolve, "bow_jtc_evolve": evolve]),
+                    "Failed to settle at tonic \(tonic), evolution \(evolve)")
                 var l = [Double](repeating: 0, count: 4096), r = l
                 var peak = 0.0
                 for _ in 0..<6 {

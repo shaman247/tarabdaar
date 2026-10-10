@@ -49,7 +49,7 @@ Everything else comes from the **dimensions** the Mac's **Controls tab (⌘4)** 
 - **Finger accel** — the playing finger's signed pitch acceleration (rest and constant-rate meend = 0)
 - **Joy-Con accel** — the controller's own acceleration magnitude
 
-**Attack sharpness** in Articulation is a direct 0–1 binding target: 0 gives a gentle draw, 1 a sharp bite. Its value is captured at each new note; bind it to Strike or Joy-Con Accel to shape attacks independently of expression.
+**Attack sharpness** is the single control in String · Attack: 0 gives a slow draw, 1 a fast engagement of bow speed and force. Its value is captured at each new note; bind it to Strike or Joy-Con Accel to shape attacks independently of expression.
 
 The iPad toolbar shows each source live (arm/wrist/stick squares, the strike and finger-accel scopes, the Mac's radiated volume). See [Sensors](sensors.md).
 

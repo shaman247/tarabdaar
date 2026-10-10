@@ -171,7 +171,7 @@ double bow_tonal_tick(void *state,double sample,double cutoff_hz,double selectiv
         s->started=1;s->active=wet>0;
     }
     if(wet>0 && !s->active) {
-        // Bypass keeps the delay ring live but does no spectral work. On
+        // Bypass keeps the analysis history live but does no spectral work. On
         // re-entry fill a complete overlap-add cycle before fading it in.
         memset(s->output,0,sizeof(double)*n);
         memset(s->power,0,sizeof(double)*(n/2+1));
@@ -184,12 +184,13 @@ double bow_tonal_tick(void *state,double sample,double cutoff_hz,double selectiv
     s->mix+=slew*(target-s->mix);
     if(fabs(s->mix-target)<1e-9)s->mix=target;
     unsigned int p=s->position;
-    double dry=s->input[p],filtered=s->output[p];
+    double dry=sample,filtered=s->output[p];
     s->input[p]=sample;s->output[p]=0;
     s->position=(p+1)&(n-1);
     if(s->active && (s->position&(hop-1))==0)frame(s);
     if(wet==0 && s->mix==0) {s->active=0;s->warmup=0;}
-    // Both paths have the same latency: live bypass never combs against dry.
+    // Bypass radiates immediately. Only enabled spectral cleanup pays the
+    // analysis latency; a live toggle crossfades between the two timelines.
     if(s->mix==0)return dry;
     if(s->mix==1)return filtered;
     return dry+s->mix*(filtered-dry);

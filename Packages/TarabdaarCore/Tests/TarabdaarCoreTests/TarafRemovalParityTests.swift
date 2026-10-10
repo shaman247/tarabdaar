@@ -65,7 +65,7 @@ final class TarafRemovalParityTests: XCTestCase {
     /// sound changes (write mode: `TARABDAAR_TARAF_REF=write`) and say why in
     /// the commit.
     private static let referenceSHA256 =
-        "24b90f0a29bcaffe6c62065a44a0c760c43125e1633b7312d838c544a32112c4"
+        "973ece44c5a940a3857e7eb1e0744926a38756c35e59c25cd52fecdb6d4eea1c"
 
     /// The shipped signal path still renders the blessed phrase.
     func testDefaultMatchesTheSilencedWebReference() throws {

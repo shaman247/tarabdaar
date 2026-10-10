@@ -14,13 +14,16 @@ import SwiftUI
 public struct ScopePane<Data>: View {
     /// The pane's fixed width; the height is `ScopeTrace.paneHeight`.
     public let width: CGFloat
+    /// Optional space below the graph for readouts, without a grid background.
+    public let footerHeight: CGFloat
     /// Reads the history — called once per tick, outside the canvas.
     public let sample: () -> Data
     public let draw: (GraphicsContext, CGSize, Data) -> Void
 
-    public init(width: CGFloat, sample: @escaping () -> Data,
+    public init(width: CGFloat, footerHeight: CGFloat = 0, sample: @escaping () -> Data,
                 draw: @escaping (GraphicsContext, CGSize, Data) -> Void) {
         self.width = width
+        self.footerHeight = footerHeight
         self.sample = sample
         self.draw = draw
     }
@@ -29,9 +32,12 @@ public struct ScopePane<Data>: View {
         TimelineView(.periodic(from: .now, by: 1.0 / ScopeTrace.pollHz)) { _ in
             let data = sample()
             Canvas { ctx, size in draw(ctx, size, data) }
-                .frame(width: width, height: ScopeTrace.paneHeight)
-                .background(RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.gray.opacity(0.15)))
+                .frame(width: width, height: ScopeTrace.paneHeight + footerHeight)
+                .background(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.gray.opacity(0.15))
+                        .frame(width: width, height: ScopeTrace.paneHeight)
+                }
         }
     }
 }

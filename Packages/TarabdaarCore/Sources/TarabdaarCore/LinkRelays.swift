@@ -129,23 +129,23 @@ public final class JoyConDisplayRelay {
 
 /// THE VOLUME READOUT RELAY: a 60 Hz poll of the engine's integrate-and-
 /// dump bus levels (the ONE poller — a second reader would steal samples)
-/// converted to the two log-scale `TLPVolume` bytes and pushed onto the
+/// converted to the three log-scale `TLPVolume` bytes and pushed onto the
 /// JOYCON_STATE frame, change-gated so a silent instrument costs nothing.
 /// Runs on its own utility queue.
 public final class VolumeMeterRelay {
 
-    private let levels: () -> (voice: Double, taraf: Double)
-    private let send: (UInt8, UInt8) -> Void
+    private let levels: () -> (voice: Double, chromatic: Double, raga: Double)
+    private let send: (UInt8, UInt8, UInt8) -> Void
     private var timer: DispatchSourceTimer?
     /// Timer queue only.
-    private var lastBytes: (UInt8, UInt8) = (0, 0)
+    private var lastBytes: (UInt8, UInt8, UInt8) = (0, 0, 0)
     private let noteControls: () -> TLPNoteControls
     private let sendNoteControls: (TLPNoteControls) -> Void
     private var noteTick = 0
     private var lastNoteControls: TLPNoteControls = .idle
 
-    public init(levels: @escaping () -> (voice: Double, taraf: Double),
-                send: @escaping (UInt8, UInt8) -> Void,
+    public init(levels: @escaping () -> (voice: Double, chromatic: Double, raga: Double),
+                send: @escaping (UInt8, UInt8, UInt8) -> Void,
                 noteControls: @escaping () -> TLPNoteControls = { .idle },
                 sendNoteControls: @escaping (TLPNoteControls) -> Void = { _ in }) {
         self.levels = levels
@@ -171,7 +171,7 @@ public final class VolumeMeterRelay {
         timer = nil
     }
 
-    /// One poll: convert, drop an unchanged pair, else send.
+    /// One poll: convert, drop an unchanged triple, else send.
     public func tick() {
         if noteTick == 0 {
             let controls = noteControls()
@@ -183,9 +183,10 @@ public final class VolumeMeterRelay {
         noteTick = (noteTick + 1) % 4
         let l = levels()
         let bytes = (TLPVolume.byte(fromLinear: l.voice),
-                     TLPVolume.byte(fromLinear: l.taraf))
+                     TLPVolume.byte(fromLinear: l.chromatic),
+                     TLPVolume.byte(fromLinear: l.raga))
         guard bytes != lastBytes else { return }
         lastBytes = bytes
-        send(bytes.0, bytes.1)
+        send(bytes.0, bytes.1, bytes.2)
     }
 }

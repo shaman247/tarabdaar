@@ -565,10 +565,10 @@ final class AppController: ObservableObject {
     private func startVolMeterRelay() {
         let relay = VolumeMeterRelay(
             levels: { [weak self] in
-                self?.audio.volumeLevels() ?? (voice: 0, taraf: 0)
+                self?.audio.volumeLevels() ?? (voice: 0, chromatic: 0, raga: 0)
             },
-            send: { [weak self] voice, taraf in
-                self?.link.setVolumeLevels(voice: voice, taraf: taraf)
+            send: { [weak self] voice, chromatic, raga in
+                self?.link.setVolumeLevels(voice: voice, chromatic: chromatic, raga: raga)
             },
             noteControls: { [weak self] in
                 self?.audio.noteControls() ?? .idle
@@ -1168,6 +1168,7 @@ final class AppController: ObservableObject {
         let triggers: [AnyPublisher<Void, Never>] = [
             tuning.didChange,
             audio.$tarafBank.map { _ in () }.eraseToAnyPublisher(),
+            sarangi.$state.map { _ in () }.eraseToAnyPublisher(),
             pitchPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             fretPad.$marginPixels.map { _ in () }.eraseToAnyPublisher(),
             $fretArrangement.map { _ in () }.eraseToAnyPublisher(),
@@ -1215,7 +1216,9 @@ final class AppController: ObservableObject {
         link.send(event: .scaleState(blob: PitchScaleSysEx.encodeBlob(state)))
         if ipadLayout == .fretPad {
             link.send(event: .fretArrangement(
-                blob: FretArrangementSysEx.encodeBlob(fretArrangement)))
+                blob: FretArrangementSysEx.encodeBlob(fretArrangement.withRagaStrings(
+                    ratios: sarangi.state.enabledRagaRatios,
+                    degrees: scaleDegrees(from: pitchPad.scale)))))
         }
         link.send(event: .tarafBank(audio.tarafBank))
         // A freshly-linked iPad must also learn the JOYCON_STATE fields.

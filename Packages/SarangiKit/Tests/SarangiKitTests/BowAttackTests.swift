@@ -5,9 +5,6 @@ final class BowAttackTests: XCTestCase {
     private func trace(sharpness: Double, overrides: [String: Double] = [:],
                        changedSharpness: Double? = nil) -> [[Double]] {
         var bp = BowedStringEngineTests.stringBP()
-        for (k, v) in ["bow_place_ms": 0.0, "bow_draw_ms": 180,
-                       "bow_draw_min_ms": 5, "bow_attack_fms": 3,
-                       "bow_attack_bite_ms": 60] { bp.num[k] = v }
         for (k, v) in overrides { bp.num[k] = v }
         var filter = BowControlFilter(bp: bp, srk: 96000)
         let buffers = (0..<5).map { _ in UnsafeMutablePointer<Double>.allocate(capacity: 256) }
@@ -26,20 +23,27 @@ final class BowAttackTests: XCTestCase {
         return result
     }
 
-    /// Zero placement starts a finite draw, sharp draw time remains effective, and sharpness stays onset-captured.
-    func testFiniteDrawAndCapturedSharpness() {
+    /// One bounded bow engagement preserves force/speed ratio, captures sharpness once, and shares sustain and release.
+    func testSingleEngagementAndCapturedSharpness() {
         let gentle = trace(sharpness: 0)
         let sharp = trace(sharpness: 1)
-        let slowSharp = trace(sharpness: 1, overrides: ["bow_draw_min_ms": 40])
         XCTAssertEqual(gentle[1][0], 0)
-        XCTAssertGreaterThan(gentle[1][64], 0, "zero placement must not hold or bypass the draw")
-        XCTAssertGreaterThan(sharp[1][960], 5 * slowSharp[1][960])
+        XCTAssertGreaterThan(gentle[1][64], 0, "the draw starts without a placement delay")
         XCTAssertGreaterThan(sharp[1][960], 10 * gentle[1][960])
         XCTAssertEqual(sharp, trace(sharpness: 1, changedSharpness: 0), "a held touch must not recapture sharpness")
+        for path in [gentle, sharp] {
+            let speed = path[1][90000], force = path[2][90000]
+            for i in stride(from: 0, to: 90000, by: 31) {
+                XCTAssertEqual(path[1][i] / speed, path[2][i] / force, accuracy: 1e-12,
+                               "independent envelopes must not move the bow's force/speed ratio")
+                XCTAssertGreaterThanOrEqual(path[1][i], 0)
+                XCTAssertLessThanOrEqual(path[1][i], speed)
+            }
+        }
         for k in [1, 2, 3] {
             XCTAssertEqual(sharp[k].suffix(256), gentle[k].suffix(256), "both attacks return to the same sustained bow")
         }
-        XCTAssertEqual(sharp[4].last!, gentle[4].last!, accuracy: 1e-10, "release keeps the shared lift time")
+        XCTAssertEqual(sharp[4].suffix(4096), gentle[4].suffix(4096), "release keeps the shared lift time")
     }
 
     /// Overlapping onsets capture independent sharpness before rendering and ignore subsequent pressure changes.
@@ -62,18 +66,15 @@ final class BowAttackTests: XCTestCase {
         XCTAssertEqual(snapshot.slots[2].attackSharpness, 0)
     }
 
-    /// Attack color is null for a gentle onset and returns exactly to the unmodified sustained controls.
-    func testAttackColorIsTransientAndZeroIsNull() {
-        let color = ["bow_attack_beta": 0.6, "bow_attack_speed_db": 8.0]
-        XCTAssertEqual(trace(sharpness: 0), trace(sharpness: 0, overrides: color))
-        XCTAssertEqual(trace(sharpness: 1), trace(sharpness: 1,
-            overrides: ["bow_attack_beta": 0, "bow_attack_speed_db": 0]))
-        let plain = trace(sharpness: 1), colored = trace(sharpness: 1, overrides: color)
-        XCTAssertLessThan(colored[3][960], plain[3][960])
-        XCTAssertGreaterThan(colored[1][960], plain[1][960])
-        for k in plain.indices {
-            XCTAssertTrue(colored[k].allSatisfy(\.isFinite))
-            XCTAssertEqual(plain[k].suffix(4096), colored[k].suffix(4096))
+    /// Retired preset knobs cannot reintroduce placement, competing ramps, accents, or a post-onset dip.
+    func testRetiredAttackOverridesAreInert() {
+        let retired = ["bow_place_ms": 120.0, "bow_draw_ms": 200,
+                       "bow_draw_min_ms": 60, "bow_attack_fms": 60,
+                       "bow_attack_bite": 4, "bow_attack_bite_ms": 200,
+                       "bow_attack_beta": 0.7, "bow_attack_speed_db": 12,
+                       "bow_settle_db": 12, "bow_settle_ms": 500, "bow_settle_sharp": 1]
+        for sharpness in [0.0, 0.5, 1.0] {
+            XCTAssertEqual(trace(sharpness: sharpness), trace(sharpness: sharpness, overrides: retired))
         }
     }
 }

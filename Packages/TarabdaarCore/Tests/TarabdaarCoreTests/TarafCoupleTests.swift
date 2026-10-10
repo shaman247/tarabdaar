@@ -97,27 +97,29 @@ final class TarafCoupleTests: XCTestCase {
                        "rows are still awake after their reference-clock decay bound")
     }
 
-    /// The heavy case the range was measured on — a hard-bowed three-note
-    /// chord, where the summed return is far larger than under one note. The
-    /// output trim is pulled down so the safety limiter cannot mask growth.
+    /// Full-feedback chords decay at reference and maximum uncompensated drive without limiter masking.
     func testHeavyChordRingStillDecaysAtTheTop() throws {
         try skipUnlessSlowTestsEnabled()
-        let r = try makeRig(["bow_live_trim": 5e-5])
-        r.e.setJtCouple(1.0)
-        r.mapper.setAxis(expr: 1.0, press: 100.0 / 127.0)
-        render(r, seconds: 1.0)
-        r.mapper.touchOn(1, pitchSemis: 64)   // Sa
-        r.mapper.touchOn(2, pitchSemis: 71)   // Pa
-        r.mapper.touchOn(3, pitchSemis: 76)   // Sa'
-        render(r, seconds: 1.0)
-        r.mapper.touchOff(1)
-        r.mapper.touchOff(2)
-        r.mapper.touchOff(3)
-        let ring = render(r, seconds: 4.0)
-        let early = Self.peak(ring[Int(0.5 * r.sr)..<Int(1.0 * r.sr)])
-        let late = Self.peak(ring[Int(3.5 * r.sr)..<Int(4.0 * r.sr)])
-        XCTAssertTrue(late.isFinite && early.isFinite, "the loop diverged")
-        XCTAssertLessThan(Self.db(late) - Self.db(early), -12.0,
-                          "the heavy-case ring is not decaying")
+        for (drive, norm) in [(0.03, 0.7), (0.3, 0.0)] {
+            let r = try makeRig(["bow_live_trim": 5e-5])
+            r.e.setJtDrive(drive)
+            r.e.setJtDriveNorm(norm)
+            r.e.setJtCouple(1.0)
+            r.mapper.setAxis(expr: 1.0, press: 100.0 / 127.0)
+            render(r, seconds: 1.0)
+            r.mapper.touchOn(1, pitchSemis: 64)   // Sa
+            r.mapper.touchOn(2, pitchSemis: 71)   // Pa
+            r.mapper.touchOn(3, pitchSemis: 76)   // Sa'
+            render(r, seconds: 1.0)
+            r.mapper.touchOff(1)
+            r.mapper.touchOff(2)
+            r.mapper.touchOff(3)
+            let ring = render(r, seconds: 4.0)
+            let early = Self.peak(ring[Int(0.5 * r.sr)..<Int(1.0 * r.sr)])
+            let late = Self.peak(ring[Int(3.5 * r.sr)..<Int(4.0 * r.sr)])
+            XCTAssertTrue(late.isFinite && early.isFinite, "the loop diverged")
+            XCTAssertLessThan(Self.db(late) - Self.db(early), -12.0,
+                              "the heavy-case ring is not decaying")
+        }
     }
 }

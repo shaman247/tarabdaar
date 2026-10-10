@@ -131,8 +131,8 @@ extension BowEngine {
 
     // MARK: - Bus volume meter
 
-    /// BUS VOLUME METER (voice, taraf) for the iPad volume readout. Armed,
-    /// the render takes the split-bus `bow_poly_process3` path, whose
+    /// BUS VOLUME METER for the iPad: voice, combined taraf and separate banks. Armed,
+    /// the render takes the split-bus `bow_poly_process4` path, whose
     /// host-side `out + outJt` is BIT-EXACT against the fused path. Levels
     /// are kernel-rate RMS × output gain (trim × `bow_gain`), INTEGRATE-
     /// AND-DUMP with no smoothing: each `busLevels()` returns the exact RMS
@@ -141,41 +141,47 @@ extension BowEngine {
         os_unfair_lock_lock(&tiltLock)
         meterArmed = on
         if !on {
-            meterSumV = 0; meterSumT = 0; meterFrames = 0
-            meterLast = (0, 0)
+            meterSumV = 0; meterSumT = 0; meterSumC = 0; meterSumR = 0; meterFrames = 0
+            meterLast = (0, 0, 0, 0)
         }
         os_unfair_lock_unlock(&tiltLock)
     }
 
-    /// (voice, taraf) RMS of everything rendered since the previous call
-    /// — (0, 0) unarmed; nothing rendered in between repeats the previous
+    /// Voice, combined taraf, chromatic and raga RMS since the previous call
+    /// — all zero unarmed; nothing rendered in between repeats the previous
     /// reading. Safe from any thread; poll at UI rate.
-    public func busLevels() -> (voice: Double, taraf: Double) {
+    public func busLevels() -> (voice: Double, taraf: Double, chromatic: Double, raga: Double) {
         os_unfair_lock_lock(&tiltLock)
         defer { os_unfair_lock_unlock(&tiltLock) }
         if meterFrames > 0 {
             let n = Double(meterFrames)
             meterLast = ((meterSumV / n).squareRoot(),
-                         (meterSumT / n).squareRoot())
-            meterSumV = 0; meterSumT = 0; meterFrames = 0
+                         (meterSumT / n).squareRoot(),
+                         (meterSumC / n).squareRoot(),
+                         (meterSumR / n).squareRoot())
+            meterSumV = 0; meterSumT = 0; meterSumC = 0; meterSumR = 0; meterFrames = 0
         }
         return meterLast
     }
 
     /// Render thread: fold one split-bus chunk (kernel rate, mid streams)
-    /// into the interval accumulators — after the bus FX and the balance,
-    /// before the merge, so the meter shows each bus's actual contribution.
+    /// into the interval accumulators. Bank taps precede shared taraf FX;
+    /// voice/combined taraf follow bus FX. All taps include balance and gain.
     func meterBuses(voice: UnsafePointer<Double>,
                     taraf: UnsafePointer<Double>, nk: Int) {
-        var sv = 0.0, st = 0.0
+        var sv = 0.0, st = 0.0, sc = 0.0, sr = 0.0
         for i in 0..<nk {
             sv += voice[i] * voice[i]
             st += taraf[i] * taraf[i]
+            sc += meterChromatic[i] * meterChromatic[i]
+            sr += meterRaga[i] * meterRaga[i]
         }
         let g2 = outGain * outGain
         os_unfair_lock_lock(&tiltLock)
         meterSumV += sv * g2
         meterSumT += st * g2
+        meterSumC += sc * g2
+        meterSumR += sr * g2
         meterFrames += nk
         os_unfair_lock_unlock(&tiltLock)
     }
@@ -197,7 +203,7 @@ extension BowEngine {
                          voiceS: UnsafeMutablePointer<Double>?,
                          taraf: UnsafeMutablePointer<Double>,
                          tarafS: UnsafeMutablePointer<Double>?,
-                         nk: Int, target: Double) {
+                         nk: Int, target: Double, metering: Bool) {
         let bFrom = balCur
         let dt = Double(nk) / srk
         balCur += OnePole.coefficient(dt: dt, tau: 0.03) * (target - balCur)
@@ -209,6 +215,11 @@ extension BowEngine {
             let gT = min(1.0, 1.0 + b)
             voice[i] *= gV
             taraf[i] *= gT
+            // Initialized by process4 whenever metering is armed.
+            if metering {
+                meterChromatic[i] *= gT
+                meterRaga[i] *= gT
+            }
             if let s = voiceS { s[i] *= gV }
             if let s = tarafS { s[i] *= gT }
         }

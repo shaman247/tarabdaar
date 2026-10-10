@@ -44,6 +44,29 @@ public struct InstrumentState: Codable, Sendable {
         strings.filter { $0.set == set }
     }
 
+    /// Enabled raga pitches, independent of pickup gain and the chromatic bridge.
+    public var enabledRagaRatios: [Double] {
+        strings.filter { $0.set == .raga && $0.enabled }
+            .map { $0.ratio(in: scaleRatios) }
+    }
+
+    /// Toggle a pitch class across existing raga octaves, preserving row identities and settings.
+    public mutating func toggleRagaString(degree: Int, octave: Int) {
+        guard scaleRatios.indices.contains(degree), (-2...2).contains(octave) else { return }
+        let matches = strings.indices.filter { i in
+            guard strings[i].set == .raga else { return false }
+            let octaves = log2(strings[i].ratio(in: scaleRatios) / scaleRatios[degree])
+            return abs(octaves - octaves.rounded()) < 1e-9
+        }
+        if !matches.isEmpty {
+            let enabled = !matches.contains { strings[$0].enabled }
+            for i in matches { strings[i].enabled = enabled }
+        } else {
+            strings.append(StringSpec(degree: degree, octave: octave, gain: 0.85, t60: 4))
+            normalizeStrings()
+        }
+    }
+
     /// Mirrors TarabdaarCore's `FretArrangement.droneCount` (not visible
     /// from here); `DroneStringTests` pins the two equal.
     public static let droneSlotCount = 3

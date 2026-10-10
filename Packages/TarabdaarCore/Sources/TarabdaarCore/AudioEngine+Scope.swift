@@ -68,18 +68,18 @@ extension AudioEngine {
                                   active: meterActive)
     }
 
-    /// Radiated level of the main voice and of the taraf (the jt bus) for
+    /// Bus levels of the main voice, chromatic taraf and raga taraf for
     /// the iPad's volume scope. Voice = the String voice bus plus the main
     /// instrument's node when plucked (energy sum; the drone never counts).
     /// Interval RMS since the previous poll, linear, 1.0 ≈ 0 dBFS. ONE poller.
-    public func volumeLevels() -> (voice: Double, taraf: Double) {
-        let bus = stringVoiceSource?.busLevels() ?? (voice: 0, taraf: 0)
+    public func volumeLevels() -> (voice: Double, chromatic: Double, raga: Double) {
+        let bus = stringVoiceSource?.busLevels() ?? (voice: 0, taraf: 0, chromatic: 0, raga: 0)
         lock.lock()
         let voice = playedVoiceLocked(mainInstrumentStorage)
         lock.unlock()
         var voiceSq = bus.voice * bus.voice
         if let l = voice?.outputLevel() { voiceSq += l * l }
-        return (voiceSq.squareRoot(), bus.taraf)
+        return (voiceSq.squareRoot(), bus.chromatic, bus.raga)
     }
 
     /// `(pitchHz, expression, active)` for the primary held voice. `lock` held.

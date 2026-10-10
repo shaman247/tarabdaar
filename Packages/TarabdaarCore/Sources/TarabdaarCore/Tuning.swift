@@ -7,7 +7,7 @@ import SarangiKit
 /// hold the same instance, so nothing mirrors). The tonic is an integer
 /// note anchor plus a ±50 ¢ refinement — the range the sync blob encodes —
 /// set in Hz from the Fret Pad tab. Not persisted: every launch opens on
-/// D4 (a stale restored tonic would silently retune the whole instrument).
+/// E4 (a stale restored tonic would silently retune the whole instrument).
 public final class Tuning: ObservableObject {
     /// The active scale, seeded from the bundled `Default.json` (fallback
     /// `PitchScale.defaultJI`).
@@ -19,8 +19,8 @@ public final class Tuning: ObservableObject {
 
     /// The MIDI notes the tonic anchor may take (C1…B7).
     public static let tonicNoteRange = 24...107
-    /// The tonic every launch opens on: **D4** (293.665 Hz).
-    public static let defaultTonicMidi = 62
+    /// The tonic every launch opens on: **E4** (329.628 Hz).
+    public static let defaultTonicMidi = 64
 
     public init() {}
 

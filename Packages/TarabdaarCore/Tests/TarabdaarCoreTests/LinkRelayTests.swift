@@ -6,13 +6,33 @@ import SarangiKit
 /// and the debounced rebuild funnel.
 final class LinkRelayTests: XCTestCase {
 
+    /// Each bank independently triggers the relay and silence clears all three readings.
+    func testVolumeBanksRelayIndependently() {
+        var levels = (voice: 0.1, chromatic: 0.01, raga: 0.001)
+        var sent: [[UInt8]] = []
+        let relay = VolumeMeterRelay(levels: { levels }, send: { sent.append([$0, $1, $2]) })
+        relay.tick()
+        XCTAssertEqual(sent.last, [levels.voice, levels.chromatic, levels.raga].map(TLPVolume.byte(fromLinear:)))
+        relay.tick()
+        XCTAssertEqual(sent.count, 1)
+        levels.chromatic = 0.02
+        relay.tick()
+        XCTAssertEqual(sent.count, 2)
+        levels.raga = 0.03
+        relay.tick()
+        XCTAssertEqual(sent.count, 3)
+        levels = (0, 0, 0)
+        relay.tick()
+        XCTAssertEqual(sent.last, [0, 0, 0])
+    }
+
     /// The note readout follows pitch, includes per-note expression, and clears despite silent volume.
     func testHighestNoteControlReadout() {
         let mapper = BowControlMapper()
         mapper.setSlotLimit(4)
         mapper.setAxis(expr: 0.8, press: 0.6, pos: 0.3)
         var sent: [TLPNoteControls] = []
-        let relay = VolumeMeterRelay(levels: { (0, 0) }, send: { _, _ in },
+        let relay = VolumeMeterRelay(levels: { (0, 0, 0) }, send: { _, _, _ in },
             noteControls: { AudioEngine.noteControls(mapper: mapper) },
             sendNoteControls: { sent.append($0) })
         func poll() { for _ in 0..<4 { relay.tick() } }

@@ -46,8 +46,9 @@ public struct TarafStrumGesture {
     }
 }
 
-/// Direct plucks above the pad; melody touches remain owned by the pad below.
+/// Direct raga plucks above the fret band; melody touches remain owned by the pad below.
 public struct TarafPluckStrip: View {
+    public static let height: CGFloat = 64
     public let bank: TarafBank
     public let scale: PitchScale
     public let pluck: (UInt32, UInt8) -> Void
@@ -61,18 +62,18 @@ public struct TarafPluckStrip: View {
         self.bank = bank; self.scale = scale; self.pluck = pluck
     }
     public var body: some View {
-        let rows = bank.orderedRows
+        let rows = bank.orderedRows.filter { $0.isDual && !$0.isFollower }
         if !rows.isEmpty {
             GeometryReader { geometry in
                 HStack(spacing: 0) {
                     ForEach(rows) { row in
-                        let label = row.isFollower ? "↗" : scaleLabel(
+                        let label = scaleLabel(
                             forRatio: Double(row.frequency / bank.tonic), degrees: scaleDegrees(from: scale))
                         VStack(spacing: 3) {
                             Text(label).font(.system(size: 11, weight: .medium)).lineLimit(1)
                                 .minimumScaleFactor(0.5)
-                            Rectangle().fill(row.isDual ? Color.orange : Color.cyan.opacity(0.65))
-                                .frame(width: row.isDual ? 2 : 1, height: 21)
+                            Rectangle().fill(Color.orange)
+                                .frame(width: 2, height: 21)
                             Text(String(Int(row.id) + 1)).font(.system(size: 9).monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
@@ -103,7 +104,7 @@ public struct TarafPluckStrip: View {
                         reset()
                     })
             }
-            .frame(height: 64)
+            .frame(height: Self.height)
             .onChange(of: bank) { _ in stroke.reset(); active = nil }
             .onDisappear { reset() }
         }

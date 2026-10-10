@@ -23,7 +23,7 @@ enum DualTaraf {
         // clock at ratio times wall time, preserving the discrete contact law.
         // Physical lengths/displacements scale by 1/ratio, density by 1/ratio².
         let f = 554.7063153796236
-        let length = 0.25, radius = 0.0001, j = 24, m = 40
+        let length = 0.25, radius = 0.0001, j = 8, m = 40
         let mu = Double.pi * radius * radius * 7850
         let tension = 4 * mu * length * length * f * f
         let inertia = Double.pi * pow(radius, 4) / 4

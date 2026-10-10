@@ -142,9 +142,10 @@ public enum SyncedScaleStore {
 /// Sent only while the Fret Pad is the active layout.
 ///
 /// Blob: `[ghostQuarterOctaves][flags][count]`, per segment
-/// `[degreeIndex][x14: 2×7-bit][topY][bottomY][enabled]`, then the 3
-/// drone-button ratios as 14-bit cents above −1200 (0.25–4.0). `flags` is
-/// RESERVED (written 0, decoded ignored). The blob's version is TLP's.
+/// `[degreeIndex][x14: 2×7-bit][topY][bottomY][enabled][ragaOctaves]`, then the 3
+/// drone-button ratios as 14-bit cents above −1200 (0.25–4.0). `flags`
+/// bit 0 marks raga masks (bits 0…4 = octaves −2…+2). Older cached blobs
+/// without masks decode with every fret eligible. The blob's version is TLP's.
 /// The fret pitch warp is deliberately NOT here — `ctl_fret_warp` is a
 /// live registry param relayed over JOYCON_STATE.
 public enum FretArrangementSysEx {
@@ -153,7 +154,7 @@ public enum FretArrangementSysEx {
         func b7(_ v: Int) -> UInt8 { UInt8(max(0, min(127, v))) }
         let segments = a.segments.prefix(127)
         var blob: [UInt8] = [b7(Int((a.ghostExtentOctaves * 4).rounded())),
-                             0,   // flags — reserved
+                             1,   // per-segment raga octave masks
                              UInt8(segments.count)]
         for s in segments {
             blob.append(b7(s.degreeIndex))
@@ -162,6 +163,7 @@ public enum FretArrangementSysEx {
             blob.append(b7(Int((s.topY * 127).rounded())))
             blob.append(b7(Int((s.bottomY * 127).rounded())))
             blob.append(s.enabled ? 1 : 0)
+            blob.append(s.ragaOctaves & 0x1F)
         }
         for i in 0..<FretArrangement.droneCount {
             let r = i < a.droneRatios.count ? a.droneRatios[i]
@@ -178,19 +180,21 @@ public enum FretArrangementSysEx {
         guard blob.count >= 3 else { return nil }
 
         let extent = Double(blob[0]) / 4.0
-        // blob[1] = the reserved flags byte (ignored).
+        let hasRagaMasks = blob[1] & 1 != 0
+        let segmentSize = hasRagaMasks ? 7 : 6
         let count = Int(blob[2])
         var i = 3
         var segments: [FretSegment] = []
         for _ in 0..<count {
-            guard i + 6 <= blob.count else { return nil }
+            guard i + segmentSize <= blob.count else { return nil }
             let x14 = get14(blob, i + 1)
             segments.append(FretSegment(degreeIndex: Int(blob[i]),
                                         x: Double(x14) / 16383.0,
                                         topY: Double(blob[i + 3]) / 127.0,
                                         bottomY: Double(blob[i + 4]) / 127.0,
                                         enabled: blob[i + 5] != 0))
-            i += 6
+            if hasRagaMasks { segments[segments.count - 1].ragaOctaves = blob[i + 6] & 0x1F }
+            i += segmentSize
         }
         var drones = FretArrangement.defaultDroneRatios
         if i + 2 * FretArrangement.droneCount <= blob.count {
@@ -250,7 +254,7 @@ extension JoyConTiltDisplay {
     }
 
     public func frame(stateSeq: UInt16, timestampUs: UInt32,
-                      volVoice: UInt8, volTaraf: UInt8) -> TLPJoyConState {
+                      volVoice: UInt8, volChromatic: UInt8, volRaga: UInt8) -> TLPJoyConState {
         func b(_ v: Double) -> UInt8 {
             UInt8((min(max(v, -1), 1) + 1) / 2 * 255.0 + 0.5)
         }
@@ -267,7 +271,7 @@ extension JoyConTiltDisplay {
             // floor 1 so a tiny window never encodes as "unset" 0
             strikeWin: UInt8(min(max((strikeWindowS / Self.strikeWinUnitS).rounded(),
                                      1), 255)),
-            volVoice: volVoice, volTaraf: volTaraf,
+            volVoice: volVoice, volChromatic: volChromatic, volRaga: volRaga,
             fieldWarp: UInt8(min(max(fieldWarp, 0), 1) * 255.0 + 0.5),
             octave: UInt8(bitPattern: Int8(clamping: octaveShift)),
             wristRate1: b(wristRate1), wristRate2: b(wristRate2),
@@ -522,13 +526,14 @@ public final class NoteControlDisplay {
     }
 }
 
-/// Thread-safe rolling buffer of received (voice, taraf) levels; samples
+/// Thread-safe rolling buffer of received (voice, chromatic, raga) levels; samples
 /// are sparse and the scope forward-fills.
 public final class VolumeHistory {
     public struct Sample: Sendable {
         public let t: TimeInterval        // ProcessInfo systemUptime
         public let voice: Double
-        public let taraf: Double
+        public let chromatic: Double
+        public let raga: Double
     }
     private let lock = NSLock()
     private var samples: [Sample] = []
@@ -537,11 +542,11 @@ public final class VolumeHistory {
 
     public init() {}
 
-    /// Append one received level pair (any thread).
-    public func record(voice: Double, taraf: Double) {
+    /// Append one received level triple (any thread).
+    public func record(voice: Double, chromatic: Double, raga: Double) {
         let now = ProcessInfo.processInfo.systemUptime
         lock.lock()
-        samples.append(Sample(t: now, voice: voice, taraf: taraf))
+        samples.append(Sample(t: now, voice: voice, chromatic: chromatic, raga: raga))
         let cutoff = now - Self.window
         if let first = samples.first, first.t < cutoff {
             samples.removeFirst(samples.firstIndex { $0.t >= cutoff } ?? 0)

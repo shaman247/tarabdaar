@@ -1,0 +1,60 @@
+# Tarabdaar - Codex Development Guide
+
+This file describes the instrument as it is. Its development history (every deletion, rename and re-bless with its rationale) lives in `docs/history/` — read `docs/history/CLAUDE-2026-09-03.md` before resurrecting anything that looks missing.
+
+## Standing directive: local web development
+
+- Do all web development locally on the user's machine: edit local files, build and test locally, and serve previews on localhost.
+- Do not use the Sites connector or any Sites tools, including read-only discovery, registration, source uploads, publishing, or deployment.
+- Do not create or restore hosted copies, add hosting registrations, or upload web source or build artifacts to an external host. The user must explicitly change this directive before any hosted workflow is used.
+- Reuse the existing local server when available. The Fret Pad runs at `http://127.0.0.1:4174` via `npm start` in `web-fret-pad/`.
+
+## Documentation
+
+`docs/` is the detailed reference, one page per subsystem; read the relevant page before changing the code it describes. The Markdown is the source; `tools/gen_docs_html.py` renders `docs/html/` on every `tools/build-mac.sh` run — never edit `docs/html/*` by hand. `docs/parameters.md` is **auto-generated** by `paramdoc` from `ParamRegistry`; change the definitions, never the file. `docs/tech-debt.md` is the open backlog from the whole-tree audit: delete an entry when its change lands, never leave a "done" note.
+
+## What the instrument is
+
+**Two devices, one link.** An iPad runs the **Fret Pad**, the only playing surface, and streams touches and raw tilt over **TLP** (`Packages/TarabdaarCore/.../Link/`) to a Mac that owns all the sound. Bundle IDs `com.tarabdaar.Tarabdaar` / `com.tarabdaar.TarabdaarMac`; presets are `.tarabdaar`.
+
+**Three voices.** The sarangi **String voice** (`SarangiKit.BowEngine` + the `CBowKernel` C friction kernel) is the default played voice. The **Tanpura** (`TanpuraEngine` + `tanpura_kernel.c`) is the default drone voice and an optional main instrument; the **Sitar** is a second `TanpuraEngine` mounted from `sitar_live.json` (the scale-model role ladder), main-instrument only. Both plucked voices charge the String kernel's sympathetic web through its inject ring.
+
+**The taraf.** The sympathetic strings are modal-jawari rows inside the String kernel (`bow_jt_*`): scale-degree rows on the raga bridge plus a chromatic set (`bow_jtc_gain`/`_norm`/`_evolve`) over the same jawari geometry. The bridge force enters each row through the fitted 0.90 L tap, and `bow_jt_couple` (0…1 of a measured safe range, live, **default 0 = byte-null**) returns the rows' summed **DC-blocked** bridge force into the played strings one block out, so the web loads the bridge and charges itself. Two traps that look like gate bugs but are not: the return MUST be DC-blocked (the raw row load carries the wrap preload and self-excites the web), and a sleeping row FADES its return out rather than stepping to 0. Derivation, scales and measurements: [docs/sarangi.md](docs/sarangi.md); guard: `TarafCoupleTests`. A melody-follower row can live-retune to the played pitch. The Strings tab (⌘2) edits the rows; drone buttons and the Joy-Con strum pluck them.
+
+**Not present, by decision** (details and dates in `docs/history/`): the SWAM/hosted-AU voice, the coupled bridge–body network and its FX rack, the linear comb-string taraf web, the Harmonics/Simulator/Chord Pad/String Pad/Pitch Pad tabs, the in-process MIDI note vocabulary and the headless audition pipeline, the fixed sargam naming table, per-string ratio/Hz tuning, the 0.90 L taraf radiation pickup (`bow_jt_tap`), the taraf drive-shape morph (`bow_jt_drive_term`), fret linger / auto-vibrato, the legato/portamento allocation laws and the meend smoother, the automatic vibrato LFO, per-row taraf detune. Do not restore any of them on the assumption they were lost.
+
+## Key conventions
+
+- **UI copy.** Never add explanatory text or user instructions to the UI unless the user explicitly requests them. This includes helper text, instructional tooltips, and explanatory captions. Keep explanations in documentation or conversation; ordinary control labels and values belong in the UI.
+- **The wire is TLP, not the MIDI vocabulary.** The iPad streams one latest-wins `PERF_STATE` frame (every touch at f32 fractional-MIDI pitch with an `onsetSeq`, a fingertip `radius` byte, 16-bit tilt ×3, drone mask, strike byte, chord selection); the Mac streams sync events and `JOYCON_STATE` display frames back. Frames tunnel in one SysEx envelope over CoreMIDI — USB first, else **BLE-MIDI** (kept deliberately: its ~11 ms connection interval beats any custom GATT link). `TarabLink` paces sends at 120 Hz on its own queue. **There is no MIDI note vocabulary** — no notes, bends, CCs or MPE anywhere, in-process included; CoreMIDI is only the TLP transport, and `MIDIInput` exists solely to reassemble inbound SysEx. Spec: [docs/midi-and-audio.md](docs/midi-and-audio.md).
+- **Almost no shared state.** iPad owns glide and calibration; Mac owns physics, tuning and bindings. The only cross-device state is the one-way pad sync (`SCALE_STATE`, `FRET_ARRANGEMENT`) plus the acted-on `JOYCON_STATE` fields (`connected`, `fieldWarp`, `octave`) and the iPad's chord selection. Do not add shared parameters.
+- **The iPad evaluates no mappings.** It streams raw axes; the Mac evaluates `tiltMapping` (`AppController.handleRawTilt` → `applyTiltAxis`). The strike byte feeds the `.strike`/`.acceleration` dimension pair through `evaluateStrikeBlend` (per-note window), never through `applyTiltAxis`; `.fingerAccel` is derived on the Mac from the frame pitches, and `.touchSize` (raw value 16, axis 12) from the per-touch `radius` byte — `TouchSizeTracker` maps 31.3 → 73.0 pt onto a UNIPOLAR 0…1, following the newest sounding touch through `applyAxis`. Apple quantises the radius to ≈10.42 pt levels, so the tracker ESTIMATES the finger rather than filtering the staircase: each level transition is an exact position fix (the midpoint, at that instant), two consecutive fixes measure the speed, the estimate coasts between them clamped to the current bin, and a critically damped tracker gives the axis continuous velocity.
+- **Packages.** `TarabdaarCore` = cross-platform building blocks (scale, link, config, motion, pad engine, Mac-only `AudioEngine`); `SarangiKit` = the voices and the kernel. Anything used across a package boundary must be `public`, `init` included. `CBowKernel` builds with `-O3` always.
+- **ONE parameter registry.** Every knob is a `ParamSpec` in `ParamRegistry.swift` with a `scope` (`.global`/`.perNote`) and an apply strategy (`live`/`rebuild`/`hybrid`); adding a parameter is one entry (a `.live` knob that is not a String-voice control names its `target`), and it appears in the Parameters tab, the composite and tilt menus and the docs. The one apply path is `AppController.applyParamToVoice`, a switch on the strategy and the target with no per-key cases. Ranges live in the registry; `Config.swift` holds system constants only. The Parameters tab and `docs/parameters.md` render the same `ParamScope`/`ParamTiming` strings — never derive display timing from `apply` alone.
+- **ONE scale, ONE tonic.** `Tuning` owns them — one instance per device, shared by both Mac pad engines, every follower on its `didChange`; the tonic is set in Hz on the Fret Pad tab (the app's only Hz input). Frets, tarab rows and drones are scale-degree references; the tarab pool is pitch-sorted with one string per pitch (`InstrumentState.normalizeStrings`). Every pitch is named by the scale's own labels (`scaleLabel(degree:)` / `scaleLabel(forRatio:)`, `ScaleDegrees.swift`); concert note names label absolute Hz only. Use `scale.frequency(for:)`, never a hardcoded 12-TET formula; interpolate pitch in `log2(freq)`.
+- **One touch = one string.** Each touch gets a u16 wire id and full-resolution pitch; the mapper allocates `bow_live_poly` gut strings on one bridge, keyed by that id. Every note-on mounts a fresh string; within a note the pitch follows the finger at wire rate — vibrato and meend are played, not synthesized (player vibrato depth is ONE global, the `.vibratoAmount` composite target; a 2026-09-04 per-note fingertip-flatten ease was removed the same day — it sounded fake). The **glide queue** (`GlideSequencer`, `ctl_glide_*`, off by default) sits above allocation and turns overlapping onsets into glissando waypoints.
+- **Threads.** Producers write `OutboundPlayState`; the link paces the wire. The audio thread runs the source render blocks only. Hot paths go through `StringVoiceSource.setControl` (the static knob table under `cacheLock`), never a registry lookup per frame. SwiftUI updates on the iPad are throttled to ~15 Hz.
+- **`InputDimension`** is the dimension enum (avoids `Foundation.Dimension`). **`PadLayout`'s non-fret cases must stay** — the sync blob encodes the layout by raw value.
+
+## Building and testing
+
+```bash
+./tools/build-mac.sh                       # Mac build + docs/parameters.md + docs/html
+cd Packages/TarabdaarCore && swift test    # fast loop, seconds
+cd Packages/SarangiKit && swift test       # kernel lockstep + ByteNullContractTests
+tools/test-full.sh                         # the full guard: gated DSP suites, phase 2 serial
+```
+
+The DSP render suites (`TarafRemovalParityTests`, `RealtimePerformanceTests`, `RebuildCostTests`, `ZipperTests`, `LiveParamPushTests`, `TarafCoupleTests`) skip without `TARABDAAR_SLOW_TESTS=1`; `tools/test-full.sh` is required before committing any kernel, table-builder, parameter or levels change (both phases run, and either failure fails the guard). The guard set is deliberately small — **about 77 tests, 10 in SarangiKit and 67 in TarabdaarCore** — and a test earns its place only by pinning a contract that would break silently (codec/persistence compatibility, the allocation law, a threading repro, a byte-null path, parity), a stability bound, or a lockstep with a golden: one render hash pins the shipped sound, `ByteNullContractTests` pins that every "0 = off" path is bit-null at rest, `TarafCoupleTests` pins that the coupled web cannot run away, `ControlCacheConcurrencyTests` pins that the live apply path survives concurrent writers, and the logic suites pin invariants nothing else would catch. Do not add a test that re-covers another one, asserts a calibration number, or checks that a setter stored a value. When you change the sound, bless the hash on purpose; when you add an optional path, add a contract case. Test doc comments are one line — no dates, no history: the ear judges the sound, git holds the story.
+
+`tools/install-hooks.sh` installs a pre-commit hook that runs the full guard when a kernel, builder, parameter, artifact or DSP-test file is staged and the fast loop otherwise (`git commit --no-verify` skips it once).
+
+The iOS target builds with `xcodebuild -scheme Tarabdaar` against an iPad simulator (`-showdestinations` lists names). Sensors and MIDI need a physical device. Adding a file to an Xcode target: the `add-xcode-file` skill (files under `Packages/` need nothing).
+
+## Sound design
+
+The physics ship fitted in `bowed_string.json`; Tarabdaar edits values, it does not re-fit. Level calibration lives in the preset (`bow_live_trim`, `bow_rev_*`), `bow_gain` is the performance master volume, and a linked-stereo limiter rides the end of the chain; the full levels contract is [docs/sound-design.md](docs/sound-design.md). Presets are one `TarabdaarPreset` document covering the whole rig. To change the shipping default, edit `bowed_string.json` or the tarab builders and re-bless the parity hash deliberately.
+
+## Updating documentation
+
+When you change code, update the matching `docs/` page in the same commit, in the present tense: say what the instrument does now, not what it used to do. Move rationale that only matters as history into `docs/history/`. `docs/parameters.md` and `docs/html/` are generated.

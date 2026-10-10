@@ -167,7 +167,7 @@ public enum FretArrangementStore {
         // any drone count but the current one falls back in the initializer
         return FretArrangement(
             segments: doc.segments,
-            ghostExtentOctaves: doc.ghostExtentOctaves ?? 0.5,
+            ghostExtentOctaves: doc.ghostExtentOctaves ?? FretArrangement.defaultGhostExtentOctaves,
             droneRatios: doc.droneRatios ?? FretArrangement.defaultDroneRatios)
     }
 }

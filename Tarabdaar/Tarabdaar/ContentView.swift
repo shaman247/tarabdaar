@@ -111,7 +111,8 @@ struct ContentView: View {
                 // the toolbar (the scope polls at UI rate).
                 scaleSync?.volumeHistory.record(
                     voice: TLPVolume.value01(s.volVoice),
-                    taraf: TLPVolume.value01(s.volTaraf))
+                    chromatic: TLPVolume.value01(s.volChromatic),
+                    raga: TLPVolume.value01(s.volRaga))
                 let display = JoyConTiltDisplay(frame: s)
                 scaleSync?.applyJoyCon(display)
                 // The shift acts at the engine's outbound-pitch point
@@ -132,7 +133,7 @@ struct ContentView: View {
                     scaleSync?.noteControls.update(.idle)
                     // The Mac's levels are history too — drop the scope
                     // to silence instead of freezing at the last value.
-                    scaleSync?.volumeHistory.record(voice: 0, taraf: 0)
+                    scaleSync?.volumeHistory.record(voice: 0, chromatic: 0, raga: 0)
                     // And the octave shift with them — .idle shows 0, so
                     // the engine must agree (a re-link resends the truth
                     // via the forced state push).

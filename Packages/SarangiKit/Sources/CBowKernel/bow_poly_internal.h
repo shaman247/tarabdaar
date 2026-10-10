@@ -44,7 +44,17 @@ static double pfrac_read(const double *buf, int n, int w, double delay) {
     int i0 = (int)rp;
     double fr = rp - i0;
     const int m = n - 1;
-    return buf[i0 & m] * (1.0 - fr) + buf[(i0 + 1) & m] * fr;
+    /* Cubic Lagrange interpolation keeps numerical loss small, leaving
+       physical damping to the termination and material coefficients.
+       Sub-two-sample segments keep the causal linear read. */
+    if (delay < 2.0)
+        return buf[i0 & m] * (1.0 - fr) + buf[(i0 + 1) & m] * fr;
+    double cm = -fr * (fr - 1.0) * (fr - 2.0) / 6.0;
+    double c0 = (fr + 1.0) * (fr - 1.0) * (fr - 2.0) / 2.0;
+    double c1 = -(fr + 1.0) * fr * (fr - 2.0) / 2.0;
+    double c2 = (fr + 1.0) * fr * (fr - 1.0) / 6.0;
+    return cm * buf[(i0 - 1) & m] + c0 * buf[i0 & m]
+         + c1 * buf[(i0 + 1) & m] + c2 * buf[(i0 + 2) & m];
 }
 
 /* per-string cross-sample state */
@@ -59,10 +69,10 @@ typedef struct {
     double vRet, vRet2;
     double apXs[4], apYs[4];
     double nz1, nz2, nz1b, nz2b;
-    double tEnv, fbPrev;
     double Tr3[3];
     double kGate;
     double senv;        /* chunk peak of |brLp| — ring envelope for skip */
+    double dampLoss, dampTarget; /* extra round-trip loss, slewed at the nut */
     /* torsional wave loop */
     double bufT[MAXBOW];
     int wti;
@@ -104,7 +114,7 @@ typedef struct {
     double mu_s, mu_d, v0f, nutA, brA;
     double thLeak, thA, thD, thFloor;
     double bowDisp, zload;
-    double nA, nT, nPow, nzHi, nzLo, nDir, nzHiD;
+    double nA, nPow, nzHi, nzLo, nDir, nzHiD;
     double gutG, dispN, nailK, f0Open, gutA2;
     double torsRatio, torsG, torsC;
     double v0Pow, v0Ref;
@@ -115,6 +125,7 @@ typedef struct {
     /* --- derived per-sample constants (poly_load_scalars; sr-bound) --- */
     double nutFc0;                       /* nail-law corner at the open string */
     double kgAtk, kgRel;                 /* key-gate 3 ms attack / 8 ms release */
+    double dampSlew;                     /* 10 ms release-damper coefficient */
     double slCD, slAtk, slRel;           /* slide tracker: 10 ms smoother, env */
     double slAAtk, slARel;               /* slide-noise env attack / release */
     double thLeakPow[3];                 /* thLeak^{0.92, 1, 1.09} per hair group */
@@ -125,6 +136,12 @@ typedef struct {
        contact with dt/4 substepping past jtDeep; driven ONE-WAY by the previous
        sample's junction force. Loaded by bow_poly_jt_load after
        bow_poly_init; njt == 0 or jtGain == 0 = byte-null by construction. */
+    /* Independently owned callback bank; parent workers exclude its rows.
+       Both banks preserve document row indices, with no shared DSP state. */
+    void *jtInline;
+    int jtInlineOnly;
+    double jtQuadraticKc;
+    double *jtInlineDrive, *jtInlineCap;
     int njt, jtJ;
     int *jtM, *jtMOff, *jtZOff;
     double *jtCa, *jtCb, *jtCa4, *jtCb4, *jtWd, *jtWdI,
@@ -145,6 +162,13 @@ typedef struct {
        mean of the skipped samples. */
     int jtDiv, jtPhase;
     double jtHold, jtFacc;
+    /* Display-only bank taps, after shared body/tone, before shared FX; never fed into sound. */
+    unsigned char *jtMeterChromatic;
+    double *jtMeterPartials, *jtMeterWebC, *jtMeterWebR;
+    double *jtMeterRingC, *jtMeterRingR;
+    double jtMeterHoldC, jtMeterOutC, jtMeterOutR;
+    double jtMeterLp, jtMeterHp, jtMeterFilteredC;
+    double *jtMeterBody; /* four K-sized body state arrays */
     /* jt tone LP on the radiated sum (bow_poly_jt_set_lp); <= 0 = bypass,
        bit-exact */
     double jtLpA, jtLpY;
@@ -193,6 +217,7 @@ typedef struct {
        wrap preload. */
     double jtRadA;
     double *jtRadScale, *jtRadLp;
+    double *jtRadSmooth;     /* chromatic radiation-only [1,2,1]/4 history */
     unsigned char *jtRadPrime;
     /* per-row radiation scale slew: jtRadScaleCur glides ~40 ms per jt tick
        toward jtRadScale (a coefficient reload steps the target). Constant
@@ -324,8 +349,8 @@ typedef struct {
        byte-null. */
     int jtBodyOn;
     double jtBodyA, jtBodyTgt, jtBodyCur;
-    double jbx1[96], jbx2[96], jby1[96], jby2[96];      /* mid twin */
-    double jbsx1[96], jbsx2[96], jbsy1[96], jbsy2[96];  /* side twin */
+    double *jbx1, *jbx2, *jby1, *jby2;      /* mid twin, K modes */
+    double *jbsx1, *jbsx2, *jbsy1, *jbsy2;  /* side twin, K modes */
     double *jtQ, *jtP;            /* modal state, concat modes */
     double jtFprev, jtFmax, jtPenMax;   /* + telemetry */
     double jtFdc;                 /* drive DC tracker (~50 ms) */
@@ -420,7 +445,8 @@ typedef struct {
     double sdX1[2][16], sdX2[2][16], sdY1[2][16], sdY2[2][16];
     double hpG;
     /* --- shared cross-sample state --- */
-    double bx1[96], bx2[96], by1[96], by2[96];
+    double *bodyState;  /* 12 K-sized vectors, allocated only at build */
+    double *bx1, *bx2, *by1, *by2;
     double hpY, hpX1;
     double pLp;
     double disp;           /* leaky bridge displacement (integral of V) */
@@ -479,6 +505,24 @@ static inline double jt_cap_ceiling(const bow_poly_state_t *st, double venv)
     if (st->jtGMulOn) g *= fabs(st->jtGMulCur);
     if (g < 1e-12) g = 1e-12;
     return venv * st->jtCapRatio / g;
+}
+
+/* Bank ownership is immutable after construction. */
+static inline int jt_row_active(const bow_poly_state_t *st, int row) {
+    if (!st->jtInline && !st->jtInlineOnly) return 1;
+    const int chromatic = st->jtMeterChromatic[row] != 0;
+    return st->jtInlineOnly ? chromatic : !chromatic;
+}
+static inline int jt_row_quadratic(const bow_poly_state_t *st, int row) {
+    return (st->jtInline || st->jtInlineOnly) && st->jtMeterChromatic[row];
+}
+/* Packed active width; the ABI slot retains its original storage stride. */
+static inline int jt_row_contacts(const bow_poly_state_t *st, int row) {
+    return jt_row_quadratic(st, row) && st->jtJ > 4 ? 4 : st->jtJ;
+}
+static inline double jt_row_kc(const bow_poly_state_t *st, int row) {
+    return jt_row_quadratic(st, row)
+        ? st->jtQuadraticKc : st->jtKc;
 }
 
 /* the slewed jt output gain, stepped ONCE per kernel output sample (call
@@ -561,6 +605,30 @@ static inline double jt_lp_step(bow_poly_state_t *st, double x)
     /* jt tone HP (x − LP(x)) after the LP; unarmed = warm-tracked identity */
     if (st->jtHpA <= 0.0) st->jtHpY = x;
     else { st->jtHpY += st->jtHpA * (x - st->jtHpY); x -= st->jtHpY; }
+    /* A shadow linear filter attributes the common tone/body output to
+       the chromatic bank without changing the mixed signal's arithmetic. */
+    if (st->jtMeterChromatic) {
+        double c = st->jtMeterHoldC;
+        if (st->jtBodyOn) {
+            double wet = st->c0 * c;
+            const int K = st->K;
+            double *x1 = st->jtMeterBody, *x2 = x1 + K;
+            double *y1 = x2 + K, *y2 = y1 + K;
+            for (int k = 0; k < K; k++) {
+                double y = st->bn0[k] * (c - x2[k])
+                    + st->ba1[k] * y1[k] + st->ba2[k] * y2[k];
+                x2[k] = x1[k]; x1[k] = c;
+                y2[k] = y1[k]; y1[k] = y;
+                wet += st->bC[k] * y;
+            }
+            c += st->jtBodyCur * (wet - c);
+        }
+        if (st->jtLpA <= 0.0) st->jtMeterLp = c;
+        else { st->jtMeterLp += st->jtLpA * (c - st->jtMeterLp); c = st->jtMeterLp; }
+        if (st->jtHpA <= 0.0) st->jtMeterHp = c;
+        else { st->jtMeterHp += st->jtHpA * (c - st->jtMeterHp); c -= st->jtMeterHp; }
+        st->jtMeterFilteredC = m * c;
+    }
     return m * x;
 }
 
@@ -603,9 +671,6 @@ static inline void jt_cpl_put(bow_poly_state_t *st, long long *w, double v)
 double jt_tick(bow_poly_state_t *st, double Fd, double ev,
                       double cap, double dn, double comp,
                       double *sideOut, double *cplOut);
-void jt_run_job(bow_poly_state_t *st, const double *drv,
-                       const double *cv, int n,
-                       double *web, double *webS);
 void jt_pool_stop(bow_poly_state_t *st);
 void jt_gate_eps(bow_poly_state_t *st, double refDisp);
 void jt_track_retune(bow_poly_state_t *st);

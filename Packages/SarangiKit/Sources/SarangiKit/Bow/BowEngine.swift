@@ -149,6 +149,8 @@ public final class BowEngine {
     private var y96: [Double], y48: [Double]
     private var y96S: [Double], y48S: [Double]   // stereo side scratch
     private var y96Jt: [Double], y96JtS: [Double] // FX split taraf bus
+    let meterChromatic: UnsafeMutablePointer<Double>
+    let meterRaga: UnsafeMutablePointer<Double>
     // poly per-slot state
     var filters: [BowControlFilter] = []
     private var lastSerial: [UInt32] = []
@@ -214,6 +216,8 @@ public final class BowEngine {
         y48 = [Double](repeating: 0, count: maxFrames)
         y96S = [Double](repeating: 0, count: nk)
         y48S = [Double](repeating: 0, count: maxFrames)
+        meterChromatic = .allocate(capacity: nk)
+        meterRaga = .allocate(capacity: nk)
         y96Jt = [Double](repeating: 0, count: nk)
         y96JtS = [Double](repeating: 0, count: nk)
         fxUnits = [FXChainUnit(sr: sr * Double(osFactor)),  // drive
@@ -292,13 +296,20 @@ public final class BowEngine {
             droneHeldMask = [Bool](repeating: false, count: jt.rowFreqs.count)
             selPitches = [Double](repeating: 0.0, count: self.maxPoly)
             if let pk = pkernel {
-                bow_poly_jt_load(pk, Int32(jt.M.count), jt.J, jt.M,
-                                 jt.ca, jt.cb, jt.ca4, jt.cb4, jt.wd,
-                                 jt.rowForceScale, jt.rowPinScale,
-                                 jt.rowCplScale,
-                                 jt.phiD, jt.phiU, jt.phiF,
-                                 jt.b, jt.G, jt.G4, jt.gd, jt.gd4,
-                                 jt.phys, jt.q0)
+                let chromaticKernel = jt.hasChromatic ? withUnsafePointer(to: s) { sp in
+                    bow_poly_init(1, t.sr, Int32(t.ba1.count), t.ba1, t.ba2, t.bn0, t.bA, t.bC, sp)
+                } : nil
+                for bank in [pk, chromaticKernel].compactMap({ $0 }) {
+                    bow_poly_jt_load(bank, Int32(jt.M.count), jt.J, jt.M,
+                                     jt.ca, jt.cb, jt.ca4, jt.cb4, jt.wd,
+                                     jt.rowForceScale, jt.rowPinScale,
+                                     jt.rowCplScale,
+                                     jt.phiD, jt.phiU, jt.phiF,
+                                     jt.b, jt.G, jt.G4, jt.gd, jt.gd4,
+                                     jt.phys, jt.q0)
+                    bow_poly_jt_meter_banks(bank, jt.rowChromatic.map { $0 ? UInt8(1) : 0 }, Int32(jt.M.count))
+                }
+                if let chromaticKernel { bow_poly_jt_inline_attach(pk, chromaticKernel) }
                 bow_poly_jt_output_levels(pk, jt.rowOutputLevel, Int32(jt.rowOutputLevel.count), 1)
                 // The retired selector is retained only for isolated research fixtures.
                 let fixtureRow = Int(bp.v("bow_jt_dual_row", 0).rounded()) - 1
@@ -310,6 +321,7 @@ public final class BowEngine {
                 bow_poly_jt_dual_tone(pk, bp.v("bow_jt_dual_lp", 20000))
                 bow_poly_jt_dual_selectivity(pk, bp.v("bow_jt_dual_select", 0))
                 bow_poly_jt_dual_bloom(pk, bp.v("bow_jt_bow_bloom", 1))
+                bow_poly_jt_dual_pluck_level(pk, bp.v("bow_jt_dual_pluck_level", 0.5))
                 // pool spawn happens at build, never on the audio thread
                 if jt.threads >= 2 {
                     // A full physical bank needs more lanes than the one-row
@@ -498,8 +510,9 @@ public final class BowEngine {
     var meterArmed = false
     var meterSumV = 0.0          // Σ (outGain·x)² since last read
     var meterSumT = 0.0
+    var meterSumC = 0.0, meterSumR = 0.0
     var meterFrames = 0
-    var meterLast = (0.0, 0.0)
+    var meterLast = (voice: 0.0, taraf: 0.0, chromatic: 0.0, raga: 0.0)
 
     // staged under tiltLock (target); balCur is render-thread only
     var balTarget = 0.0
@@ -539,6 +552,8 @@ public final class BowEngine {
     var liveRampArmed = false
 
     deinit {
+        meterChromatic.deallocate()
+        meterRaga.deallocate()
         if let pk = pkernel { bow_poly_free(pk) }
     }
 
@@ -649,6 +664,11 @@ public final class BowEngine {
                                     fb: fb.baseAddress! + o,
                                     beta: be.baseAddress! + o,
                                     gate: ga.baseAddress! + o)
+                                let release = filters[s].releaseT60
+                                let damping = slot.gate > 0 ? 0 : (slot.damped
+                                    ? (release > 0 ? min(release, 0.12) : 0.12) : release)
+                                bow_poly_set_string_damping(pk, Int32(s), damping,
+                                                            f0[o])
                             }
                         }
                     }
@@ -676,11 +696,13 @@ public final class BowEngine {
                     if splitBus {
                         y96Jt.withUnsafeMutableBufferPointer { jb in
                             y96JtS.withUnsafeMutableBufferPointer { jsb in
-                                bow_poly_process3(
+                                bow_poly_process4(
                                     pk, Int32(nk), Int32(slotStride),
                                     cF0, cVb, cFb, cBeta, cGate, cXv,
                                     yb.baseAddress!, sb.baseAddress!,
-                                    jb.baseAddress!, jsb.baseAddress!)
+                                    jb.baseAddress!, jsb.baseAddress!,
+                                    metering ? meterChromatic : nil,
+                                    metering ? meterRaga : nil)
                                 fxUnits[vIdx].processMidSide(
                                     yb.baseAddress!, sb.baseAddress!, nk)
                                 fxUnits[tIdx].processMidSide(
@@ -691,7 +713,7 @@ public final class BowEngine {
                                         voiceS: sb.baseAddress!,
                                         taraf: jb.baseAddress!,
                                         tarafS: jsb.baseAddress!,
-                                        nk: nk, target: balT)
+                                        nk: nk, target: balT, metering: metering)
                                 }
                                 if metering {
                                     meterBuses(voice: yb.baseAddress!,
@@ -724,10 +746,12 @@ public final class BowEngine {
             y96.withUnsafeMutableBufferPointer { yb in
                 if splitBus {
                     y96Jt.withUnsafeMutableBufferPointer { jb in
-                        bow_poly_process3(pk, Int32(nk), Int32(slotStride),
+                        bow_poly_process4(pk, Int32(nk), Int32(slotStride),
                                           cF0, cVb, cFb, cBeta, cGate, cXv,
                                           yb.baseAddress!, nil,
-                                          jb.baseAddress!, nil)
+                                          jb.baseAddress!, nil,
+                                          metering ? meterChromatic : nil,
+                                          metering ? meterRaga : nil)
                         fxUnits[vIdx].processMono(yb.baseAddress!, nk)
                         fxUnits[tIdx].processMono(jb.baseAddress!, nk)
                         if balOn {
@@ -735,7 +759,7 @@ public final class BowEngine {
                                             voiceS: nil,
                                             taraf: jb.baseAddress!,
                                             tarafS: nil,
-                                            nk: nk, target: balT)
+                                            nk: nk, target: balT, metering: metering)
                         }
                         if metering {
                             meterBuses(voice: yb.baseAddress!,

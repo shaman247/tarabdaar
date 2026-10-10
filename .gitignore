@@ -61,6 +61,14 @@ _archive/
 auditions/
 auditions-ci/
 auditions-glide/
+/output/
+/tools/experiments/
+/docs/history/Codex-*.md
+
+# Independent local browser projects (not part of the native instrument)
+/web-fret-pad/
+/web-sarangi/
+/docs/web-fret-pad.md
 
 # Media & render artifacts (asset-catalog images are re-included below)
 *.png
