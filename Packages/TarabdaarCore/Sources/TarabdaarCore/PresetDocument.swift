@@ -35,6 +35,17 @@ public struct TarabdaarPreset: Codable {
     /// `AppController.paramValues` holds).
     public var paramValues: [String: Double]?
 
+    /// Legacy files merge split stores and express the old strum threshold on today's scale.
+    public func resolvedParamValues() -> [String: Double]? {
+        guard version == 1 else { return paramValues }
+        guard paramValues != nil || stringOverrides != nil else { return nil }
+        var values = (stringOverrides ?? [:]).merging(paramValues ?? [:]) { _, value in value }
+        if let threshold = values["ctl_strum_thresh"], threshold > 1 {
+            values["ctl_strum_thresh"] = min(1, threshold / 127)
+        }
+        return values
+    }
+
     /// The FX rack's EQ curves — each insert point's control points, keyed
     /// by the point's key prefix (`fx_voice_`). The curve is inferred from
     /// the points (`SarangiKit.EQCurve`); a point with no entry is flat.

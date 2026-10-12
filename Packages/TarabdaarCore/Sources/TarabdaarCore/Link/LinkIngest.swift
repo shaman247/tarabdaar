@@ -64,19 +64,48 @@ public final class LinkIngest {
     /// deselected.
     public var onChordSelect: ((ChordSelection?) -> Void)?
 
+    private let touchIdentities: TouchIdentityAllocator?
+    private var hostIDs: [UInt16: UInt16] = [:]
     private var last: TLPPerfState?
     private var lastTilt: [Double] = [.nan, .nan, .nan]
     private var lastAccel: (Int16, Int16, Int16) = (.min, .min, .min)
     private var lastStrike: UInt8?
 
-    public init(sink: LinkPerformanceSink? = nil) {
+    /// Share `touchIdentities` across every lane feeding one host. Omitting it
+    /// preserves source ids for single-lane consumers.
+    public init(sink: LinkPerformanceSink? = nil,
+                touchIdentities: TouchIdentityAllocator? = nil) {
         self.sink = sink
+        self.touchIdentities = touchIdentities
+    }
+
+    deinit {
+        for id in hostIDs.values { touchIdentities?.release(id) }
+    }
+
+    private func acquireHostID(_ sourceID: UInt16) -> UInt16? {
+        let id: UInt16
+        if let touchIdentities {
+            guard let allocated = touchIdentities.allocate() else { return nil }
+            id = allocated
+        } else {
+            id = sourceID
+        }
+        hostIDs[sourceID] = id
+        return id
+    }
+
+    private func releaseTouch(_ sourceID: UInt16) {
+        guard let id = hostIDs.removeValue(forKey: sourceID) else { return }
+        sink?.touchOff(id)
+        onTouchGate?(id, false)
+        touchIdentities?.release(id)
     }
 
     public func apply(_ frame: TLPPerfState) {
+        guard let sink else { return }
         let prev = last
         last = frame
-        guard let sink else { return }
 
         // Tilt: s16 −32767…32767 ↔ −1…+1, change-gated per axis.
         let axes = [frame.tiltX, frame.tiltY, frame.tiltZ]
@@ -106,47 +135,48 @@ public final class LinkIngest {
         // A hand of touches at most: linear scans, no per-frame hashing.
         let prevTouches = prev?.touches ?? []
         for t in prevTouches where !frame.touches.contains(where: { $0.id == t.id }) {
-            sink.touchOff(t.id)
-            onTouchGate?(t.id, false)
+            releaseTouch(t.id)
         }
         for t in frame.touches {
-            if let p = prevTouches.first(where: { $0.id == t.id }) {
+            let existingID = hostIDs[t.id]
+            guard let id = existingID ?? acquireHostID(t.id) else { continue }
+            if let p = prevTouches.first(where: { $0.id == t.id }), existingID != nil {
                 if p.onsetSeq != t.onsetSeq {
                     // expr before the onset so the pluck level sees it
                     if t.exprScale != 1.0 || p.exprScale != 1.0 {
-                        sink.touchExpr(t.id, exprScale: t.exprScale)
+                        sink.touchExpr(id, exprScale: t.exprScale)
                     }
-                    if t.glideExempt { sink.touchGlideExempt(t.id) }
-                    onTouchGate?(t.id, true)
-                    onTouchPitch?(t.id, Double(t.pitch))
-                    onTouchRadius?(t.id, t.radiusPoints)
-                    onTouchFretPosition?(t.id, t.fretPosition01)
-                    sink.touchOn(t.id, pitchSemis: Double(t.pitch))
+                    if t.glideExempt { sink.touchGlideExempt(id) }
+                    onTouchGate?(id, true)
+                    onTouchPitch?(id, Double(t.pitch))
+                    onTouchRadius?(id, t.radiusPoints)
+                    onTouchFretPosition?(id, t.fretPosition01)
+                    sink.touchOn(id, pitchSemis: Double(t.pitch))
                 } else {
                     if p.exprScale != t.exprScale {
-                        sink.touchExpr(t.id, exprScale: t.exprScale)
+                        sink.touchExpr(id, exprScale: t.exprScale)
                     }
                     if p.fretPosition != t.fretPosition {
-                        onTouchFretPosition?(t.id, t.fretPosition01)
+                        onTouchFretPosition?(id, t.fretPosition01)
                     }
                     if p.pitch != t.pitch {
-                        sink.touchGlide(t.id, pitchSemis: Double(t.pitch))
-                        onTouchPitch?(t.id, Double(t.pitch))
+                        sink.touchGlide(id, pitchSemis: Double(t.pitch))
+                        onTouchPitch?(id, Double(t.pitch))
                     }
                     if p.radius != t.radius {
-                        onTouchRadius?(t.id, t.radiusPoints)
+                        onTouchRadius?(id, t.radiusPoints)
                     }
                 }
             } else {
                 if t.exprScale != 1.0 {
-                    sink.touchExpr(t.id, exprScale: t.exprScale)
+                    sink.touchExpr(id, exprScale: t.exprScale)
                 }
-                if t.glideExempt { sink.touchGlideExempt(t.id) }
-                onTouchGate?(t.id, true)
-                onTouchPitch?(t.id, Double(t.pitch))
-                onTouchRadius?(t.id, t.radiusPoints)
-                onTouchFretPosition?(t.id, t.fretPosition01)
-                sink.touchOn(t.id, pitchSemis: Double(t.pitch))
+                if t.glideExempt { sink.touchGlideExempt(id) }
+                onTouchGate?(id, true)
+                onTouchPitch?(id, Double(t.pitch))
+                onTouchRadius?(id, t.radiusPoints)
+                onTouchFretPosition?(id, t.fretPosition01)
+                sink.touchOn(id, pitchSemis: Double(t.pitch))
             }
         }
 
@@ -179,11 +209,8 @@ public final class LinkIngest {
         lastTilt = [.nan, .nan, .nan]
         lastAccel = (.min, .min, .min)
         lastStrike = nil
+        for sourceID in Array(hostIDs.keys) { releaseTouch(sourceID) }
         guard let sink else { return }
-        for t in prev?.touches ?? [] {
-            sink.touchOff(t.id)
-            onTouchGate?(t.id, false)
-        }
         let mask = prev?.droneMask ?? 0
         for i in 0..<FretArrangement.droneCount
         where mask & (1 << UInt8(i)) != 0 {

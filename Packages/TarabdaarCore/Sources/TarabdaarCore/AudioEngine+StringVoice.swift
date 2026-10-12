@@ -49,8 +49,11 @@ extension AudioEngine {
         lock.unlock()
         if on { rebuildStringVoice(tonic: tonic, strings: strings,
                                    follower: follower) }
-        else { tarafBank = .empty }
-        storeMeter((0, 0, false))
+        else {
+            stringBuilds.invalidate()
+            tarafBank = .empty
+        }
+        storeMeter((0, false))
         return true
     }
 
@@ -141,34 +144,32 @@ extension AudioEngine {
     private func rebuildStringVoice(tonic: Double, strings: [ResolvedString],
                                     follower: (gain: Double, t60: Double)? = nil) {
         guard let src = stringVoiceSource else { return }
-        stringBuildGen += 1
-        let gen = stringBuildGen
         let overrides = stringVoiceOverrides
         let mapper = src.mapper
-        stringBuildQueue.async { [weak self] in
-            let engine = StringVoiceSource.buildEngine(tonicHz: tonic,
-                                              strings: strings,
-                                              mapper: mapper,
-                                              overrides: overrides,
-                                              follower: follower)
-            DispatchQueue.main.async {
-                guard let self, gen == self.stringBuildGen else { return }
-                if engine == nil {
-                    NSLog("Tarabdaar: String engine build failed (bowed_string.json missing?)")
-                }
-                self.stringVoiceSource?.setEngine(engine)
-                if let engine {
-                    let rows = engine.jtRowFreqs.prefix(128).enumerated().map { index, hz in
-                        TarafBank.Row(id: UInt8(index), frequency: Float(hz),
-                            flags: (engine.jtDualRows.contains(index) ? 1 : 0)
-                                | (index == engine.jtFollowerRow ? 2 : 0))
-                    }
-                    self.tarafBank = TarafBank(revision: UInt32.random(in: 1...UInt32.max),
-                                              tonic: Float(tonic), rows: rows)
-                    self.reapplyHeldDrones(to: engine)
-                } else { self.tarafBank = .empty }
+        stringBuilds.request(on: stringBuildQueue, build: {
+            guard let engine = StringVoiceSource.buildEngine(tonicHz: tonic,
+                                                  strings: strings,
+                                                  mapper: mapper,
+                                                  overrides: overrides,
+                                                  follower: follower,
+                                                  configureMapper: false,
+                                                  retainJawariTables: false)
+            else { return .failed }
+            return .ready(engine)
+        }, publish: { [weak self] engine in
+            guard let self, let engine else { return }
+            self.stringVoiceSource?.setEngine(engine)
+            let rows = engine.jtRowFreqs.prefix(128).enumerated().map { index, hz in
+                TarafBank.Row(id: UInt8(index), frequency: Float(hz),
+                    flags: (engine.jtDualRows.contains(index) ? 1 : 0)
+                        | (index == engine.jtFollowerRow ? 2 : 0))
             }
-        }
+            self.tarafBank = TarafBank(revision: UInt32.random(in: 1...UInt32.max),
+                                      tonic: Float(tonic), rows: rows)
+            self.reapplyHeldDrones(to: engine)
+        }, failed: {
+            NSLog("Tarabdaar: String engine build failed; retaining the last working engine")
+        })
     }
 
     /// Push overrides onto the RUNNING engine when every changed key is in
@@ -186,6 +187,9 @@ extension AudioEngine {
         let follower = lastSarangiFollower
         lock.unlock()
         guard on, let src = stringVoiceSource else { return false }
+        // The caller immediately submits a replacement with all current overrides.
+        // Otherwise a pending structural build could undo this in-place edit.
+        guard !stringBuilds.isPending else { return false }
         stringVoiceOverrides = overrides
         // the jawari tables are the costly half — only when a jt key moved
         let jtTouched = changed.contains { $0.hasPrefix("bow_jt") }

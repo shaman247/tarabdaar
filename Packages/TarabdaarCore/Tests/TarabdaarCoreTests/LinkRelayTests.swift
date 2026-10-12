@@ -6,6 +6,39 @@ import SarangiKit
 /// and the debounced rebuild funnel.
 final class LinkRelayTests: XCTestCase {
 
+    /// UI reads neither consume meter intervals nor hide released-string tails.
+    func testLiveVolumeSnapshotsShareTheRelayPoll() {
+        let meter = AudioEngine.PerformanceMeter()
+        var interval = (voice: 0.2, chromatic: 0.03, raga: 0.04)
+        var samples = 0
+        var sent: [[UInt8]] = []
+        let relay = VolumeMeterRelay(levels: {
+            meter.captureVolume {
+                samples += 1
+                let captured = interval
+                interval = (0, 0, 0)
+                return captured
+            }
+        }, send: { sent.append([$0, $1, $2]) })
+        meter.storeTouch((440, true))
+        relay.tick()
+        XCTAssertEqual(sent.last, [0.2, 0.03, 0.04].map(TLPVolume.byte(fromLinear:)))
+        meter.storeTouch((0, false))
+        for _ in 0..<20 {
+            let reading = meter.readout()
+            XCTAssertFalse(reading.active)
+            XCTAssertEqual(reading.voiceRMS, 0.2)
+        }
+        XCTAssertEqual(samples, 1, "UI reads must not steal the next audio interval")
+        interval.voice = 0.1
+        relay.tick()
+        XCTAssertEqual(meter.readout().voiceRMS, 0.1)
+        relay.tick()
+        XCTAssertEqual(meter.readout().voiceRMS, 0)
+        XCTAssertEqual(sent.last, [0, 0, 0])
+        XCTAssertEqual(samples, 3)
+    }
+
     /// Each bank independently triggers the relay and silence clears all three readings.
     func testVolumeBanksRelayIndependently() {
         var levels = (voice: 0.1, chromatic: 0.01, raga: 0.001)

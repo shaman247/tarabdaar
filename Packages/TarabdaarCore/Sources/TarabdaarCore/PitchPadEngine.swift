@@ -389,14 +389,16 @@ public final class PitchPadEngine: ObservableObject {
 
     /// Mac path: the pad drives the local `AudioEngine` through its own
     /// `OutboundPlayState` → `LinkIngest` pump — the wire's frame-diff path,
-    /// in-process. Coexists with a linked iPad (distinct id namespaces).
-    public init(audio: AudioEngine, tuning: Tuning = Tuning()) {
+    /// in-process. The host allocator separates this lane from the linked iPad.
+    public init(audio: AudioEngine, tuning: Tuning = Tuning(),
+                touchIdentities: TouchIdentityAllocator? = nil) {
         self.audio = audio
         self.tuning = tuning
         let state = OutboundPlayState()
         self.playState = state
         self.localPump = LocalLinkPump(state: state,
-                                       ingest: LinkIngest(sink: audio))
+                                       ingest: LinkIngest(sink: audio,
+                                           touchIdentities: touchIdentities))
         bindTuning()
     }
 

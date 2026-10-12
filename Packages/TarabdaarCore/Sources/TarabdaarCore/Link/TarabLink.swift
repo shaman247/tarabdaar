@@ -71,7 +71,7 @@ public final class TarabLink {
     }
 
     public func start() {
-        queue.async {
+        queue.async { [self] in
             guard self.timer == nil else { return }
             let t = DispatchSource.makeTimerSource(queue: self.queue)
             t.schedule(deadline: .now(),
@@ -168,7 +168,8 @@ public final class TarabLink {
 
     private func tick() {
         let now = LinkClock.nowUs()
-        if role == .pad, let state = playState {
+        if !status.isUp { sendHelloLocked() }
+        if status.isUp, role == .pad, let state = playState {
             let heartbeat = LinkClock.elapsedUs(from: lastSentUs, to: now)
                 >= TarabLink.heartbeatUs
             if let frame = state.snapshotFrame(timestampUs: now,
@@ -176,7 +177,7 @@ public final class TarabLink {
                 outbox.enqueue(.perfState(frame))
             }
         }
-        if role == .host {
+        if status.isUp, role == .host {
             let heartbeat = LinkClock.elapsedUs(from: lastSentUs, to: now)
                 >= TarabLink.heartbeatUs
             if joyConDirty || (heartbeat && joyCon != nil) {
@@ -229,6 +230,9 @@ public final class TarabLink {
         guard let sendRaw else { return }
         var sent = false
         while let item = outbox.dequeue() {
+            // Old peers may not gate their receive path; never send them a
+            // payload whose field units differ. The pad resyncs after HELLO.
+            guard status.isUp || item.bytes.first == TLP.typeHello else { continue }
             sendRaw(TLPPack.envelope(item.bytes, role: role),
                     item.stateType == nil)
             sent = true
@@ -244,16 +248,23 @@ public final class TarabLink {
               // must never pollute the sequence gating.
               senderRole != role,
               let frame = TLPFrame.decode(bytes) else { return }
+        if case .event(let seq, let event) = frame, case .hello = event {
+            // HELLO establishes both the format and a new sequence epoch.
+            lastEventSeqSeen = seq
+            lastStateSeqSeen.removeAll(keepingCapacity: true)
+            handleEventLocked(event)
+            return
+        }
+        guard status.isUp else {
+            // Keep greeting until a compatible peer identifies its format.
+            sendHelloLocked()
+            drainLocked()
+            return
+        }
         lastReceiveUs = LinkClock.nowUs()
         if status.isStale {
             status.isStale = false
             onStatus?(status)
-        }
-        // Self-healing handshake: a valid frame arrived but HELLO is not
-        // complete — keep greeting (1 s-throttled) until its hello lands.
-        if !status.isUp {
-            sendHelloLocked()
-            drainLocked()
         }
         switch frame {
         case .perfState(let s):
@@ -263,16 +274,9 @@ public final class TarabLink {
             guard acceptState(type: TLP.typeJoyConState, seq: s.stateSeq) else { return }
             onJoyConState?(s)
         case .event(let seq, let event):
-            if case .hello = event {
-                // A hello is a stream epoch: the peer's sequence spaces
-                // reset. Always accept, re-anchor gating.
-                lastEventSeqSeen = seq
-                lastStateSeqSeen.removeAll(keepingCapacity: true)
-            } else {
-                if let last = lastEventSeqSeen,
-                   !TLP.isNewer(seq, than: last) { return }
-                lastEventSeqSeen = seq
-            }
+            if let last = lastEventSeqSeen,
+               !TLP.isNewer(seq, than: last) { return }
+            lastEventSeqSeen = seq
             handleEventLocked(event)
         }
     }
@@ -290,12 +294,17 @@ public final class TarabLink {
         case .hello(let minVer, let maxVer, _):
             // Range intersection: a one-sided check would let a newer peer
             // come "up" against one whose frames it cannot decode.
-            let compatible = minVer <= TLP.versionMax
+            let compatible = minVer <= maxVer && minVer <= TLP.versionMax
                 && maxVer >= TLP.versionMin
             let wasUp = status.isUp
+            let wasStale = status.isStale
             status.isUp = compatible
+            status.isStale = false
             status.remoteVersionMax = maxVer
-            if !wasUp || !compatible { onStatus?(status) }
+            lastReceiveUs = compatible ? LinkClock.nowUs() : nil
+            if compatible { joyConDirty = true }
+            if !wasUp || !compatible || wasStale { onStatus?(status) }
+            if wasUp, !wasStale, !compatible { onLinkDrop?() }
             // Always greet back (the 1 s throttle ends the chain). Never
             // gate on the up-transition: a relaunched peer would stay down.
             sendHelloLocked()

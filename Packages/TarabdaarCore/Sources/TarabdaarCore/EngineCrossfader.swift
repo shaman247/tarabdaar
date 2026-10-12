@@ -25,6 +25,7 @@ public final class EngineCrossfader<Engine: StereoRenderEngine>: @unchecked Send
     private var fading: Engine?
     private var fadePos = 0
     private var fadeLen = 0
+    private var generation: UInt64 = 0
     private let sr: Double
     private let maxFrames: Int
     private var bufL: [Double], bufR: [Double]
@@ -32,7 +33,7 @@ public final class EngineCrossfader<Engine: StereoRenderEngine>: @unchecked Send
     private var fadeL: [Double], fadeR: [Double]
     /// Strong refs keep swapped-out engines alive past any in-flight buffer
     /// — deep enough that a fading engine is never freed under the audio
-    /// thread. Control thread only.
+    /// thread. Mutated under `lock` by the control thread.
     private var recent: [Engine] = []
 
     public init(sr: Double, maxFrames: Int = 4096) {
@@ -48,11 +49,13 @@ public final class EngineCrossfader<Engine: StereoRenderEngine>: @unchecked Send
     /// over `crossfadeMs`; a swap mid-fade restarts the fade from the
     /// audible engine.
     public func publish(_ engine: Engine?, crossfadeMs: Double) {
+        var retired: Engine?
+        os_unfair_lock_lock(&lock)
         if let engine {
             recent.append(engine)
-            if recent.count > 8 { recent.removeFirst() }
+            if recent.count > 8 { retired = recent.removeFirst() }
         }
-        os_unfair_lock_lock(&lock)
+        generation &+= 1
         let outgoing = self.engine
         if engine != nil, let outgoing, crossfadeMs > 0 {
             fading = outgoing
@@ -65,6 +68,8 @@ public final class EngineCrossfader<Engine: StereoRenderEngine>: @unchecked Send
         }
         self.engine = engine
         os_unfair_lock_unlock(&lock)
+        // Destruction may join DSP workers; never hold the render lock for it.
+        withExtendedLifetime(retired) {}
     }
 
     /// The published engine (brief lock); nil unarmed.
@@ -85,6 +90,9 @@ public final class EngineCrossfader<Engine: StereoRenderEngine>: @unchecked Send
         os_unfair_lock_lock(&lock)
         let engine = self.engine
         let fading = self.fading
+        let generation = self.generation
+        let fadeLen = self.fadeLen
+        var fadePos = self.fadePos
         os_unfair_lock_unlock(&lock)
         guard let engine else { return false }
         var done = 0
@@ -121,11 +129,14 @@ public final class EngineCrossfader<Engine: StereoRenderEngine>: @unchecked Send
             }
             done += m
         }
-        if fading != nil, fadePos >= fadeLen {
-            // Fade finished. `recent` still holds the object, so this never
-            // deallocates on the audio thread.
+        if fading != nil {
             os_unfair_lock_lock(&lock)
-            if self.fading === fading { self.fading = nil }
+            // A publication during this buffer owns fresh progress. An older
+            // buffer must neither advance nor finish that new fade.
+            if self.generation == generation {
+                self.fadePos = fadePos
+                if fadePos >= fadeLen { self.fading = nil }
+            }
             os_unfair_lock_unlock(&lock)
         }
         return true

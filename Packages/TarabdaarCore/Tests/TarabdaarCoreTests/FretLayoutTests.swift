@@ -7,6 +7,46 @@ final class FretLayoutTests: XCTestCase {
 
     private let degrees = scaleDegrees(from: PitchScale.defaultJI)
 
+    /// Scale and layout replacements preserve the last good document when encoding fails.
+    func testAtomicStoreReplacement() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SavedDocumentTests-\(UUID().uuidString)")
+        ScaleStore.dirOverride = tmp.appendingPathComponent("Scales")
+        FretArrangementStore.dirOverride = tmp.appendingPathComponent("Layouts")
+        defer {
+            ScaleStore.dirOverride = nil
+            FretArrangementStore.dirOverride = nil
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let scaleURL = ScaleStore.url(forName: "Custom")
+        try ScaleStore.save(.defaultJI, name: "Custom")
+        // An abandoned old staging path must not block future saves.
+        try FileManager.default.createDirectory(at: scaleURL.appendingPathExtension("tmp"),
+                                               withIntermediateDirectories: true)
+        let scale = ScalePreset.pythagorean.pitchScale
+        try ScaleStore.save(scale, name: "Custom")
+        XCTAssertEqual(try ScaleStore.load(name: "Custom"), scale)
+        let scaleBytes = try Data(contentsOf: scaleURL)
+        var invalidScale = scale
+        invalidScale.points[0].y = .nan
+        XCTAssertThrowsError(try ScaleStore.save(invalidScale, name: "Custom"))
+        XCTAssertEqual(try Data(contentsOf: scaleURL), scaleBytes)
+
+        let layoutURL = FretArrangementStore.url(forName: "Custom")
+        var arrangement = FretLayoutPreset.keyboard.arrangement(degrees: degrees)
+        try FretArrangementStore.save(arrangement, name: "Custom")
+        try FileManager.default.createDirectory(at: layoutURL.appendingPathExtension("tmp"),
+                                               withIntermediateDirectories: true)
+        arrangement.ghostExtentOctaves = 1.5
+        try FretArrangementStore.save(arrangement, name: "Custom")
+        XCTAssertEqual(try FretArrangementStore.load(name: "Custom").ghostExtentOctaves, 1.5)
+        let layoutBytes = try Data(contentsOf: layoutURL)
+        arrangement.droneRatios[0] = .nan
+        XCTAssertThrowsError(try FretArrangementStore.save(arrangement, name: "Custom"))
+        XCTAssertEqual(try Data(contentsOf: layoutURL), layoutBytes)
+    }
+
     /// The persisted fields of each segment — `FretSegment.id` is per-process
     /// (minted fresh on decode), so a round trip is compared on these.
     private func layout(_ a: FretArrangement) -> [[Int]] {

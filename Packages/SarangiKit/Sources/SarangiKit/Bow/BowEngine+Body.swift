@@ -1,13 +1,68 @@
 import Foundation
 import CBowKernel
 
-// The body's frequency response, evaluated from the tables the running
-// kernel was built with — what the Mac Body tab draws. Display only:
-// nothing here touches the render.
+// The body's frequency response from a coherent snapshot of adopted coefficients.
+// The render thread publishes small updates; the UI evaluates the response after unlocking.
 extension BowEngine {
+    struct BodyDiagnosticSnapshot {
+        var revision: UInt64 = 0
+        var tables: BowKernelTables
+        var lowpass: Biquad?
+        var highpass: Biquad?
+        var highpassCount: Int
+        var hill: Biquad?
+    }
+
+    /// Changes only when the adopted body or radiation coefficients change.
+    public var bodyResponseRevision: UInt64 {
+        bodyDiagnosticLock.lock()
+        defer { bodyDiagnosticLock.unlock() }
+        return bodyDiagnosticSnapshot?.revision ?? 0
+    }
+
+    /// Render thread (or initialization): no coefficient-array mutation or response calculation.
+    func refreshBodyDiagnostics(tables updated: BowKernelTables? = nil) {
+        func same(_ a: Biquad?, _ b: Biquad?) -> Bool {
+            switch (a, b) {
+            case (.none, .none): return true
+            case (.some(let a), .some(let b)):
+                return a.b0 == b.b0 && a.b1 == b.b1 && a.b2 == b.b2
+                    && a.a1 == b.a1 && a.a2 == b.a2
+            default: return false
+            }
+        }
+        bodyDiagnosticLock.lock()
+        defer { bodyDiagnosticLock.unlock() }
+        var snapshot = bodyDiagnosticSnapshot ?? BodyDiagnosticSnapshot(
+            tables: BowKernelTables(sr: srk), lowpass: nil, highpass: nil,
+            highpassCount: 0, hill: nil)
+        var changed = bodyDiagnosticSnapshot == nil
+        if let updated {
+            let old = snapshot.tables
+            changed = changed || old.ba1 != updated.ba1 || old.ba2 != updated.ba2
+                || old.bn0 != updated.bn0 || old.bA != updated.bA || old.bC != updated.bC
+            // Keep only the body, never the packed jawari initialization arrays.
+            snapshot.tables.ba1 = updated.ba1; snapshot.tables.ba2 = updated.ba2
+            snapshot.tables.bn0 = updated.bn0; snapshot.tables.bA = updated.bA
+            snapshot.tables.bC = updated.bC
+        }
+        let old = snapshot.tables.scalars, current = liveScalarsCur
+        changed = changed || old.f0Open != current.f0Open || old.dcRho != current.dcRho
+            || old.c0 != current.c0 || old.yinf != current.yinf || old.kret != current.kret
+            || !same(snapshot.lowpass, radLp) || !same(snapshot.highpass, radHP.first)
+            || snapshot.highpassCount != radHP.count || !same(snapshot.hill, radHill)
+        guard changed else { return }
+        snapshot.tables.scalars = current
+        snapshot.lowpass = radLp; snapshot.highpass = radHP.first
+        snapshot.highpassCount = radHP.count; snapshot.hill = radHill
+        snapshot.revision &+= 1
+        bodyDiagnosticSnapshot = snapshot
+    }
+
     /// The formula body as three transfer magnitudes on one log-frequency
     /// grid, plus the mode list behind them.
     public struct BodyResponse: Sendable {
+        public var revision: UInt64
         /// One body mode as built: centre frequency, Q, and its signed
         /// radiation and (positive) admittance residues.
         public struct Mode: Sendable {
@@ -44,11 +99,14 @@ extension BowEngine {
         public var peaksPerOctave: Double
     }
 
-    /// Evaluate the body from `tables` on `points` log-spaced bins between
-    /// `fLo` and `fHi`. Allocates; call from the UI at poll rate only.
+    /// Evaluate the adopted body on `points` log-spaced bins between `fLo` and `fHi`.
+    /// Allocates after taking a coherent coefficient snapshot; UI thread only.
     public func bodyResponse(points: Int = 1024, fLo: Double = 40.0,
                              fHi: Double = 20000.0) -> BodyResponse {
-        let t = tables
+        bodyDiagnosticLock.lock()
+        let snapshot = bodyDiagnosticSnapshot!
+        bodyDiagnosticLock.unlock()
+        let t = snapshot.tables
         let s = t.scalars
         let n = max(points, 2)
         let K = t.ba1.count
@@ -79,9 +137,11 @@ extension BowEngine {
             adm[i] = Self.db(y.magnitude)
             if f < 0.5 * sr {
                 var m = 1.0
-                if let lp = radLp { m *= lp.magnitude(at: f, sr: sr) }
-                for sec in radHP { m *= sec.magnitude(at: f, sr: sr) }
-                if let h = radHill { m *= h.magnitude(at: f, sr: sr) }
+                if let lp = snapshot.lowpass { m *= lp.magnitude(at: f, sr: sr) }
+                if let hp = snapshot.highpass {
+                    for _ in 0..<snapshot.highpassCount { m *= hp.magnitude(at: f, sr: sr) }
+                }
+                if let h = snapshot.hill { m *= h.magnitude(at: f, sr: sr) }
                 chain[i] = rad[i] + Self.db(m)
             } else {
                 chain[i] = .nan
@@ -121,7 +181,7 @@ extension BowEngine {
         let mean = cnt > 0 ? sum / Double(cnt) : 0
         let varc = cnt > 0 ? max(sum2 / Double(cnt) - mean * mean, 0) : 0
         return BodyResponse(
-            hz: hz, radDb: rad, chainDb: chain, admDb: adm,
+            revision: snapshot.revision, hz: hz, radDb: rad, chainDb: chain, admDb: adm,
             radSmoothDb: smooth, modes: modes, tonicHz: s.f0Open,
             kret: s.kret, meanDb: mean, stdDb: varc.squareRoot(),
             minDb: cnt > 0 ? mn : 0, maxDb: cnt > 0 ? mx : 0,

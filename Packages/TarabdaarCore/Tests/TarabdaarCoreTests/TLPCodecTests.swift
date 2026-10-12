@@ -11,7 +11,7 @@ final class TLPCodecTests: XCTestCase {
         for i in 0..<touches {
             let pitch: Float = 60.0 + Float(i) * 1.01
             list.append(TLPTouch(id: UInt16(i * 7 + 1), onsetSeq: UInt8(i),
-                                 radius: UInt8(i * 3),   // v13: fingertip size
+                                 radius: UInt8(i * 3),
                                  pitch: pitch, fretPosition: UInt16(i * 6500)))
         }
         return TLPPerfState(
@@ -107,7 +107,7 @@ final class TLPCodecTests: XCTestCase {
         }
     }
 
-    /// Ten-byte touch records preserve radius and its quarter-point encoding.
+    /// Ten-byte touch records preserve half-point radii and reserve zero for unknown.
     func testTouchRadiusRoundTrip() {
         let frame = TLPFrame.perfState(samplePerf(touches: 4))
         guard case .perfState(let back)? = TLPFrame.decode(frame.encode()) else {
@@ -119,11 +119,17 @@ final class TLPCodecTests: XCTestCase {
 
         XCTAssertEqual(TLPTouch.radiusByte(points: 0), 0)
         XCTAssertEqual(TLPTouch.radiusByte(points: -3), 0)
-        XCTAssertEqual(TLPTouch.radiusByte(points: 5.25), 21)
+        XCTAssertEqual(TLPTouch.radiusByte(points: .nan), 0)
+        XCTAssertEqual(TLPTouch.radiusByte(points: .infinity), 0)
+        XCTAssertEqual(TLPTouch.radiusByte(points: 0.1), 1)
+        XCTAssertEqual(TLPTouch.radiusByte(points: 5.5), 11)
+        XCTAssertEqual(TLPTouch.radiusByte(points: 73), 146)
         XCTAssertEqual(TLPTouch.radiusByte(points: 1000), 255)
-        XCTAssertEqual(TLPTouch.radiusPoints(21), 5.25, accuracy: 1e-12)
+        XCTAssertEqual(TLPTouch.radiusPoints(0), 0)
+        XCTAssertEqual(TLPTouch.radiusPoints(255), 127.5)
+        XCTAssertEqual(TLPTouch.radiusPoints(11), 5.5, accuracy: 1e-12)
         XCTAssertEqual(TLPTouch(id: 1, onsetSeq: 0,
-                                radius: 92, pitch: 60).radiusPoints,
+                                radius: 46, pitch: 60).radiusPoints,
                        23.0, accuracy: 1e-12)
     }
 

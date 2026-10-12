@@ -1,20 +1,20 @@
 # Config Reference
 
-System-level constants live in `Packages/TarabdaarCore/Sources/TarabdaarCore/Config.swift`. Every **instrument** parameter lives in `ParamRegistry.swift` instead — one `ParamSpec` per knob, rendered as the generated [Parameters](parameters.md) table — and tilt-binding endpoint ranges come from the target itself (`MapTarget.defaultRange` in `TiltMapping.swift`: 0–1 for a composite, the parameter's own range otherwise). See [Sensors — Dimension System](sensors.md#dimension-system-parameter-mapping).
+System-level constants live in `Packages/TarabdaarCore/Sources/TarabdaarCore/Config.swift`. Every **instrument** parameter lives in `ParamRegistry.swift` instead — one `ParamSpec` per knob, rendered as the generated [Parameters](parameters.md) table — and tilt-binding endpoint ranges come from the target itself (`MapTarget.defaultRange` in `TiltMapping.swift`: 0–1 for a composite, the parameter's own range otherwise). See [Sensors — Binding model](sensors.md#binding-model).
 
 ## Where each kind of value lives
 
 | Kind | Home | Edited in |
 |------|------|-----------|
-| Voice parameters (`bow_*`, `tp_*`, `st_*`, `ctl_*`, `fx_*`) | `ParamRegistry` — every resting value, whatever its apply strategy, in `AppController.paramValues` (`tarabdaar.paramValues.v2`; the two earlier stores are read once when it is absent); `StringParamStore` holds the physics subset for the engine build | Parameters tab ⌘5, FX tab ⌘6 |
-| Bow-axis curves | `AppController.bowAxisCurves` (`tarabdaar.bowAxisCurves.v1`, keyed by `expr` / `pos` / `press`); presets carry `bowAxisCurves`; legacy band parameters migrate automatically | Transforms tab |
+| Voice parameters (`bow_*`, `tp_*`, `st_*`, `ctl_*`, `fx_*`) | `ParamRegistry` — every resting value, whatever its apply strategy, in `AppController.paramValues` (`tarabdaar.paramValues.v2`; absent values use the current defaults); `StringParamStore` holds the physics subset for the engine build | Parameters tab ⌘5, FX tab ⌘6 |
+| Bow-axis curves | `AppController.bowAxisCurves` (`tarabdaar.bowAxisCurves.v1`, keyed by `expr` / `pos` / `press`); presets carry `bowAxisCurves`; older preset parameter sections resolve to curves when imported | Transforms tab |
 | FX EQ curves (the points per insert) | `AppController.fxEQCurves` (`tarabdaar.fxCurves.v1`, keyed by the insert's prefix); presets carry them as `fxCurves` | FX tab ⌘6 |
 | The tarab | the `[StringSpec]` table + chromatic set + follower on `InstrumentState` (`tarabdaar.sarangiState.v8`) | Strings tab ⌘2 |
 | Composite parameters | `CompositeParam` on `AppController.composites` (`tarabdaar.compositeParams.v1`) — named 0–1 macros of parameter members each sweeping lo→hi; defaults Taraf Purity / Taraf Decay / Tone Tilt / Expression on slots 1–4 | Controls tab ⌘4 |
 | Acceleration smoothing | `ctl_ipad_accel_smooth` / `ctl_jc_accel_smooth` in the same parameter registry and preset store | Controls tab ⌘4, Parameters tab ⌘5 |
 | Tilt bindings | `tiltMapping` (`MapTarget` per dimension) | Controls tab ⌘4 |
 | Arm / wrist calibration | `tarabdaar.armCal.v2` / `tarabdaar.wristCal.v1` | Setup tab ⌘7 |
-| The playing scale | `PitchScale` via `ScaleStore`; the tonic is not persisted | Fret Pad tab ⌘3 |
+| The playing scale | `PitchScale` via `ScaleStore`; the tonic resets on launch and is restored when a full preset is loaded | Fret Pad tab ⌘3 |
 | The whole rig | one `TarabdaarPreset` document per `.tarabdaar` file in `Application Support/Tarabdaar/Presets/` | Parameters tab preset toolbar |
 
 ## Parameter organization and descriptions
@@ -78,8 +78,3 @@ See [Sound Design](sound-design.md), [Sarangi](sarangi.md) and [FX](fx.md).
 | `chordBarShown` | false | Whether the chord bar is laid out at all; off, `chordBarCells` resolves to no cells on either surface (hidden for now) |
 
 The Snap distance (24 px default, `AppController.init`) and the fret warp are not here — Snap rides the synced arrangement, the warp is the `ctl_fret_warp` registry parameter.
-
-## Display
-
-| Constant | Value | Description |
-|----------|-------|-------------|

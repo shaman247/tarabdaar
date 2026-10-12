@@ -19,7 +19,7 @@ extension AudioEngine {
 
     /// Enable one plucked voice: mount the source on first enable (artifact
     /// check, out-gain override, the voice→taraf tap at its own drive),
-    /// attach/connect the node, then (re)build it on the retained scale.
+    /// attach/connect the node, then build on the retained scale if needed.
     /// False only when the fitted artifact is missing.
     @discardableResult
     private func setPluckedVoiceEnabled(_ v: PluckedVoice, _ on: Bool) -> Bool {
@@ -66,8 +66,10 @@ extension AudioEngine {
         let tonic = lastTanpuraTonic
         let ratios = lastTanpuraRatios
         lock.unlock()
-        if on, !ratios.isEmpty {
+        if on, !ratios.isEmpty, v.builds.needsBuild {
             rebuildPlucked(v, tonic: tonic, scaleRatios: ratios)
+        } else if !on {
+            v.builds.invalidate()
         }
         return true
     }
@@ -85,24 +87,22 @@ extension AudioEngine {
         let poly = Int(v.poly.rounded())
         lock.unlock()
         guard armed else { return }
-        v.buildGen += 1
-        let gen = v.buildGen
-        tanpuraBuildQueue.async { [weak self] in
-            let engine = TanpuraVoiceSource.buildEngine(tonicHz: tonic,
-                                                scaleRatios: scaleRatios,
-                                                artifact: artifact,
-                                                registerComp: registerComp,
-                                                cascade: cascade,
-                                                polyphony: poly)
-            DispatchQueue.main.async {
-                guard let self, gen == v.buildGen else { return }
-                if engine == nil {
-                    NSLog("Tarabdaar: \(v.name) engine build failed (\(v.artifactFile) missing?)")
-                }
-                v.source?.setEngine(engine)
-                self.pluckedEnginePublished(v)
-            }
-        }
+        v.builds.request(on: tanpuraBuildQueue, build: {
+            TanpuraVoiceSource.buildResult(tonicHz: tonic,
+                                          scaleRatios: scaleRatios,
+                                          artifact: artifact,
+                                          registerComp: registerComp,
+                                          cascade: cascade,
+                                          polyphony: poly)
+        }, publish: { [weak self] engine in
+            guard let self else { return }
+            self.touchRoutingLock.lock()
+            defer { self.touchRoutingLock.unlock() }
+            v.source?.setEngine(engine)
+            self.pluckedEnginePublished(v)
+        }, failed: {
+            NSLog("Tarabdaar: \(v.name) engine build failed; retaining the last working engine")
+        })
     }
 
     /// The per-voice hook after a fresh engine is published (main thread):
@@ -233,21 +233,22 @@ extension AudioEngine {
         return droneVoiceModeStorage
     }
 
-    /// Which voice the played notes drive. Leaving the String voice
-    /// releases its notes; leaving a plucked voice drops pending plucks.
+    /// Release the outgoing played notes at their normal tail rate, then
+    /// forget glide ownership. Re-selecting the current voice changes nothing.
     public func setMainInstrument(_ inst: MainInstrument) {
-        // an in-flight glissando references the outgoing voice's notes
-        glideQueue.reset()
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         lock.lock()
         guard inst != mainInstrumentStorage else { lock.unlock(); return }
-        let old = mainInstrumentStorage
+        let outgoing = playedVoiceLocked(mainInstrumentStorage)
         mainInstrumentStorage = inst
-        let strSrc = stringVoiceSource
+        clearTouchTrackingLocked()
+        let snap = meterSnapshotLocked()
         lock.unlock()
-        tanpuraVoice.clearTouches()
-        sitarVoice.clearTouches()
-        if old == .string { strSrc?.reset() }
-        // the sitar arms lazily and stays armed (idle strings are ~free)
+        outgoing?.touchAllOff()
+        glideQueue.reset()
+        storeMeter(snap)
+        // The sitar arms lazily and stays armed (idle strings are ~free).
         if inst == .sitar { setSitarVoiceEnabled(true) }
     }
 

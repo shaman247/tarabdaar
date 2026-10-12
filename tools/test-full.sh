@@ -1,7 +1,7 @@
 #!/bin/bash
 # FULL GUARD RUN — every TarabdaarCore suite including the slow DSP
 # render/bench suites behind the TARABDAAR_SLOW_TESTS gate (see
-# Tests/TarabdaarCoreTests/SlowTestGate.swift and CLAUDE.md "Building").
+# Tests/TarabdaarCoreTests/SlowTestGate.swift and AGENTS.md "Building and testing").
 #
 # Two phases, because parallelism and wall-clock assertions don't mix:
 #

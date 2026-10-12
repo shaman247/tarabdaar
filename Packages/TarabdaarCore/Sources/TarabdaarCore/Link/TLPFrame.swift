@@ -14,8 +14,8 @@ public enum TLP {
     /// Protocol version — both apps ship in lockstep; the HELLO range check
     /// refuses a mismatched peer cleanly (the symptom otherwise: "drones and
     /// tilt work, touches are silent").
-    public static let versionMin: UInt16 = 25
-    public static let versionMax: UInt16 = 25
+    public static let versionMin: UInt16 = 26
+    public static let versionMax: UInt16 = 26
     /// Hard cap on an encoded frame.
     public static let maxFrameBytes = 1024
     /// HELLO magic 'TRBL' (LE u32).
@@ -88,8 +88,8 @@ public enum TLPRole: UInt8, Equatable, Sendable {
 public struct TLPTouch: Equatable, Sendable {
     public var id: UInt16
     public var onsetSeq: UInt8
-    /// FINGERTIP SIZE — `UITouch.majorRadius` in POINTS × 4, clamped to
-    /// 255 (0 = unknown: producers without a touchscreen). Quarter-point
+    /// FINGERTIP SIZE — `UITouch.majorRadius` in POINTS × 2, clamped to
+    /// 255 (127.5 pt; 0 = unknown: producers without a touchscreen). Half-point
     /// steps are far finer than Apple's own quantisation; the Mac maps it
     /// onto the `.touchSize` control axis (`TouchSizeTracker`).
     public var radius: UInt8
@@ -123,15 +123,15 @@ public struct TLPTouch: Equatable, Sendable {
         self.glideExempt = glideExempt
     }
 
-    /// Fingertip radius in points → the wire byte (quarter-point steps,
-    /// clamped to 255 ≈ 63.75 pt). Negative/zero reads as unknown.
+    /// Fingertip radius in points → the wire byte (half-point steps, up to
+    /// 127.5 pt). Zero, negative and nonfinite inputs read as unknown.
     public static func radiusByte(points: Double) -> UInt8 {
-        guard points > 0 else { return 0 }
-        return UInt8(min(255.0, max(0.0, (points * 4.0).rounded())))
+        guard points.isFinite, points > 0 else { return 0 }
+        return UInt8(min(255.0, max(1.0, (points * 2.0).rounded())))
     }
 
     /// The wire byte back to points (0 = unknown).
-    public static func radiusPoints(_ b: UInt8) -> Double { Double(b) / 4.0 }
+    public static func radiusPoints(_ b: UInt8) -> Double { Double(b) / 2.0 }
 
     /// This touch's fingertip radius in points (0 = unknown).
     public var radiusPoints: Double { TLPTouch.radiusPoints(radius) }
@@ -144,7 +144,7 @@ public struct TLPTouch: Equatable, Sendable {
 ///
 /// Layout: `type u8 · flags u8 · stateSeq u16 · timestampUs u32 ·
 /// tilt s16×3 · accel s16×3 · droneMask u8 · strike u8 · chordDegree u8 ·
-/// chordOctave i8 · count u8 · touches (9 B each)`.
+/// chordOctave i8 · count u8 · touches (10 B each)`.
 public struct TLPPerfState: Equatable, Sendable {
     public static let flagBackgrounded: UInt8 = 1 << 0
     /// Accelerometer wire full scale: ±32767 ↔ ±4 g (diagnostic display).

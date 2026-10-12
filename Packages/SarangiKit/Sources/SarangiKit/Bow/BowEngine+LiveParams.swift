@@ -21,7 +21,6 @@ extension BowEngine {
         guard let curves else { return }
         axisTransforms = curves
         for i in filters.indices { filters[i].setAxisTransforms(curves) }
-        filter.setAxisTransforms(curves)
     }
 
     /// Seed the gain ramp from the engine's output settings; called once
@@ -82,25 +81,26 @@ extension BowEngine {
 
     /// Swap the body-modal and jawari coefficient arrays on the running
     /// kernel; histories are kept, so it is click-free and not ramped.
-    private func reloadCoefficients(_ t: BowKernelTables) {
-        guard let st = pkernel else { return }
+    private func reloadCoefficients(_ t: BowKernelTables) -> Bool {
+        guard let st = pkernel else { return false }
+        var bodyAccepted = false
         t.ba1.withUnsafeBufferPointer { a1 in
             t.ba2.withUnsafeBufferPointer { a2 in
                 t.bn0.withUnsafeBufferPointer { n0 in
                     t.bA.withUnsafeBufferPointer { bA in
                         t.bC.withUnsafeBufferPointer { bC in
                             let k = Int32(t.ba1.count)
-                            _ = bow_poly_set_body(st, k, a1.baseAddress,
+                            bodyAccepted = bow_poly_set_body(st, k, a1.baseAddress,
                                                   a2.baseAddress,
                                                   n0.baseAddress,
                                                   bA.baseAddress,
-                                                  bC.baseAddress)
+                                                  bC.baseAddress) == 1
                         }
                     }
                 }
             }
         }
-        guard let jt = t.jt, jt.M.count > 0 else { return }
+        guard let jt = t.jt, jt.M.count > 0 else { return bodyAccepted }
         jt.M.withUnsafeBufferPointer { M in
         jt.ca.withUnsafeBufferPointer { ca in
         jt.cb.withUnsafeBufferPointer { cb in
@@ -150,6 +150,7 @@ extension BowEngine {
                                      jt.rowFreqs[Int(jt.trackRow)],
                                      jt.trackT60, jt.trackFhf, jt.trackBst)
         }
+        return bodyAccepted
     }
 
     /// Render-thread half of `setLiveParams`: adopt a new target, then
@@ -163,6 +164,7 @@ extension BowEngine {
         let gain = masterGain
         let base = trimBase
         os_unfair_lock_unlock(&tiltLock)
+        var adoptedBodyTables: BowKernelTables?
 
         // Master-gain-only change (a bound axis moving): retarget the
         // trim glide without any bp push.
@@ -176,8 +178,7 @@ extension BowEngine {
             // Control-side constants step immediately: they shape the
             // mapping into the friction loop, which absorbs a step.
             for i in filters.indices { filters[i].updateLiveParams(bp: bp) }
-            filter.updateLiveParams(bp: bp)
-            if let t = tables { reloadCoefficients(t) }
+            if let t = tables, reloadCoefficients(t) { adoptedBodyTables = t }
             let newBase = bp.v("bow_live_trim", base)
             os_unfair_lock_lock(&tiltLock)
             trimBase = newBase
@@ -211,12 +212,14 @@ extension BowEngine {
 
         if pending != nil {
             for i in filters.indices { filters[i].setAxisTransforms(axisTransforms) }
-            filter.setAxisTransforms(axisTransforms)
         }
 
         // Gains can ramp before any scalar push has happened (master gain on
         // a fresh engine); the kernel push below stays guarded.
-        guard liveRamping else { return }
+        guard liveRamping else {
+            if pending != nil { refreshBodyDiagnostics(tables: adoptedBodyTables) }
+            return
+        }
         // ~25 ms one-pole glide, same shape as the taraf-axis smoother.
         let a = OnePole.coefficient(frames: n48, tau: 0.025, sr: sr)
         var settled = true
@@ -254,6 +257,7 @@ extension BowEngine {
         if let pk = pkernel {
             withUnsafePointer(to: liveScalarsCur) { bow_poly_set_scalars(pk, $0) }
         }
+        refreshBodyDiagnostics(tables: adoptedBodyTables)
         if settled {
             liveRamping = false
             os_unfair_lock_lock(&tiltLock)

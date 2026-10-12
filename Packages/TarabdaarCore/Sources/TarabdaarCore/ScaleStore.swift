@@ -48,16 +48,19 @@ struct ScaleDocument: Codable {
 /// are written to `~/Library/Application Support/Tarabdaar/Scales/`.
 ///
 /// This is Mac-only persistence with no iPad coupling — scales live
-/// entirely on this side, like presets. Writes are
-/// atomic (`*.json.tmp` → move) so a reader never observes a partial
-/// file.
+/// entirely on this side, like presets. Encoded files atomically replace
+/// the destination, preserving the previous file until replacement succeeds.
 public enum ScaleStore {
     /// Reserved name for the bundled default. The Save UI refuses it so
     /// the default can't be shadowed by a user file of the same name.
     public static let defaultName = "Default"
 
+    /// Tests use an isolated library instead of the player's saved scales.
+    static var dirOverride: URL?
+
     /// Directory holding user-saved scales. Created on first save.
     public static var userScalesDir: URL {
+        if let dirOverride { return dirOverride }
         let appSupport = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
@@ -96,8 +99,7 @@ public enum ScaleStore {
         userScalesDir.appendingPathComponent(name).appendingPathExtension("json")
     }
 
-    /// Write `scale` under `name`. Atomic: encode to `name.json.tmp`,
-    /// then move into place over any existing file.
+    /// Encode `scale` completely, then atomically replace the named file.
     public static func save(_ scale: PitchScale, name: String) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: userScalesDir, withIntermediateDirectories: true)
@@ -105,10 +107,7 @@ public enum ScaleStore {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(ScaleDocument(points: scale.points))
         let dest = url(forName: name)
-        let tmp = dest.appendingPathExtension("tmp")
-        try data.write(to: tmp)
-        if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-        try fm.moveItem(at: tmp, to: dest)
+        try data.write(to: dest, options: .atomic)
     }
 
     public static func load(name: String) throws -> PitchScale {

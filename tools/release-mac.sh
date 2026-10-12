@@ -7,18 +7,17 @@
 #      installed in Keychain Access.
 #   2. `xcrun notarytool store-credentials tarabdaar-notary ...` (see
 #      docs/packaging.md).
-#   3. Fill in TEAM_ID and SIGN_IDENTITY below.
+#   3. Configure TEAM_ID and NOTARY_PROFILE below.
 #
 # Usage:
 #   ./tools/release-mac.sh
 # Output:
-#   build/Release/Tarabdaar.app
+#   build/Release/TarabdaarMac.app
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # ---- USER CONFIG ------------------------------------------------------------
 TEAM_ID="WN86FWABN8"
-SIGN_IDENTITY="Developer ID Application: YOUR NAME (${TEAM_ID})"
 NOTARY_PROFILE="tarabdaar-notary"
 # -----------------------------------------------------------------------------
 

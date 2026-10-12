@@ -32,7 +32,7 @@ An engine rebuild publishes a new bank identity and cancels the old gesture;
 late plucks for that old bank are ignored. The iPad receives only this display
 snapshot (not editable tuning or physics), and sends discrete `TARAF_PLUCK`
 events over TLP. The snapshot clears when the link is unavailable. Both apps
-must use protocol version 25. Guards: `TarafStripTests`, `TLPCodecTests`.
+must use the same TLP version. Guards: `TarafStripTests`, `TLPCodecTests`.
 
 ## The pitch field
 
@@ -130,8 +130,10 @@ scale in the same mapper update as the pitch (`BowControlMapper.touchGlide`
 with `exprScale`), so the dip rides the finger at wire rate and the
 control filter ramps it across each block; the plucked mains consume it at
 the onset as a pluck-level scale. The fret grid follows the arrangement
-and `tuning.didChange` undebounced (`AppController.syncAccentGridFromFrets`),
-and both a grid move and a knob move re-deliver the scale to every held
+and tuning undebounced: `FretPitchGrid.publisher` combines the emitted
+arrangement, scale, tonic and tonic-cents values directly, so each edit
+rebuilds the grid from the new values immediately. Both a grid move and
+a knob move re-deliver the scale to every held
 note, so a bound tilt/stick axis works mid-phrase. Guard: `PitchAccentTests`.
 
 **Scale-pitch grid (Mac and iPad).** Faint vertical lines span the playable
@@ -248,7 +250,7 @@ Both surfaces read the latest settings at every move and 60 Hz settle tick,
 so a mapping can change a held finger's correction without another move.
 Capture radius is recomputed from the current settings on each integration.
 A stale/disconnected link restores the fitted defaults; a resync restores
-the Mac's resolved controls. The protocol is version 25 on both devices.
+the Mac's resolved controls. Both devices must use the same TLP version.
 
 **Fitting.** The constants are fitted to recorded strokes, not hand-tuned.
 **Rec** (Mac toolbar) / **REC** (iPad toolbar) appends each stroke to a
@@ -371,6 +373,10 @@ without that marker migrate once from three rows. Built-ins are
 code, not files. Guard:
 `FretLayoutTests`.
 
+Named saves and `_Current.json` autosaves encode the complete JSON first,
+then atomically replace the destination. They never remove the previous
+file before writing its replacement.
+
 ### Naming
 
 A fret's pitch is a `degreeIndex` into the enabled scale degrees, looked up
@@ -379,7 +385,7 @@ disappears skips its fret. **A fret is named by the scale**: the scale
 point's own `label` (`PitchPoint.displayLabel`, or the ratio when blank)
 via `scaleLabel(degree:octave:degrees:)`, with `'`/`,` octave marks on the
 ghosts. The default scale reads `S r R g G m M P d D n N`; another scale
-speaks its own labels ([Scales & Tuning](scales-and-tuning.md#playing-scale-tarabdaarmac-fret-pad-tab--ipad)).
+speaks its own labels ([Scales & Tuning](scales-and-tuning.md#the-playing-scale-fret-pad-tab--ipad)).
 
 ## Editing
 
@@ -589,13 +595,13 @@ TarabdaarMac edits, Tarabdaar performs: the Mac pushes
 (`Tarabdaar/Tarabdaar/PitchPadView_iOS.swift`).
 
 **What syncs (Mac → iPad, one-way).** The layout travels as the TLP
-`FRET_ARRANGEMENT` event (`FretArrangementSysEx`, TLP **v25**):
+`FRET_ARRANGEMENT` event (`FretArrangementSysEx`):
 `[ghostQuarterOctaves][flags=8][count]`, then `[degreeIndex][row: 1…5]`
 per assigned fret, followed by three 14-bit drone display ratios. Flag bit 3
 selects the five-row format. The receiver derives x, row height and overlaps.
 Cached three-row blobs map 1/2/3 to 1/3/5; their former raga masks are ignored.
 Older coordinate blobs migrate through the same three-row mapping. Both live
-peers must use v25.
+peers must use the current matching protocol from [MIDI & Audio](midi-and-audio.md).
 The arrangement travels beside `SCALE_STATE` whenever it changes.
 `ScaleSyncReceiver` decodes it into `fretArrangement`
 (persisted by `FretArrangementSyncStore` for offline relaunch; a
@@ -633,7 +639,7 @@ Scale menu · Layout menu · Reset to Scale · Perform · Rec · sounding
 readout. The second holds Octaves · Snap · Warp · Prime ≤ (the scale
 editor's prime limit) · Tonic (a typed Hz field + a note menu of the
 surrounding half-octave — see
-[Scales & Tuning](scales-and-tuning.md#the-tonic-tarabdaarmac-fret-pad-tab)).
+[Scales & Tuning](scales-and-tuning.md#the-tonic-fret-pad-tab)).
 
 ## Code map
 

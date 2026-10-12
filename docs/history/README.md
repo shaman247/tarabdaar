@@ -7,6 +7,16 @@ describe only what the instrument currently is.
   guide: every deletion and rename since the Starpad era with its
   rationale, the "do not revive" list with detail, and the dated
   conventions. Consult it before resurrecting anything.
+- [Documentation audit — 2026-10-12](documentation-audit-2026-10-12.md) —
+  archived jawari proposals, old 34-row coupling measurements and historical
+  rebuild/continuity benchmarks; the live docs retain current bank contracts.
+- Reference research outputs — archived on the user's external USB backup
+  as of 2026-10-12; the local copy was deleted that day to recover disk space.
+  The original project path is `output/reference_onsets/` (about 123.5 GiB).
+  Restore needed files from that backup to the same relative
+  path for historical comparisons or research/export scripts that consume them.
+  The experiment scripts, original reference recordings and bundled fitted
+  resources remain in the local project.
 - `simulator.md` — the headless audition loop: `IPadSimulator` +
   `AuditionRunner`, the JSON score format and the `tools/audition_*.py`
   scripts. The pipeline was removed 2026-09-03 along with the in-process

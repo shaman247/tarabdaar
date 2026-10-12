@@ -4,11 +4,13 @@ The **String voice** is Tarabdaar's default played instrument: a pure‑physics
 bowed gut string in **`SarangiKit`** (`Packages/SarangiKit/`) — **`BowEngine`**
 (`Bow/BowEngine.swift`) driving the **C friction kernel** (`CBowKernel`,
 built `-O3` always: `bow_kernel_poly.c` is the played strings, the body and
-the render loop, `bow_jt.c` the taraf, `bow_poly_internal.h` the state and
-the per-sample inlines both share) at 96 kHz, half‑band‑decimated to
-48 kHz. The kernel is the whole instrument — played strings, the two‑bridge
-modal‑jawari taraf, the formula body, radiation and room — and needs only
-**`bowed_string.json`** (`Resources/`). SarangiKit is Tarabdaar's own code:
+the render loop, `bow_jt.c` the chromatic taraf and bank dispatch, and
+`bow_jt_dual.c` / `bow_contact.c` the physical raga rows) at 96 kHz,
+half‑band‑decimated to 48 kHz. The String engine owns the played strings,
+two sympathetic banks, body, radiation and room. Its main parameter artifact
+is **`bowed_string.json`**; raga radiation uses `taraf_dual_radiation.json`,
+and the optional fitted observation uses the resources described below.
+SarangiKit is Tarabdaar's own code:
 the DSP is edited here, and `TarafRemovalParityTests` pins a SHA‑256 of the
 shipped render so an accidental edit fails loudly.
 
@@ -26,7 +28,7 @@ the zone matvecs, table copies), `Model/`, `Presets.swift`; Mac side
 ## Signal path
 
 ```
-touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (one‑sample −Z·V load)
+TLP touches ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (one‑sample −Z·V load)
               ► formula body (modal resonators) ► voice bus ─┐
               ► raga physical rows (async pool) + chromatic quadratic rows (callback)
                   ► bridge‑force radiation ► per‑row cap ► [body mix] ► tone LP/HP ► taraf bus ─┤
@@ -112,12 +114,17 @@ is not claimed to reproduce the offline waveform sample for sample.
 
 ## The kernel and its host
 
-- **`StringVoiceSource`** pulls `BowEngine.render` under its own lock; engine
-  swaps publish under a brief unfair lock and retain the outgoing engine so an
-  in‑flight buffer never reads freed memory.
+- **`StringVoiceSource`** pulls `BowEngine.render` through `EngineCrossfader`.
+  The callback snapshots engine references and fade progress under a brief
+  unfair lock, renders after unlocking, then commits progress only if the
+  publication generation still matches. Engine references remain retained
+  across an in-flight render; controls stage updates under their own locks.
   `buildEngine(tonicHz:strings:mapper:overrides:)` builds tables + kernel +
   jt pool off‑main (tarab TUNING = the enabled strings, taraf PHYSICS = the
-  `bow_jt_*` / `bow_jtc_*` keys).
+  `bow_jt_*` / `bow_jtc_*` keys). The kernel owns its copied jawari arrays;
+  async host builds pass `retainJawariTables: false` and release the packed
+  builder payload after mounting. Runtime row metadata remains in the engine.
+  Direct builders retain the full `tables.jt` by default for native exporters.
 - **Rebuilds.** `AudioEngine.rebuildSarangi(strings:tonic:)` handles every
   structural change (tarab edit, tonic move, scale push): built on a serial
   queue, generation‑checked, crossfaded in; the mapper keeps held notes and
@@ -127,7 +134,9 @@ is not claimed to reproduce the offline waveform sample for sample.
   the existing split integrator for a neutral, full-step bank. It commits only
   if every row converges; moved bones and deep-contact states use the fallback.
   `buildEngine` settles with a silent control snapshot, preserving held touches
-  for publication. A prepared bank receives one 4096-frame warmup block;
+  for publication. Async builds defer the mapper's polyphony change until
+  accepted publication, so failed or superseded builds cannot release held slots.
+  A prepared bank receives one 4096-frame warmup block;
   fallback banks receive at least five with 50 ms damping. The physical kernel
   state is preserved while the discarded setup transient is cleared from the
   output filters and room. Natural-decay verification blocks must stay below
@@ -135,10 +144,10 @@ is not claimed to reproduce the offline waveform sample for sample.
   returns no replacement engine. `RebuildCostTests` checks the −80 dBFS publish
   contract across tonics and bone positions. Setup remains outside
   `BowEngine.init`, so direct kernel fixtures can still start at t = 0.
-- **In‑place push.** A `.live`/`.hybrid` edit recomputes the kernel's scalar
-  vector and hands it to `BowEngine.setLiveParams` — no reset, no pre‑roll,
+- **In‑place push.** A supported model edit recomputes the kernel's scalars
+  and hands them to `BowEngine.setLiveParams` — no reset, no pre‑roll,
   no crossfade (`inPlaceKeys`; see [Sound Design](sound-design.md)).
-- **The scalar block** is `bow_scalars_t`, a NAMED C struct of 51 doubles
+- **The scalar block** is `bow_scalars_t`, a named C struct of doubles
   declared (and documented field by field) in `bow_kernel.h`.
   `BowTables.buildOpenString` fills it BY NAME; `bow_poly_init` takes a
   pointer to it and `bow_poly_set_scalars` replaces the whole block on a
@@ -160,6 +169,8 @@ is not claimed to reproduce the offline waveform sample for sample.
   `touchOn`/`touchGlide`/`touchOff`/`touchAllOff`, every slot keyed by its
   u16 touch id (`TouchMapperTests`). The Mac pads hold the expression axis
   at the commanded value 0.251 unless a control changes it.
+  Each played slot owns its `BowControlFilter` state and deterministic drift
+  seed; live updates, axis transforms and resets apply to that slot array.
 - **Bow-axis transforms.** Expression, pressure and position each pass through
   an editable piecewise-linear curve before the bow law. The Transforms tab
   edits arbitrary input/output points in 0…1 (up to 64), with fixed input
@@ -180,10 +191,14 @@ is not claimed to reproduce the offline waveform sample for sample.
   budget — a LATE callback glitches at the device even when the render
   itself is clean); `AppController`'s 5 s watchdog logs "jt OVERLOAD" /
   "render OVERRUN" when they grow. Check these first for clicking.
-- **Body (⌘0) tab** draws the formula body's frequency response as
-  built into the running engine (`BowEngine.bodyResponse`, from the
-  engine's own tables — radiation, at‑the‑ear, admittance, modes);
-  display‑only, computed on rebuild ([UI Layout](ui-layout.md)).
+- **Body (⌘0) tab** draws the running formula body's radiation,
+  at‑the‑ear response, admittance and modes (`BowEngine.bodyResponse`).
+  The render thread publishes a versioned snapshot of accepted body arrays,
+  current ramped scalars and radiation coefficients; the UI evaluates the
+  response after unlocking. Its 2 Hz poll recomputes only when the engine or
+  coefficient revision changes, including in-place edits. Pending and rejected
+  tables never replace the diagnostic snapshot (`BowBodyResponseTests`;
+  [UI Layout](ui-layout.md)).
 - **Scope (⌘8) and Taraf (⌘9) tabs** draw display‑only kernel meters:
   `bow_poly_scope_arm` turns on, per jt row, a peak envelope of its radiated
   (post‑cap) sample and per‑mode peak envelopes of the first 16 modes' |p_k|
@@ -562,61 +577,39 @@ exactly 1.0 at the build value, the two trackers stay bit‑identical and
 
 ### Two‑way coupling (`bow_jt_couple`)
 
-The drive is ONE‑WAY: the played string's bridge force charges every row and
-never feels one back. On the instrument the rows sit on the SAME bridge, so
-their own bridge forces load it too — energy returns to the played string,
-and the rows feel each other through the shared termination.
+`bow_jt_couple` (0…1, live, default **0 = byte-exact bypass**) returns the
+sympathetic banks' mechanical bridge force to the played strings. The return
+enters the bridge force `F` before the body solve, reaching body radiation,
+the played-string return and the next recorded drive. The rows therefore
+exchange energy through the same bridge. Each bank owns its return FIFO;
+chromatic return is one render block late, while raga return follows its
+asynchronous worker path.
 
-`bow_jt_couple` (0…1, `.live`, **0 = byte‑exact**) closes that loop. Each row
-already computes its whole bridge load in the tick: `radScale`·fsum (contact)
-+ `pinScale`·Σ(−1)^k·k·q_k (termination), **DC‑blocked** — the same `fr − lp`
-it radiates. Both halves carry the SAME force→radiated factor
-gout·π/(mu·L·wd1), so ONE per‑row reciprocal, `JtTables.rowCplScale` =
-mu·L·wd1/(gout·π), turns that back into NEWTONS. The rows' summed force joins
-the played strings' bridge force `F` **before** the body solve, so it (a)
-moves the bridge every played string takes back through its kret return, (b)
-radiates through the body, and (c) lands in the drive record, which is what
-charges every row on the NEXT tick — that last part is the row‑to‑row
-exchange: the web feeds itself through the bridge.
+Chromatic rows form contact plus termination force, DC-block it, and use
+`rowCplScale` to convert back to newtons. Physical raga rows keep a separate
+DC-blocked normal-force path (`forceScale` / `rowCouplingNorm`) alongside
+their fitted radiation path. Normalization uses the summed physical row
+weights. Bank radiation levels, direct-pluck loudness and radiation filters
+do not multiply this mechanical return.
 
-**The pickup must be DC‑BLOCKED, and that was the whole never‑silent bug.**
-The raw per‑row load carries the row's static wrap preload as a constant
-term, so the first cut of this knob parked a DC force on the played strings'
-bridge — which then fed the drive record and charged every row with it. It
-self‑excited from silence: a web nobody played, gate disarmed, settled to a
-tail RMS of **2.6e‑1** at the top of the range (DC‑blocked: **5.7e‑3**, all
-of it the wrap's contact micro limit‑cycle, DC offset 1.3e‑5 → 1.0e‑6). With
-the gate armed and a real note it read as the instrument never going quiet: a
-bowed Sa's 12 s ring parked at a constant **−42 dBFS with 0 of 34 rows
-asleep**. Blocked, the same ring reads −49 / −65 / −87 dBFS at 3 / 5 / 7 s and
-then truncates as the gate closes, **34 of 34 asleep** — the uncoupled ring's
-own curve (−49 / −66 / −87). A row the gate puts to sleep also FADES its last
-returned value out on the blocker's own rate instead of stepping to 0 (a step
-on the shared bridge strums every other row); with the DC term gone that step
-is small, so this is continuity insurance, not the fix.
+**The return must be DC-blocked.** A row's raw load contains its static wrap
+preload. Returning that constant load charges the other strings and can
+self-excite an unplayed web. **A sleeping row must fade its final return
+rather than step it to zero:** a discontinuity on the shared bridge excites
+the other rows. Chromatic rows decay `jtCplLast` at their blocker rate;
+physical rows drain their converter/filter tails and decay `last_force`.
 
-**The bank normalization.** The kernel SUMS the rows into one return, so the
-loop gain scales with how many rows the document holds and how loud they are —
-the shipped Pilu bank is 34 rows. `rowCplScale` is therefore divided by the
-bank's total row gain **Σ gout**, and one knob position means one loop gain
-whatever the bank. Without it the knob's stable range was a property of the
-document, which is why real playing diverged at ~0.04 where a single‑note
-bench sweep said 0.2.
+`BowEngine.setJtCouple` maps the knob to a maximum kernel gain of **0.04**
+when physical raga rows are mounted. An unbanked legacy fixture uses
+`jtCoupleFullScale` **0.4**. The gain slews over about 40 ms. The earlier
+34-row divergence study is [historical evidence](history/documentation-audit-2026-10-12.md#original-coupling-measurements),
+not a measurement of the current two-bank instrument.
 
-**The range is 0…1 of a MEASURED safe range** (`BowEngine.jtCoupleFullScale`
-= 0.4 kernel gain — half the divergence gain). Measured on the HEAVY case,
-because one note is far more forgiving than a chord: shipped Pilu bank, serial
-jt, **Sa + Pa + Sa′ at full expression** held 1 s then a 4 s ring, output trim pulled
-60 dB so the safety limiter cannot mask growth. The ring's fall from +1 s to
-+4 s: **31 dB** uncoupled, 31 / 27 / 28 / 18 / 23 dB at 0.2 / 0.3 / 0.4 / 0.5
-/ 0.6 — and at **0.8** it stops decaying and GROWS +6 dB through the last
-second. Above that it only flattens (2.0 and up hold a plateau for the whole
-ring; the kernel clamps the gain at 4). So 0.8 is the divergence gain, full
-scale is 0.4, and the knob's top still decays 28 dB over that ring.
-
-Not baked, deliberately: this is a sound‑design lever and it is judged by
-ear. It is LOUD well before the top — the web bloom is the point — so pull
-`bow_jt_gain` / `bow_bal` / `bow_jt_cap` with it.
+`TarafCoupleTests` guards the production bank at full knob range: an unplayed
+web returns no DC load, a released ring becomes inaudible and sleeps within
+its reference-clock decay bound, and full-expression chords decay at both
+reference and maximum uncompensated drive without limiter masking. Re-run
+the full guard after changes to the contact models, return path or gain law.
 
 ### Chromatic evolution and register
 
@@ -684,6 +677,18 @@ pluck mechanism is available, but a convincing `sitar1.wav` fit remains open.
 
 The realtime implementation (local research: `tools/experiments/taraf_sitar/realtime/README.md`)
 mounts the approved two-direction physical model on every selected raga row.
+`DualTaraf` initializes one immutable reference profile per process: radiation
+coefficients, geometry, modal frequencies/losses, equilibrium and radiation
+projection vectors. Concurrent builds share that profile through Swift's once-only
+initialization. Each row derives its own pitch-scaled drive in the original
+arithmetic order and owns its C solver, motion, converter and filter histories.
+The twelve-row setup probe measures a warm median of 11.06 ms with the cache,
+against 15.32 ms without it (30 warm builds on this machine); this measures row
+installation, not complete rebuild time or sustained rendering CPU. Newton and
+SAV probe renders retain their exact SHA-256 hashes. C row storage is still
+independent; the cache is a setup-time optimization, with no claimed reduction
+in process memory.
+
 The retired `bow_jt_dual_row` selector is ignored by the app; only isolated
 research fixtures retain it. `bow_jt_dual_mm` captures 0–1 reference mm of
 plectrum displacement at a drone press or explicit pluck, default 0.5. At
@@ -886,7 +891,7 @@ incoming bridge force. **Above:** the profile flattens — resonant rows are
 CUT toward the common haze level (w → √(haze/(haze+kin²)); cuts, because
 extra drive is drained by the graze contact) until at 1 every row contributes
 equally, independent of the played note. **Loudness compensation:**
-`BowEngine.recruitGainMul` (an incoherent power sum over the kin scores plus a
+`BowEngine.updateRecruitment` (an incoherent power sum over the kin scores plus a
 per‑row haze floor `recruitHazeFloor` 0.05, blending above 0.5 to one common
 level rows·haze + `recruitKinNominal` 1.75, capped ×`bow_jt_sel_comp` [4])
 drives `bow_poly_jt_set_gain_mul`. The follower and held‑drone rows count as
@@ -1045,11 +1050,11 @@ range keys are bp scalars (`string.<key>`). Path: binding →
 `AppController.applyParamToVoice` → `AudioEngine` → `StringVoiceSource`
 (re‑applied on every `setEngine`) → `BowEngine` chunk‑rate smoothers (~40 ms).
 
-1. **Taraf purity** (CC71): the radiated‑jt tone‑LP corner sweeps from the
+1. **Taraf purity** (composite slot 1): the radiated‑jt tone‑LP corner sweeps from the
    build corner to `bow_tilt_pure_lp` 1500 Hz (hi‑band buzz falls ~10 dB, no
    loudness bloom) and `bow_jt_sel` sweeps 0.5 → 0. The bones never move.
-2. **Taraf decay** (CC73): `bow_jt_damp`, natural ring → choked.
-3. **Tone tilt** (CC72, `bow_tone_tilt`): a complementary low/high shelf pair
+2. **Taraf decay** (composite slot 2): `bow_jt_damp`, natural ring → choked.
+3. **Tone tilt** (composite slot 3, `bow_tone_tilt`): a complementary low/high shelf pair
    (∓/± `bow_tilt_eq_db` 9 dB at `bow_tilt_eq_lo` 300 Hz / `bow_tilt_eq_hi`
    2400 Hz) over the whole voice, mid and side alike (so the image never
    narrows), pre‑room; smoothed ~50 ms with in‑place coefficient swaps; flat
@@ -1084,13 +1089,13 @@ range keys are bp scalars (`string.<key>`). Path: binding →
 
 ## The Strings tab (⌘2) and the tarab model
 
-- **`StringSpec`** is `degree, octave, gain, t60, enabled, set`. **The pitch
-  is scale‑defined:** `degree` indexes `InstrumentState.scaleRatios` (the one
-  centralized scale, mirrored from the Fret Pad), `octave` shifts it by whole
-  octaves; a scale or tonic move retunes the whole bank. Hz is minted only at
-  resolve time (`resolved(tonic:scaleRatios:)` = ratio × 2^octave × tonic,
-  quantized to millihertz — the drone press finds its row by exact nominal
-  Hz). `gain` 0 silences a row, keeping it. `TarabRatioTests`.
+- **`StringSpec`** stores `degree, octave, gain, t60, enabled, set, followsScale`
+  and a stable ID. `set` selects the bridge independently of pitch source.
+  With `followsScale`, `degree` indexes `InstrumentState.scaleRatios`;
+  otherwise it indexes the fixed JI chromatic grid. Both follow the tonic;
+  only scale-reference rows follow scale edits. `resolved(tonic:scaleRatios:)`
+  mints millihertz-quantized Hz, and drone lookup also carries the bridge
+  identity. `gain` 0 keeps a silent row. `TarabRatioTests` pins resolution.
 - **The pool invariant: sorted by pitch, one string per pitch, per bridge.**
   `InstrumentState.normalizeStrings` (sort + fold duplicates keeping the
   stronger twin — higher gain, then longer t60) runs on every entry path; an
@@ -1119,44 +1124,14 @@ range keys are bp scalars (`string.<key>`). Path: binding →
   decode away. Per‑string ratio/Hz inputs and manual
   raga tuning are not present — see `docs/history/`.
 
-## Jawari modelling roadmap
+## Modelling research
 
-The standalone single-row equilibrium probe (local research: `tools/experiments/jawari_equilibrium/README.md`)
-compares initial wraps, contact solvers and timesteps using the production
-table builder and row tick, without changing the instrument. Measurements and
-limitations: equilibrium experiment (local research: `docs/history/Codex-2026-09-08-jawari-equilibrium.md`).
-
-Improvements proposed for the modal‑jawari rows, in the order worth doing.
-
-1. **Radiate the bridge contact force — done.** Rows radiate the DC‑blocked
-   contact force, unit‑matched per row (`rowForceScale`); every mode radiates
-   flat and the Taraf tab's modal spectrum is the radiated one.
-1b. **Add the termination (pin) force — done (baked in).** Every row's
-   radiated sample is the bone contact force plus the pin force
-   `rowPinScale`·Σ(−1)^k·k·q_k, ahead of the DC blocker; no knob (the
-   `bow_jt_rad_pin` mix it shipped as was judged at 1 and folded in).
-2. **Drive from the termination too — tried, rejected.** The pin's
-   mode‑slope drive shape was built as a 0…1 morph and normalised two ways
-   (mode‑1 match, then an energy match); by ear neither changed the
-   character — it read as a taraf loudness knob and 0 sounded best.
-   Removed: the knob, its `phiDT` table and its ABI are gone and the fitted
-   0.90 L tap is the only drive (git history carries both measurements).
-3. **Two‑way coupling among the rows — shipped as a KNOB, default off.**
-   `bow_jt_couple` (above) feeds the rows' summed, DC‑blocked bridge force
-   back into `F` one post‑pass block out (the deferred web forbids a literal
-   one‑sample return). The first cut returned the UN‑blocked load, whose
-   static‑wrap DC term made the instrument ring forever at a low strumming
-   floor; blocked, normalized by the bank's Σ gout and expressed as 0…1 of
-   half the measured divergence gain, the loop is bounded and the ring ends.
-   Not baked: taking it means re‑fitting levels around it.
-4. **Bone profile.** A real jawari is an asymmetric arc with a gentler slope
-   toward the nut, lengthening the cascade rather than deepening it.
-   Build‑time table, cheap to try.
-5. **Damping law.** Per‑mode loss is a constant plus an f² roll‑off around
-   `bow_jt_fhf`; real strings add an air term ∝ f — how long the high cluster
-   survives the cascade.
-6. **Port the tanpura contact string** under the sarangi web — costly
-   (~9 %/core/row); only if 1–3 don't get there.
+The [open backlog](tech-debt.md) tracks current numerical and efficiency
+work. The standalone equilibrium probe (`tools/experiments/jawari_equilibrium/`)
+compares initial wraps, solvers and timesteps without changing the instrument.
+Completed/rejected proposals and the original coupling measurements are
+[archived](history/documentation-audit-2026-10-12.md); they do not prescribe
+changes to the fitted raga model.
 
 ## Presets and resources
 
@@ -1167,12 +1142,13 @@ over it, so what ships is the LAYOUT and the gains/t60s. The timbre lives in
 `bowed_string.json`; the "Default (Sarangi Live)" reset restores the untouched
 artifact, zero overrides and the generated bank. Whole‑rig presets are
 `TarabdaarPreset` documents — [Sound Design](sound-design.md). A fitted
-per‑string table is not present; the taraf sits on the scale's JI grid.
+per‑string table is not present; pitches resolve from the scale or fixed JI
+chromatic grid according to each row's pitch source.
 
 ## Tests
 
-The guard set is deliberately small — about 77 tests. One render hash pins the
-sound; everything else pins a contract that would otherwise break silently, a
+The guard set pins behavior rather than implementation details. One render hash
+pins the sound; other tests pin a contract that would otherwise break silently, a
 stability bound, or a lockstep with a golden. No calibration numbers live in
 tests; the sound is judged by ear.
 

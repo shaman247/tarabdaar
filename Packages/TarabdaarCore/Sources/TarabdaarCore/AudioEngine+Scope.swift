@@ -51,54 +51,73 @@ extension AudioEngine {
 
     // MARK: - Live performance readout (Live tab)
 
-    /// Live-tab readout: played pitch (Hz), commanded loudness (`expression`
-    /// 0…1 from CC11; 0 on the touch path), and whether anything is held.
+    /// Live-tab readout: held pitch and the latest main-voice interval RMS.
+    /// Released strings can still sound while `active` is false.
     public struct PerformanceReadout {
         public let pitchHz: Double
-        public let expression: Double
+        public let voiceRMS: Double
         public let active: Bool
     }
 
-    /// Thread-safe snapshot; poll at UI rate.
-    public func performanceReadout() -> PerformanceReadout {
-        meterLock.lock()
-        defer { meterLock.unlock() }
-        return PerformanceReadout(pitchHz: meterPitchHz,
-                                  expression: meterExpr,
-                                  active: meterActive)
+    /// The destructive meter poll and nondestructive UI snapshots share this cache.
+    final class PerformanceMeter {
+        private let lock = NSLock()
+        private var pitchHz = 0.0
+        private var voiceRMS = 0.0
+        private var active = false
+
+        func storeTouch(_ touch: (Double, Bool)) {
+            lock.lock()
+            pitchHz = touch.0
+            active = touch.1
+            lock.unlock()
+        }
+
+        func captureVolume(_ sample: () -> (voice: Double, chromatic: Double, raga: Double))
+            -> (voice: Double, chromatic: Double, raga: Double) {
+            let levels = sample()
+            lock.lock()
+            voiceRMS = levels.voice
+            lock.unlock()
+            return levels
+        }
+
+        func readout() -> PerformanceReadout {
+            lock.lock()
+            defer { lock.unlock() }
+            return PerformanceReadout(pitchHz: pitchHz, voiceRMS: voiceRMS, active: active)
+        }
     }
+
+    /// Thread-safe, nondestructive snapshot; polling never consumes audio meters.
+    public func performanceReadout() -> PerformanceReadout { performanceMeter.readout() }
 
     /// Bus levels of the main voice, chromatic taraf and raga taraf for
     /// the iPad's volume scope. Voice = the String voice bus plus the main
     /// instrument's node when plucked (energy sum; the drone never counts).
     /// Interval RMS since the previous poll, linear, 1.0 ≈ 0 dBFS. ONE poller.
     public func volumeLevels() -> (voice: Double, chromatic: Double, raga: Double) {
-        let bus = stringVoiceSource?.busLevels() ?? (voice: 0, taraf: 0, chromatic: 0, raga: 0)
-        lock.lock()
-        let voice = playedVoiceLocked(mainInstrumentStorage)
-        lock.unlock()
-        var voiceSq = bus.voice * bus.voice
-        if let l = voice?.outputLevel() { voiceSq += l * l }
-        return (voiceSq.squareRoot(), bus.chromatic, bus.raga)
-    }
-
-    /// `(pitchHz, expression, active)` for the primary held voice. `lock` held.
-    /// Expression reads 0 — the axis idles in the mapper.
-    func meterSnapshotLocked() -> (Double, Double, Bool) {
-        guard let id = heldTouchOrder.last, let semis = touchPitchSemis[id] else {
-            return (0, 0, false)
+        performanceMeter.captureVolume {
+            let bus = stringVoiceSource?.busLevels() ?? (voice: 0, taraf: 0, chromatic: 0, raga: 0)
+            lock.lock()
+            let voice = playedVoiceLocked(mainInstrumentStorage)
+            lock.unlock()
+            var voiceSq = bus.voice * bus.voice
+            if let l = voice?.outputLevel() { voiceSq += l * l }
+            return (voiceSq.squareRoot(), bus.chromatic, bus.raga)
         }
-        return (Pitch.hz(fractionalMidi: semis), 0, true)
     }
 
-    /// Publish a snapshot. Takes `meterLock`, which must never nest with `lock`.
-    func storeMeter(_ snap: (Double, Double, Bool)) {
-        meterLock.lock()
-        meterPitchHz = snap.0
-        meterExpr = snap.1
-        meterActive = snap.2
-        meterLock.unlock()
+    /// `(pitchHz, active)` for the primary held voice. `lock` held.
+    func meterSnapshotLocked() -> (Double, Bool) {
+        guard let id = heldTouchOrder.last, let semis = touchPitchSemis[id] else {
+            return (0, false)
+        }
+        return (Pitch.hz(fractionalMidi: semis), true)
     }
+
+    /// Publish after releasing `lock`; a touch release leaves ringing RMS intact.
+    func storeMeter(_ snap: (Double, Bool)) { performanceMeter.storeTouch(snap) }
 
     /// Jawari-web overload telemetry (see `StringVoiceSource.jtStats`); nil without a voice.
     public func stringVoiceJtStats() -> (drops: Double, flat: Double,
@@ -169,8 +188,7 @@ extension AudioEngine {
 
     // MARK: - Body response (Body tab)
 
-    /// Identity of the String voice's published engine — changes on every
-    /// rebuild, so the Body tab recomputes only when the body did. Cheap.
+    /// Identity of the String voice's published engine — changes on every rebuild.
     public func stringVoiceEngineIdentity() -> ObjectIdentifier? {
         lock.lock()
         let src = stringVoiceSource
@@ -179,8 +197,23 @@ extension AudioEngine {
         return ObjectIdentifier(engine)
     }
 
-    /// The formula body's frequency response as built into the running
-    /// engine (see `BowEngine.bodyResponse`). Allocates; nil unarmed.
+    public struct BodyResponseVersion: Equatable {
+        public let engine: ObjectIdentifier
+        public let coefficients: UInt64
+    }
+
+    /// Cheap revision for both engine replacements and adopted in-place coefficient changes.
+    public func stringVoiceBodyVersion() -> BodyResponseVersion? {
+        lock.lock()
+        let src = stringVoiceSource
+        lock.unlock()
+        guard let engine = src?.currentEngine() else { return nil }
+        return BodyResponseVersion(engine: ObjectIdentifier(engine),
+                                   coefficients: engine.bodyResponseRevision)
+    }
+
+    /// The formula body's adopted coefficient response (see `BowEngine.bodyResponse`).
+    /// Allocates; nil unarmed.
     public func stringVoiceBodyResponse(points: Int = 1024)
         -> BowEngine.BodyResponse? {
         lock.lock()

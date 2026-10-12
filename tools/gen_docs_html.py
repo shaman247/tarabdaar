@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tarabdaar documentation site generator (2026-07-24).
+"""Tarabdaar documentation site generator.
 
 Renders every docs/*.md into docs/html/<page>.html with a fixed left
 sidebar: the page list (curated order, extras appended) plus the current
@@ -17,12 +17,13 @@ import html
 import os
 import re
 import sys
+from urllib.parse import urlsplit, urlunsplit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCS = os.path.join(ROOT, "docs")
 OUT = os.path.join(DOCS, "html")
 
-# Curated reading order (CLAUDE.md's docs list); extra pages appended.
+# Curated reading order; extra pages appended.
 ORDER = [
     "overview", "playing-guide", "architecture", "sarangi", "tanpura-voice",
     "sitar-voice", "fret-pad", "glide-system", "scales-and-tuning",
@@ -81,17 +82,21 @@ img { max-width: 100%; }
 def slugify(text):
     t = re.sub(r"[`*_]", "", text).strip().lower()
     t = re.sub(r"[^\w\- ]", "", t)
-    return re.sub(r"\s+", "-", t).strip("-")
+    return re.sub(r"\s", "-", t)
 
 
 def rewrite_href(url):
-    """Point relative .md links at the generated .html twins."""
-    if re.match(r"^[a-z]+://", url) or url.startswith("#"):
+    """Resolve source links from docs/html, using generated twins where available."""
+    parts = urlsplit(url)
+    if parts.scheme or parts.netloc or not parts.path or parts.path.startswith("/"):
         return url
-    m = re.match(r"^(?:docs/)?([\w\-]+)\.md(#.*)?$", url)
-    if m:
-        return m.group(1) + ".html" + (m.group(2) or "")
-    return url
+    path = os.path.normpath(parts.path)
+    if os.path.dirname(path) == "" and path.endswith(".md") \
+            and os.path.isfile(os.path.join(DOCS, path)):
+        path = path[:-3] + ".html"
+    else:
+        path = os.path.join("..", path)
+    return urlunsplit(("", "", path, parts.query, parts.fragment))
 
 
 CODE_TOKEN = "\x00CODE%d\x00"
@@ -115,7 +120,7 @@ def inline(text):
     text = re.sub(
         r"\[([^\]]+)\]\(([^)\s]+)\)",
         lambda m: '<a href="%s">%s</a>'
-        % (html.escape(rewrite_href(m.group(2)), quote=True), m.group(1)),
+        % (html.escape(rewrite_href(html.unescape(m.group(2))), quote=True), m.group(1)),
         text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<em>\1</em>", text)

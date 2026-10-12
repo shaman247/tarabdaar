@@ -3,7 +3,7 @@ import Foundation
 /// persist in saved bindings, so cases are never renumbered or removed —
 /// retired cases (`accelPressure`, `keyY`, the sliders) survive so old
 /// documents still decode. Live axes: `ControlAxes.bindableDims`.
-public enum InputDimension: Int, Codable, CaseIterable, Hashable {
+public enum InputDimension: Int, Codable, CaseIterable, Hashable, Sendable {
     case tilt1          = 0    // shared tilt up/down
     case tilt2          = 1    // shared tilt in/out
     case tilt3          = 2    // shared tilt rotation
@@ -413,7 +413,7 @@ public struct DimensionMapping: Codable, Equatable {
     public var mappings: [String: ParameterMapping]
 
     public init(mappings: [String: ParameterMapping]) {
-        self.mappings = Self.unifyTiltBindings(Self.splitStickBindings(mappings))
+        self.mappings = mappings
     }
 
     /// Prefer the primary wrist curve when an old target bound both devices.
@@ -552,14 +552,13 @@ public struct DimensionMapping: Codable, Equatable {
             }
         }
         // The controller strum's expression ships bound to the Joy-Con
-        // Up/Down directions: split the original full-throw Y curve so its
-        // offsets are preserved. Seeded only when the key is ENTIRELY absent; an
+        // Up/Down directions. Seeded only when the key is ENTIRELY absent; an
         // entry the user emptied persists as an empty mapping.
         let strumKey = MapTarget(paramKey: "ctl_strum_expr").storageKey
         if m[strumKey] == nil {
             m[strumKey] = ParameterMapping(
-                bindings: [DimensionBinding(dimension: .stickY,
-                                            rangeMin: 0, rangeMax: 1)],
+                bindings: [DimensionBinding(dimension: .stickDown, rangeMin: 0.5, rangeMax: 0),
+                           DimensionBinding(dimension: .stickUp, rangeMin: 0.5, rangeMax: 1)],
                 defaultValue: 1.0)
         }
         return DimensionMapping(mappings: m)

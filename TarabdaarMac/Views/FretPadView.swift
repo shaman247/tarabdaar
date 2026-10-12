@@ -592,10 +592,6 @@ private struct FretPadMouseCapture: NSViewRepresentable {
     }
 }
 
-// MARK: - Local helpers
-
-private func clamp01(_ x: Double) -> Double { min(max(0, x), 1) }
-
 // MARK: - Scale list editor
 
 /// The scale's notes as an editable list (enable chip, name, `num/den`,

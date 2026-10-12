@@ -13,7 +13,7 @@ import Foundation
 ///
 /// This struct owns the WEIGHT only — the per-note window bookkeeping:
 ///
-///  * anchors are PER NOTE (wire touch id): a new onset never rewrites an
+///  * anchors are PER NOTE (host touch id): a new onset never rewrites an
 ///    older sounding note's window;
 ///  * while notes sound, the NEWEST sounding note's age drives the weight
 ///    (a fresh tap always gets full Strike
@@ -34,7 +34,7 @@ public struct StrikeBlendWindow {
     /// the ramp length moves.
     public var windowS: Double
 
-    /// Onset anchor per SOUNDING note (wire touch id).
+    /// Onset anchor per SOUNDING note (host touch id).
     private var anchors: [UInt16: TimeInterval] = [:]
     /// The newest onset ever seen — the aging fallback after release.
     private var newestOnset: TimeInterval?

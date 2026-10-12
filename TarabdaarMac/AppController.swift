@@ -264,22 +264,16 @@ final class AppController: ObservableObject {
     }
 
     private static let paramValuesKey = "tarabdaar.paramValues.v2"
-    /// The two stores this one replaced, read once when v2 is absent.
-    private static let legacyControlKey = "tarabdaar.controlDefaults.v1"
-    private static let legacyOverridesKey = "tarabdaar.stringOverrides.v1"
 
     private static func loadParamValues() -> [String: Double] {
         let saved = DefaultsStore.load([String: Double].self, key: paramValuesKey)
-            ?? (DefaultsStore.load([String: Double].self, key: legacyOverridesKey) ?? [:])
-                .merging(DefaultsStore.load([String: Double].self, key: legacyControlKey) ?? [:]) { _, c in c }
+            ?? [:]
         return Self.known(saved)
     }
 
-    /// Only keys the registry still knows (retired keys drop out), on the
-    /// current scale.
+    /// Only keys the registry still knows; retired keys drop out.
     private static func known(_ d: [String: Double]) -> [String: Double] {
         d.filter { ParamRegistry.spec($0.key) != nil }
-            .reduce(into: [:]) { $0[$1.key] = migrated($1.key, $1.value) }
     }
 
     /// The physics scalars in `values` as `StringParamStore` overrides: every
@@ -295,12 +289,6 @@ final class AppController: ObservableObject {
         }
     }
 
-    /// `ctl_strum_thresh` was 1…127 (≥127 = off) before it became 0…1:
-    /// a stored value above 1 is the old scale.
-    private static func migrated(_ key: String, _ v: Double) -> Double {
-        key == "ctl_strum_thresh" && v > 1.0 ? min(1.0, v / 127.0) : v
-    }
-
     private static func saveParamValues(_ d: [String: Double]) {
         DefaultsStore.save(d, key: paramValuesKey)
     }
@@ -311,11 +299,10 @@ final class AppController: ObservableObject {
     }
 
     private static func loadBowAxisCurves() -> [String: [BowAxisPoint]] {
-        var preset = TarabdaarPreset()
-        preset.bowAxisCurves = DefaultsStore.load([String: [BowAxisPoint]].self, key: bowAxisCurvesKey)
-        preset.paramValues = DefaultsStore.load([String: Double].self, key: paramValuesKey)
-        preset.stringOverrides = DefaultsStore.load([String: Double].self, key: legacyOverridesKey)
-        return preset.resolvedBowAxisCurves() ?? TarabdaarPreset.factoryBowAxisCurves()
+        let saved = DefaultsStore.load([String: [BowAxisPoint]].self, key: bowAxisCurvesKey) ?? [:]
+        return TarabdaarPreset.factoryBowAxisCurves().merging(
+            saved.filter { BowAxis(rawValue: $0.key) != nil }
+                .mapValues(BowAxisTransform.normalize)) { _, curve in curve }
     }
 
     func bowAxisCurve(_ axis: BowAxis) -> [BowAxisPoint] {
@@ -328,8 +315,6 @@ final class AppController: ObservableObject {
     }
 
     private func applyBowAxisCurves() {
-        // Save migration before a later parameter edit discards the retired band keys.
-        DefaultsStore.save(bowAxisCurves, key: Self.bowAxisCurvesKey)
         audio.setBowAxisCurves(bowAxisCurves)
     }
 
@@ -349,12 +334,6 @@ final class AppController: ObservableObject {
     private static func loadEQCurves() -> [String: [EQPoint]] {
         if let saved = DefaultsStore.load([String: [EQPoint]].self, key: eqCurvesKey) {
             return saved.mapValues(EQCurve.normalize).filter { !$0.value.isEmpty }
-        }
-        // First run after the graphic EQ: the saved profile's band values
-        // become a curve through the band centres (`loadParamValues` drops
-        // the retired keys themselves).
-        if let saved = DefaultsStore.load([String: Double].self, key: legacyControlKey) {
-            return TarabdaarPreset.legacyEQCurves(in: saved)
         }
         return [:]
     }
@@ -641,12 +620,15 @@ final class AppController: ObservableObject {
         self.audio = audio
         self.midi = midi
         self.midiIn = midiIn
-        self.ingest = LinkIngest(sink: audio)
+        let touchIdentities = TouchIdentityAllocator(retaining: audio.glideQueue.retainsTouchIdentity)
+        self.ingest = LinkIngest(sink: audio, touchIdentities: touchIdentities)
         // ONE scale, ONE tonic: both pad engines share the instance.
         let tuning = Tuning()
         self.tuning = tuning
-        self.pitchPad = PitchPadEngine(audio: audio, tuning: tuning)
-        self.fretPad = PitchPadEngine(audio: audio, tuning: tuning)
+        self.pitchPad = PitchPadEngine(audio: audio, tuning: tuning,
+                                            touchIdentities: touchIdentities)
+        self.fretPad = PitchPadEngine(audio: audio, tuning: tuning,
+                                            touchIdentities: touchIdentities)
         // Fret Pad Snap: 24 px (not the shared 16), fitted to real iPad
         // onsets — ≈43¢, under the 40 px minimum fret gap. Synced to the iPad.
         self.fretPad.marginPixels = 24
@@ -1083,8 +1065,8 @@ final class AppController: ObservableObject {
         // The pitch accent's fret grid: a handful of doubles, so it follows
         // the arrangement and the tuning undebounced (held notes re-accent
         // at once).
-        Publishers.Merge($fretArrangement.map { _ in () }, tuning.didChange)
-            .sink { [weak self] in self?.syncAccentGridFromFrets() }
+        FretPitchGrid.publisher(tuning: tuning, arrangement: $fretArrangement)
+            .sink { [weak self] grid in self?.audio.setFretPitchGrid(grid) }
             .store(in: &cancellables)
 
         // Rebuild the tanpura's JI slot grid on a scale/tonic change. Heavier
@@ -1094,13 +1076,6 @@ final class AppController: ObservableObject {
             .sink { [weak self] in self?.syncTanpuraFromScale() }
         .store(in: &cancellables)
         syncTanpuraFromScale()      // arm the drone voice on launch
-    }
-
-    /// Push the pad's fret pitches into the pitch accent (`ctl_fret_accent`).
-    private func syncAccentGridFromFrets() {
-        audio.setFretPitchGrid(FretPitchGrid(tonicHz: pitchPad.tonicHz,
-                                             arrangement: fretArrangement,
-                                             degrees: fretDegrees))
     }
 
     /// Last tuning pushed into the tanpura, for the unchanged-skip above.
@@ -1469,11 +1444,8 @@ final class AppController: ObservableObject {
         if let inst = p.instrument {
             sarangi.replaceState(inst)
         }
-        if p.paramValues != nil || p.stringOverrides != nil {
-            // One section now; a file from the two-store era carries both.
-            let merged = (p.stringOverrides ?? [:])
-                .merging(p.paramValues ?? [:]) { _, pv in pv }
-            paramValues = Self.known(merged)
+        if let values = p.resolvedParamValues() {
+            paramValues = Self.known(values)
             stringParams.replaceOverrides(Self.physicsOverrides(in: paramValues))
             refreshHybridHeadroom()
             applyRestingParams()

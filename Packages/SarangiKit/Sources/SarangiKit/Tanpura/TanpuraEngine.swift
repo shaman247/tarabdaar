@@ -260,13 +260,9 @@ public final class TanpuraEngine: @unchecked Sendable {
                     tanpura_render(ctx, Int32(m), mb.baseAddress)
                 }
             }
-            // body EQ: slide history, vDSP correlate with reversed taps
+            // body EQ: prepend the retained tail, vDSP correlate with reversed taps
             firHist.withUnsafeMutableBufferPointer { hb in
                 let h = hb.baseAddress!
-                // shift the last (nt-1) samples to the front
-                if nt > 1 {
-                    memmove(h, h + m, (nt - 1) * 8)
-                }
                 mono.withUnsafeBufferPointer { mbp in
                     _ = memcpy(h + (nt - 1), mbp.baseAddress!, m * 8)
                 }
@@ -276,6 +272,10 @@ public final class TanpuraEngine: @unchecked Sendable {
                                    ob.baseAddress!, 1,
                                    vDSP_Length(m), vDSP_Length(nt))
                     }
+                }
+                // Store this chunk's tail now: the next chunk may have a different length.
+                if nt > 1 {
+                    memmove(h, h + m, (nt - 1) * 8)
                 }
             }
             for i in 0..<m {

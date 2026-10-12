@@ -1,6 +1,6 @@
 # MIDI & Audio
 
-The iPad↔Mac wire is **TLP** (the TarabLink Protocol). The iPad streams one compact binary **state frame** (all touches at full-resolution pitch + tilt + strike + drones + chord selection, atomic, latest-wins) plus a small set of reliable **events**; the Mac streams sync events and a display/control frame back. Both directions tunnel inside one SysEx envelope over the CoreMIDI transports — the USB session when wired, the BLE-MIDI session otherwise. Code: `Packages/TarabdaarCore/Sources/TarabdaarCore/Link/`.
+The iPad↔Mac wire is **TLP** (the TarabLink Protocol). The iPad streams one compact binary **state frame** (all touches at full-resolution pitch + tilt + strike + drones + chord selection, atomic, latest-wins) plus a small set of ordered **events**; the Mac streams sync events and a display/control frame back. Both directions tunnel inside one SysEx envelope over the CoreMIDI transports — the USB session when wired, the BLE-MIDI session otherwise. Code: `Packages/TarabdaarCore/Sources/TarabdaarCore/Link/`.
 
 **There is no MIDI note vocabulary.** No notes, bends, control changes, aftertouch or MPE exist anywhere in the app — not on the wire and not in-process. CoreMIDI is the tunnel's BEARER and nothing else: the only bytes either side sends or reads are SysEx-framed TLP frames. Pitch is an f32 fractional-MIDI number inside a state frame; expression, press, position, tilt and vibrato are 0…1 axes set directly on `BowControlMapper`; drone presses are `droneMask` bits. (MPE note+bend, tilt CC pairs, per-message SysEx blobs and the in-process note path are all gone — see docs/history/.)
 
@@ -20,7 +20,7 @@ Reassembly on both ends is **per source** (keyed by the CoreMIDI connection refC
 
 ## Frames (`TLPFrame.swift`)
 
-Little-endian, explicitly encoded byte tables, one frame per envelope. `TLP.versionMin/Max` are 25/25 (the scale and arrangement blobs carry no version of their own — this one is theirs); HELLO intersects version ranges, so a mismatched peer stays down cleanly instead of half-decoding (the symptom of a skipped iPad install is "drones and tilt work, touches are silent" — header-only frames decode while resized touch records don't; install both apps together).
+Little-endian, explicitly encoded byte tables, one frame per envelope. `TLP.versionMin/Max` are 26/26 (the scale and arrangement blobs carry no version of their own — this one is theirs); HELLO intersects version ranges. Until a compatible HELLO arrives, only HELLO is sent and all other inbound frames are ignored. A version mismatch on an established link releases that link’s touches and drones. Install both apps together; version 26 uses half-point radius units.
 
 | Type | Name | Class | Direction |
 |---|---|---|---|
@@ -35,7 +35,7 @@ Little-endian, explicitly encoded byte tables, one frame per envelope. `TLP.vers
 | `0x40` | PERF_STATE | state | iPad → Mac |
 | `0x41` | JOYCON_STATE | state | Mac → iPad |
 
-Events (`0x01–0x3F`) are `[type][eventSeq u16]` + payload, reliable, never dropped or reordered. State frames (`0x40–0x5F`) are latest-wins, coalescable per type; unknown state types are ignored. `0x42` is retired (not present — see docs/history/).
+Events (`0x01–0x3F`) are `[type][eventSeq u16]` + payload. After a compatible HELLO establishes the session, the sender queues events in order without state coalescing; this is not an acknowledgement/retransmission guarantee. Pre-handshake sync events are discarded and recovered by resync. State frames (`0x40–0x5F`) are latest-wins, coalescable per type; unknown state types are ignored. `0x42` is retired (not present — see docs/history/).
 
 ### `0x40 PERF_STATE` (iPad → Mac)
 
@@ -50,9 +50,9 @@ Events (`0x01–0x3F`) are `[type][eventSeq u16]` + payload, reliable, never dro
 | `strike` | u8 | the accelerometer strike envelope, 0–255 ↔ 0…1 (`LinkIngest.onStrike` → the `.strike`/`.acceleration` pair — see [Sensors](sensors.md)); 0 from producers without an accelerometer |
 | `chordDegree`, `chordOctave` | u8, i8 | the chord bar selection as held state: degree index (0xFF = none) + octave (always 0 on the wire — reserved, still decoded); the Mac acts on change edges (`LinkIngest.onChordSelect` → `AppController.strumChord`) — see [Fret Pad](fret-pad.md) |
 | `touchCount` | u8 | then per touch: |
-| `id` | u16 | namespaced wire id — one touch = one identity |
+| `id` | u16 | source-local wire id — one touch = one identity; the host remaps input lanes before voice routing |
 | `onsetSeq` | u8 | bumps on retrigger |
-| `radius` | u8 | FINGERTIP SIZE — `UITouch.majorRadius` in points × 4 (quarter-point steps, clamped at 255 ≈ 63.75 pt); 0 = unknown (producers without a touchscreen). `LinkIngest.onTouchRadius` → `TouchSizeTracker` → the `.touchSize` control dimension — see [Sensors](sensors.md). Filled at onset and on every move. **v13** — it replaced the never-read `pressure` byte in place, so the record size is unchanged |
+| `radius` | u8 | FINGERTIP SIZE — `UITouch.majorRadius` in points × 2 (half-point steps, up to 127.5 pt); 0 = unknown (producers without a touchscreen). `LinkIngest.onTouchRadius` → `TouchSizeTracker` → the `.touchSize` control dimension — see [Sensors](sensors.md). Filled at onset and on every move. **v26** — positive finite values use bytes 1–255; zero, negative or nonfinite input is unknown. The touch record remains ten bytes |
 | `pitch` | f32 | fractional MIDI (~0.0008 ¢ steps) |
 | `fretPosition` | u16 | position along the fret, 0…65535 ↔ 0…1: inner end 0, outer end 1; 0 for producers without fret geometry. Filled at onset and on movement, including changes with unchanged pitch. **v18** |
 
@@ -95,7 +95,7 @@ on resync; they do not send reliable events for each mapping update.
 The iPad applies them to `PitchPadEngine.fretAssistSettings` on main, and
 `FretTouchPlayer` reads them at onset, movement and every settle tick.
 Disconnect/staleness restores registry defaults. The Mac alone persists
-rests and evaluates mappings. Both apps must use protocol version 25.
+rests and evaluates mappings. Both apps must use the same TLP version.
 
 ### Taraf strip events
 
@@ -117,7 +117,7 @@ Local Mac strip gestures use the same revision-checked entry point.
 
 ### Sync events
 
-`SCALE_STATE` and `FRET_ARRANGEMENT` carry the binary blobs raw (`[len u16][blob]`): `PitchScaleSysEx.encodeBlob` (`[tonic][tonicCents14][margin][layout][count]`, then per point `num/den` 14-bit pairs, `y`, `enabled`, length-prefixed UTF-8 label) and `FretArrangementSysEx.encodeBlob`; neither carries a version byte — TLP's version is theirs. The synced state is a `SyncedScaleState` = scale + `tonicMidi` + `tonicCents` (±50 ¢ at 0.01 ¢ — the tonic is set in Hz on the Mac) + `marginPixels` + `layout` (`PadLayout`, always `.fretPad`; the enum keeps its other cases because the blob encodes the raw value). Older blob versions are rejected; both apps ship the format together. Arrangement flags bit 3 selects five-row pitch/row pairs: `[degreeIndex][row: 1…5]`.
+`SCALE_STATE` and `FRET_ARRANGEMENT` carry the binary blobs raw (`[len u16][blob]`): `PitchScaleSysEx.encodeBlob` (`[tonic][tonicCents14][margin][layout][count]`, then per point `num/den` 14-bit pairs, `y`, `enabled`, length-prefixed UTF-8 label) and `FretArrangementSysEx.encodeBlob`; neither carries a version byte — TLP's version is theirs. The synced state is a `SyncedScaleState` = scale + `tonicMidi` + `tonicCents` (±50 ¢ at 0.01 ¢ — the tonic is set in Hz on the Mac) + `marginPixels` + `layout` (`PadLayout`, always `.fretPad`; the enum keeps its other cases because the blob encodes the raw value). Peers with incompatible TLP versions are rejected; both apps ship the format together. Cached arrangement formats decode as described below. Arrangement flags bit 3 selects five-row pitch/row pairs: `[degreeIndex][row: 1…5]`.
 Only assigned frets are sent. The receiver derives frequency-aligned x coordinates,
 equal heights and 30% overlaps. Cached three-row blobs (bit 2) migrate rows 1/2/3
 to 1/3/5; old raga membership masks (bit 0) are consumed and ignored. Older
@@ -131,14 +131,16 @@ The iPad requests a fresh snapshot after every compatible host `HELLO`, includin
 |---|---|
 | Producers | O(1) locked writes into `OutboundPlayState` (main thread) |
 | Pacing | a `DispatchSourceTimer` at 120 Hz on the link's own `userInteractive` serial queue — off main, so UI stalls cannot delay frames; ≤ 1 fresh state frame per tick (≤ 8.3 ms sampling age); events immediately |
-| Coalescing | a state enqueue replaces any unsent frame of the same type; events never drop or reorder |
+| Coalescing | a state enqueue replaces any unsent frame of the same type; events on an established link stay ordered in the sender queue without coalescing |
 | Heartbeat | 250 ms when idle — a still iPad stays distinguishable from a dead one; held state (`droneMask`, chord selection, `connected`) re-delivers on it |
 | Staleness | 1.5 s of silence → the link is stale → `LinkIngest.linkDidDrop` |
 | Drop path | **surgical**: releases only the touches and drones the peer's OWN frames introduced, never the Mac's local-pad notes; a PANIC event routes through the same path — a wire event never has global blast radius |
 | Dedupe | wrap-aware u16 sequence gating per class; HELLO re-anchors |
 | Throttles | `kick()` (re-HELLO + resync on a CoreMIDI setup change) at most 1/s; hello replies 1/s; the Mac's state pushes coalesce to ≥ 300 ms apart |
 
-`LinkIngest` first applies change-gated tilt/strike/accel, then diffs consecutive PERF_STATE frames — removals → onsets/retriggers → glides, drone-mask and chord edges — into `AudioEngine.touchOn/touchGlide/touchOff` and `setDronePressed`, all on the link queue. Each onset anchors and evaluates its Strike blend before mounting the string, so onset-captured parameters see the current frame. The Mac's `PitchPadEngine(audio:)` runs the same path in-process (`OutboundPlayState` → `LocalLinkPump` → `LinkIngest`).
+While the link is down, HELLO retries use the existing one-second throttle. Performance state stays pending until a compatible handshake. Pre-handshake sync events are discarded; the pad requests a fresh snapshot after HELLO, and the host marks its display frame dirty.
+
+`LinkIngest` first applies change-gated tilt/strike/accel, then diffs consecutive PERF_STATE frames — removals → onsets/retriggers → glides, drone-mask and chord edges — into `AudioEngine.touchOn/touchGlide/touchOff` and `setDronePressed`, all on the link queue. Each onset anchors and evaluates its Strike blend before mounting the string, so onset-captured parameters see the current frame. The Mac's `PitchPadEngine(audio:)` runs the same path in-process (`OutboundPlayState` → `LocalLinkPump` → `LinkIngest`). Every production ingest (the wire and both Mac pad engines) shares one host `TouchIdentityAllocator`: equal source ids become distinct host ids before audio routing and all touch callbacks. Releases and link drops return only that ingest's mappings. `OutboundPlayState` uses the full u16 range and skips its own held ids, without a process-local namespace. The host also skips held ids, glide-chain identities (including a lifted chain origin and release grace), and identities with downstream callbacks still in flight. Both cursors advance monotonically across wrap, so a released id is not immediately reused. The encoded u16 field and TLP format are unchanged.
 
 **Lane selection** is `MIDIEngine`'s wired-first rule (below); the link has no lane state machine. The iPad sends via `sendSysExToLink` (real links only, never its own virtual loopback). The Mac sends via `sendSysExToLinkPeer`: to the **learned peer** — the destination on the same CoreMIDI entity as the source the pad's frames arrive on — so its replies ride whichever bearer the iPad chose; until the first pad frame (or after the peer's endpoint vanishes) the wired-first `sendSysEx(toDestinationsMatching: "iPad")` stands in, `fallbackToAll` for events only.
 
@@ -174,7 +176,7 @@ Drones, the tarab and the strum do NOT follow the octave shift.
 | Path | What it provides |
 |---|---|
 | **GameController** (`attach`) | buttons and the stick as macOS presents them. A lone Joy-Con arrives SIDEWAYS: the stick is rotated back `(x, y) = (y_os, −x_os)` and A/B/X/Y map to ↓/←/→/↑; a paired L+R duo presents as a real gamepad and is not rotated. **Alias trap**: a `GCPhysicalInputProfile` names one element under several keys (the stick is BOTH `Left Thumbstick` and `Direction Pad`), so Direction Pad buttons bind only when `dpad !== stick` — otherwise stick deflection plucks drones |
-| **IOHID full mode** (`startHID`, classic Joy-Con VID Nintendo, PIDs 0x2006/0x2007) | the GC profile omits L/ZL and delivers the stick as a digital 8-way hat. In simple mode 0x3F only the button bytes are real; `requestFullMode` sends subcommand `0x03 0x30` (retried until the first 0x30 report). Full mode (0x30, 60 Hz) carries the upright-frame button byte (arrows, SL/SR, L/ZL — four DISTINCT shoulder controls) and the 12-bit analog stick (bytes 6–8), which then drives the tilts; the GC hat AND the GC button bindings stand down entirely (clones alias GC face buttons unpredictably). IMU: subcommand `0x40 0x01` enables three 5 ms-spaced frames at byte 12 (accel 4096 LSB/g, gyro 16.4 LSB/°/s) |
+| **IOHID full mode** (`startHID`, classic Joy-Con VID Nintendo, PIDs 0x2006/0x2007) | the GC profile omits L/ZL and delivers the stick as a digital 8-way hat. In simple mode 0x3F only the button bytes are real; `requestFullMode` sends subcommand `0x03 0x30` (retried until the first 0x30 report). Full mode (0x30, 60 Hz) carries the upright-frame button byte (arrows, SL/SR, L/ZL — four DISTINCT shoulder controls) and the 12-bit analog stick (bytes 6–8), which then drives the four directional stick dimensions; the GC hat AND the GC button bindings stand down entirely (clones alias GC face buttons unpredictably). IMU: subcommand `0x40 0x01` enables three 5 ms-spaced frames at byte 12 (accel 4096 LSB/g, gyro 16.4 LSB/°/s) |
 | **Joy-Con 2 over BLE** (`JoyCon2BLE`) | BLE-only vendor GATT — macOS cannot pair them and neither GC nor IOHID sees them, so Tarabdaar's own CoreBluetooth client scans broadly, filters on manufacturer company ID **`0x0553`** (NOT the 0x057E USB VID, which appears later in the payload with the PID; the advertisement has an EMPTY name), connects and subscribes to `AB7DE9BE-…7FD2` on service `…7FD0`. Report 0x05: buttons as a u32 LE at bytes 4–7 (left: dpad Down/Up/Right/Left bits 16–19, SR 20, SL 21, L 22, ZL 23), the 12-bit packed stick at bytes 10–12, accel i16 ×3 at 0x30, gyro at 0x36 (classic scales), magnetometer at 0x19. Commands use `0x91` framing on `649D4AC9-…` (acks on `C765A961-…`, subscribed first): console-style init (command-response subscribe → controller-info read → LED → vibration preset → feature enable → input subscribe LAST), player-1 LED `09 91 01 07 00 04 00 00 01 00 00 00`, IMU + magnetometer feature enables (flags `0x03 | 0x04 | 0x80`) spaced 150 ms apart (back-to-back, the ack returns zeros and motion stays off). First connect: hold the sync button while the panel reads "scanning"; reconnects rescan. Needs `NSBluetoothAlwaysUsageDescription` |
 | **Clone fallback** (`altFallbackDelay` 2 s) | third-party Switch-2 controllers impersonate a Joy-Con 2 at the link layer but ignore `0x91` commands, stream nothing on `…7FD2`, and disconnect after 60 s idle; their input streams continuously on `CC1BBBB5-…` (63-byte report: counter at byte 0, buttons at bytes 2–3 — byte 2: Down 0x01, Right 0x02, Left 0x04, Up 0x08, L 0x10, ZL 0x20, Minus 0x40, stick click 0x80; byte 3: Capture 0x01, SR 0x40, SL 0x80 — stick 12-bit packed at bytes 5–7, IMU zeros). That characteristic is ALSO the real Joy-Con 2 (L)'s report 0x07 (motion as a length byte at 0x0E + a packed blob at 0x0F in an undocumented encoding), and a real unit switches to 0x07 the moment it is subscribed — so `JoyCon2BLE` subscribes ONLY `…7FD2` at init, enables the rest after 2 s of silence, forwards them only while `…7FD2` stays silent, and the alternate parser reads no IMU |
 
@@ -182,11 +184,11 @@ Drones, the tarab and the strum do NOT follow the octave shift.
 
 ### Stick calibration (`StickCal`, `tarabdaar.joyconStickCal.v2`)
 
-The in-hand neutral is off-centre and the gate is roughly a circle, so per-axis min/max can never send a diagonal to (±1, ±1). The rim is calibrated as a radius per angle bin (16 bins) and mapped circle → square at runtime: radius normalized by the interpolated rim radius at that angle, direction scaled so the larger component reaches 1. "Recalibrate stick" runs two phases: ~½ s at rest in the playing grip, then a full circle along the rim, then Done (an unswept segment or radius < 150 raw units discards; the panel counts segments live). The stick does not drive the tilts during a capture. Uncalibrated fallback: rest from the first 24 samples after attach + a fixed 1400-unit span.
+The in-hand neutral is off-centre and the gate is roughly a circle, so per-axis min/max can never send a diagonal to (±1, ±1). The rim is calibrated as a radius per angle bin (16 bins) and mapped circle → square at runtime: radius normalized by the interpolated rim radius at that angle, direction scaled so the larger component reaches 1. "Recalibrate stick" runs two phases: ~½ s at rest in the playing grip, then a full circle along the rim, then Done (an unswept segment or radius < 150 raw units discards; the panel counts segments live). Stick bindings remain neutral during a capture. Uncalibrated fallback: rest from the first 24 samples after attach + a fixed 1400-unit span.
 
 ### IMU, fusion and the wrist
 
-While a controller streams motion, a complementary filter propagates body-frame gravity `gHat` (ġ = g × ω with a slow accel pull) and, with a magnetometer (Joy-Con 2 only), pins yaw to a body-frame north `nHat` — hard-iron offset learned as the running min/max midpoint, trusted once the seen extremes span most of the field sphere (figure-eight the controller; until then yaw is gyro-integrated). The fused attitude feeds the iPad's wrist bars (`onWristAttitude` → JOYCON_STATE at ~30 Hz, as a `JoyConWristMotion`: the displayed tilt, its rate, the linear acceleration and its magnitude), the **wrist calibration** (control axes 8–10) and, gravity-removed through `StrikeLaw`, the **Joy-Con Accel** axis — see [Sensors](sensors.md). `jcIMUActive`/`jcMagActive`/`jcFusedActive` flip on the first sample to gate the panels.
+While a controller streams motion, a complementary filter propagates body-frame gravity `gHat` (ġ = g × ω with a slow accel pull) and, with a magnetometer (Joy-Con 2 only), pins yaw to a body-frame north `nHat` — hard-iron offset learned as the running min/max midpoint, trusted once the seen extremes span most of the field sphere (figure-eight the controller; until then yaw is gyro-integrated). The fused attitude feeds the iPad's wrist bars (`onWristAttitude` → JOYCON_STATE at ~30 Hz, as a `JoyConWristMotion`: the displayed tilt, its rate, the linear acceleration and its magnitude), the **wrist calibration** (the shared tilt axes 0–2 while the controller is connected) and, gravity-removed through `StrikeLaw`, the **Joy-Con Accel** axis — see [Sensors](sensors.md). `jcIMUActive`/`jcMagActive`/`jcFusedActive` flip on the first sample to gate the panels.
 
 ### Setup tab panel (`JoyConStatusView`, ⌘7)
 
@@ -201,7 +203,7 @@ touch ► StringVoiceSource         ─┐
 ```
 
 - Three `AVAudioSourceNode`s connect DIRECTLY to `symGain` (`outputVolume` 1), which feeds the main mixer: the String voice (`SarangiKit.BowEngine` + the C kernel — the complete instrument: played strings + modal-jawari taraf + body + radiation + room + the FX rack), the tanpura node (default drone voice / optional main instrument) and the sitar node (main instrument; its output charges the String kernel's inject ring, `st_taraf`). The tanpura's output also feeds the inject ring (`tp_taraf`). No hosted AU, no master filter/reverb bus.
-- The String kernel runs 96 kHz internally and half-band-decimates to 48 kHz; the tanpura nodes run at their artifact's 48 kHz; the mixer input converts to the engine rate, `Config.sampleRate` (44 100).
+- The String kernel runs 96 kHz internally and half-band-decimates to 48 kHz. The String and plucked source nodes and mixer all use `Config.sampleRate` (48 kHz); the output device is matched to that rate when supported.
 - The String node's async jawari worker pool renders one block late so the callback never waits. The audio thread never does link or state logic.
 
 ### Output device
@@ -209,7 +211,7 @@ touch ► StringVoiceSource         ─┐
 | Setting | Rule |
 |---|---|
 | IO buffer | requested at engine start and on `setOutputDevice` via `preferredBufferFrames(for:)` → `setOutputBufferFrames` (the device's CoreAudio HAL buffer, clamped to its range; `outputBufferFrames` reads it back, `logAudioLatencyReport` is a diagnostic). `Config.preferredOutputBufferFrames` 128 (≈ 2.7 ms) for direct transports |
-| Jitter-prone transports | DisplayPort/HDMI monitor audio, Bluetooth, AirPlay (by `kAudioDevicePropertyTransportType`) cannot hold the ~3 ms cadence and crackle on EVERY voice; they get `Config.jitterProneOutputBufferFrames` 512 (≈ 11.6 ms). Check `system_profiler SPAudioDataType` before suspecting DSP |
+| Jitter-prone transports | DisplayPort/HDMI monitor audio, Bluetooth, AirPlay (by `kAudioDevicePropertyTransportType`) cannot hold the ~3 ms cadence and crackle on EVERY voice; they get `Config.jitterProneOutputBufferFrames` 512 (≈ 10.7 ms at 48 kHz). Check `system_profiler SPAudioDataType` before suspecting DSP |
 | Sample rate | `matchOutputDeviceToEngineRate` sets the device to 48 kHz when supported (no output resampler — the whole graph runs at the artifacts' native 48 kHz) and `restoreOutputDeviceRate` restores it on quit (`willTerminate` + `deinit`); a device without 48 kHz keeps AVAudioEngine's converter |
 
 See [Sound Design](sound-design.md) for the voice DSP.
@@ -244,7 +246,7 @@ deltas are the reliable interval counters.
 
 ## Parameter update cadence
 
-`AppController`'s `@Published` setters push to `AudioEngine` via `didSet` — slider drags fire immediately, no timer. The String voice routes through `StringParamStore` / `SarangiStore`: live keys and composite members push instantly (chunk-rate smoothed in `BowEngine`); a structural edit (tarab tuning, a `bow_*` build scalar) schedules a debounced off-thread `BowEngine` rebuild, swapped in lock-free, so rapid drags coalesce into one rebuild. See [Parameters](parameters.md).
+`AppController`'s `@Published` setters push to `AudioEngine` via `didSet` — slider drags fire immediately, no timer. The String voice routes through `StringParamStore` / `SarangiStore`: live keys and composite members push instantly (chunk-rate smoothed in `BowEngine`); a structural edit (tarab tuning, a `bow_*` build scalar) schedules a debounced off-thread `BowEngine` rebuild, published under a brief lock for crossfading, so rapid drags coalesce into one rebuild. See [Parameters](parameters.md).
 
 ## MIDIEngine (the tunnel's byte pump)
 
@@ -256,7 +258,7 @@ deltas are the reliable interval counters.
 
 There are no other senders: SysEx is the only thing that leaves the port. Setup is deferred to `onAppear` (the iOS MIDI server may not be ready at launch; 3 retries). Playing emits nothing on CoreMIDI beyond the tunnel: `PitchPadEngine` writes touches into `OutboundPlayState`, `NoteManager`'s 60 Hz tick writes tilt/accel/strike into the same snapshot, and `TarabLink` paces it onto the wire.
 
-Every outbound envelope has an explicit CoreMIDI host-clock timestamp, at least 2 ms after the preceding envelope. A send lock keeps timestamp reservation and submission in the same order. This preserves the scale / fret arrangement / taraf-bank burst on USB/IDAM, which drops messages when several SysEx sends use timestamp 0. CoreMIDI schedules the brief burst spacing; the link queue never sleeps, and ordinary 120 Hz performance frames send immediately once the burst has cleared. `MIDISysExScheduleTests` guards ordering and the return to immediate delivery.
+Every outbound envelope has an explicit CoreMIDI host-clock timestamp, at least 2 ms after the preceding envelope. A send lock keeps timestamp reservation and submission in the same order. This preserves the scale / fret arrangement / taraf-bank burst on USB/IDAM, which drops messages when several SysEx sends use timestamp 0. CoreMIDI schedules the brief burst spacing; the link queue never sleeps, and ordinary 120 Hz performance frames send immediately once the burst has cleared. `MIDISysExScheduleTests` guards ordering and the return to immediate delivery. Packet-list construction checks CoreMIDI’s documented null result before sending; an envelope that does not fit is dropped without submitting an incomplete list.
 
 ## Connecting
 

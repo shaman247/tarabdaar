@@ -61,7 +61,7 @@ struct ContentView: View {
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
         .defersSystemGestures(on: .all)
-        .onAppear {
+        .onAppear { [pad, midi, link, scaleSync] in
             // NoteManager is the tilt sampler and nothing else.
             noteManager.motionSource = motion
             // THE tilt wire: NoteManager's 60 Hz tick writes the raw tilt

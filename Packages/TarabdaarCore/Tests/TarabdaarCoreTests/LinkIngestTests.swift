@@ -14,6 +14,7 @@ final class LinkIngestTests: XCTestCase {
             case allOff
             case drone(Int, Bool)
             case expr(UInt16, Double)
+            case exempt(UInt16)
         }
         var calls: [Call] = []
         var onMount: ((UInt16, Double) -> Void)?
@@ -24,6 +25,7 @@ final class LinkIngestTests: XCTestCase {
         func touchExpr(_ id: UInt16, exprScale: Double) {
             calls.append(.expr(id, exprScale))
         }
+        func touchGlideExempt(_ id: UInt16) { calls.append(.exempt(id)) }
         func touchGlide(_ id: UInt16, pitchSemis: Double) {
             calls.append(.glide(id, pitchSemis))
         }
@@ -100,6 +102,116 @@ final class LinkIngestTests: XCTestCase {
         XCTAssertEqual(value, 0.7, accuracy: 1e-12)
         evaluator.touchGate(lane: .local, id: id, on: false)
         XCTAssertEqual(value, 0)
+    }
+
+    /// Equal source ids stay independent across wire/local lanes, including every callback and surgical drop.
+    func testSharedHostIdentitiesSeparateInputLanes() throws {
+        let identities = TouchIdentityAllocator()
+        let sink = RecordingSink()
+        let ingests = (0..<3).map { _ in LinkIngest(sink: sink, touchIdentities: identities) }
+        var callbackIDs: [[UInt16]] = Array(repeating: [], count: ingests.count)
+        for (i, ingest) in ingests.enumerated() {
+            ingest.onTouchGate = { id, _ in callbackIDs[i].append(id) }
+            ingest.onTouchPitch = { id, _ in callbackIDs[i].append(id) }
+            ingest.onTouchRadius = { id, _ in callbackIDs[i].append(id) }
+            ingest.onTouchFretPosition = { id, _ in callbackIDs[i].append(id) }
+            ingest.apply(frame(seq: 1, touches: [TLPTouch(id: 0, onsetSeq: 0,
+                radius: 100, pitch: 60 + Float(i), fretPosition: 100,
+                exprScale: 0.5, glideExempt: true)]))
+        }
+        let ids = sink.calls.compactMap { call -> UInt16? in
+            if case .on(let id, _) = call { return id }; return nil
+        }
+        XCTAssertEqual(Set(ids).count, 3)
+        for i in ingests.indices {
+            XCTAssertEqual(Set(callbackIDs[i]), [ids[i]])
+            XCTAssertTrue(sink.calls.contains(.expr(ids[i], 0.5)))
+            XCTAssertTrue(sink.calls.contains(.exempt(ids[i])))
+        }
+        sink.calls.removeAll()
+        ingests[0].linkDidDrop()
+        XCTAssertEqual(sink.calls, [.off(ids[0])])
+        ingests[1].apply(frame(seq: 2, touches: [touch(0, pitch: 65)]))
+        XCTAssertTrue(sink.calls.contains(.glide(ids[1], 65)))
+        ingests[1].apply(frame(seq: 3, touches: [touch(0, onset: 1, pitch: 67)]))
+        XCTAssertEqual(sink.calls.last, .on(ids[1], 67))
+        ingests[0].apply(frame(seq: 1, touches: [touch(0, pitch: 72)]))
+        guard case .on(let reconnectedID, 72)? = sink.calls.last else { return XCTFail("Missing reconnect onset") }
+        XCTAssertFalse(ids.contains(reconnectedID))
+        XCTAssertFalse(sink.calls.contains(.off(ids[1])))
+        XCTAssertFalse(sink.calls.contains(.off(ids[2])))
+    }
+
+    /// Full UInt16 wrap skips held source ids and host ids retained by a transferred glide voice or its grace.
+    func testIdentityWrapPreservesHeldAndGlideRetainedNotes() throws {
+        let state = OutboundPlayState()
+        state.touchOn("held", pitchSemis: 60)
+        let held = try XCTUnwrap(state.newestTouch()).id
+        for i in 0...Int(UInt16.max) {
+            state.touchOn("moving", pitchSemis: 64)
+            let id = try XCTUnwrap(state.newestTouch()).id
+            XCTAssertNotEqual(id, held, "source wrap at \(i)")
+            state.touchOff("moving")
+        }
+        var now = 0.0
+        let seq = GlideSequencer(drivesTimer: false, clock: { now })
+        seq.setControl("ctl_glide_on", 1)
+        seq.setControl("ctl_glide_over", 0)
+        seq.setControl("ctl_glide_grace", 500)
+        let ids = TouchIdentityAllocator(retaining: seq.retainsTouchIdentity)
+        let root = try XCTUnwrap(ids.allocate())
+        let owner = try XCTUnwrap(ids.allocate())
+        seq.touchOn(root, pitchSemis: 60)
+        seq.touchOn(owner, pitchSemis: 64)
+        seq.touchOff(root)
+        ids.release(root)
+        now = 1
+        seq.tick(now: now)
+        for _ in 0...Int(UInt16.max) {
+            let id = try XCTUnwrap(ids.allocate())
+            XCTAssertNotEqual(id, root)
+            XCTAssertNotEqual(id, owner)
+            ids.release(id)
+        }
+        seq.touchOff(owner)
+        ids.release(owner)
+        XCTAssertTrue(seq.retainsTouchIdentity(root))
+        now += 0.501
+        XCTAssertFalse(seq.retainsTouchIdentity(root))
+        var reclaimed = false
+        for _ in 0...Int(UInt16.max) {
+            let id = try XCTUnwrap(ids.allocate())
+            reclaimed = reclaimed || id == root
+            ids.release(id)
+        }
+        XCTAssertTrue(reclaimed, "Expired glide identities become reusable")
+    }
+
+    /// A removed chain keeps its voice id reserved until its downstream release callback completes.
+    func testPendingGlideReleaseCannotBeReallocated() throws {
+        let seq = GlideSequencer(drivesTimer: false)
+        seq.setControl("ctl_glide_on", 1)
+        seq.setControl("ctl_glide_grace", 0)
+        let ids = TouchIdentityAllocator(retaining: seq.retainsTouchIdentity)
+        let root = try XCTUnwrap(ids.allocate())
+        let owner = try XCTUnwrap(ids.allocate())
+        seq.touchOn(root, pitchSemis: 60)
+        seq.touchOn(owner, pitchSemis: 64)
+        seq.touchOff(root)
+        ids.release(root)
+        var released: UInt16?
+        seq.onTouchOff = { id in
+            released = id
+            XCTAssertTrue(seq.retainsTouchIdentity(root))
+            for _ in 0...Int(UInt16.max) {
+                guard let next = ids.allocate() else { XCTFail("Pool exhausted"); return }
+                XCTAssertNotEqual(next, root)
+                ids.release(next)
+            }
+        }
+        seq.touchOff(owner)
+        XCTAssertEqual(released, root)
+        XCTAssertFalse(seq.retainsTouchIdentity(root))
     }
 
     private func frame(seq: UInt16, touches: [TLPTouch], drones: UInt8 = 0,

@@ -21,13 +21,16 @@ public final class BowEngine {
     public let sr: Double                 // engine rate (48 kHz)
     public let osFactor: Int              // kernel oversampling (bow_os)
     public let srk: Double                // kernel rate
+    /// Original build tables; async hosts may discard the initialization-only jawari payload.
     public let tables: BowKernelTables
+    let initialJawariEquilibriumConverged: Bool
+    let bodyDiagnosticLock = NSLock()
+    var bodyDiagnosticSnapshot: BodyDiagnosticSnapshot?
     /// Gut strings on the shared bridge, one per mapper slot.
     public let maxPoly: Int
 
     /// Long-lived control mapper (owned by the host, shared across rebuilds).
     public let mapper: BowControlMapper
-    var filter: BowControlFilter
 
     public var outGain = 1.0 {
         didSet { if !gainPrimed { gainPrev = outGain; gainPrimed = true } }
@@ -74,7 +77,6 @@ public final class BowEngine {
     // ---- Runtime taraf/tone axes: taraf PURITY (jt tone LP) and DECAY
     // (momentum damping) are kernel scalars; TONE TILT is a shelf pair on
     // the voice output here. Targets under `tiltLock`; off = byte-null.
-    private let tiltPureLiftMax: Double     // bow_tilt_pure_lift
     var tiltPureLpHiHz = 16000.0    // axis-0 corner (build LP or open)
     var jtLpBaseA = 0.0             // build-time jt LP coeff (≤0 bypass)
     var jtTickRate = 48000.0        // jt tick rate (srk / bow_jt_div)
@@ -145,7 +147,7 @@ public final class BowEngine {
     private var limGain = 1.0
 
     // preallocated per-buffer scratch; control arrays are SLOT-MAJOR at a
-    // fixed stride (maxFrames·osFactor), `renderFixture` drives slot 0
+    // fixed stride (maxFrames·osFactor).
     private let maxFrames: Int
     private let slotStride: Int
     private var cF0: [Double], cVb: [Double], cFb: [Double]
@@ -165,13 +167,16 @@ public final class BowEngine {
 
     /// `rfir` = the 48 kHz radiation FIR taps (empty ⇒ flat), `eLp` = the
     /// radiation low-pass corner (Hz; ≥ 0.44·sr ⇒ bypass).
+    /// Async host builds defer mapper configuration until accepted publication.
+    /// `retainJawariTables` keeps packed builder output for exporters; render state is kernel-owned.
     public init(tables: BowKernelTables, mapper: BowControlMapper,
                 bp: BowParams, sr: Double = 48000.0,
                 rfir: [Double], eLp: Double,
                 reverbRT60: Double, reverbPredelayMs: Double,
                 reverbMix: Double, reverbWidth: Double,
                 maxFrames: Int = 4096,
-                maxPoly: Int = 1) {
+                maxPoly: Int = 1, configureMapper: Bool = true,
+                retainJawariTables: Bool = true) {
         self.fitForce = .allocate(capacity: maxFrames * 2)
         self.fitForce.initialize(repeating: 0, count: maxFrames * 2)
         let fitKeys = ["timbre", "response", "memory", "smooth_ms", "room", "room_low_db", "room_mid_db", "room_high_db", "ring", "shelf_db"]
@@ -183,12 +188,15 @@ public final class BowEngine {
         precondition(osFactor == 2,
                      "bow_os \(osFactor) unsupported: the live decimator is 2:1")
         srk = sr * Double(osFactor)
-        self.tables = tables
+        var retainedTables = tables
+        if !retainJawariTables { retainedTables.jt = nil }
+        self.tables = retainedTables
+        initialJawariEquilibriumConverged = tables.jt?.equilibriumConverged != false
         self.mapper = mapper
         self.maxPoly = min(max(maxPoly, 1), BowControlMapper.maxSlots)
         // f0Open = the tuning tonic (register-force reference)
-        filter = BowControlFilter(bp: bp, srk: srk,
-                                  tonic: tables.scalars.f0Open)
+        let initialFilter = BowControlFilter(bp: bp, srk: srk,
+                                             tonic: tables.scalars.f0Open)
         dec = HalfBandDecimator()
         if !rfir.isEmpty { radFIR = FIRFilter(taps: rfir) }
         // bow_rad_lp_ord < 2 selects a one-pole rolloff; absent → 2nd order
@@ -236,11 +244,11 @@ public final class BowEngine {
         fxPending = FXPoint.allCases.map { _ in FXStaged() }
         fxDesignCache = FXPoint.allCases.map { _ in nil }
         polySnap = BowControlMapper.PolySnapshot(count: nPoly)
-        filters = [BowControlFilter](repeating: filter, count: nPoly)
+        filters = [BowControlFilter](repeating: initialFilter, count: nPoly)
         for i in filters.indices { filters[i].seedDrift(UInt64(i)) }
         lastSerial = [UInt32](repeating: 0, count: nPoly)
         slotSilent = [Bool](repeating: false, count: nPoly)
-        mapper.setSlotLimit(nPoly)
+        if configureMapper { mapper.setSlotLimit(nPoly) }
 
         let t = tables
         let s = t.scalars
@@ -269,7 +277,6 @@ public final class BowEngine {
         droneToneMix = bp.v("bow_drone_tone_mix", 0.5)
         droneSpread = bp.v("bow_drone_spread", 1.0)
         // Tilt-axis ranges (bp defaults, overridable via `string.<key>`).
-        tiltPureLiftMax = bp.v("bow_tilt_pure_lift", 8.0)
         tiltDampMinT60 = bp.v("bow_tilt_damp_min_t60", 0.25)
         tiltDampMaxT60 = bp.v("bow_tilt_damp_max_t60", 20.0)
         tiltEqDbMax = bp.v("bow_tilt_eq_db", 9.0)
@@ -457,6 +464,7 @@ public final class BowEngine {
             }
             stereoOn = true
         }
+        refreshBodyDiagnostics(tables: tables)
         // voice→taraf drive FX hook, installed unconditionally (off the audio
         // thread); `isEngaged` keeps it byte-null. deinit frees the kernel
         // before self dies, so `passUnretained` is safe.
@@ -914,42 +922,13 @@ public final class BowEngine {
         applyLimiter(n48: n48, outL: outL, outR: outR)
     }
 
-    /// Fixture/e2e entry: render EXPLICIT kernel-rate control arrays through
-    /// the live buffer path. `n96` must be `2·frames` and ≤ the preallocated
-    /// scratch per call (the caller chunks). With `maxPoly` > 1 the controls
-    /// drive string 0; the other strings stay silent.
-    public func renderFixture(f0: [Double], vb: [Double], fb: [Double],
-                              beta: [Double], gate: [Double],
-                              outL: UnsafeMutablePointer<Double>,
-                              outR: UnsafeMutablePointer<Double>) {
-        hasRendered = true
-        let nk = f0.count
-        precondition(nk % osFactor == 0 && nk <= maxFrames * osFactor)
-        for i in 0..<nk {
-            cF0[i] = f0[i]; cVb[i] = vb[i]; cFb[i] = fb[i]
-            cBeta[i] = beta[i]; cGate[i] = gate[i]
-        }
-        guard let pk = pkernel else { return }
-        updateFittedControls()
-        bow_poly_observation_force(pk, fitForce)
-        y96.withUnsafeMutableBufferPointer { yb in
-            bow_poly_process(pk, Int32(nk), Int32(slotStride),
-                             cF0, cVb, cFb, cBeta, cGate, cXv,
-                             yb.baseAddress!)
-            y48.withUnsafeMutableBufferPointer { ob in
-                dec.process(yb.baseAddress!, count: nk, into: ob.baseAddress!)
-            }
-        }
-        postChain(n48: nk / osFactor, outL: outL, outR: outR)
-    }
-
     /// Off-thread, once before publication: settle silent physics, discard its synthetic room tail, and verify silence.
     public func settleForPublication(minimumBlocks: Int = 1,
                                      fallbackBlocks: Int = 5) -> Int? {
         guard !hasRendered, minimumBlocks >= 1, fallbackBlocks >= 1 else { return nil }
         settlingForPublication = true
         defer { settlingForPublication = false; setJtSettleDamp(t60: 0) }
-        let prepared = tables.jt?.equilibriumConverged != false
+        let prepared = initialJawariEquilibriumConverged
             && (pkernel.map { bow_poly_jt_prepare_initial_state($0) != 0 } ?? true)
         let warmup = prepared ? minimumBlocks : max(minimumBlocks, fallbackBlocks)
         guard warmup <= 24 else { return nil }
@@ -1002,7 +981,6 @@ public final class BowEngine {
         tiltHiShelf.reset()
         tiltLoShelfS.reset()
         tiltHiShelfS.reset()
-        filter.reset()
         for i in filters.indices { filters[i].reset() }
         for i in slotSilent.indices { slotSilent[i] = false }
         for i in fxUnits.indices { fxUnits[i].reset() }

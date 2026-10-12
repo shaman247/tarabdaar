@@ -60,6 +60,27 @@ unchanged. The 6 kHz upper shelf currently acts on the combined radiated mix,
 unlike the research observer's played-body-only shelf; this is an explicit live
 adaptation and has its own control. All gains are before the existing limiter.
 
+Run the native audit from any working directory on macOS with Xcode command-line
+tools and a Python environment containing NumPy and SciPy:
+
+```sh
+python3 /path/to/tarabdaar/tools/live_research_port/audit.py
+# Optional report location:
+python3 /path/to/tarabdaar/tools/live_research_port/audit.py --output /tmp/native-audit.json
+```
+
+Each run copies the current `bow_fit.c`, `bow_radiation.c`, their headers and the
+fitted model/room resources into a fresh temporary directory. It builds those C
+sources with `xcrun --sdk macosx clang -O3 -dynamiclib -fPIC`, linking Accelerate,
+then loads only that library. A compiler failure stops the audit. No prebuilt
+library or previous temporary artifact is reused. The temporary directory is
+removed after the run. The default report is
+`output/live-research-port/native-audit.json`; its parent directory is created.
+The report includes source/model and audit-script SHA-256 hashes, the exact
+build command, compiler and SDK identification, native library hash and
+Python/NumPy/SciPy versions. Render timings are measurements of that run, not a
+portable performance threshold.
+
 `audit.py` independently checks the C gain predictor against SciPy B-splines,
 minimum-phase magnitude accuracy across registers, complete room impulse
 convolution, exact unarmed bypass and reset silence. Package contracts cover

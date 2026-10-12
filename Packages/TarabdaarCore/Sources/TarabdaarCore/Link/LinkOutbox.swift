@@ -10,9 +10,6 @@ import Foundation
 ///    at the tail. Moving state later is always safe — it is fresher data —
 ///    and the link therefore hands the transport at most one fresh state
 ///    frame per drain, so continuous data can never queue behind itself.
-///  - On lane switchover the caller re-sends pending events verbatim
-///    (receiver eventSeq dedupe covers double delivery) and calls
-///    `removeAllState()` — the next tick regenerates fresher frames.
 public final class LinkOutbox {
     public struct Item: Equatable {
         public let bytes: [UInt8]
@@ -51,11 +48,6 @@ public final class LinkOutbox {
 
     public func dequeue() -> Item? {
         items.isEmpty ? nil : items.removeFirst()
-    }
-
-    /// Lane switch: pending state is stale the moment a new lane activates.
-    public func removeAllState() {
-        items.removeAll { $0.stateType != nil }
     }
 
     public func removeAll() { items.removeAll() }

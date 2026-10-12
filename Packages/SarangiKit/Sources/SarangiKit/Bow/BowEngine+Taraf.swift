@@ -26,7 +26,7 @@ extension BowEngine {
     }
 
     /// The jt row fundamentals (Hz) in kernel order — empty without a jt block.
-    public var jtRowFreqs: [Double] { tables.jt?.rowFreqs ?? [] }
+    public var jtRowFreqs: [Double] { selRowFreqs }
 
     public var jtFollowerRow: Int { jtTrackRowIdx }
 
@@ -481,44 +481,6 @@ extension BowEngine {
         return min(best, 1.0)
     }
 
-    /// One row's kin score 0..1 (soft-OR across the chord: misses multiply,
-    /// bounded by 1).
-    static func recruitKinScore(rowHz: Double, playedHz: [Double],
-                                widthCents: Double,
-                                kinExp: Double) -> Double {
-        let kc = recruitKin.map { 1200.0 * log2($0.ratio) }
-        let ks = recruitKin.map { pow($0.pq, -kinExp) }
-        var miss = 1.0
-        for p in playedHz where p > 0 && rowHz > 0 {
-            let c = 1200.0 * log2(rowHz / p)
-            miss *= 1.0 - recruitAffinity(centsFromPlayed: c, kinCents: kc,
-                                          kinStrength: ks,
-                                          widthCents: widthCents)
-        }
-        return 1.0 - miss
-    }
-
-    /// One row's bridge-drive weight at a profile position — the exact math
-    /// the render thread pushes (minus follower/drone exemptions): 0.5 = 1;
-    /// 0 = kin²; 1 = `√(haze/(haze+kin²))`. Public for tests/offline tuning.
-    public static func recruitWeight(rowHz: Double, playedHz: [Double],
-                                     selectivity: Double,
-                                     widthCents: Double = 30.0,
-                                     kinExp: Double = 0.7) -> Double {
-        let s = min(max(selectivity, 0.0), 1.0)
-        if abs(s - 0.5) <= 1e-12 { return 1.0 }
-        let kin = recruitKinScore(rowHz: rowHz, playedHz: playedHz,
-                                  widthCents: widthCents, kinExp: kinExp)
-        let kin2 = kin * kin
-        if s < 0.5 {
-            let t = s * 2.0
-            return t + (1.0 - t) * kin2
-        }
-        let u = (s - 0.5) * 2.0
-        let flat = (recruitHazeFloor / (recruitHazeFloor + kin2)).squareRoot()
-        return 1.0 + u * (flat - 1.0)
-    }
-
     /// Non-resonant response floor of a jawari row relative to a unison row
     /// (power): the haze it rings with under full drive when it shares no kin
     /// interval. Sets the flat end's level and keeps the compensation smooth.
@@ -528,42 +490,11 @@ extension BowEngine {
     /// tonic-like note (unison + two octave rows ≈ 1 + 2·0.38).
     static let recruitKinNominal = 1.75
 
-    /// The loudness-consistency gain for a bank at a profile position: the
-    /// radiated-gain multiplier holding the taraf's power (incoherent model,
-    /// row power ∝ weight² × (haze + kin²)), clamped [1, cap]; 1 at 0.5. The
-    /// exact math the render thread pushes (minus follower/held-drone rows).
-    public static func recruitGainMul(rowsHz: [Double], playedHz: [Double],
-                                      selectivity: Double,
-                                      widthCents: Double = 30.0,
-                                      kinExp: Double = 0.7,
-                                      cap: Double = 4.0) -> Double {
-        let s = min(max(selectivity, 0.0), 1.0)
-        if abs(s - 0.5) <= 1e-12 { return 1.0 }
-        let u = max(0.0, (s - 0.5) * 2.0)
-        var pFit = 0.0, pNow = 0.0
-        var n = 0
-        for r in rowsHz where r > 0 {
-            let kin = recruitKinScore(rowHz: r, playedHz: playedHz,
-                                      widthCents: widthCents, kinExp: kinExp)
-            let kin2 = kin * kin
-            let w = recruitWeight(rowHz: r, playedHz: playedHz,
-                                  selectivity: s, widthCents: widthCents,
-                                  kinExp: kinExp)
-            pFit += recruitHazeFloor + kin2
-            pNow += w * w * (recruitHazeFloor + kin2)
-            n += 1
-        }
-        let refTop = Double(n) * recruitHazeFloor + recruitKinNominal
-        let pRef = (1.0 - u) * pFit + u * refTop
-        guard pNow > 1e-12 else { return cap }
-        return min(max((pRef / pNow).squareRoot(), 1.0), cap)
-    }
-
     /// Per-chunk RECRUITMENT update (render thread): score each row's
     /// kinship to the gated pitches, push the per-row drive weights and the
-    /// compensating radiated gain (`recruitWeight`/`recruitGainMul` math;
-    /// follower + held drones count as fully ringing). No gated note holds
-    /// the last state; back at 0.5 one all-ones push restores the fitted
+    /// compensating radiated gain (follower + held drones count as fully
+    /// ringing). No gated note holds the last state; back at 0.5 one
+    /// all-ones push restores the fitted
     /// taraf and the path goes quiet. No allocation.
     func updateRecruitment(_ pk: UnsafeMutableRawPointer) {
         guard !selRowFreqs.isEmpty else { return }

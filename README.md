@@ -20,7 +20,7 @@ The two Swift packages and voice resources are included in this repository. A ph
 4. Connect over USB and enable the iPad in **Audio MIDI Setup → Window → Show MIDI Studio**, or connect over BLE-MIDI using the apps' connection controls.
 5. Play the iPad's Fret Pad. Edit the scale, tonic and fret arrangement in the Mac's **Fret Pad (⌘3)** tab.
 
-Install both apps from the same revision: they currently require TLP version 21.
+Install both apps from the same revision: they currently require TLP version 26 (half-point fingertip-radius units).
 
 From the repository root, build the Mac app and regenerate the parameter and HTML documentation with:
 

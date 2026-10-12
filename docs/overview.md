@@ -4,8 +4,8 @@ Tarabdaar is an expressive electronic music instrument, loosely inspired by the 
 
 ## Design philosophy
 
-- **Two devices, one link, almost no shared state.** The iPad is a silent controller — capacitive touchscreen for the Fret Pad, gyroscope and accelerometer for tilt and strike. It streams touches and raw sensor axes over the **TLP** protocol (see [MIDI & Audio](midi-and-audio.md)); it owns glide and the playing surface, and nothing else. The Mac owns all the sound: the voices, the tarab tuning, the physics, the composite and tilt bindings. The one exception to "no shared state" is **pad sync**: the Mac edits the playing scale + fret layout and pushes them to the iPad (which performs them and has no editor of its own).
-- **The whole instrument in the kernel.** The String voice (`SarangiKit.BowEngine` + the `CBowKernel` C friction kernel) renders the played strings, the taraf, the body, the radiation and the room in one pass. No hosted plugins, no base-voice picker.
+- **Two devices, one link.** The iPad captures touches and raw motion; the Mac owns sound, glide sequencing, calibration, tuning and bindings. The Mac synchronizes the playing surface and performance readouts to the iPad. Ownership and synchronization are described in [Architecture](architecture.md) and [MIDI & Audio](midi-and-audio.md).
+- **Physical voices.** The String voice models bowed gut strings and sympathetic steel strings; Tanpura and Sitar provide plucked voices. The Mac's Live tab selects the played instrument. See [Sound Design](sound-design.md) for the sound and effects paths.
 - **Continuous and expressive.** Pitch is a position on a surface, not a discrete key, so microtonal inflection between scale degrees is always on tap. Every parameter that can vary continuously does, and any of them can be bound to a tilt.
 - **Glissandi first.** Dragging across the Fret Pad bends a held note continuously; onset-only snapping lands you on a fret, drags glide freely from there, and the optional glide queue turns overlapping or closely spaced onsets into glissandi. Vibrato and meend are played, never synthesized.
 
@@ -14,12 +14,12 @@ Tarabdaar is an expressive electronic music instrument, loosely inspired by the 
 ### iPad (controller)
 - Full-screen **Fret Pad**: freely-placed vertical fret segments; touch position = pitch via the continuous fret field, onset-only snapping, per-touch glide, a gated drag assist that lands stops on frets, and the **chord bar** strip, hidden for now (see [Fret Pad](fret-pad.md))
 - Multitouch polyphony — each finger is an independent string on the Mac
-- Drone buttons inside the surface's right edge (hidden while a Joy-Con is attached)
+- A raga taraf strip above the fret band for direct sympathetic-string plucks; the Joy-Con controls the drone sequence
 - Raw tilt and the accelerometer Strike envelope in every state frame; a toolbar of scopes (arm / stick tilt, the wrist tilt with its rate and the Joy-Con's acceleration as bars, strike, finger acceleration, the Mac's radiated volume)
 - Playing scale + fret layout edited on the Mac and synced over; the iPad is perform-only
 
 ### Mac (sound module)
 - Renders the **String voice** (`BowEngine` + `CBowKernel`, 96 kHz → 48 kHz) as the default played voice, and the plucked **Tanpura** (default drone voice, optional main instrument) and **Sitar** (main instrument only) — see [Sarangi](sarangi.md), [Tanpura Voice](tanpura-voice.md), [Sitar Voice](sitar-voice.md)
-- Sympathetic (tarab) strings as modal-jawari rows fused into the kernel, tuned from the **Strings tab** (every string a degree of the centralized scale)
+- Two sympathetic (tarab) banks edited in the **Strings tab**, with scale-reference or fixed chromatic pitches — see [Sarangi](sarangi.md#two-bridges-two-sets)
 - **Parameters tab** — every parameter in one grouped, searchable list, applied live; **Controls tab** — tilt bindings (to a composite or straight to a parameter) and composite macros; **FX tab** — the four-insert rack; **Scope** and **Taraf** tabs — the performance and the sympathetic rows at a glance
 - Joy-Con primary motion input (stick, wrist tilt, strum, octave shift)

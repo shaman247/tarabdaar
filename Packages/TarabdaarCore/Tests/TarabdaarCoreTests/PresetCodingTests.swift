@@ -36,6 +36,7 @@ final class PresetCodingTests: XCTestCase {
         XCTAssertEqual(b.stringOverrides, a.stringOverrides)
         XCTAssertEqual(b.paramValues, a.paramValues)
         XCTAssertEqual(b.composites, a.composites)
+        XCTAssertEqual(b.tiltMapping, a.tiltMapping)
         XCTAssertEqual(b.droneSequence, a.droneSequence)
         XCTAssertTrue(b.sections().contains("drone sequence"))
         // the instrument section: spot-check the parts a player would notice
@@ -46,6 +47,22 @@ final class PresetCodingTests: XCTestCase {
         let t = MapTarget(paramKey: "bow_mu_s")
         XCTAssertEqual(b.tiltMapping?.mapping(for: t).binding(for: .tilt2)?
                         .controlPoints.last?.y, 1.1)
+    }
+
+    /// Legacy split sections preserve precedence and units without filling absent partial sections.
+    func testLegacyParameterResolution() throws {
+        var preset = TarabdaarPreset()
+        XCTAssertNil(preset.resolvedParamValues())
+        preset.stringOverrides = ["bow_body_q": 33, "bow_expr": 0.2]
+        preset.paramValues = ["bow_expr": 0.7, "ctl_strum_thresh": 63.5]
+        let back = try TarabdaarPreset.decode(preset.encoded())
+        XCTAssertEqual(back.resolvedParamValues(),
+                       ["bow_body_q": 33, "bow_expr": 0.7, "ctl_strum_thresh": 0.5])
+        preset.paramValues = ["ctl_strum_thresh": 0.25]
+        XCTAssertEqual(preset.resolvedParamValues()?["ctl_strum_thresh"], 0.25)
+        preset.stringOverrides = nil
+        preset.paramValues = [:]
+        XCTAssertEqual(preset.resolvedParamValues(), [:])
     }
 
     /// Curve sections round-trip, override legacy bands, and leave mapping-only presets partial.

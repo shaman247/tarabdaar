@@ -6,8 +6,7 @@ the curved bone with the jiva thread, fitted offline against real tanpura
 recordings. By default it is **the drone voice** (the Joy-Con drone sequence
 plucks it); the **Live tab's Instrument picker** can make it the **main
 instrument**, turning fret notes into plucks. The same engine, mounted from
-a different artifact, is the [Sitar voice](sitar-voice.md). (Port and
-fitting history: not present — see `docs/history/`.)
+a different artifact, is the [Sitar voice](sitar-voice.md).
 
 ## The model and its files
 
@@ -26,6 +25,9 @@ fitting history: not present — see `docs/history/`.)
   bridge geometry, polarization, per-note `pitchCents`, the 1025-tap body
   FIR, the room. Output chain: body FIR → `tp_gain` → calibration room
   (`DSP/Reverb.swift`, the engine's only Swift dependency).
+
+The body FIR retains its tail after each convolution, so changing callback sizes
+and final remainder chunks produce the same output as a fixed block partition.
 
 **RECAL LAW.** `pitchCents` and the role t60s are secanted at the artifact's
 exact physics. Physics edits (roles, contact, polarization, room) are
@@ -57,12 +59,17 @@ sources use: a lock-published engine, an equal-power ~300 ms crossfade so
 ringing strings decay across a swap, swapped-out engines retained off the
 audio-thread dealloc path.
 
-**Builds are ~seconds of CPU** (every slot is mounted and settled onto its
-static wrap through the kernel), so: its own serial queue
-(`tarabdaar.tanpura.build`, `.utility`); the scale/tonic pipeline debounces
-**750 ms** and skips unchanged tunings (`AppController.syncTanpuraFromScale`);
-a newer build supersedes an in-flight one (`tanpuraBuildGen`); held drone
-buttons re-pluck onto the fresh engine. The kernel renders through its
+Builds mount and settle every slot off-main on the serial
+`tarabdaar.tanpura.build` queue (`.utility`), shared by both plucked voices.
+The scale/tonic pipeline debounces **750 ms** and skips unchanged tunings
+(`AppController.syncTanpuraFromScale`). Each mount's `EngineBuildCoordinator`
+skips obsolete queued requests before construction and rejects superseded
+in-flight results. Failed builds retain the working engine and touch bindings;
+an intentionally empty slot grid clears them. Repeated enables reuse a pending
+or successful build, and retry the latest failed request. Held tanpura drone
+buttons re-pluck only after a fresh engine publishes. Disabling a source cancels
+outstanding publication while retaining an already-mounted engine for re-enable.
+The kernel renders through its
 **async worker pool** (the callback never computes; one block ≈ 32 ms of
 latency on this path only).
 
@@ -117,7 +124,10 @@ every launch starts on the String voice; presets can switch it;
   TLP frame, so the pluck fires immediately — the nearest mounted slot
   (60 ¢ tolerance) **bent to the exact Hz**, scaled by `tp_pluck_level`,
   recorded per touch id in the voice's own slot map (`PluckedVoice`, a
-  `PlayedVoice` like the String bow).
+  `PlayedVoice` like the String bow). The newest touch to pluck a slot owns
+  its bend and release; displaced fingers cannot control that new string or
+  resume it through glide grace. Historical plucks remain in the kernel's
+  tail bank.
 - **Glides retune the ringing string** — `TanpuraEngine.bend`, a
   kernel-side live retune (`tp_apply_bend`): each mode's rotation angle is
   rescaled from mount-time base tables (damping, so every t60, preserved)
@@ -132,10 +142,15 @@ every launch starts on the String voice; presets can switch it;
   buzz cuts, the pitch rings down. A re-pluck promotes the string and clears
   the release and any bend.
 
-CC121 never damps anything; CC123 fast-releases every tracked
-main-instrument note. Slot bindings clear on instrument switch and engine
-rebuild. Drone strings are untouched — their release rings out. The String
-voice stays armed and silent, so switching back is instant.
+`PlayedVoice.touchAllOff()` fast-releases tracked main-instrument slots.
+`AudioEngine.touchesAllOff()` also clears the glide queue and raises drone
+buttons; drone releases ring out. Switching the main instrument first releases
+its outgoing played notes normally, then clears glide ownership and played-note
+bookkeeping. It leaves drone holds and their repeat cycles alone. Re-selecting
+the current instrument changes nothing. A fresh engine publication clears slot
+bindings because its mounted slots differ. The String voice stays armed to render the sympathetic
+response while a plucked main instrument is selected. There is no MIDI-note
+or CC dispatch path.
 
 ## Pluck touch, the string bank, and pluck drive
 
@@ -225,7 +240,7 @@ table in `registerCompThreadMul`.
 
 ## Parameters and presets
 
-The **"Tanpura" registry group** — all registry-`.live`
+The **Tanpura · Voice / Drones / Jawari** registry groups use `.live` apply routing
 (`AudioEngine.setTanpuraParam` via the `tp_` branch of
 `setStringControlParam`); [parameters.md](parameters.md)'s Timing column
 marks the table-build ones (`tp_jiva_comp`, `tp_cascade`) that
@@ -234,14 +249,16 @@ fitted `gain` — keep them in step when the artifact regenerates (the unified
 apply pushes every live default at startup; a drifted default would silently
 retrim). `tp_rel_t60` is `.perNote`; drones never read it.
 
-Presets: `TarabdaarPreset.mainInstrument` / `.droneVoice` (optional
-sections); `tp_*` resting values ride `paramValues`. The factory preset
-resets to String main + tanpura drones.
+Version-2 presets save `mainInstrument`, `droneVoice` and `tp_*` resting
+values as part of the complete rig. Legacy partial presets may omit those
+sections. The factory preset resets to String main + tanpura drones.
 
 ## Tests
 
 `SarangiKitTests/TanpuraEngineTests` — the **lockstep golden** (note 57 at
 its calibrated cents, 1e-9 rel) and the JI-slot engine smoke.
-`ByteNullContractTests` — inject gain 0 (and every "0 = off" path) is
+`PlayedVoiceLifecycleTests` pins exclusive slot ownership, normal release tails
+across instrument switches, unchanged-selection glide ownership, and independent
+drone holds. `ByteNullContractTests` — inject gain 0 (and every "0 = off" path) is
 bit-null at rest. `TarafRemovalParityTests` is untouched — a separate source
 node; the String render path is byte-identical.

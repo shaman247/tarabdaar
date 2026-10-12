@@ -30,10 +30,11 @@ technique: move the finger.
 ## The Glide Queue
 
 `GlideSequencer` (`Packages/TarabdaarCore/.../GlideSequencer.swift`) is
-a control layer in front of the voice routing: `AudioEngine` funnels its
+a Mac-owned control layer in front of the voice routing. `AudioEngine` owns it and funnels its
 public `touchOn`/`touchGlide`/`touchOff` through one instance, so every
-touch source — the iPad wire, the Mac pads, the Joy-Con strum — obeys
-the same law. It is the only note path there is.
+touch source — the iPad wire, Mac pads, keyboard and Joy-Con strum — reaches
+the same allocation path. Strum touches explicitly bypass sequencing. The iPad
+sends touch pitches and evaluates no glide-queue policy.
 
 ### Overlap and release grace
 
@@ -85,8 +86,9 @@ with glide disabled.
 
 - **Ownership** — after arriving at a waypoint, that waypoint's
   physical touch owns the sounding voice: its drags meend it and its
-  last physical release ends it immediately, mapped onto the voice's original wire id (the voice
-  layer never learns the queued ids). A queued finger dragging *before*
+  last physical release ends it immediately, mapped onto the voice's original host touch id (the voice
+  layer never learns the queued ids). The shared host allocator keeps that
+  identity reserved through release grace and pending callbacks. A queued finger dragging *before*
   the glide arrives retargets its waypoint live — the trajectory lands
   where the finger is.
 - **Releases** — a queued note released while other members remain held
@@ -95,7 +97,7 @@ with glide disabled.
 - **Parked fingers and glide-back** — past chain members still down are
   *parked*: only the current owner's drags drive the voice, and a parked
   finger's movements are remembered **silently** (following them is the
-  two-finger oscillation bug — the held first finger's wire id is the
+  two-finger oscillation bug — the held first finger's host touch id is the
   voice's own downstream id, so its wiggles would yank the pitch back).
   Releasing the owner while fingers are parked glides **back** to the
   most recent one, at that finger's *current* position, at the full

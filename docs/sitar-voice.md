@@ -8,7 +8,7 @@ release path and the string bank), with the String voice's modal-jawari web
 (`bow_jt_*`, the Strings-tab rows) as its sympathetic strings.
 Main-instrument only (Live tab → Instrument → Sitar; the **String bowed
 voice stays the default**); the drone buttons keep their tanpura/sympathetic
-choice. (Earlier fits and prototypes: not present — see `docs/history/`.)
+choice.
 
 ## The physics: a geometrically scaled string
 
@@ -81,7 +81,7 @@ pluck-comb notch fills faster than a scaled tape's — the hcB velocity term).
 `Packages/SarangiKit/Sources/SarangiKit/Resources/sitar_live.json`, written
 by the fitting project's `scripts/export_sitar_live.py`: the 12-rung ladder
 (thread comp baked per rung), `radByMode`, identity `bodyFIR`, per-note
-`pitchCents`, `rampCycles` 1.0, and `gain` calibrated so a velocity-100
+`pitchCents`, `rampCycles` 1.0, and `gain` calibrated so the reference
 sitar pluck peaks like a tanpura drone pluck (`st_gain`'s registry default
 equals it — keep the two in step). t60s sit at their similarity values
 (halving them starves the cascade — the bloom modes lie below the shifted
@@ -101,17 +101,26 @@ nominal); numpy-on-Accelerate emits benign matmul FP warnings on every
 — the SAME mount as the tanpura, parameterized by key prefix (`st_`/`tp_`)
 and artifact — holding a `TanpuraVoiceSource` built with `artifact: .sitar`
 (`Presets.sitarParams()`), third node into `symGain`, armed lazily on first
-switch. One path serves both voices (`setPluckedVoiceEnabled` /
+switch. Returning to Sitar reuses its mounted engine or pending build; a failed
+build is retried on the next enable. Failed replacements retain the last working
+engine and touch bindings; an empty grid (including all slots above the 1.5 kHz
+cap) deliberately clears the source. One path serves both voices (`setPluckedVoiceEnabled` /
 `rebuildPlucked` / `setPluckedParam`); the asymmetric parts are explicit
 hooks — the tanpura's drone buttons and its debounced table-shaping rebuild
 (`tp_jiva_comp` / `tp_cascade`). As a played voice each mount is a
 `PlayedVoice` (`PlayedVoice.swift`): exact-pitch wire plucks, live bends
-and `tp_rel_t60` releases, with its own touch→slot map (cleared when a
-fresh engine publishes and on a main-instrument switch); the String bow
+and its own `st_rel_t60` / `tp_rel_t60` releases. Each slot has one current
+touch owner: a new pluck displaces previous touch bindings while kernel history
+tails continue. A fresh engine publication clears the map. A main-instrument
+switch normally releases the outgoing played notes before forgetting glide
+ownership, leaves drone holds alone, and is a no-op for the current selection.
+The String bow
 is the third `PlayedVoice`, so `AudioEngine`'s touch entry points speak one
 protocol and never branch on the instrument. Scale/tonic changes rebuild the sitar's JI grid on
 the tanpura's queue and debounce (`rebuildSitar` from
-`AppController.syncTanpuraFromScale`). `TanpuraTables.buildNote` carries
+`AppController.syncTanpuraFromScale`). The shared build coordinator skips
+superseded queued builds before construction and rejects stale in-flight
+results. `TanpuraTables.buildNote` carries
 per-note contact stiffness and transverse curvature
 (`TanpuraNoteTables.kc` / `.polRt`) — the engine mounts those, not the
 globals.
@@ -142,7 +151,7 @@ sympathetic zone; 1.0 is ~12 dB too subtle.
 
 ## Parameters
 
-The **"Sitar" registry group** — all `.live`, via the `st_` prefix branch of
+The **Sitar · Voice** registry group — all `.live`, via the `st_` prefix branch of
 `setStringControlParam` → `setSitarParam`: `st_gain` (= the artifact trim),
 `st_pluck_level`, `st_rel_t60` (0.15 s, `.perNote` — sitar lines
 articulate), `st_pluck_touch` (default 1: fret runs re-pluck at new pitches;

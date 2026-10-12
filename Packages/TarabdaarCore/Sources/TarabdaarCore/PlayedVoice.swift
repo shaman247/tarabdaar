@@ -66,26 +66,24 @@ extension StringVoiceSource: PlayedVoice {
 /// pluck cannot swell).
 extension PluckedVoice: PlayedVoice {
     func touchOn(_ id: UInt16, pitchSemis: Double, exprScale: Double) {
+        touchLock.lock()
+        defer { touchLock.unlock() }
         let hz = Pitch.hz(fractionalMidi: pitchSemis)
         guard let engine = source?.currentEngine(),
               let slot = engine.nearestSlot(toHz: hz, toleranceCents: 60)
         else { return }
+        touchBindings.claim(slot, for: id)
         engine.pluck(slot: slot, scale: pluckLevel * exprScale,
                      bendRatio: hz / engine.slotFrequencies[slot],
                      touch: pluckTouch, drive: pluckDrive)
-        touchLock.lock()
-        releasedTouchSlot = releasedTouchSlot.filter { $0.value != slot && $0.key != id }
-        touchSlot[id] = slot
-        touchLock.unlock()
     }
 
     func touchExpr(_ id: UInt16, exprScale: Double) {}
 
     func touchGlide(_ id: UInt16, pitchSemis: Double, exprScale: Double?) {
         touchLock.lock()
-        let slot = touchSlot[id]
-        touchLock.unlock()
-        guard let slot, let engine = source?.currentEngine(),
+        defer { touchLock.unlock() }
+        guard let slot = touchBindings.held[id], let engine = source?.currentEngine(),
               slot < engine.slotFrequencies.count else { return }
         let hz = Pitch.hz(fractionalMidi: pitchSemis)
         engine.bend(slot: slot, ratio: hz / engine.slotFrequencies[slot])
@@ -93,35 +91,26 @@ extension PluckedVoice: PlayedVoice {
 
     func touchOff(_ id: UInt16) {
         touchLock.lock()
-        let slot = touchSlot.removeValue(forKey: id)
-        if let slot {
-            releasedTouchSlot = releasedTouchSlot.filter { $0.value != slot }
-            releasedTouchSlot[id] = slot
-        }
-        touchLock.unlock()
-        guard let slot, let engine = source?.currentEngine() else { return }
+        defer { touchLock.unlock() }
+        guard let slot = touchBindings.release(id), let engine = source?.currentEngine() else { return }
         engine.release(slot: slot, rate: releaseRate)
     }
 
     func touchResume(_ id: UInt16, exprScale: Double) -> Bool {
         touchLock.lock()
         defer { touchLock.unlock() }
-        guard let slot = releasedTouchSlot.removeValue(forKey: id),
-              !touchSlot.values.contains(slot),
-              let engine = source?.currentEngine(), slot < engine.slotFrequencies.count else {
+        guard let engine = source?.currentEngine(),
+              let slot = touchBindings.resume(id, slotCount: engine.slotFrequencies.count) else {
             return false
         }
-        touchSlot[id] = slot
         engine.release(slot: slot, rate: 0)
         return true
     }
 
     func touchAllOff() {
         touchLock.lock()
-        let slots = Array(touchSlot.values)
-        touchSlot.removeAll(keepingCapacity: true)
-        releasedTouchSlot.removeAll(keepingCapacity: true)
-        touchLock.unlock()
+        defer { touchLock.unlock() }
+        let slots = touchBindings.releaseAll()
         guard let engine = source?.currentEngine() else { return }
         for s in slots { engine.release(slot: s, rate: releaseRate) }
     }
@@ -129,7 +118,7 @@ extension PluckedVoice: PlayedVoice {
     func scopeVoices() -> [AudioEngine.ScopeSnapshot.Voice] {
         guard let engine = source?.currentEngine() else { return [] }
         touchLock.lock()
-        let held = Set(touchSlot.values)
+        let held = Set(touchBindings.held.values)
         touchLock.unlock()
         var out: [AudioEngine.ScopeSnapshot.Voice] = []
         for (i, s) in engine.scopeSlots().enumerated() where s.level > 0 {

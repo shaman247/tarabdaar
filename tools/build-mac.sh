@@ -17,8 +17,29 @@ cd "$(dirname "$0")/.."
 # compiles against the same types the apps use, so docs/parameters.md
 # stays in sync with the parameter set by construction — a definition
 # change that breaks the generator fails the build here.
+# Compiler diagnostics remain visible, and actionable warnings fail the build.
+# Xcode emits this exact metadata warning for apps without App Intents support.
+run_checked() {
+    local output rc=0 diagnostics
+    output=$("$@" 2>&1) || rc=$?
+    diagnostics=$(printf '%s\n' "$output" | grep -E 'error:|warning:' |
+        grep -vF 'warning: Metadata extraction skipped. No AppIntents.framework dependency found.' || true)
+    if [ -n "$diagnostics" ]; then
+        printf '%s\n' "$diagnostics"
+    fi
+    if [ "$rc" -ne 0 ]; then
+        # Preserve non-compiler failures as well (signing, tool startup, etc.).
+        printf '%s\n' "$output"
+        return "$rc"
+    fi
+    if [ -n "$diagnostics" ]; then
+        echo "❌ Build has actionable warnings or errors" >&2
+        return 1
+    fi
+}
+
 echo "→ regenerating docs/parameters.md"
-swift run -c release --package-path Packages/TarabdaarCore paramdoc \
+run_checked swift run -c release --package-path Packages/TarabdaarCore paramdoc \
     docs/parameters.md
 
 # Render the whole docs/ tree to the HTML site (docs/html/, sidebar TOC).
@@ -26,23 +47,11 @@ swift run -c release --package-path Packages/TarabdaarCore paramdoc \
 echo "→ regenerating docs/html"
 python3 tools/gen_docs_html.py
 
-# `|| EXIT=$?` keeps `set -e` from aborting before the errors are printed
-# (a failing xcodebuild used to exit the script silently with its code).
-EXIT=0
-OUTPUT=$(xcodebuild \
+run_checked xcodebuild \
     -project Tarabdaar/Tarabdaar.xcodeproj \
     -scheme TarabdaarMac \
     -destination 'platform=macOS,arch=arm64' \
     -derivedDataPath build/mac-ci \
-    -quiet build 2>&1) || EXIT=$?
-echo "$OUTPUT" | grep -E "error:|warning:" | grep -v "appintents\|never used\|consider replacing" || true
+    -quiet build
 
-if [ $EXIT -ne 0 ]; then
-    echo "❌ TarabdaarMac build failed"
-    exit $EXIT
-fi
-if echo "$OUTPUT" | grep -q "error:"; then
-    echo "❌ TarabdaarMac build had errors"
-    exit 1
-fi
 echo "✅ TarabdaarMac build succeeded"

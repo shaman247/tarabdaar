@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SarangiKit
 
@@ -20,6 +21,21 @@ import SarangiKit
 /// fret sounds exactly as commanded at every amount and the axis never
 /// boosts past the player's expression.
 public struct FretPitchGrid: Equatable, Sendable {
+    /// Consume published values directly; their owners still hold the old value during delivery.
+    public static func publisher<Arrangement: Publisher>(
+        tuning: Tuning, arrangement: Arrangement
+    ) -> AnyPublisher<FretPitchGrid, Never>
+    where Arrangement.Output == FretArrangement, Arrangement.Failure == Never {
+        Publishers.CombineLatest4(tuning.$scale, tuning.$tonicMidi,
+                                  tuning.$tonicCents, arrangement)
+            .map { scale, midi, cents, frets in
+                FretPitchGrid(tonicHz: Pitch.hz(fractionalMidi: Double(midi) + cents / 100),
+                              arrangement: frets, degrees: scaleDegrees(from: scale))
+            }
+            .removeDuplicates()
+            .eraseToAnyPublisher()
+    }
+
     /// The tonic as fractional MIDI (69 = A440).
     public let tonicSemis: Double
     /// The fret pitches folded into one octave, as octave fractions in

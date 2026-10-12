@@ -1,6 +1,5 @@
 import AVFoundation
 import Foundation
-import QuartzCore
 import SarangiKit
 
 /// macOS audio plumbing for the three voices — the String voice
@@ -18,6 +17,9 @@ public class AudioEngine: ObservableObject {
     /// Summing stage for the three source nodes, pinned at unity.
     let symGain = AVAudioMixerNode()
     let lock = NSLock()
+    /// Serialize input routing and instrument switches; callbacks re-enter
+    /// from the glide sequencer after its own lock has been released.
+    let touchRoutingLock = NSRecursiveLock()
     var pluckCapture: PluckDiagnosticCapture?
 
     // MARK: - String voice source
@@ -46,11 +48,11 @@ public class AudioEngine: ObservableObject {
                                count: FretArrangement.droneCount)
     var droneHeld = [Bool](repeating: false,
                            count: FretArrangement.droneCount)
-    /// Serial off-main build queue for the String engine; `stringBuildGen`
-    /// discards builds superseded while in flight.
+    /// Serial off-main build queue; the coordinator skips obsolete requests
+    /// and retains the last good engine on failure.
     let stringBuildQueue = DispatchQueue(label: "tarabdaar.string.build",
                                          qos: .userInitiated)
-    var stringBuildGen = 0
+    let stringBuilds = EngineBuildCoordinator<BowEngine>()
     @Published public internal(set) var tarafBank = TarafBank.empty
 
     // MARK: - Tanpura voice
@@ -117,28 +119,29 @@ public class AudioEngine: ObservableObject {
     var fretPitchGrid = FretPitchGrid(tonicHz: 261.63, ratios: [])
     var pitchAccentAmount: Double = 0
 
-    /// Guards the readout scalars below; separate from `lock` so the Live
-    /// tab's poll never contends with it. Never held while `lock` is held.
-    let meterLock = NSLock()
-    var meterPitchHz: Double = 0
-    var meterExpr: Double = 0
-    var meterActive: Bool = false
-
-    // MARK: - Profiling
-
-    public private(set) var lastRenderTime: Double = 0
-    public private(set) var maxRenderTime: Double = 0
-    public private(set) var lastRenderFrames: Int = 0
+    /// Independent readout cache; its lock never nests with `lock`.
+    let performanceMeter = PerformanceMeter()
 
     // MARK: - Setup
 
     /// The glide queue the public touch API funnels through: with
     /// `ctl_glide_on` armed, an overlapping onset is queued as a glissando
     /// waypoint instead of mounting a note. Pass-through at the default 0.
-    public let glideQueue = GlideSequencer()
+    public let glideQueue: GlideSequencer
 
     public init() {
+        glideQueue = GlideSequencer()
         setupAudio()
+        bindGlideQueue()
+    }
+
+    /// Headless routing harness: no graph start or output-device changes.
+    init(glideQueue: GlideSequencer) {
+        self.glideQueue = glideQueue
+        bindGlideQueue()
+    }
+
+    private func bindGlideQueue() {
         glideQueue.onTouchOn = { [weak self] id, pitch in
             self?.touchOnDirect(id, pitchSemis: pitch)
         }
@@ -191,25 +194,6 @@ public class AudioEngine: ObservableObject {
     var changedDeviceRate: (device: AudioDeviceID, originalRate: Double)?
     #endif
 
-    // MARK: - Recording (post-FX tap on the main mixer)
-
-    let recordingLock = NSLock()
-    // The tap fills a pre-allocated interleaved Int16 buffer (no audio-thread
-    // allocation); one complete WAV with our own header is written at stop.
-    // Never AVAudioFile here: its incremental write drops the unflushed tail.
-    var recBuf: [Int16] = []      // interleaved L,R; reused across runs
-    var recCount: Int = 0         // valid interleaved Int16 count
-    var recURL: URL?
-    var recActive = false
-    var recOverflow = false       // ran out of pre-allocated capacity
-
-    var recCountFinal: Int = 0    // recCount snapshot at last stop
-
-    /// True when a recording is in progress. Updated on the main thread.
-    @Published public var isRecording: Bool = false
-    /// File URL of the most recently completed (or in-progress) recording.
-    @Published public var lastRecordingURL: URL?
-
     // MARK: - TarabLink touch ingestion (the wire path)
     //
     // Fractional-MIDI pitch keyed by touch id. Thread-safe (link receive queue).
@@ -217,11 +201,15 @@ public class AudioEngine: ObservableObject {
     /// Touch onset, through the glide queue: a fresh note via
     /// `touchOnDirect`, or a queued glissando waypoint.
     public func touchOn(_ id: UInt16, pitchSemis: Double) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         glideQueue.touchOn(id, pitchSemis: pitchSemis)
     }
 
     /// The glide queue's exemption mark (the strum chord), delivered before `touchOn`.
     public func touchGlideExempt(_ id: UInt16) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         lock.lock()
         profileExcludedTouches.insert(id)
         lock.unlock()
@@ -231,18 +219,24 @@ public class AudioEngine: ObservableObject {
     /// Pitch update, through the glide queue: a drag on a queued waypoint
     /// retargets it; the owning touch's drag meends the voice directly.
     public func touchGlide(_ id: UInt16, pitchSemis: Double) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         glideQueue.touchGlide(id, pitchSemis: pitchSemis)
     }
 
     /// Touch release, immediately through the glide queue: a chain
     /// member's release is resolved by the sequencer, others forward directly.
     public func touchOff(_ id: UInt16) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         glideQueue.touchOff(id)
     }
 
     /// Touch onset, the DIRECT path. A plucked main instrument plucks HERE
     /// at the exact pitch (onset and pitch arrive together).
     private func touchOnDirect(_ id: UInt16, pitchSemis: Double) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         lock.lock()
         if !profileExcludedTouches.contains(id) {
             performanceProfile.setPitch(pitchSemis, for: id, at: ProcessInfo.processInfo.systemUptime)
@@ -262,6 +256,8 @@ public class AudioEngine: ObservableObject {
 
     /// Restore tracking and reopen the released voice without a new attack.
     private func touchResumeDirect(_ id: UInt16, pitchSemis: Double) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         lock.lock()
         performanceProfile.setPitch(pitchSemis, for: id, at: ProcessInfo.processInfo.systemUptime)
         touchPitchSemis[id] = pitchSemis
@@ -337,6 +333,8 @@ public class AudioEngine: ObservableObject {
     /// Per-touch expression scale (the strum chord). String touches update
     /// the mapper's per-slot scale live; plucked mains consume it at onset.
     public func touchExpr(_ id: UInt16, exprScale: Double) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         lock.lock()
         touchExprScale[id] = exprScale
         let voice = playedVoiceLocked(mainInstrumentStorage)
@@ -349,6 +347,8 @@ public class AudioEngine: ObservableObject {
     /// directly, with the pitch accent's expression scale landing in the
     /// same update. Plucked mains: live-retune the ringing slot kernel-side.
     private func touchGlideDirect(_ id: UInt16, pitchSemis: Double) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         lock.lock()
         guard touchPitchSemis[id] != nil else { lock.unlock(); return }
         if !profileExcludedTouches.contains(id) {
@@ -366,6 +366,8 @@ public class AudioEngine: ObservableObject {
     /// Touch release, the DIRECT path. String: bow lift. Plucked mains:
     /// fast-release the slot (`tp_rel_t60`), even after a switch back to String.
     private func touchOffDirect(_ id: UInt16) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         recordPlayingDiagnosticEvent(kind: "touchOff", id: id)
         lock.lock()
         performanceProfile.setPitch(nil, for: id, at: ProcessInfo.processInfo.systemUptime)
@@ -383,19 +385,27 @@ public class AudioEngine: ObservableObject {
     /// The link-drop kill path: every bow off, slot released, drone up,
     /// glide queue cleared — the wire's stuck-note safety net.
     public func touchesAllOff() {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         glideQueue.reset()
         lock.lock()
-        performanceProfile.releaseAll(at: ProcessInfo.processInfo.systemUptime)
-        profileExcludedTouches.removeAll()
-        touchPitchSemis.removeAll(keepingCapacity: true)
-        touchExprScale.removeAll(keepingCapacity: true)
-        heldTouchOrder.removeAll(keepingCapacity: true)
+        clearTouchTrackingLocked()
         let voices = allVoicesLocked()
         let snap = meterSnapshotLocked()
         lock.unlock()
         storeMeter(snap)
         for v in voices { v.touchAllOff() }
         for i in 0..<FretArrangement.droneCount { setDronePressed(i, false) }
+    }
+
+    /// Forget played-note bookkeeping after releasing an outgoing voice.
+    /// Drone holds belong to a separate path. Callers hold `lock`.
+    func clearTouchTrackingLocked() {
+        performanceProfile.releaseAll(at: ProcessInfo.processInfo.systemUptime)
+        profileExcludedTouches.removeAll()
+        touchPitchSemis.removeAll(keepingCapacity: true)
+        touchExprScale.removeAll(keepingCapacity: true)
+        heldTouchOrder.removeAll(keepingCapacity: true)
     }
 
     /// The expression axis (CC11); the Mac pads hold the fitted median here.

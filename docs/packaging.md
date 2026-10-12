@@ -1,6 +1,33 @@
 # Packaging & Distribution
 
-Quick reference for shipping Tarabdaar (iOS) and TarabdaarMac outside of Xcode's run-on-device flow. Both apps already have **Hardened Runtime** enabled in their build settings; the iOS app uses Automatic provisioning. What's documented here is the workflow specific to each distribution channel.
+Quick reference for shipping Tarabdaar (iOS) and TarabdaarMac outside of Xcode's run-on-device flow. TarabdaarMac has **Hardened Runtime** enabled; the iOS app uses Automatic provisioning. What's documented here is the workflow specific to each distribution channel.
+
+## Local build and commit checks
+
+`tools/build-mac.sh` regenerates the parameter documentation and HTML reference,
+then builds TarabdaarMac in `build/mac-ci`, separate from Xcode’s signed products.
+Compiler warnings and errors from both the parameter generator and app build are
+printed and fail the command. The only ignored diagnostic is Xcode’s
+“Metadata extraction skipped. No AppIntents.framework dependency found.” warning.
+A tool failure also prints its output and preserves its exit status.
+
+`tools/install-hooks.sh` installs a launcher for the tracked
+`tools/pre-commit.sh` in Git’s active hooks directory, respecting worktrees and
+`core.hooksPath`. The full TarabdaarCore DSP guard runs for staged changes in:
+
+- Any SarangiKit file, including all engines, DSP effects, fitted resources and tests.
+- TarabdaarCore sources, tests or package manifest.
+- Mac app-controller and store files, the default preset, or any `.tarabdaar` preset.
+- The hook installer, hook implementation or full-guard script.
+
+Other changes run TarabdaarCore’s fast tests. Both routes run SarangiKit’s tests,
+even when TarabdaarCore fails; either package failure blocks the commit. Deleted
+files and both sides of renames are classified, including names containing spaces
+or newlines. `git commit --no-verify` skips the hook once.
+
+Run `python3 -m unittest discover -s tools/tests` to check guard routing, package
+failure propagation, build-warning handling and generated documentation links
+without compiling either package.
 
 ## macOS — Developer ID + Notarization
 
@@ -26,12 +53,11 @@ For distribution outside the Mac App Store (e.g. direct download, internal build
 Use [`tools/release-mac.sh`](../tools/release-mac.sh). It does:
 
 1. `xcodebuild archive` of the `TarabdaarMac` scheme.
-2. Export to a `.app` using the embedded `ExportOptions.plist`.
-3. `codesign --deep --force` with your **Developer ID Application** certificate.
-4. `xcrun notarytool submit … --wait` blocks until Apple notarizes.
-5. `xcrun stapler staple` writes the notarization ticket into the bundle.
+2. Export to a signed `.app` using its generated `ExportOptions.plist` and Developer ID Application certificate.
+3. Zip the app and submit it with `xcrun notarytool submit … --wait`.
+4. Staple the notarization ticket with `xcrun stapler staple`, then validate it.
 
-Customize the script's `TEAM_ID` and `SIGN_IDENTITY` at the top. Output lands in `build/Release/Tarabdaar.app`. Zip and distribute.
+Configure `TEAM_ID` and the `NOTARY_PROFILE` keychain entry before running. Signing uses the Developer ID Application certificate selected by the export options. Output is `build/Release/TarabdaarMac.app`. The release script removes the existing `build/` directory before archiving.
 
 ## macOS — Mac App Store
 
@@ -39,4 +65,4 @@ Generally you'd use Xcode's "Archive → Distribute App → App Store Connect" f
 
 ## iOS — App Store / TestFlight
 
-Standard Xcode archive + upload. The iPad target is a USB-MIDI controller only — it does not require any Local Network usage description, Bonjour service declaration, or multicast entitlement.
+Standard Xcode archive + upload. The iPad is a silent controller using TLP over USB or BLE-MIDI — it does not require any Local Network usage description, Bonjour service declaration, or multicast entitlement.

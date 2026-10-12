@@ -3,7 +3,7 @@ import TarabdaarCore
 import SwiftUI
 
 /// The **Body** tab (⌘0): the formula body's frequency response exactly
-/// as the running String engine was built with it —
+/// from the running String engine's adopted coefficients —
 ///
 /// - **radiation** — bridge force → radiated pressure through the modal
 ///   bank plus the flat `bow_body_c0` floor (thin, the raw ripple) and its
@@ -16,7 +16,7 @@ import SwiftUI
 ///   and the tonic's harmonics as faint verticals, so you can read where
 ///   Sa's partials sit on the peaks and nulls.
 ///
-/// Recomputed only when the engine identity changes (a rebuild), polled
+/// Recomputed only when the engine or its coefficient revision changes, polled
 /// at 2 Hz; hover for a readout at any frequency.
 struct BodyView: View {
     @ObservedObject var controller: AppController
@@ -48,7 +48,7 @@ struct BodyView: View {
             Text("BODY")
                 .font(.padCaption.weight(.bold))
                 .foregroundStyle(.secondary)
-            Text("The formula body as built into the running engine: bridge force → radiated pressure (the peaks and nulls every harmonic sweeps through during meend and vibrato), the same after the radiation chain, and the bridge admittance the string loops through. Edit the Body group on the Parameters tab; the plot follows each rebuild.")
+            Text("The formula body in the running engine: bridge force → radiated pressure (the peaks and nulls every harmonic sweeps through during meend and vibrato), the same after the radiation chain, and the bridge admittance the string loops through. Edit the Body group on the Parameters tab; the plot follows coefficient changes.")
                 .font(.padCaption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -95,32 +95,37 @@ struct BodyView: View {
     }
 }
 
-/// Polls the engine identity at 2 Hz and recomputes the response only
-/// when the String voice was rebuilt.
+/// Polls the engine and coefficient revision at 2 Hz and recomputes only when either changes.
 @MainActor
 private final class BodyModel: ObservableObject {
     @Published var response: BowEngine.BodyResponse? = nil
-    private var identity: ObjectIdentifier? = nil
+    private var version: AudioEngine.BodyResponseVersion? = nil
     private var timer: Timer? = nil
+    private weak var controller: AppController?
 
     func start(controller: AppController) {
+        stop()
+        self.controller = controller
         refresh(controller)
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) {
-            [weak self, weak controller] _ in
-            guard let self, let controller else { return }
-            MainActor.assumeIsolated { self.refresh(controller) }
+            [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let controller = self.controller else { return }
+                self.refresh(controller)
+            }
         }
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        controller = nil
     }
 
     private func refresh(_ controller: AppController) {
-        let id = controller.audio.stringVoiceEngineIdentity()
-        guard id != identity || (id != nil && response == nil) else { return }
-        identity = id
+        let current = controller.audio.stringVoiceBodyVersion()
+        guard current != version || (current != nil && response == nil) else { return }
+        version = current
         response = controller.audio.stringVoiceBodyResponse()
     }
 }

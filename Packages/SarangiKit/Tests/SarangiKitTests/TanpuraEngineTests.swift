@@ -12,6 +12,33 @@ final class TanpuraEngineTests: XCTestCase {
         return p
     }
 
+    /// The production FIR and room preserve output across variable and remainder-sized render blocks.
+    func testRenderIsIndependentOfBufferPartition() throws {
+        let p = try params()
+        func render(_ chunks: [Int]) throws -> [Double] {
+            let engine = try XCTUnwrap(TanpuraEngine(params: p, frequencies: [220], workers: 1))
+            engine.pluck(slot: 0)
+            var result: [Double] = []
+            for count in chunks {
+                var left = [Double](repeating: 0, count: count), right = left
+                left.withUnsafeMutableBufferPointer { l in
+                    right.withUnsafeMutableBufferPointer { r in
+                        engine.render(frames: count, outL: l.baseAddress!, outR: r.baseAddress!)
+                    }
+                }
+                result += left
+                XCTAssertEqual(left, right)
+            }
+            return result
+        }
+        let fixed = try render([4096, 4096])
+        let variable = try render([127, 257, 4099, 3709])
+        XCTAssertTrue(fixed.contains { abs($0) > 1e-6 })
+        XCTAssertEqual(fixed.count, variable.count)
+        let error = zip(fixed, variable).map { abs($0 - $1) }.max() ?? .infinity
+        XCTAssertLessThan(error, 1e-12)
+    }
+
     /// The table builder is in lockstep with the exporter golden.
     func testTablesLockstepGolden() throws {
         let p = try params()

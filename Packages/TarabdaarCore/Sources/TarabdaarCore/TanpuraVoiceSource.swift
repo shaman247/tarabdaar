@@ -149,8 +149,8 @@ public final class TanpuraVoiceSource {
         return (l, r)
     }
 
-    /// Publish a freshly-built engine (control thread). nil silences the
-    /// node; the outgoing engine crossfades out.
+    /// Publish a freshly-built engine (control thread), crossfading from
+    /// the outgoing engine. nil clears the source immediately.
     public func setEngine(_ engine: TanpuraEngine?, crossfadeMs: Double? = nil) {
         if let engine, let g = outGainOverride { engine.outGain = g }
         fader.publish(engine, crossfadeMs: crossfadeMs ?? EngineCrossfade.defaultMs)
@@ -205,9 +205,9 @@ public final class TanpuraVoiceSource {
     }
 
     /// Build the engine for a tonic + scale — seconds of CPU: call OFF the
-    /// main/audio thread, publish via `setEngine`; nil if the artifact is
-    /// missing. `registerComp` (`tp_jiva_comp`) / `cascade` (`tp_cascade`)
-    /// = per-slot thread calibration; both 0 = the fitted instrument,
+    /// main/audio thread, publish via `setEngine`; nil for an empty slot grid
+    /// or a failed artifact/kernel build. `registerComp` (`tp_jiva_comp`) /
+    /// `cascade` (`tp_cascade`) = per-slot thread calibration; both 0 = the fitted instrument,
     /// byte-identical.
     /// `artifact` selects the tanpura or the SITAR (a second source).
     public enum Artifact { case tanpura, sitar }
@@ -219,9 +219,19 @@ public final class TanpuraVoiceSource {
                                    cascade: Double = 0,
                                    workers: Int = 8,
                                    polyphony: Int = 6) -> TanpuraEngine? {
-        let loaded = artifact == .sitar ? Presets.sitarParams()
-                                        : Presets.tanpuraParams()
-        guard let params = loaded else { return nil }
+        if case .ready(let engine) = buildResult(tonicHz: tonicHz,
+            scaleRatios: scaleRatios, artifact: artifact, registerComp: registerComp,
+            cascade: cascade, workers: workers, polyphony: polyphony) {
+            return engine
+        }
+        return nil
+    }
+
+    /// Host publication must distinguish an intentional empty bank from a failed replacement.
+    static func buildResult(tonicHz: Double, scaleRatios: [Double],
+                            artifact: Artifact = .tanpura,
+                            registerComp: Double = 0, cascade: Double = 0,
+                            workers: Int = 8, polyphony: Int = 6) -> EngineBuildResult<TanpuraEngine> {
         var freqs = slotFrequencies(tonicHz: tonicHz, scaleRatios: scaleRatios)
         if artifact == .sitar {
             // the sitar ladder is simulable to ~1.5 kHz (above it the
@@ -229,7 +239,10 @@ public final class TanpuraVoiceSource {
             // slots do not mount, so frets above the cap find no slot
             freqs = freqs.filter { $0 <= 1500.0 }
         }
-        guard !freqs.isEmpty else { return nil }
+        guard !freqs.isEmpty else { return .empty }
+        let loaded = artifact == .sitar ? Presets.sitarParams()
+                                        : Presets.tanpuraParams()
+        guard let params = loaded else { return .failed }
         let comp = min(max(registerComp, 0.0), 1.0)
         let casc = min(max(cascade, 0.0), 1.0)
         let threadHMul: ((Double) -> Double)? = (comp > 0 || casc > 0)
@@ -240,15 +253,15 @@ public final class TanpuraVoiceSource {
                     + TanpuraTables.cascadeThreadLift(
                         f0: f0, cascade: casc, p: params))
             } : nil
-        let engine = TanpuraEngine(params: params, frequencies: freqs,
+        guard let engine = TanpuraEngine(params: params, frequencies: freqs,
                                    workers: workers,
                                    threadHMul: threadHMul,
                                    hfT60Mul: casc > 0 ? { f0 in
                                        TanpuraTables.cascadeHFT60Mul(
                                            f0: f0, cascade: casc)
-                                   } : nil)
-        engine?.setPolyphony(polyphony)
-        return engine
+                                   } : nil) else { return .failed }
+        engine.setPolyphony(polyphony)
+        return .ready(engine)
     }
 }
 
@@ -257,12 +270,11 @@ public final class TanpuraVoiceSource {
 /// its `<prefix>_*` live trims — so `AudioEngine` holds two of these and
 /// drives them through one parameterized enable / rebuild / parameter path.
 /// The genuinely asymmetric parts stay in `AudioEngine` as explicit hooks:
-/// the tanpura's drone buttons and its debounced table-shaping rebuild, and
-/// the sitar's "clear the slot map only while it is the main instrument".
+/// the tanpura's drone buttons and its debounced table-shaping rebuild.
 ///
 /// Threading follows the fields it replaced: the trims are guarded by
 /// `AudioEngine.lock`; `gainOverride`, `attached`, `connected` and
-/// `buildGen` are main-thread config.
+/// build requests are main-thread config.
 final class PluckedVoice {
     /// Registry key prefix — `tp_` / `st_`.
     let prefix: String
@@ -275,19 +287,16 @@ final class PluckedVoice {
     var source: TanpuraVoiceSource?
     var attached = false
     var connected = false
-    var buildGen = 0
+    let builds = EngineBuildCoordinator<TanpuraEngine>()
     /// The slot each ringing touch plucked (a glide retunes it, the
     /// release releases it) — this voice's own, under `touchLock`.
     let touchLock = NSLock()
-    var touchSlot: [UInt16: Int] = [:]
-    var releasedTouchSlot: [UInt16: Int] = [:]
+    var touchBindings = PluckedTouchBindings()
 
-    /// Forget the held-touch bindings (a fresh engine's slots differ; a
-    /// main-instrument switch drops pending plucks).
+    /// Forget bindings after an engine swap; the new slots differ.
     func clearTouches() {
         touchLock.lock()
-        touchSlot.removeAll(keepingCapacity: true)
-        releasedTouchSlot.removeAll(keepingCapacity: true)
+        touchBindings.clear()
         touchLock.unlock()
     }
 
@@ -346,4 +355,42 @@ final class PluckedVoice {
                            : Presets.tanpuraParams() != nil
     }
 
+}
+
+/// One current touch owns each live slot; historical plucks are kernel-owned.
+/// Access is serialized by the mount's `touchLock`.
+struct PluckedTouchBindings {
+    private(set) var held: [UInt16: Int] = [:]
+    private var released: [UInt16: Int] = [:]
+
+    mutating func claim(_ slot: Int, for id: UInt16) {
+        held = held.filter { $0.value != slot && $0.key != id }
+        released = released.filter { $0.value != slot && $0.key != id }
+        held[id] = slot
+    }
+
+    mutating func release(_ id: UInt16) -> Int? {
+        guard let slot = held.removeValue(forKey: id) else { return nil }
+        released = released.filter { $0.value != slot }
+        released[id] = slot
+        return slot
+    }
+
+    mutating func resume(_ id: UInt16, slotCount: Int) -> Int? {
+        guard let slot = released.removeValue(forKey: id),
+              slot < slotCount, !held.values.contains(slot) else { return nil }
+        held[id] = slot
+        return slot
+    }
+
+    mutating func releaseAll() -> [Int] {
+        let slots = Array(held.values)
+        clear()
+        return slots
+    }
+
+    mutating func clear() {
+        held.removeAll(keepingCapacity: true)
+        released.removeAll(keepingCapacity: true)
+    }
 }

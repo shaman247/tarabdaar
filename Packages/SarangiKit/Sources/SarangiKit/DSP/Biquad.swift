@@ -137,23 +137,6 @@ public struct Biquad: Sendable {
         let den = (denRe * denRe + denIm * denIm).squareRoot()
         return num / max(den, 1e-12)
     }
-
-    /// Constant-skirt band-pass (RBJ BPF, peak gain = Q). `lo`/`hi` set the
-    /// centre (geomean) and bandwidth in octaves.
-    public static func bandpass(lo: Double, hi: Double, sr: Double) -> Biquad {
-        let f0 = (lo * hi).squareRoot()
-        let w0 = 2 * Double.pi * f0 / sr
-        let bw = max(0.001, log2(hi / lo))
-        let sinw = sin(w0), cosw = cos(w0)
-        let alpha = sinw * sinh(0.5 * log(2.0) * bw * w0 / sinw)
-        let b0 = alpha
-        let b1 = 0.0
-        let b2 = -alpha
-        let a0 = 1 + alpha
-        let a1 = -2 * cosw
-        let a2 = 1 - alpha
-        return Biquad(b0: b0, b1: b1, b2: b2, a0: a0, a1: a1, a2: a2)
-    }
 }
 
 /// Minimal complex number for the Butterworth band-pass pole math (no

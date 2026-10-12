@@ -9,7 +9,7 @@
 
 ## Connecting
 
-Plug the iPad into the Mac over USB, or pair it over Bluetooth (BLE-MIDI — see [MIDI & Audio](midi-and-audio.md)). On the Mac, **Audio MIDI Setup › Window › Show MIDI Studio** must show the iPad enabled. Launch TarabdaarMac; the top-bar pill reads `MIDI: N src` once it sees the iPad, and the first touch sounds immediately — no settings to sync.
+Plug the iPad into the Mac over USB, or pair it over Bluetooth (BLE-MIDI). Install matching builds of both apps. Once the link handshake succeeds, the Mac's top-bar pill names the bearer (`USB` or `Bluetooth`, with round-trip time when available), and the iPad receives the playing surface. See [MIDI & Audio](midi-and-audio.md) for connection setup and the waiting, stale and version-mismatch indicators.
 
 ## Calibration (Mac)
 
@@ -23,7 +23,7 @@ Start each sweep from rest and end near rest if you can. Advance with Next or dp
 
 The collapsed **Arm fallback** section holds the iPad's arm calibration: rest, arm up/down, arm inward/outward, then arm rotation. Set it up with the iPad on your forearm before relying on it as a backup. Without an arm calibration, the tilt input uses raw, uncentred iPad angles. The iPad itself only streams raw motion. See [Sensors](sensors.md).
 
-Factory bindings pair the wrist and arm directions with matching curves: up/down controls Taraf Purity and Expression, inward/outward controls Taraf Decay, and rotation controls Tone Tilt. Existing saved mappings retain their own bindings; edit the wrist and arm rows independently in Controls.
+The three **Tilt ↕/↔/⟲** rows in Controls use the same bindings and curves for wrist and arm input; each source has its own calibration. Edit these shared rows to change either source's expression mappings. Saved mappings retain their bindings.
 
 ## Playing notes
 
@@ -55,7 +55,7 @@ The iPad toolbar shows each source live (arm/wrist/stick squares, the strike and
 
 ## Octave shift and strum (Joy-Con)
 
-Dpad ←/→ shift the playing range by whole octaves (±3; the toolbars read "Oct +1"); a sounding note keeps its octave, the next onset takes the new one. Drones, the tarab and the strum do not shift. The strum plays the configured chord — or the chord-bar selection — on the sympathetic strings.
+Dpad ←/→ shift the playing range by whole octaves (±3; the toolbars read "Oct +1"); a sounding note keeps its octave, the next onset takes the new one. Drones, the tarab and the strum do not shift. Hold **L** to play the configured chord — or the chord-bar selection — in the selected **main voice**. The chord sustains until release and excites the sympathetic strings like other played notes.
 
 Dpad **↓** or the rear **GL** button plays the next drone in a repeating **Sa → Pa → high Sa → high Sa** sequence, using the three existing drone mappings. Configure the steps in **Strings → Drones → Drone sequence (Down / GL)**. A press starts the sequence immediately; it advances every **2 seconds** after release. The next press of either button stops it. Tanpura drones start **one octave lower**; **↑** toggles back to the original octave and down again, taking effect on the next pluck. The octave selection starts low each launch. During calibration, ↓ still redoes the previous phase and ↑ advances it, without changing the sequence or octave.
 
@@ -89,4 +89,4 @@ The Live tab (⌘1) picks the played voice: **String** (bowed, the default), **T
 
 ## PANIC
 
-If a note sticks, tap the red **PANIC** button in the iPad toolbar: it clears every touch, and the Mac releases all strings.
+The red **PANIC** button in the iPad toolbar clears its touches and releases the Mac's notes and drones belonging to that link. Mac-local pad and controller notes keep their own lifetimes.

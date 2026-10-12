@@ -435,8 +435,8 @@ public final class StringVoiceSource {
                           _ r: inout [Float]) {
         l.withUnsafeMutableBufferPointer { lb in
             r.withUnsafeMutableBufferPointer { rb in
-                fader.render(frames: frames, outL: lb.baseAddress!,
-                             outR: rb.baseAddress!)
+                _ = fader.render(frames: frames, outL: lb.baseAddress!,
+                                 outR: rb.baseAddress!)
             }
         }
     }
@@ -449,8 +449,8 @@ public final class StringVoiceSource {
         return (l, r)
     }
 
-    /// Publish a freshly built engine (brief lock; control thread). nil
-    /// silences the node; the outgoing engine crossfades out.
+    /// Publish a freshly built engine (brief lock; control thread), crossfading
+    /// from the outgoing engine. nil clears the source immediately.
     public func setEngine(_ engine: BowEngine?, crossfadeMs: Double? = nil) {
         if let engine {
             // re-apply the runtime playing state (a rebuild must not snap to defaults)
@@ -467,6 +467,8 @@ public final class StringVoiceSource {
         }
         cacheLock.lock()
         engine?.setAxisTransforms(axisTransforms)
+        // Rejected async builds must never change the running mapper's allocation.
+        if let engine { engine.mapper.setSlotLimit(engine.maxPoly) }
         fader.publish(engine, crossfadeMs: crossfadeMs ?? EngineCrossfade.defaultMs)
         cacheLock.unlock()
     }
@@ -627,12 +629,15 @@ public final class StringVoiceSource {
         return (rows, flags)
     }
 
+    /// Async hosts defer mapper changes and discard packed jawari build arrays; exporters retain them by default.
     public static func buildEngine(tonicHz: Double,
                                    strings: [ResolvedString],
                                    mapper: BowControlMapper,
                                    sr: Double = Config.sampleRate,
                                    overrides: [String: Double] = [:],
-                                   follower: (gain: Double, t60: Double)? = nil)
+                                   follower: (gain: Double, t60: Double)? = nil,
+                                   configureMapper: Bool = true,
+                                   retainJawariTables: Bool = true)
         -> BowEngine? {
         guard var bp = Presets.bowedStringParams() else { return nil }
         for (k, v) in overrides { bp.num[k] = v }
@@ -662,7 +667,9 @@ public final class StringVoiceSource {
                                reverbPredelayMs: bp.v("bow_rev_predelay", 15.0),
                                reverbMix: bp.v("bow_rev_mix", 0.08),
                                reverbWidth: bp.v("bow_rev_width", 0.6),
-                               maxPoly: Int(bp.v("bow_live_poly", 8.0).rounded()))
+                               maxPoly: Int(bp.v("bow_live_poly", 8.0).rounded()),
+                               configureMapper: configureMapper,
+                               retainJawariTables: retainJawariTables)
         guard Set(tables.jt?.dualRows ?? []) == engine.jtDualRows else { return nil }
         // trim = the fitted calibration; `bow_gain` is re-applied by `setEngine`
         engine.outGain = bp.v("bow_live_trim", 0.05)

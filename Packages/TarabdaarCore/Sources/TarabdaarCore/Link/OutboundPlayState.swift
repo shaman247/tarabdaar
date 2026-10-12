@@ -21,13 +21,9 @@ public final class OutboundPlayState {
         let glideExempt: Bool
     }
     private var touches: [(token: AnyHashable, touch: Touch)] = []
-    /// Wire ids carry a per-instance namespace in the top 4 bits so two
-    /// states feeding one sink never collide; the low 12 bits wrap.
-    private let idNamespace: UInt16
-    private var nextWireId: UInt16 = 0
+    /// Source-local wire identities; the host separates input lanes at ingest.
+    private let touchIDs = TouchIdentityAllocator()
     private var nextOnsetSeq: UInt8 = 0
-    private static let namespaceCounter = NSLock()
-    private static var nextNamespace: UInt16 = 0
     /// Tilt axes, −1…+1 each (rest = 0).
     private var tilt: [Double] = [0, 0, 0]
     /// Raw user acceleration in g (gravity removed), for the Mac's
@@ -43,12 +39,7 @@ public final class OutboundPlayState {
     /// Fired (outside the lock) on every mutation — the sender's wake-up.
     public var onDirty: (() -> Void)?
 
-    public init() {
-        OutboundPlayState.namespaceCounter.lock()
-        idNamespace = (OutboundPlayState.nextNamespace & 0x0F) << 12
-        OutboundPlayState.nextNamespace &+= 1
-        OutboundPlayState.namespaceCounter.unlock()
-    }
+    public init() {}
 
     // MARK: producers (any thread)
 
@@ -57,15 +48,19 @@ public final class OutboundPlayState {
     public func touchOn(_ token: AnyHashable, pitchSemis: Double, radiusPt: Double = 0,
                         fretPosition: Double = 0, exprScale: Double = 1.0, glideExempt: Bool = false) {
         lock.lock()
+        for old in touches where old.token == token { touchIDs.release(old.touch.wireId) }
         touches.removeAll { $0.token == token }
-        let t = Touch(wireId: idNamespace | (nextWireId & 0x0FFF),
+        guard let id = touchIDs.allocate() else {
+            markDirtyLockedThenNotify()
+            return
+        }
+        let t = Touch(wireId: id,
                       onsetSeq: nextOnsetSeq,
                       radius: TLPTouch.radiusByte(points: radiusPt),
                       pitch: Float(pitchSemis),
                       fretPosition: TLPTouch.fretPositionWord(fretPosition),
                       exprScale: exprScale,
                       glideExempt: glideExempt)
-        nextWireId &+= 1
         nextOnsetSeq &+= 1
         touches.append((token, t))
         markDirtyLockedThenNotify()
@@ -84,7 +79,7 @@ public final class OutboundPlayState {
     }
 
     /// Fingertip size update for a held touch, in POINTS. Gated on the
-    /// WIRE BYTE (quarter-point steps) so jitter cannot dirty the frame.
+    /// WIRE BYTE (half-point steps) so jitter cannot dirty the frame.
     public func touchRadius(_ token: AnyHashable, radiusPt: Double) {
         lock.lock()
         let b = TLPTouch.radiusByte(points: radiusPt)
@@ -119,6 +114,7 @@ public final class OutboundPlayState {
     public func touchOff(_ token: AnyHashable) {
         lock.lock()
         let before = touches.count
+        for old in touches where old.token == token { touchIDs.release(old.touch.wireId) }
         touches.removeAll { $0.token == token }
         guard touches.count != before else { lock.unlock(); return }
         markDirtyLockedThenNotify()
@@ -190,6 +186,7 @@ public final class OutboundPlayState {
     /// caller's job).
     public func clearAll() {
         lock.lock()
+        for old in touches { touchIDs.release(old.touch.wireId) }
         touches.removeAll()
         droneMask = 0
         markDirtyLockedThenNotify()

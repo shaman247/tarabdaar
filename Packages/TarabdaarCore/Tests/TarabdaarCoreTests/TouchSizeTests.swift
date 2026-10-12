@@ -31,6 +31,24 @@ final class TouchSizeTests: XCTestCase {
                        accuracy: 1e-12)
     }
 
+    /// Wire round-trips preserve unknown/rest and let a flattened finger reach the axis endpoint.
+    func testWireRadiusReachesTheTrackerEndpoint() throws {
+        for (radius, expected) in [(0.0, 0.0), (20.8, 0.0), (hi, 1.0), (90.0, 1.0)] {
+            let state = OutboundPlayState()
+            state.touchOn("finger", pitchSemis: 60, radiusPt: radius)
+            let outbound = try XCTUnwrap(state.snapshotFrame(timestampUs: 0))
+            let sysex = TLPPack.envelope(TLPFrame.perfState(outbound).encode(), role: .pad)
+            let bytes = try XCTUnwrap(TLPPack.unenvelope(sysex)?.frame)
+            guard case .perfState(let inbound)? = TLPFrame.decode(bytes) else {
+                return XCTFail("encoded performance frame did not decode")
+            }
+            let touch = try XCTUnwrap(inbound.touches.first)
+            var tracker = TouchSizeTracker()
+            XCTAssertEqual(tracker.sample(radiusPt: touch.radiusPoints, at: 0),
+                           expected, accuracy: 1e-12, "radius \(radius)")
+        }
+    }
+
     // MARK: - The estimator
 
     /// Run a quantised staircase at 120 Hz: `levels[i]` from `i · stepS`.

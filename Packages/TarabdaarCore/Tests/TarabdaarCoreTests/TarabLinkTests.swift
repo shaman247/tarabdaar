@@ -63,6 +63,94 @@ final class TarabLinkTests: XCTestCase {
         XCTAssertEqual(events.count, 2)
     }
 
+    /// Incompatible peers exchange only HELLO; a matching epoch restores delivery and sequence gates.
+    func testVersionMismatchBlocksPayloadsAndRecovers() {
+        // Version 25 used quarter-point radii; version 26 uses half-points.
+        for role in [TLPRole.pad, .host] {
+            let peer: TLPRole = role == .pad ? .host : .pad
+            let link = TarabLink(role: role)
+            var sent: [TLPFrame] = []
+            var received = 0
+            var drops = 0
+            link.sendRaw = { bytes, _ in
+                if let raw = TLPPack.unenvelope(bytes)?.frame,
+                   let frame = TLPFrame.decode(raw) { sent.append(frame) }
+            }
+            link.onPerfState = { _ in received += 1 }
+            link.onJoyConState = { _ in received += 1 }
+            link.onEvent = { _ in received += 1 }
+            link.onLinkDrop = { drops += 1 }
+            let state = OutboundPlayState()
+            state.touchOn("finger", pitchSemis: 60, radiusPt: 73)
+            link.attach(playState: state)
+            link.setJoyConState(.idle)
+
+            func hello(_ version: UInt16) {
+                link._testProcess(envelope(.event(seq: 1,
+                    .hello(minVer: version, maxVer: version, role: peer)), from: peer))
+            }
+            func incoming() {
+                link._testProcess(envelope(.perfState(TLPPerfState(
+                    stateSeq: 1, timestampUs: 0, tiltX: 0, tiltY: 0, tiltZ: 0,
+                    droneMask: 0, strike: 0,
+                    touches: [TLPTouch(id: 1, onsetSeq: 1, radius: 255, pitch: 60)])), from: peer))
+                link._testProcess(envelope(.joyConState(TLPJoyConState(
+                    flags: 0, stateSeq: 1, timestampUs: 0, stickX: 128,
+                    stickY: 128, wrist1: 128, wrist2: 128)), from: peer))
+                link._testProcess(envelope(.event(seq: 2, .resyncRequest), from: peer))
+            }
+            func onlyHellosSent() -> Bool {
+                sent.allSatisfy { if case .event(_, .hello) = $0 { return true }; return false }
+            }
+            func sentState() -> Bool {
+                sent.contains {
+                    switch ($0, role) {
+                    case (.perfState, .pad), (.joyConState, .host): return true
+                    default: return false
+                    }
+                }
+            }
+
+            incoming()   // No peer has identified its units yet.
+            link.send(event: .resyncRequest)
+            link._testTick()
+            XCTAssertEqual(received, 0)
+            XCTAssertTrue(onlyHellosSent())
+            hello(25)
+            incoming()
+            link._testTick()
+            XCTAssertFalse(link._testStatus.isUp)
+            XCTAssertEqual(received, 0)
+            XCTAssertTrue(onlyHellosSent())
+
+            hello(TLP.versionMin)
+            incoming()
+            link._testTick()
+            XCTAssertTrue(link._testStatus.isUp)
+            XCTAssertEqual(received, 3)
+            XCTAssertTrue(sentState(), "held state survives the handshake")
+
+            sent.removeAll()
+            hello(25)
+            state.touchGlide("finger", pitchSemis: 62)
+            incoming()
+            link.send(event: .resyncRequest)
+            link._testTick()
+            XCTAssertEqual(drops, 1, "an incompatible replacement releases the link lane")
+            XCTAssertEqual(received, 3)
+            XCTAssertTrue(onlyHellosSent())
+            hello(25)
+            XCTAssertEqual(drops, 1, "repeated mismatches must not repeat the kill path")
+
+            hello(TLP.versionMin)
+            incoming()   // Low sequence numbers belong to the newly accepted epoch.
+            link._testTick()
+            XCTAssertTrue(link._testStatus.isUp)
+            XCTAssertEqual(received, 6)
+            XCTAssertTrue(sentState())
+        }
+    }
+
     /// The whole tunnel minus CoreMIDI: a real `OutboundPlayState` through the
     /// pad's paced tick arrives at the host's ingest as one on and one off.
     func testPadToHostEndToEnd() {
@@ -84,10 +172,15 @@ final class TarabLinkTests: XCTestCase {
         let sink = Sink()
         let ingest = LinkIngest(sink: sink)
         let host = TarabLink(role: .host)
-        host.sendRaw = { _, _ in }
+        host.sendRaw = { [weak pad] bytes, _ in pad?.receivedSysEx(bytes) }
         host.onPerfState = { ingest.apply($0) }
         // Wire pad's sends into host's receive (the tunnel, minus CoreMIDI).
-        pad.sendRaw = { bytes, _ in host.receivedSysEx(bytes) }
+        pad.sendRaw = { [weak host] bytes, _ in host?.receivedSysEx(bytes) }
+        pad._testTick()       // Send HELLO, then drain both receive queues.
+        host._testTick()
+        pad._testTick()
+        XCTAssertTrue(pad._testStatus.isUp)
+        XCTAssertTrue(host._testStatus.isUp)
 
         state.touchOn("finger", pitchSemis: 61.25)
         pad._testTick()

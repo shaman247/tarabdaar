@@ -404,7 +404,7 @@ public class MIDIEngine: ObservableObject {
     }
 
     /// One packet list, one `MIDISend` per target. A default
-    /// `MIDIPacketList` struct is 256 bytes; the payload may be larger, so
+    /// `MIDIPacketList` stores 256 payload bytes; the payload may be larger, so
     /// the buffer is sized to hold the full byte run in one packet.
     private func send(_ bytes: [UInt8], to targets: [MIDIEndpointRef]) {
         guard !targets.isEmpty else { return }
@@ -419,10 +419,12 @@ public class MIDIEngine: ObservableObject {
         )
         defer { raw.deallocate() }
         let listPtr = raw.assumingMemoryBound(to: MIDIPacketList.self)
-        var packet = MIDIPacketListInit(listPtr)
+        let packet = MIDIPacketListInit(listPtr)
         let timestamp = sendSchedule.reserve(now: mach_absolute_time())
-        packet = MIDIPacketListAdd(listPtr, bufSize, packet, timestamp, bytes.count, bytes)
-        guard packet != nil else { return }
+        // The C API documents null on capacity failure despite its nonnull import.
+        let appended: UnsafeMutablePointer<MIDIPacket>? = MIDIPacketListAdd(
+            listPtr, bufSize, packet, timestamp, bytes.count, bytes)
+        guard appended != nil else { return }
         for dest in targets {
             let status = MIDISend(midiOutputPort, dest, listPtr)
             if status != noErr {

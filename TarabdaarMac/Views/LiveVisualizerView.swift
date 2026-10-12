@@ -1,15 +1,15 @@
 import SarangiKit
 import TarabdaarCore
 import SwiftUI
+import Combine
 
-/// "Live" tab: what is reaching the audio engine — link status,
-/// render-time metrics, and live time-series graphs of the **played
-/// pitch** and **volume**.
+/// "Live" tab: what is reaching the audio engine — link status
+/// and live time-series graphs of the **played pitch** and **volume**.
 ///
 /// The pitch + volume traces are read from `AudioEngine.performanceReadout()`,
-/// derived at the single voice-routing choke point, so they reflect every
-/// input path — the iPad over the link and the Mac pads. The volume line
-/// is the commanded expression.
+/// so they reflect every input path — the iPad over the link and the Mac pads.
+/// Volume uses cached audio RMS from the sole meter relay, including released
+/// tails, on the same 60 dB scale as the iPad.
 ///
 /// The graphs show a fixed **6-second** window and scroll smoothly: a
 /// 60 Hz timer appends timestamped samples to an unpublished ring buffer
@@ -31,7 +31,7 @@ struct LiveVisualizerView: View {
     private final class TraceBuffer {
         /// log2(Hz); nil when silent.
         private(set) var pitchPts: [(t: Double, v: Double?)] = []
-        /// 0…1 (commanded expression).
+        /// 0…1 on the shared −60…0 dBFS display scale.
         private(set) var volPts: [(t: Double, v: Double?)] = []
         private(set) var latestPitchHz: Double? = nil
         private(set) var latestVol: Double = 0
@@ -59,9 +59,6 @@ struct LiveVisualizerView: View {
     }
 
     @State private var traces = TraceBuffer()
-    @State private var renderTimeMs: Double = 0
-    @State private var maxRenderTimeMs: Double = 0
-    @State private var sampleCounter = 0
 
     /// Visible time span of the graphs, in seconds.
     private let window: Double = 6
@@ -75,7 +72,6 @@ struct LiveVisualizerView: View {
                 performanceCard(now: timeline.date.timeIntervalSinceReferenceDate)
             }
             Spacer()
-            statsRow
         }
         .padding(24)
         .onReceive(sample) { _ in tick() }
@@ -162,9 +158,9 @@ struct LiveVisualizerView: View {
                 fill: false)
             TimeSeriesGraph(
                 title: "VOLUME",
-                readout: "\(Int((curVol * 100).rounded()))%",
-                topLabel: "100%",
-                bottomLabel: "0%",
+                readout: curVol > 0 ? String(format: "%.0f dBFS", TLPVolume.db(from01: curVol)) : "≤ −60 dBFS",
+                topLabel: "0 dBFS",
+                bottomLabel: "−60 dBFS",
                 points: volPts,
                 now: now,
                 window: window,
@@ -172,16 +168,6 @@ struct LiveVisualizerView: View {
                 color: .orange,
                 fill: true)
         }
-    }
-
-    private var statsRow: some View {
-        HStack(spacing: 16) {
-            Label(String(format: "render: %.2f / %.2f ms",
-                         renderTimeMs, maxRenderTimeMs),
-                  systemImage: "waveform")
-        }
-        .font(.padCaption)
-        .foregroundStyle(.secondary)
     }
 
     /// Fixed y-bounds for the pitch graph, in log2(Hz): the span of the Fret
@@ -208,14 +194,8 @@ struct LiveVisualizerView: View {
         // The buffer keeps a little beyond the window so the line enters
         // cleanly from the left edge (clipped) rather than starting at the
         // first sample.
-        traces.append(t: now, pitchHz: pitch, vol: r.active ? r.expression : 0,
+        traces.append(t: now, pitchHz: pitch, vol: TLPVolume.level01(linear: r.voiceRMS),
                       window: window)
-        // Render-time readout doesn't need 60 Hz; refresh it ~5×/s.
-        sampleCounter += 1
-        if sampleCounter % 12 == 0 {
-            renderTimeMs = controller.audio.lastRenderTime * 1000
-            maxRenderTimeMs = controller.audio.maxRenderTime * 1000
-        }
     }
 
     /// log2(Hz) → "440 Hz" axis label.

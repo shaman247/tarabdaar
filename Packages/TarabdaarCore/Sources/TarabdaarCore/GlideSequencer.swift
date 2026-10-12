@@ -111,6 +111,7 @@ public final class GlideSequencer {
 
     private var chains: [Chain] = []
     private var exempt: Set<UInt16> = []
+    private var pendingActions: [UInt16: Int] = [:]
     private var timer: DispatchSourceTimer?
     private var lastTickTime = 0.0
     private let timerQueue = DispatchQueue(
@@ -121,6 +122,13 @@ public final class GlideSequencer {
         case glide(UInt16, Double)
         case off(UInt16)
         case resume(UInt16, Double)
+
+        var id: UInt16 {
+            switch self {
+            case .on(let id, _), .glide(let id, _), .off(let id), .resume(let id, _):
+                return id
+            }
+        }
     }
 
     /// `drivesTimer: false` + an injected `clock` = the test harness.
@@ -133,6 +141,19 @@ public final class GlideSequencer {
     }
 
     // MARK: Controls
+
+    /// Identities still referenced by a sounding chain or release grace.
+    /// The host allocator must not recycle a lifted chain's original voice id.
+    public func retainsTouchIdentity(_ id: UInt16) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return pendingActions[id] != nil || exempt.contains(id) || chains.contains { c in
+            (c.voiceId == id || c.ownerId == id
+                || c.queue.contains { $0.id == id }
+                || c.parked.contains { $0.id == id })
+                && (!c.voiceReleased || withinGrace(c, now: clock()))
+        }
+    }
 
     /// One setter for the `ctl_glide_*` family; unknown keys are ignored.
     public func setControl(_ key: String, _ value: Double) {
@@ -177,8 +198,7 @@ public final class GlideSequencer {
 
         if exempt.contains(id) {
             actions.append(.on(id, pitchSemis))
-            lock.unlock()
-            run(actions)
+            runUnlocking(actions)
             return
         }
 
@@ -226,8 +246,7 @@ public final class GlideSequencer {
                                 ownerId: id, ownerHeld: true,
                                 ownerPitch: pitchSemis))
         }
-        lock.unlock()
-        run(actions)
+        runUnlocking(actions)
     }
 
     public func touchGlide(_ id: UInt16, pitchSemis: Double) {
@@ -253,8 +272,7 @@ public final class GlideSequencer {
         } else {
             actions.append(.glide(id, pitchSemis))
         }
-        lock.unlock()
-        run(actions)
+        runUnlocking(actions)
     }
 
     public func touchOff(_ id: UInt16) {
@@ -298,8 +316,7 @@ public final class GlideSequencer {
         } else {
             actions.append(.off(id))
         }
-        lock.unlock()
-        run(actions)
+        runUnlocking(actions)
     }
 
     /// The kill path: forget everything. The caller has already silenced
@@ -349,8 +366,7 @@ public final class GlideSequencer {
             }
         }
         if !needsTicksLocked { stopTimerLocked() }
-        lock.unlock()
-        run(actions)
+        runUnlocking(actions)
     }
 
     /// Advance one chain by `dt`, cascading through as many waypoints as
@@ -491,7 +507,20 @@ public final class GlideSequencer {
         timer = nil
     }
 
-    private func run(_ actions: [Action]) {
+    /// Register dispatches before dropping the state lock: the allocator
+    /// cannot reuse an expired chain id while its final callback is in flight.
+    private func runUnlocking(_ actions: [Action]) {
+        for action in actions { pendingActions[action.id, default: 0] += 1 }
+        lock.unlock()
+        defer {
+            lock.lock()
+            for action in actions {
+                let remaining = pendingActions[action.id, default: 0] - 1
+                if remaining > 0 { pendingActions[action.id] = remaining }
+                else { pendingActions.removeValue(forKey: action.id) }
+            }
+            lock.unlock()
+        }
         for a in actions {
             switch a {
             case .on(let id, let p): onTouchOn?(id, p)

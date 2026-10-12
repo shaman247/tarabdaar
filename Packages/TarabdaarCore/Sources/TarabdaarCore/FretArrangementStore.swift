@@ -81,8 +81,8 @@ struct FretArrangementDocument: Codable {
 // MARK: - FretArrangementStore
 
 /// Saves and loads Fret-Pad arrangements as JSON. Mac-only persistence with
-/// no iPad coupling. Writes are atomic (`*.json.tmp` → move) so a reader never
-/// observes a partial file. The live arrangement is auto-saved to a reserved
+/// no iPad coupling. Encoded files atomically replace the destination, preserving
+/// the previous file until replacement succeeds. The live arrangement uses a reserved
 /// `_Current.json`, and the player's **named layouts** sit beside it in the same folder, one
 /// `<name>.json` each, listed by `savedNames()` (`_Current` filtered out).
 /// The built-in layouts are `FretLayoutPreset`, not files.
@@ -185,10 +185,7 @@ public enum FretArrangementStore {
             ghostExtentOctaves: arrangement.ghostExtentOctaves,
             droneRatios: arrangement.droneRatios)
         let data = try encoder.encode(doc)
-        let tmp = dest.appendingPathExtension("tmp")
-        try data.write(to: tmp)
-        if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-        try fm.moveItem(at: tmp, to: dest)
+        try data.write(to: dest, options: .atomic)
     }
 
     private static func read(_ url: URL) throws -> FretArrangement {

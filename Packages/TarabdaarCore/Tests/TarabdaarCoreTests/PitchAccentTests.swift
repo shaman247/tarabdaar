@@ -1,8 +1,41 @@
+import Combine
 import XCTest
 @testable import TarabdaarCore
 
 /// The pitch accent follows the pad's frets, not the scale, and is null on every fret.
 final class PitchAccentTests: XCTestCase {
+
+    /// One edit immediately updates the accent grid, including the final fractional tonic.
+    func testPublishedGridUsesIncomingArrangementAndTuning() throws {
+        final class Layout: ObservableObject {
+            @Published var arrangement = FretArrangement(segments: [
+                FretSegment(degreeIndex: 0, row: .middle),
+            ])
+        }
+        let tuning = Tuning()
+        tuning.scale = .defaultJI
+        let layout = Layout()
+        var latest: FretPitchGrid?
+        let subscription = FretPitchGrid.publisher(tuning: tuning, arrangement: layout.$arrangement)
+            .sink { latest = $0 }
+        defer { subscription.cancel() }
+
+        layout.arrangement = FretArrangement(segments: [
+            FretSegment(degreeIndex: 7, row: .middle),
+        ])
+        XCTAssertEqual(try XCTUnwrap(latest).degrees, [log2(1.5)])
+
+        tuning.setTonic(fractionalMidi: 67.23)
+        let moved = try XCTUnwrap(latest)
+        XCTAssertEqual(moved.tonicSemis, 67.23, accuracy: 1e-12)
+        let pitch = 67.23 + 12 * log2(1.5)
+        XCTAssertEqual(moved.exprScale(atSemis: pitch, amount: 1), 1, accuracy: 1e-12)
+
+        tuning.scale = PitchScale(points: [PitchPoint(num: 1, den: 1, y: 0.5)])
+        XCTAssertTrue(try XCTUnwrap(latest).degrees.isEmpty,
+                      "a removed degree cannot remain an accent target")
+        XCTAssertEqual(try XCTUnwrap(latest).exprScale(atSemis: pitch + 3, amount: 1), 1)
+    }
 
     /// Accent is null on frets, ignores missing degrees and dips across unfretted pitches.
     func testAccentIsNullOnFretsAndDipsAcrossUnfrettedDegrees() {
