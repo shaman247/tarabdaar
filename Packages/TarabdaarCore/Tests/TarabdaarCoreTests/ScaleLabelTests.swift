@@ -15,7 +15,8 @@ final class ScaleLabelTests: XCTestCase {
                                         size: CGSize(width: 1000, height: 400))
         let base = placements.filter { !$0.isGhost }
             .sorted { $0.ratio < $1.ratio }.map(\.name)
-        XCTAssertEqual(base, defaultDegrees.map(\.label))
+        XCTAssertEqual(base, arrangement.segments.sorted { $0.degreeIndex < $1.degreeIndex }
+            .map { defaultDegrees[$0.degreeIndex].label })
 
         // a custom scale renames everything, frets and drones alike
         let scale = PitchScale(points: [

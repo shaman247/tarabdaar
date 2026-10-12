@@ -8,12 +8,11 @@ import Foundation
 // offline (`tools/fretpad_fit.py`). Toggled from the Fret Pad toolbar's Rec
 // button; one JSONL line per stroke:
 //
-//   {"v":2, "date":…, "offset":<onset snapOffsetLog>, "ctx":{frets, snap,
-//    extent, width, height, assistParams}, "events":[[t,x,y,u,o,tick],…],
+//   {"v":5, "date":…, "offset":<onset snapOffsetLog>, "ctx":{frets, snap,
+//    extent, width, height, assistParams}, "events":[[t,x,y,u,o,tick,region1U,…,region9U],…],
 //    "endT":t}
 //
-// (v2 since the free-fret change: each ctx fret carries its pixel
-// `x` and `u` is the fret-field pitch, not an x-mapping.)
+// Version 5 retains nine region pitches and blends corrections across region boundaries.
 //
 //   t    seconds since the stroke began (CACurrentMediaTime-based)
 //   x,y  surface-local px (same space as the recorded fret extents)
@@ -37,20 +36,21 @@ public final class FretGestureRecorder: ObservableObject {
         public struct FretRef: Codable {
             public var id: String
             public var log2Ratio: Double
-            /// Pixel x of the fret line (frets are freely positioned — the
-            /// assist's magnet basin is screen-px, so the fitter needs it).
+            /// Pixel x of the fret line, used by the assist's screen-pixel basin.
             public var x: Double
             public var topY: Double
             public var bottomY: Double
+            public var row: Int?
             public var ghost: Bool
 
             public init(id: String, log2Ratio: Double, x: Double, topY: Double,
-                        bottomY: Double, ghost: Bool) {
+                        bottomY: Double, ghost: Bool, row: Int? = nil) {
                 self.id = id
                 self.log2Ratio = log2Ratio
                 self.x = x
                 self.topY = topY
                 self.bottomY = bottomY
+                self.row = row
                 self.ghost = ghost
             }
         }
@@ -92,6 +92,7 @@ public final class FretGestureRecorder: ObservableObject {
         var events: [[Double]]
         var lastX: Double
         var lastY: Double
+        var lastRegionLogs: [Double]
         var lastU: Double
     }
 
@@ -146,33 +147,40 @@ public final class FretGestureRecorder: ObservableObject {
         }
     }
 
-    /// Register a play stroke at note-on (skip edit grabs).
+    /// Register a play stroke at note-on.
     public func begin(touchId: Int, context: Context, offset: Double,
                       x: CGFloat, y: CGFloat, u: Double, o: Double,
-                      time: TimeInterval) {
+                      time: TimeInterval, regionLogs: [FretRegion: Double] = [:]) {
         guard isRecording else { return }
         var stroke = ActiveStroke(start: time, ctx: context, offset: offset,
                                   events: [], lastX: Double(x),
-                                  lastY: Double(y), lastU: u)
-        stroke.events.append([0, Double(x), Double(y), u, o, 0])
+                                  lastY: Double(y),
+                                  lastRegionLogs: FretRegion.allCases.map { regionLogs[$0] ?? u }, lastU: u)
+        stroke.events.append([0, Double(x), Double(y), u, o, 0] + stroke.lastRegionLogs)
         active[touchId] = stroke
     }
 
     /// Record a drag event.
     public func sample(touchId: Int, x: CGFloat, y: CGFloat, u: Double,
-                       o: Double, time: TimeInterval) {
+                       o: Double, time: TimeInterval, regionLogs: [FretRegion: Double] = [:]) {
         guard isRecording, var s = active[touchId] else { return }
+        s.lastRegionLogs = FretRegion.allCases.map { regionLogs[$0] ?? u }
         s.lastX = Double(x)
         s.lastY = Double(y)
         s.lastU = u
-        s.events.append([time - s.start, Double(x), Double(y), u, o, 0])
+        s.events.append([time - s.start, Double(x), Double(y), u, o, 0] + s.lastRegionLogs)
         active[touchId] = s
     }
 
     /// Record a settle-timer sample (position unchanged — parity data only).
-    public func sampleTick(touchId: Int, o: Double, time: TimeInterval) {
+    public func sampleTick(touchId: Int, u: Double, o: Double, time: TimeInterval,
+                           regionLogs: [FretRegion: Double]? = nil) {
         guard isRecording, var s = active[touchId] else { return }
-        s.events.append([time - s.start, s.lastX, s.lastY, s.lastU, o, 1])
+        s.lastU = u
+        if let regionLogs {
+            s.lastRegionLogs = FretRegion.allCases.map { regionLogs[$0] ?? s.lastU }
+        }
+        s.events.append([time - s.start, s.lastX, s.lastY, s.lastU, o, 1] + s.lastRegionLogs)
         active[touchId] = s
     }
 
@@ -181,7 +189,7 @@ public final class FretGestureRecorder: ObservableObject {
         guard var s = active.removeValue(forKey: touchId) else { return }
         guard isRecording, let handle else { return }
         s.events = s.events.map { $0.map { ($0 * 10000).rounded() / 10000 } }
-        let record = StrokeRecord(v: 2, date: Self.dateStamp.string(from: Date()),
+        let record = StrokeRecord(v: 5, date: Self.dateStamp.string(from: Date()),
                                   offset: s.offset, ctx: s.ctx,
                                   events: s.events, endT: time - s.start)
         guard let data = try? JSONEncoder().encode(record) else { return }

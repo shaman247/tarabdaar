@@ -27,7 +27,7 @@ DerivedData/
 .build/
 .swiftpm/
 Package.resolved
-# Note: `Packages/StarpadDSP/` is the local DSP package and IS tracked.
+# The local instrument packages under Packages/ are tracked.
 # Don't `git ignore` Packages/ wholesale.
 
 # CocoaPods
@@ -55,6 +55,7 @@ __pycache__/
 # Editor / local tooling state
 .vscode/
 .playwright-mcp/
+.claude/settings.local.json
 
 # Local-only working areas
 _archive/

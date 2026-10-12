@@ -1,4 +1,5 @@
 module CBowKernel {
+    header "bow_fit.h"
     header "bow_contact.h"
     header "bow_radiation.h"
     header "bow_tonal.h"

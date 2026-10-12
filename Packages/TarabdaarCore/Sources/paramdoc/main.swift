@@ -12,6 +12,21 @@ import TarabdaarCore
 // relabel a parameter and the next `tools/build-mac.sh` rewrites the doc.
 //
 // Usage: paramdoc [output-path]   (no argument = print to stdout)
+//        paramdoc --json         (registry metadata for preset conversion)
+
+if CommandLine.arguments.dropFirst().first == "--json" {
+    let artifact = Presets.bowedStringParams()?.num ?? [:]
+    let rows = ParamRegistry.all.map { p -> [String: Any] in
+        let headroom = artifact[p.key] ?? p.def
+        let rest = p.apply == .hybrid ? (p.restFraction ?? 0) * headroom
+            : (p.apply == .live ? p.def : headroom)
+        return ["key": p.key, "apply": p.apply.rawValue, "default": rest,
+                "artifact": headroom, "minimum": p.lo, "maximum": p.hi]
+    }
+    let data = try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys])
+    FileHandle.standardOutput.write(data)
+    exit(0)
+}
 
 /// Keep structured help inside one Markdown table cell.
 func helpCell(_ text: String) -> String {
@@ -39,6 +54,9 @@ let artifact = Presets.bowedStringParams()?.num ?? [:]
 /// The value the parameter RESTS at in the shipped instrument, plus the
 /// authored registry default when the artifact overrides it.
 func shippedDefault(_ p: ParamSpec) -> (value: Double, authored: Double?) {
+    if p.apply == .hybrid {
+        return ((p.restFraction ?? 0) * (artifact[p.key] ?? p.def), nil)
+    }
     guard p.apply != .live, let a = artifact[p.key] else { return (p.def, nil) }
     return (a, a == p.def ? nil : p.def)
 }

@@ -2,47 +2,80 @@ import Foundation
 
 // MARK: - Codable conformance
 
-/// A `FretSegment` round-trips through JSON by its musical/layout fields only —
-/// `degreeIndex`, `x`, `topY`, `bottomY`, `enabled`. The `id` is **not**
-/// persisted (per-process identity for SwiftUI diffing / gesture targeting), so
-/// a fresh one is minted on decode — same rule `ScaleStore` uses for
-/// `PitchPoint.id`.
+/// Layout JSON stores only the pitch reference and row.
 extension FretSegment: Codable {
     private enum CodingKeys: String, CodingKey {
-        case degreeIndex, x, topY, bottomY, enabled
+        case degreeIndex, row, y, topY, bottomY, enabled
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let degreeIndex = try c.decode(Int.self, forKey: .degreeIndex)
-        let x = try c.decodeIfPresent(Double.self, forKey: .x) ?? 0.5
-        let topY = try c.decode(Double.self, forKey: .topY)
-        let bottomY = try c.decode(Double.self, forKey: .bottomY)
-        let enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        self.init(degreeIndex: degreeIndex, x: x, topY: topY, bottomY: bottomY,
-                  enabled: enabled)
+        let degree = try c.decode(Int.self, forKey: .degreeIndex)
+        if let row = try c.decodeIfPresent(FretRow.self, forKey: .row) {
+            self.init(degreeIndex: degree, row: row)
+            return
+        }
+        let y: Double
+        if let center = try c.decodeIfPresent(Double.self, forKey: .y) {
+            y = center
+        } else {
+            y = try (c.decode(Double.self, forKey: .topY)
+                     + c.decode(Double.self, forKey: .bottomY)) / 2
+        }
+        self.init(degreeIndex: degree, row: FretRow.legacy((1...3).min { abs((3.5 - Double($0)) / 3 - y) < abs((3.5 - Double($1)) / 3 - y) }!)!)
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(degreeIndex, forKey: .degreeIndex)
-        try c.encode(x, forKey: .x)
-        try c.encode(topY, forKey: .topY)
-        try c.encode(bottomY, forKey: .bottomY)
-        try c.encode(enabled, forKey: .enabled)
+        try c.encode(row, forKey: .row)
+    }
+
+    /// Legacy disabled entries become absent pairs; all retained entries use fixed geometry.
+    static func decodeList(from decoder: Decoder, legacyRows: Bool = false) throws -> [FretSegment] {
+        var list = try decoder.unkeyedContainer()
+        var frets: [FretSegment] = []
+        while !list.isAtEnd {
+            let item = try list.superDecoder()
+            let c = try item.container(keyedBy: CodingKeys.self)
+            var fret = try FretSegment(from: item)
+            if legacyRows, let old = try c.decodeIfPresent(Int.self, forKey: .row) {
+                guard let row = FretRow.legacy(old) else { throw CocoaError(.coderReadCorrupt) }
+                fret.row = row
+            }
+            if try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true {
+                frets.append(fret)
+            }
+        }
+        return frets
     }
 }
 
-/// On-disk representation of a Fret-Pad arrangement. Versioned: files
-/// below v4 carry pitch-derived positions instead of the free per-segment
-/// `x`, so they are **rejected** on load (the caller rebuilds the default).
-/// `ghostExtentOctaves` and `droneRatios` are optional and default when
-/// absent.
+/// Version 7 stores pitch/row pairs; older coordinates migrate to the nearest row.
 struct FretArrangementDocument: Codable {
-    var version: Int = 4
+    var version: Int = 7
     var segments: [FretSegment]
     var ghostExtentOctaves: Double?
     var droneRatios: [Double]?
+
+    init(segments: [FretSegment], ghostExtentOctaves: Double?, droneRatios: [Double]?) {
+        self.segments = segments
+        self.ghostExtentOctaves = ghostExtentOctaves
+        self.droneRatios = droneRatios
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, segments, ghostExtentOctaves, droneRatios
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decode(Int.self, forKey: .version)
+        guard (4...7).contains(version) else { throw CocoaError(.coderReadCorrupt) }
+        segments = try FretSegment.decodeList(from: c.superDecoder(forKey: .segments), legacyRows: version < 7)
+        ghostExtentOctaves = try c.decodeIfPresent(Double.self, forKey: .ghostExtentOctaves)
+        droneRatios = try c.decodeIfPresent([Double].self, forKey: .droneRatios)
+    }
 }
 
 // MARK: - FretArrangementStore
@@ -161,9 +194,6 @@ public enum FretArrangementStore {
     private static func read(_ url: URL) throws -> FretArrangement {
         let data = try Data(contentsOf: url)
         let doc = try JSONDecoder().decode(FretArrangementDocument.self, from: data)
-        // Pre-v4 layouts had no per-segment x (positions were pitch-derived);
-        // treat them as absent so the caller rebuilds the new default.
-        guard doc.version >= 4 else { throw CocoaError(.coderReadCorrupt) }
         // any drone count but the current one falls back in the initializer
         return FretArrangement(
             segments: doc.segments,

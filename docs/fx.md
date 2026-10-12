@@ -62,6 +62,11 @@ pitch-sorted with points closer than 1/24 octave merged
 three make a bump. **Beyond the outermost points the curve holds their
 gain flat.**
 
+In the FX tab, single-click empty space to add a point or an existing
+point to remove it. Drag a point to move it without crossing its neighbours.
+Clicks take effect on release; movement of at least 3 screen points starts
+a drag, and releasing a drag never adds or removes a point.
+
 The target is a monotone cubic through the points in log-frequency
 (Fritsch–Carlson, so it never overshoots a point), and it is realised as
 a biquad cascade whose SHAPE follows the points: a peaking section at

@@ -401,4 +401,7 @@ int bow_poly_jt_dual_pluck(void *vst,int row,double displacement);
 /* Snapshot: first row (or -1), summed failed steps/ticks, maximum Newton iterations. */
 void bow_poly_jt_dual_stats(void *vst,double *stats);
 
+/* Render-thread observation tap, cleared by its owner before destruction. */
+void bow_poly_observation_force(void *state, double *output);
+
 #endif

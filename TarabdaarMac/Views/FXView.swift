@@ -119,8 +119,8 @@ private struct FXPointPanel: View {
             }
             .opacity(on ? 1 : 0.45)
             Text(points.isEmpty
-                 ? "Double-click to add a point — the curve is inferred from the points."
-                 : "\(points.count) of \(EQCurve.maxPoints) points · drag to move, double-click a point to remove it")
+                 ? "Click to add a point — the curve is inferred from the points."
+                 : "\(points.count) of \(EQCurve.maxPoints) points · drag to move, click a point to remove it")
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
         }
@@ -178,7 +178,7 @@ private struct FXPointPanel: View {
 /// REALISED response of the fitted cascade (`EQCurve.design` — what the
 /// insert actually does at its rate, scaled by the amount knob) drawn
 /// through the points. Drag a point to move it in both axes (it cannot
-/// cross its neighbours), double-click empty space to add one, double-click
+/// cross its neighbours), click empty space to add one, click
 /// a point to remove it.
 private struct EQCurveEditor: View {
     let points: [EQPoint]
@@ -189,6 +189,7 @@ private struct EQCurveEditor: View {
 
     @State private var dragIndex: Int? = nil
     @State private var dragMissed = false
+    @State private var didDrag = false
 
     private static let dbSpan = 14.0
     private static let lo = log2(EQCurve.minHz)
@@ -225,7 +226,7 @@ private struct EQCurveEditor: View {
                 }
             }
             .contentShape(Rectangle())
-            .simultaneousGesture(
+            .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { g in
                         guard enabled else { return }
@@ -233,22 +234,29 @@ private struct EQCurveEditor: View {
                             if let i = nearest(g.startLocation, w, h) { dragIndex = i }
                             else { dragMissed = true }
                         }
-                        guard let i = dragIndex else { return }
+                        if hypot(g.translation.width, g.translation.height) >= 3 {
+                            didDrag = true
+                        }
+                        guard didDrag, let i = dragIndex else { return }
                         move(i, to: g.location, w, h)
                     }
-                    .onEnded { _ in dragIndex = nil; dragMissed = false })
-            .onTapGesture(count: 2, coordinateSpace: .local) { loc in
-                guard enabled else { return }
-                if let i = nearest(loc, w, h) {
-                    var pts = points; pts.remove(at: i); onChange(pts)
-                } else if points.count < EQCurve.maxPoints {
-                    let p = EQPoint(hz: tidy(hz(loc.x, w)), db: snap(db(loc.y, h)))
-                    onChange(points + [p])
-                }
-            }
+                    .onEnded { g in
+                        defer { dragIndex = nil; dragMissed = false; didDrag = false }
+                        guard enabled else { return }
+                        // A drag stays a drag even if it returns to its starting point.
+                        if didDrag {
+                            if let i = dragIndex { move(i, to: g.location, w, h) }
+                        } else if let i = nearest(g.startLocation, w, h) {
+                            var pts = points; pts.remove(at: i); onChange(pts)
+                        } else if points.count < EQCurve.maxPoints {
+                            let loc = g.startLocation
+                            let p = EQPoint(hz: tidy(hz(loc.x, w)), db: snap(db(loc.y, h)))
+                            onChange(points + [p])
+                        }
+                    })
         }
         .frame(width: 360, height: 118)
-        .help("EQ curve: drag a point, double-click to add one, double-click a point to remove it")
+        .help("EQ curve: drag a point, click to add one, click a point to remove it")
     }
 
     private func draw(_ ctx: GraphicsContext, _ size: CGSize, _ design: EQDesign) {

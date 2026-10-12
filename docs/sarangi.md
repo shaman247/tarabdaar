@@ -77,6 +77,39 @@ touch / MIDI ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (o
   rate, no converter. Touches arrive from the link
   ([MIDI & Audio](midi-and-audio.md)).
 
+## Shared fitted timbre and acoustic observation
+
+`BowFit` loads `sarangi_fit.json` and `sarangi_fit_room.f32` once from the
+package. These resources contain the shared empirical coefficients and
+synthetic image-room impulse, with no recording samples or saved performance
+contours. `bow_fit.c` runs the output observation at 48 kHz before the existing
+room, master gain and limiter. The optional bridge-force tap only copies force;
+it changes no physical return or taraf state. Current two-direction raga rows,
+chromatic rows and released-string damping retain their production paths.
+
+At a sample-clocked 10 ms interval, the predictor blends the native physical
+commands using smooth effort weighting and overlap confidence, evaluates the
+23 pitch/bow/history features, and smooths the 129 half-order gain knots. A
+4096-point real-cepstrum design yields a causal 2048-tap minimum-phase filter.
+Successive FIRs crossfade over 10 ms, preserving histories across controls and
+host buffer boundaries. All FFT setups, convolution storage and audio scratch
+are allocated before rendering. The fixed response and dynamic correction have
+separate amounts. A zero, never-armed path performs no audio arithmetic and
+retains the existing render hash.
+
+The synthetic room is split into a short-partition first 2048 taps and a
+1024-frame-partitioned tail. The tail's own offset covers the FFT block
+availability, so the dry signal has no added delay. Live room and band gains
+slew over 30 ms without resetting echoes. Reset clears convolution, predictor,
+FIR and acoustic-mode history without allocating. Body radiation blending
+modifies only `bC`, independently of the feedback/mobility table `bA`.
+
+The causal magnitude audit, room impulse closure, bypass/reset contracts and
+full-bank timing guard are described in the
+[live research port](../tools/live_research_port/README.md). The port changes
+phase from the offline experiment and uses the current production taraf; it
+is not claimed to reproduce the offline waveform sample for sample.
+
 ## The kernel and its host
 
 - **`StringVoiceSource`** pulls `BowEngine.render` under its own lock; engine
@@ -991,7 +1024,7 @@ target stays put, so the string rings out where the melody left it.
 
 ### Drone excitation
 
-The three Fret Pad drone buttons pluck **mapped tarab rows** — no
+The three Joy-Con drone slots pluck **mapped tarab rows** — no
 drone‑specific pitch, gain or t60 (`InstrumentState.droneStringIds`, 3 ×
 optional `StringSpec.id`; nil = inert). The kernel drive is a pitched
 (sine‑at‑mode‑1) kin‑spread drive plus a pluck boost — pure noise rings the

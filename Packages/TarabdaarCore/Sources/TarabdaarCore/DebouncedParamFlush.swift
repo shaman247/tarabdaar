@@ -13,6 +13,7 @@ public final class DebouncedParamFlush {
     private let lock = NSLock()
     private var pending: [String: Double] = [:]
     private var scheduled = false
+    private var generation = 0
 
     private let delay: TimeInterval
     private let flush: ([String: Double]) -> Void
@@ -39,13 +40,24 @@ public final class DebouncedParamFlush {
         pending.merge(values) { _, new in new }
         let needsSchedule = !scheduled
         scheduled = true
+        let token = generation
         lock.unlock()
         guard needsSchedule else { return }
-        schedule(delay) { [weak self] in self?.fire() }
+        schedule(delay) { [weak self] in self?.fire(generation: token) }
     }
 
-    private func fire() {
+    /// Drop gesture updates belonging to the rig being replaced by a preset.
+    public func cancel() {
         lock.lock()
+        generation += 1
+        pending.removeAll()
+        scheduled = false
+        lock.unlock()
+    }
+
+    private func fire(generation token: Int) {
+        lock.lock()
+        guard token == generation else { lock.unlock(); return }
         let batch = pending
         pending.removeAll()
         scheduled = false

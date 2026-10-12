@@ -1,6 +1,46 @@
 import CoreGraphics
 import Foundation
 
+/// Stable order of the resolved assist controls in JOYCON_STATE.
+public enum FretAssistControl: Int, CaseIterable, Sendable {
+    case amount, radius, stillRadius, dwell, ramp, settle, slew, turnGain, turnDecay, release
+
+    public var key: String {
+        let suffix: String
+        switch self {
+        case .amount: suffix = "amount"
+        case .radius: suffix = "radius"
+        case .stillRadius: suffix = "still_px"
+        case .dwell: suffix = "dwell_ms"
+        case .ramp: suffix = "ramp_ms"
+        case .settle: suffix = "settle_ms"
+        case .slew: suffix = "slew"
+        case .turnGain: suffix = "turn"
+        case .turnDecay: suffix = "turn_ms"
+        case .release: suffix = "release_px"
+        }
+        return "ctl_fret_assist_" + suffix
+    }
+}
+
+/// Mac-resolved performance values, in registry units; no bindings run on the pad.
+public struct FretAssistSettings: Equatable, Sendable {
+    // Binary32 keeps the local and remote pads on exactly the same controls.
+    private var values: [Float]
+
+    public init() {
+        values = FretAssistControl.allCases.map { Float(ParamRegistry.spec($0.key)!.def) }
+    }
+
+    public subscript(_ control: FretAssistControl) -> Double {
+        get { Double(values[control.rawValue]) }
+        set {
+            guard newValue.isFinite else { return }
+            values[control.rawValue] = Float(ParamRegistry.spec(control.key)!.clamp(newValue))
+        }
+    }
+}
+
 // MARK: - Fret Pad drag assist
 //
 // Intonation assistance for **drags** (the onset snap handles note starts):
@@ -8,12 +48,12 @@ import Foundation
 // fast movement is a glide and is left alone.
 //
 // Mechanism — a **stop-gated magnetic correction**. Each touch carries one
-// state value, `correction` (log2 units), and the played pitch is always
+// state value per region, `correction` (log2 units), and the played pitch is always
 //
 //     played = uncorrectedLog + correction
 //
 // where `uncorrectedLog` is the fret-field pitch at the cursor plus the
-// constant onset offset. `correction` is slewed toward the nearest qualifying
+// region's constant onset offset. `correction` is slewed toward the nearest qualifying
 // fret at a rate that is the product of:
 //
 //   • **stopped OR turn impulse** — the gate: dwell within `stillRadiusPx`
@@ -21,15 +61,15 @@ import Foundation
 //     a glide at any tempo keeps restarting the clock; or a direction flip
 //     (deadbanded dx sign change) firing an impulse that decays over
 //     `turnTau`. Gate = min(1, max(stopGate, turnGain·impulse)).
-//   • **proximity** — within `radiusScale` × the Snap radius in px AND inside
-//     the fret's vertical extent (Snap = 0 disables assist); full pull inside
+//   • **proximity** — within `radiusScale` × the Snap radius in px within
+//     the same region (Snap = 0 disables assist); full pull inside
 //     half the radius, fading to 0 at the edge.
 //   • `settleTau` under a hard **slew cap** (~1500 cents/s).
 //
 // A fret the touch is **receding** from exerts no pull. With no pull, a
 // stationary touch keeps its correction frozen while a moving touch sheds it
-// with distance (`correctionDecayPx`). The output is always the slew-filtered
-// state, so no input event can step the pitch.
+// with distance (`correctionDecayPx`). Each correction is slew-filtered;
+// spatial blending keeps region boundaries continuous.
 //
 // Stops emit no move events, so hosts feed `move(...)` from drag events and
 // `tick(time:)` from a ~60 Hz timer while touches are down, sending the
@@ -41,6 +81,7 @@ public final class FretDragAssist {
     /// weights, and the stop gate (0 = moving … 1 = stopped, dwell only).
     public struct Output {
         public let log2Pitch: Double
+        public let uncorrectedLog: Double
         public let weights: [String: Double]
         public let stopGate: Double
     }
@@ -50,7 +91,8 @@ public final class FretDragAssist {
         var y: CGFloat
         var uncorrectedLog: Double
         var speed: Double            // smoothed |dx/dt|, px/s
-        var correction: Double       // log2 units, slew-filtered
+        var corrections: [FretRegion: Double] // independent, slew-filtered region offsets
+        var regionLogs: [FretRegion: Double]
         var impulse: Double          // direction-flip impulse, decaying 1→0
         var dxSign: Int              // last movement direction (±1, 0 unknown)
         var anchorX: CGFloat         // still anchor of the stopped detector
@@ -62,7 +104,10 @@ public final class FretDragAssist {
 
     private var touches: [Int: TouchState] = [:]
     private var placements: [FretPlacement] = []
-    private var radiusPx: Double = 0
+    private var snapDistance: Double = 0
+    private var radiusPx: Double { snapDistance * radiusScale }
+    public var settings = FretAssistSettings()
+    public var amount: Double { settings[.amount] }
 
     /// px/s below which the touch is stationary (receding check + shed gate).
     public var speedFloor: Double = 59
@@ -72,23 +117,23 @@ public final class FretDragAssist {
     public var speedTau: Double = 0.026
     /// Slew time constant for the correction (s); the hard `slewCap` is what
     /// actually bounds the rate.
-    public var settleTau: Double = 0.005
+    public var settleTau: Double { settings[.settle] / 1000 }
     /// Magnet basin = `radiusScale` × the Snap radius, in px (42 px at the
     /// default 24 px Snap; the onset snap stays at 1×).
-    public var radiusScale: Double = 1.75
+    public var radiusScale: Double { settings[.radius] }
     /// Direction-flip impulse strength: a turn sets `impulse = 1` and the
     /// gate is `max(stopGate, turnGain × impulse)` clamped to 1 — values > 1
     /// hold the gate fully open for `turnTau·ln(turnGain)` after the flip.
-    public var turnGain: Double = 2.0
+    public var turnGain: Double { settings[.turnGain] }
     /// Decay time constant of the flip impulse (s).
-    public var turnTau: Double = 0.026
+    public var turnTau: Double { settings[.turnDecay] / 1000 }
     /// The stop detector's still disc (px): inside = jitter, beyond re-anchors
     /// and restarts the dwell clock. Keeps glides down to ~20 px/s transparent.
-    public var stillRadiusPx: Double = 2.0
+    public var stillRadiusPx: Double { settings[.stillRadius] }
     /// Dwell (s) inside the still disc before the stop gate starts opening.
-    public var stopDwellMin: Double = 0.10
+    public var stopDwellMin: Double { settings[.dwell] / 1000 }
     /// Ramp (s) over which the stop gate opens 0 → 1 past `stopDwellMin`.
-    public var stopDwellRamp: Double = 0.15
+    public var stopDwellRamp: Double { settings[.ramp] / 1000 }
 
     /// px of movement below which direction is not re-evaluated (touch jitter
     /// must not fire flips).
@@ -97,10 +142,10 @@ public final class FretDragAssist {
     /// qualifying pull, a moving touch's correction loses a 1/e step per
     /// this many px of travel (half the default snap radius — anchors fade
     /// on basin-scale travel).
-    private let correctionDecayPx: Double = 12.0
+    public var correctionDecayPx: Double { settings[.release] }
     /// Hard cap on the correction's slew rate (log2/s ≈ 1500 cents/s, inside
-    /// natural meend speeds) — the output pitch can never step.
-    private let slewCap: Double = 1500.0 / 1200.0
+    /// natural meend speeds) for each region's correction.
+    public var slewCap: Double { settings[.slew] / 1200 }
     /// Ticks arriving within this gap of the last move event don't decay the
     /// speed estimate (the finger is still moving; events are just sparse).
     private let stationaryGap: TimeInterval = 0.04
@@ -112,16 +157,18 @@ public final class FretDragAssist {
     /// Refresh the geometry (every down/drag event); the timer reuses it.
     public func setContext(placements: [FretPlacement], snapDistance: CGFloat) {
         self.placements = placements
-        self.radiusPx = Double(max(0, snapDistance)) * radiusScale
+        self.snapDistance = Double(max(0, snapDistance))
     }
 
     /// Register a touch at note-on. Every touch is **born stopped**: the gate
     /// starts open, so a tap snaps its landing immediately (slew-capped) and
     /// the first movement shuts it. Correction starts at 0 — no onset step.
     public func begin(touchId: Int, x: CGFloat, y: CGFloat,
-                      uncorrectedLog: Double, time: TimeInterval) {
+                      uncorrectedLog: Double, time: TimeInterval,
+                      regionLogs: [FretRegion: Double]? = nil) {
         touches[touchId] = TouchState(x: x, y: y, uncorrectedLog: uncorrectedLog,
-                                      speed: speedCeiling, correction: 0,
+                                      speed: speedCeiling, corrections: [:],
+                                      regionLogs: regionLogs ?? fallbackRegionLogs(uncorrectedLog),
                                       impulse: 0, dxSign: 0,
                                       anchorX: x, anchorY: y,
                                       stillStart: time - stopDwellMin
@@ -131,11 +178,13 @@ public final class FretDragAssist {
 
     /// Feed a drag event; returns the assisted pitch to glide to.
     public func move(touchId: Int, x: CGFloat, y: CGFloat,
-                     uncorrectedLog: Double, time: TimeInterval) -> Output {
+                     uncorrectedLog: Double, time: TimeInterval,
+                     regionLogs: [FretRegion: Double]? = nil) -> Output {
         guard var s = touches[touchId] else {
             begin(touchId: touchId, x: x, y: y,
-                  uncorrectedLog: uncorrectedLog, time: time)
-            return Output(log2Pitch: uncorrectedLog, weights: [:], stopGate: 0)
+                  uncorrectedLog: uncorrectedLog, time: time, regionLogs: regionLogs)
+            return Output(log2Pitch: uncorrectedLog, uncorrectedLog: uncorrectedLog,
+                          weights: [:], stopGate: 0)
         }
         let dt = min(max(time - s.lastUpdateTime, 1e-4), 0.1)
         s.impulse *= exp(-dt / turnTau)
@@ -152,18 +201,24 @@ public final class FretDragAssist {
         s.x = x
         s.y = y
         s.uncorrectedLog = uncorrectedLog
+        s.regionLogs = regionLogs ?? fallbackRegionLogs(uncorrectedLog)
         s.lastMoveTime = time
         let out = integrate(&s, dt: dt, time: time)
         touches[touchId] = s
         return out
     }
 
-    /// Timer tick (~60 Hz while touches are down): decays idle speed
-    /// estimates and advances the settle. One output per active touch.
-    public func tick(time: TimeInterval) -> [(touchId: Int, output: Output)] {
+    /// Settle without a pointer move; optional field updates preserve motion history.
+    public func tick(time: TimeInterval,
+                     regionLogs: [Int: [FretRegion: Double]] = [:]) -> [(touchId: Int, output: Output)] {
         var outs: [(Int, Output)] = []
         for (id, state) in touches {
             var s = state
+            if let logs = regionLogs[id],
+               let raw = fretRegionValue(logs, atY: s.y, placements: placements) {
+                s.regionLogs = logs
+                s.uncorrectedLog = raw
+            }
             let dt = min(max(time - s.lastUpdateTime, 1e-4), 0.1)
             s.impulse *= exp(-dt / turnTau)
             if time - s.lastMoveTime > stationaryGap {
@@ -179,6 +234,10 @@ public final class FretDragAssist {
 
     public func end(touchId: Int) {
         touches.removeValue(forKey: touchId)
+    }
+
+    private func fallbackRegionLogs(_ raw: Double) -> [FretRegion: Double] {
+        Dictionary(uniqueKeysWithValues: FretRegion.allCases.map { ($0, raw) })
     }
 
     // MARK: Internals
@@ -204,57 +263,45 @@ public final class FretDragAssist {
         let w = v * v * (3 - 2 * v)
         let gate = min(1.0, max(w, turnGain * s.impulse))
 
-        // Candidate: nearest fret (px) within the basin whose extent
-        // contains the touch.
-        var cand: FretPlacement? = nil
-        var candD = Double.infinity
-        if radiusPx > 0 {
-            for p in placements {
-                guard s.y >= p.topY, s.y <= p.bottomY else { continue }
-                let d = Double(abs(p.x - s.x))
-                if d <= radiusPx, d < candD {
-                    cand = p
-                    candD = d
-                }
-            }
-        }
-
+        let regionWeights = fretRegionWeights(atY: s.y, placements: placements)
         var weights: [String: Double] = [:]
-        // A fret the touch is receding from (moving away above the
-        // stationary floor) exerts no pull — the magnet never fights an
-        // escape.
-        let receding: Bool = {
-            guard let cand, s.dxSign != 0, s.speed > speedFloor,
-                  cand.x != s.x else { return false }
-            return (cand.x > s.x ? 1 : -1) != s.dxSign
-        }()
-        if let cand, !receding {
-            // Full pull inside half the radius, fading to 0 at the edge —
-            // continuous in space.
-            let prox = max(0.0, min(1.0, 2.0 * (1.0 - candD / radiusPx)))
-            let rate = (1 - exp(-dt / settleTau)) * gate * prox
-            let target = log2(cand.ratio) - s.uncorrectedLog
-            let cap = slewCap * dt
-            let step = (target - s.correction) * rate
-            s.correction += min(cap, max(-cap, step))
-            // Glow: proximity-shaped, brightening as the gate opens.
-            let glow = (1.0 - candD / radiusPx) * (0.3 + 0.7 * gate)
-            if glow > 0.05 { weights[cand.id] = min(1.0, glow) }
-        } else if s.correction != 0 {
-            // No qualifying pull: a moving touch sheds the carried
-            // correction with distance travelled (one 1/e step per
-            // `correctionDecayPx`); the movement gate (0 at the stationary
-            // floor, 1 at twice it) keeps rests frozen.
-            let mv = max(0.0, min(1.0, (s.speed - speedFloor) / speedFloor))
-            let moveGate = mv * mv * (3 - 2 * mv)
-            let travel = s.speed * dt
-            let rate = (1 - exp(-travel / correctionDecayPx)) * moveGate
-            let cap = slewCap * dt
-            let step = -s.correction * rate
-            s.correction += min(cap, max(-cap, step))
+        for row in FretRegion.allCases {
+            guard let raw = s.regionLogs[row] else { continue }
+            // Each interior and overlap owns its candidate and carried offset.
+            let cand = radiusPx > 0 ? row.frets(in: placements).filter {
+                abs($0.x - s.x) <= radiusPx
+            }.min { abs($0.x - s.x) < abs($1.x - s.x) } : nil
+            var correction = s.corrections[row] ?? 0
+            let receding: Bool = {
+                guard let cand, s.dxSign != 0, s.speed > speedFloor,
+                      cand.x != s.x else { return false }
+                return (cand.x > s.x ? 1 : -1) != s.dxSign
+            }()
+            if amount == 0 {
+                let step = -correction * (1 - exp(-dt / settleTau))
+                correction += min(slewCap * dt, max(-slewCap * dt, step))
+            } else if let cand, !receding {
+                let distance = Double(abs(cand.x - s.x))
+                let prox = max(0.0, min(1.0, 2.0 * (1.0 - distance / radiusPx)))
+                let rate = (1 - exp(-dt / settleTau)) * gate * prox
+                let target = (log2(cand.ratio) - raw) * amount
+                let step = (target - correction) * rate
+                correction += min(slewCap * dt, max(-slewCap * dt, step))
+                let glow = (1 - distance / radiusPx) * (0.3 + 0.7 * gate) * amount
+                    * (regionWeights[row] ?? 0)
+                if glow > 0 { weights[cand.id] = min(1, (weights[cand.id] ?? 0) + glow) }
+            } else if correction != 0 {
+                let mv = max(0.0, min(1.0, (s.speed - speedFloor) / speedFloor))
+                let rate = (1 - exp(-s.speed * dt / correctionDecayPx)) * mv * mv * (3 - 2 * mv)
+                let step = -correction * rate
+                correction += min(slewCap * dt, max(-slewCap * dt, step))
+            }
+            s.corrections[row] = correction
         }
+        let correction = fretRegionValue(s.corrections, atY: s.y, placements: placements) ?? 0
 
-        return Output(log2Pitch: s.uncorrectedLog + s.correction,
+        return Output(log2Pitch: s.uncorrectedLog + correction,
+                      uncorrectedLog: s.uncorrectedLog,
                       weights: weights, stopGate: w)
     }
 }

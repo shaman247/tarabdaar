@@ -946,6 +946,7 @@ void bow_poly_process4(void *vst, int n, int stride,
         st->hpY = hpG * (F - st->hpX1) + dcRho * st->hpY;
         st->hpX1 = F;
         double V = yinf * st->hpY;
+        if (st->observationForce) st->observationForce[t] = F;
         double rad = c0 * F;
         for (int k = 0; k < K; k++) {
             double y = bn0[k] * (F - st->bx2[k]) + ba1[k] * st->by1[k]
@@ -1300,4 +1301,8 @@ void bow_poly_free(void *vst)
     free(st->stSlotPan); free(st->stJtPan);
     free(st->strs); free(st->proc);
     free(st);
+}
+
+void bow_poly_observation_force(void *state, double *output) {
+    ((bow_poly_state_t *)state)->observationForce = output;
 }

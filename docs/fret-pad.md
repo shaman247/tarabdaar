@@ -1,18 +1,22 @@
 # Fret Pad
 
 The **Fret Pad** is the **sole playing surface** — the Mac's Fret Pad tab
-(⌘3) and the iPad's only surface. Each enabled scale degree appears as one
-or more vertical **line segments (frets)** that are **freely positioned**:
-a fret's `x` (0..1 across the base band) is its own layout state, unrelated
-to its pitch. The playable pitch is a continuous **field** interpolated
-from the frets.
+(⌘3) and the iPad's only surface. A layout is a list of `(degreeIndex, row)`
+pairs. Rows count upward from **1 bottom to 5 top**. Adjacent rows overlap by
+**30% of one row's height**. Five rows fill the playable band, so every fret
+has height `1 / 3.8` of the band and row centres are `0.7 / 3.8` apart.
+The x coordinate is always `log2(ratio)`, resolved from the scale degree.
+Each row interior has its own horizontal pitch field, snapping and correction.
+Each of the four overlap strips acts as another region whose frets are the
+union of the two adjacent rows. A pitch assigned to both appears once in that
+region's pitch field.
 
 ## Taraf pluck strip
 
 A 64-point strip immediately above the playable fret band shows only the
 running raga taraf strings on both Mac and iPad, low pitch to high pitch.
 The strip aligns with the fret band's left edge inside the pad surface and
-reserves space for the right-side drone buttons when they are visible. Each orange
+spans its full width. Each orange
 target carries its scale-derived name and one-based kernel row number;
 chromatic rows and the melody follower are omitted. Tap for a single pluck;
 drag either way to strum every
@@ -28,33 +32,34 @@ An engine rebuild publishes a new bank identity and cancels the old gesture;
 late plucks for that old bank are ignored. The iPad receives only this display
 snapshot (not editable tuning or physics), and sends discrete `TARAF_PLUCK`
 events over TLP. The snapshot clears when the link is unavailable. Both apps
-must use protocol version 21. Guards: `TarafStripTests`, `TLPCodecTests`.
+must use protocol version 25. Guards: `TarafStripTests`, `TLPCodecTests`.
 
 ## The pitch field
 
-- A **column** = the frets sharing an x position (within `fretColumnEps`
-  ≈ 0.5 px) — stack two frets and they form one. A column's pitch at the
-  touch's y (`fretColumnLog`): **inside** a member fret's vertical extent →
-  exactly that fret's pitch; **between** two stacked frets → a
-  y-interpolation across the gap; **above/below** all → clamped to the
-  nearest one.
-- The field at the touch = the **log-pitch x-interpolation between the two
-  closest columns** (`fretFieldLog`). Beyond the outermost columns the line
-  through the outermost **pair extrapolates**, so the edges keep the local
-  slope (a single-column layout holds its pitch everywhere).
+Each of the nine regions interpolates log-pitch between its own adjacent
+assigned frets, with linear extrapolation beyond its outermost pair. Warp,
+onset snapping and drag correction use that same fret set. In an overlap,
+either neighboring row's pitch is a full anchor; the field is evaluated from
+the sorted union rather than averaging two independently warped pitches.
 
-Dragging right of S plays S at S's line, r at r's line, and the log-pitch
-curve between them — pitch always moves toward the neighbour you're
-dragging at. The field is continuous everywhere: onset snapping only adds a
-constant offset, drags follow the field, and the drag assist is
-slew-limited and additive on top.
+Onset offsets and slew-filtered corrections are independent per region. Near
+each boundary, the complete pitches of the two touching regions blend in
+log-frequency, including their onset offsets and carried corrections. The
+blend follows `t²(3−2t)`, with zero slope at both ends. Its width is 15% of one
+row's height, centred on the boundary: 7.5% lies on either side. The central
+half of each overlap uses its union field exclusively; row centres likewise
+retain their own field. The blend adds no time delay or new snap on crossing.
+Fret highlights follow the same spatial blend.
+At warp zero with no snap offset
+or correction, regions with at least two pitches share the uniform log-frequency
+axis. An empty row follows that unwarped axis and has no snap or correction.
+A region with one visible pitch holds it outside the boundary blends. An entirely empty layout has no
+playable field. Vertical drags beyond the pad retain the outermost region.
 
 ## Pitch warp
 
 **`ctl_fret_warp`** ("pitch warp", the "Fret pad" registry group; the Mac
-toolbar's **Warp** slider edits the same value, 0…100 %) reshapes the raga
-side of each fret-to-fret interpolation — the x-blend between columns AND the y-blend
-across a stacked gap — through a **normalized logistic** (`fretWarp`):
+toolbar's **Warp** slider edits the same value, 0…100 %) reshapes each region’s horizontal fret-to-fret interpolation through a **normalized logistic** (`fretWarp`):
 
 ```
 w(t) = (σ(g·(t−½)) − σ(−g/2)) / (σ(g/2) − σ(−g/2)),   g = 14 · warp
@@ -69,14 +74,9 @@ guarantees; the extrapolation beyond the outermost columns stays linear. At
 the top (g = 14) the center slope is ≈ 3.5× linear and the quarter-gap
 point sounds ≈ 3 % of the interval instead of 25 %.
 
-An enabled raga string in any octave enables warp for every octave copy
-of that pitch class.
-Each half-gap uses the membership of its nearer endpoint: a gray fret's
-half stays linear, while a colored fret's half uses the logistic. The
-midpoint stays fixed and the field stays continuous, including mixed pairs.
-Across stacked gaps, horizontal warp influence blends continuously between
-the two endpoints. Contours use the same selective inverse. Snapping and
-drag assist still include every fret, including gray frets.
+Every assigned fret participates in warp, snapping and correction, independently
+of sympathetic-string membership. Unassigned gray candidates in the Mac editor
+are display and hit-test targets only; they never enter a playing region.
 
 The amount is a **live control param** (`.live`, def 0), not layout state.
 Like `ctl_strike_window` it never reaches the voice:
@@ -86,9 +86,12 @@ the **JOYCON_STATE frame** (`fieldWarp`), where `FretPadSurfaceIOS`
 resolves every touch onset/move through it (0 = linear while the link is
 down). It is **performable**: bind it to a tilt/stick axis and the pad
 morphs mid-phrase — stick at rest = the linear meend-friendly field, stick
-pushed = a near-quantized field for fast runs. Touch pitch is evaluated
-iPad-side at event rate, so a warp change retunes a MOVING finger
-continuously; a still finger keeps its pitch until it next moves. The
+pushed = a near-quantized field for fast runs. Both surfaces re-evaluate
+every held touch at its latest position whenever warp changes, including
+stationary fingers at glide endpoints. The update glides the existing note
+through the new field, preserving its onset offsets, octave and the drag
+assist's correction and motion history; it never triggers another attack.
+Subsequent settle ticks use the refreshed field pitch. The
 resting value persists with the control defaults and in presets; it is
 deliberately NOT in the arrangement blob or the layout files. The glide
 queue's segments are shaped by the same law — [Glide System](glide-system.md).
@@ -100,7 +103,7 @@ Guard: `FretWarpTests`.
 0) is the warp's sounded counterpart: the played **expression dips between
 frets** and returns as the finger lands on one, so a glided run keeps its
 notes distinct even where the field is linear. The grid is the **frets on
-the pad** — the arrangement's enabled segments resolved against the one
+the pad** — the arrangement's segments resolved against the one
 scale and folded into an octave, so it covers every octave copy — and not
 the whole scale: dragging D → E → F♯ across three frets dips once per gap
 and never spikes at a D♯ or F the scale holds but the pad does not show.
@@ -131,26 +134,23 @@ and `tuning.didChange` undebounced (`AppController.syncAccentGridFromFrets`),
 and both a grid move and a knob move re-deliver the scale to every held
 note, so a bound tilt/stick axis works mid-phrase. Guard: `PitchAccentTests`.
 
-**Contour overlay (Mac, edit mode).** Out of Perform mode the Mac surface
-draws the field's **iso-pitch contours** (`fretFieldContours`): the
-**territory boundaries** — log-midpoints between adjacent sounding pitches
-— at white 0.28, quarter-pitch minors at white 0.10. Between plain columns
-a boundary is vertical; through a stacked column's blend zone it curves.
-The minors show the warp: at 0 they sit at the linear quarter positions, as
-Warp rises they bunch against the boundaries. Solved exactly per scanline
-(`fretWarpInverse`). Perform mode and the iPad draw no contours.
+**Scale-pitch grid (Mac and iPad).** Faint vertical lines span the playable
+band at every enabled scale pitch, including all visible octave copies and
+pitches with no assigned frets. Their x positions follow the scale's exact
+log-frequency coordinates. The grid is visible in both Edit and Perform modes.
+Ordinary lines use opaque 10% gray; tonic octave lines use slightly brighter
+13% gray. The grid keeps the same shade across both row backgrounds.
+Colored fret segments draw over it. The playable band has no enclosing border.
 
 ## Onset snapping
 
-- **Start within the Snap distance (px) of a fret AND inside its vertical
-  extent** → the note snaps to that fret's exact pitch (nearest in x wins).
-- **Start elsewhere** (above/below an extent, or open space) → no snap; the
-  note plays the **field** pitch. This is the approach path.
-- **Drags never re-snap.** The pitch follows the field at the cursor,
-  offset by the constant `log2` delta captured at a snapped onset
-  (`snapOffsetLog`), so vibrato/meend move relative to the exact onset
-  pitch with no discontinuity. The offset is bounded by the snap distance
-  and clears on note-off.
+- At onset, each region snaps to its nearest assigned fret within the Snap
+  distance. Outside that distance it uses its field pitch.
+- Overlaps snap against the union. Near a boundary the touch blends the two
+  adjacent regions' snapped pitches.
+- **Drags never re-snap.** Each region keeps its own onset offset; horizontal
+  motion follows its field and vertical motion blends into another region's result.
+  All offsets clear on note-off.
 - **Snap = 0** disables snapping.
 
 The Snap slider is `engine.marginPixels` (0–64 px); the Fret Pad's default
@@ -163,19 +163,20 @@ gap.
 **`FretTouchPlayer`** (TarabdaarCore) is the touch pipeline both surfaces play through — onset (snap or field), drag, release and the 60 Hz settle tick, with the per-touch snap offsets, the assist and the stroke recorder behind it; a surface keeps only its pointer model and its overlays. **`FretDragAssist`** (TarabdaarCore) handles the stroke after onset.
 Premise: when the player **stops or changes direction** near a scale pitch,
 that inflection was intended to be *on* the pitch; while the finger is
-moving — at **any** tempo — they're gliding and must be left alone.
+moving beyond the pause radius before its delay elapses, they're gliding
+and the pause gate stays closed.
 
 A **gated magnetic correction**, continuous by construction. Each touch
-carries one slew-filtered `correction` (log2 units);
-`played = field + onsetOffset + correction`, and the correction eases toward
-the nearest qualifying fret at a rate = **gate × proximity × settle**:
+carries one slew-filtered `correction` per region (log2 units);
+`pitch = regionField + regionOnsetOffset + regionCorrection`. Each correction
+eases toward that region’s nearest qualifying fret at a rate = **gate × proximity × settle**:
 
 - **gate = min(1, max(stopped, turnGain·impulse))** — "stopped" is a
   genuine **stop detector**: the touch must dwell within `stillRadiusPx`
   (2 px) of a still anchor for `stopDwellMin` (100 ms) before the gate
   opens, ramping to 1 over `stopDwellRamp` (150 ms). A sustained drag —
-  however slow — keeps leaving the still disc and restarting the clock, so
-  the magnet never touches a glide; jitter stays inside the disc, so rests
+  that leaves the disc within the delay keeps restarting the clock, so
+  the pause gate stays closed; jitter stays inside the disc, so rests
   engage it. Fast connected playing turns in ~30 ms — too fast for any
   dwell — so a causally-detected **direction flip** (deadbanded dx sign
   change) fires an impulse that holds the gate open while it decays
@@ -185,8 +186,7 @@ the nearest qualifying fret at a rate = **gate × proximity × settle**:
 - **proximity** — the fret must be within the **assist basin** =
   `radiusScale` × Snap (1.75× = 42 px at the default Snap — landings are
   far sloppier than onsets), measured in **screen px** to the fret line's
-  x, and its extent must contain the touch (above/below stays free; Snap =
-  0 disables assist). Pull is full inside half the radius, fading to 0 at
+  x, using only assigned frets in that region (Snap = 0 disables assist). Pull is full inside half the radius, fading to 0 at
   the edge.
 - **settle** — `settleTau` 5 ms, but the governing rate is the hard **slew
   cap ≈ 1500 ¢/s** on the correction: smoothness is guaranteed by
@@ -196,8 +196,8 @@ the nearest qualifying fret at a rate = **gate × proximity × settle**:
 sloppy landing, staccato tap and legato strike alike snap onto the fret
 immediately (slew-capped, ~30–50 ms for a typical 30 ¢ error). The first
 ≥`stillRadiusPx` of movement re-anchors and shuts the gate, so a touch that
-becomes a glide is left alone from its first events; approach-path starts
-have no magnet candidate at all.
+becomes a glide is left alone from its first events. Each region’s assist runs independently even while the touch is elsewhere,
+so vertical travel blends between the regions' own correction histories.
 
 A candidate the touch is **actively receding from** exerts **no pull** —
 the magnet corrects approaches and rests, never fights an escape. When no
@@ -212,14 +212,55 @@ touches are down (both surfaces), feeding `tick(time:)` → `engine.glide`.
 The assisting fret glows with the gate. Fully per-touch on the iPad. Guard:
 `FretDragAssistTests`.
 
+### Tunable assist
+
+The **Controls · Fret assist** parameter group exposes the correction through
+the usual sliders, direct axis bindings and composites. All ten controls
+are live and per-note: each touch keeps its own correction, pause clock and
+turn impulse. Existing defaults preserve the fitted behavior above.
+
+| Parameter | Range | Default |
+|---|---|---|
+| `ctl_fret_assist_amount` — correction amount | 0–1 | 1 |
+| `ctl_fret_assist_radius` — capture radius, × Snap | 0–4 | 1.75 |
+| `ctl_fret_assist_still_px` — pause radius | 0.1–12 px | 2 px |
+| `ctl_fret_assist_dwell_ms` — pause delay | 0–1000 ms | 100 ms |
+| `ctl_fret_assist_ramp_ms` — pause ramp | 1–1000 ms | 150 ms |
+| `ctl_fret_assist_settle_ms` — settle time constant | 1–500 ms | 5 ms |
+| `ctl_fret_assist_slew` — correction speed limit | 50–6000 ¢/s | 1500 ¢/s |
+| `ctl_fret_assist_turn` — turn pull | 0–4 | 2 |
+| `ctl_fret_assist_turn_ms` — turn decay time constant | 1–500 ms | 26 ms |
+| `ctl_fret_assist_release_px` — release distance constant | 1–96 px | 12 px |
+
+Amount scales the target correction: 0.5 corrects half the error, 1 can
+reach the fret exactly. At 0, a fresh touch passes through unchanged; any
+carried correction on a held touch eases to zero under the settle time and
+slew cap, even outside a capture zone. Onset snapping remains independently
+controlled by Snap. Capture radius 0 admits no new target; it retains the
+normal stationary-hold/moving-release behavior for an existing offset.
+Turn pull 0 disables reversal capture while retaining pause capture.
+
+The Mac owns parameter rests, persistence and all mapping evaluation.
+`ParamTarget.fretAssist` updates the local pad and relays the resolved
+`FretAssistSettings` in TLP's paced `JOYCON_STATE` frame. The iPad receives
+only these values, with no bindings or editable copy of the parameters.
+Both surfaces read the latest settings at every move and 60 Hz settle tick,
+so a mapping can change a held finger's correction without another move.
+Capture radius is recomputed from the current settings on each integration.
+A stale/disconnected link restores the fitted defaults; a resync restores
+the Mac's resolved controls. The protocol is version 25 on both devices.
+
 **Fitting.** The constants are fitted to recorded strokes, not hand-tuned.
 **Rec** (Mac toolbar) / **REC** (iPad toolbar) appends each stroke to a
-JSONL session (`FretGestureRecorder`, record v2: events
-`[t, x, y, u, o, tick]` — `u` the uncorrected log2 pitch, `o` the pitch
-played — plus a context snapshot of fret pixels, pitches, extents, Snap and
+JSONL session (`FretGestureRecorder`, record v5: events
+`[t, x, y, u, o, tick, region1U, …, region9U]` — `u` the uncorrected log2 pitch, `o` the pitch
+played; regions are ordered bottom to top, alternating interiors and overlaps — plus a context snapshot of fret rows, pixels, pitches, extents, Snap and
 the live params), in `~/Library/Application Support/Tarabdaar/FretRecordings/`
 on the Mac and the app's user-visible `Documents/FretRecordings/` on the
 iPad. **The iPad fit is the one that matters** — glass differs from mouse.
+Replay derives the overlap width from the recorded fret heights, preserving older geometry.
+Version 5 replays the boundary blends; older v4 recordings retain hard region
+switches and v3 recordings retain three-row gap interpolation.
 `python3 tools/fretpad_fit.py report <files>` gives stroke stats and a
 **parity check** (a causal Python replica vs the recorded `o` — only trust
 fits when parity is tight; recordings made under other assist rules replay
@@ -230,7 +271,10 @@ constants to dwell-end error + 15·settle-lag + 0.7·reversal error +
 velocity around each turn; a 120 ms post-turn guard); `--phrase "p n d n …"`
 aligns inflections to a known svara sequence by monotonic DP; `selftest`
 runs synthetic strokes. The hindsight thresholds define "truth" and are not
-fitted. Fitting rounds: `docs/history/`.
+fitted. The context includes amount, slew limit and release distance as well
+as the pause/turn controls. Fitting expects settings to stay fixed within
+each recorded stroke; disable assist and warp mappings when recording fitting data.
+Fitting rounds: `docs/history/`.
 
 ## Fret position mapping
 
@@ -276,7 +320,7 @@ extends `ghostExtentOctaves` band-widths (default **0.75**) past it on each
 side, tiled with read-only
 **octave-repeat ghost copies of the whole base layout** — left an octave
 down, right an octave up — drawn faint in edit mode. The surface spans
-`1 + 2·extent` band-widths; pixel x is `(x + shift + extent) / span · width`
+`1 + 2·extent` band-widths; pixel x is `(log2(ratio) + shift + extent) / span · width`
 (`fretPixelX(forBandX:)`).
 
 The Mac toolbar's **Octaves** slider controls the total span from **1 to 5
@@ -287,62 +331,44 @@ setting is part of the arrangement, autosaved and synced to the iPad over
 retain their explicit range; new built-ins, Reset to Scale and the
 never-synced iPad fallback use the factory span.
 
-### C Keyboard — the default
+### Factory layouts
 
-`FretLayoutPreset.keyboard` is the **default layout**: a fresh install's
-starter, the never-synced iPad's fallback, and what the toolbar's **"Reset
-to Scale"** builds from the current scale. **7 evenly-spaced columns**, one
-per svara — `x = (col + 0.5)/7` for S · R/r · G/g · m/M · P · D/d · N/n —
-so the naturals are spaced like white keys and each komal/tivra fret
-**stacks above** its shuddha partner:
+**Pilu** is the default for a fresh install, Reset to Scale and a
+never-synced iPad. Its rows are:
 
-- **S and P**: duplicated in both rows, at the same pitch and x position
-  and drawn toward the center (upper y 0.196–0.500, lower y 0.500–0.804).
-  Each keeps the ordinary fret height; the pair meets at the center with no gap.
-- **shuddha** (R G m D N): lower middle (y 0.544–0.848)
-- **komal/tivra** (r g M d n): upper middle (y 0.152–0.456)
+| Row | Pitches |
+|---|---|
+| 5 · top | r M d |
+| 4 | empty |
+| 3 · middle | S g P n |
+| 2 | empty |
+| 1 · bottom | S R G m P D N |
 
-The 0.088 gap inside a komal/tivra–shuddha pair is the column's **y-interpolation zone**
-(sliding down bends r → R); the space toward the edges is open approach
-room. Every fret has height 0.304; the rows sit symmetrically around the center.
-
-### C♯ Keyboard
-
-`FretLayoutPreset.keyboardSharp` mirrors C Keyboard vertically: every
-fret's y interval becomes `1 − bottomY` through `1 − topY`. Shuddha frets
-sit in the upper row and komal/tivra in the lower row. S and P remain in
-both rows. Pitches, the seven columns and octave repeats stay the same;
-the layout does not transpose the scale. C Keyboard remains the default.
-
-### C Equal Freq
-
-`FretArrangement.defaultArrangement` (the name is historic; Layout menu →
-Built-in) is **pitch-aligned**: a fret's `x` is `log2(ratio)` — position
-IS frequency — so the base band spans one octave, the tonic sits at its
-left edge, the ghosts tile the ribbon continuously and the field along any
-horizontal line is a straight log-pitch ramp. Two **separated tiers**,
-ordinary frets the **same height** (0.352), **S and P as long keys**:
-komal/tivra upper tier (y 0.108–0.460), shuddha lower tier (0.540–0.892),
-P 0.510–0.912, S 0.470–0.912. No y belongs to two tiers (0.460–0.470 /
-0.510–0.540 is open approach space). Nothing stacks, so on the default JI
-scale fret spacing is 35–56 px and adjacent assist basins (42 px) overlap
-within a tier — the assist takes the nearest qualifying fret, so the magnet
-is live nearly everywhere along a tier. Segments draw 1.5 px base / 1 px
-ghost with a 2.5 px-half-width sounding glow.
+Pitches resolve against the active scale; the usual chromatic classes assign
+factory rows while the scale supplies the exact frequencies and labels.
+S and P occur independently in rows 1 and 3. C Keyboard, C♯ Keyboard and
+C Equal Freq remain alternative arrangements on the outer two rows.
+Retuning the scale updates each fret's pitch and x position.
 
 ### Saving layouts
 
 Layouts are **their own saved state**, independent of the scale — a layout
 loads onto whatever scale is active, and a degree the scale lacks skips its
 fret. The **Layout** menu mirrors the Scale menu: *Save As…* (name prompt,
-no file panel), *Save "name"*, **Built-in** (C Equal Freq · C Keyboard · C♯ Keyboard,
+no file panel), *Save "name"*, **Built-in** (Pilu · C Equal Freq · C Keyboard · C♯ Keyboard,
 generated from the current scale), the saved layouts with a checkmark, and
 *Delete*. Loading panics the fret engine first. (The Scale menu's **Reset
-to Default** is the full factory reset: bundled default scale AND C
-Keyboard rebuilt from it.) Layouts are one `<name>.json` each in
+to Default** is the full factory reset: bundled default scale AND Pilu rebuilt from it.) Layouts are one `<name>.json` each in
 `Application Support/Tarabdaar/FretArrangements/`, the same format as the
 autosave `_Current.json` (hidden from the menu, refused as a name); copy a
-file in and it appears. Built-ins are code, not files. Guard:
+file in and it appears. Version 7 stores only `degreeIndex` and `row` (1…5)
+per assigned fret; absence means disabled. The octave span and drone display
+ratios are arrangement metadata. Version 6 maps old rows 1/2/3 to 1/3/5.
+Versions 4 and 5 first resolve their old vertical coordinates to the old three
+rows, then use the same mapping; free x and disabled entries are discarded.
+Complete `.tarabdaar` preset surfaces include `fretRowCount: 5`; surfaces
+without that marker migrate once from three rows. Built-ins are
+code, not files. Guard:
 `FretLayoutTests`.
 
 ### Naming
@@ -357,29 +383,21 @@ speaks its own labels ([Scales & Tuning](scales-and-tuning.md#playing-scale-tara
 
 ## Editing
 
-Edit mode is the default; **Perform** hides the band gridlines, labels,
-endpoint handles and the scale editor, styling ghosts like base frets.
+Edit mode is the default. It displays every enabled scale degree in all five
+rows, including octave copies. Assigned frets use their pitch color; unassigned
+candidates are gray. **Perform** hides unassigned frets, labels and the scale
+editor; the scale-pitch grid remains visible.
 
-- **drag an endpoint handle** — set that end of the extent (min height 0.02)
-- **drag the line** — move the segment in any direction (height preserved;
-  x clamped to the base band)
-- **shift-click empty space** — add a 0.15-tall fret on the degree nearest
-  the field pitch there (multiple segments per degree allowed)
-- **right-click a fret** — toggle its raga string, in Edit or Perform mode
-- **option-right-click a base fret** — delete the fret in Edit mode
-- **drag empty space** — play (grabbing a fret sounds its exact pitch)
+- **Left-click a fret** in Edit mode toggles that pitch's assignment to that
+  row. Clicking an octave copy changes the same base assignment.
+- In an overlap, the nearer row centre determines which row is edited;
+  an exact tie selects the lower row.
+- **Drag empty space** to audition the playing field. In Perform mode every
+  left press plays and dragging glides.
 
-Frets with an enabled raga string keep their pitch color; the others are
-gray on both surfaces. Membership spans octaves: one enabled raga string
-colors and enables warp for every fret of that pitch class. Right-clicking
-any copy disables all existing raga rows of that pitch class if any are on,
-or re-enables them if all are off. Existing rows keep their identity, gain,
-decay, and drone/strum mappings. If the pitch class has no raga rows, one is
-created at the clicked octave with the raga defaults. The Strings tab and presets own this state. Layout files do
-not save it. The Mac sends the same membership for every octave copy in the one-way
-arrangement snapshot, so the iPad colors and warps the same frets without
-owning editable string state. Membership follows the row's enabled flag,
-independent of its gain or whether an audio rebuild has finished.
+Assignment changes autosave and sync to the iPad. They do not toggle or create
+sympathetic strings. The Strings tab and instrument presets own those strings.
+Right-click and modifier-click have no separate fret-editing behavior.
 
 The Mac surface's emitter is a `PitchPadEngine` (`AppController.fretPad`,
 in-process `init(audio:)`, tonic kept in step with `pitchPad`); each fret
@@ -397,31 +415,17 @@ through every glide; only the next onset takes the new range. Both
 toolbars show the offset ("Oct +1", dim at 0). Drones, the tarab and the
 strum deliberately do NOT shift. Not persisted.
 
-## Drone buttons
+## Drones (Joy-Con)
 
-Three **press-to-sound drone buttons** sit along the right edge around the
-upper quarter on **both** surfaces. They live **inside the playing
-surface** (`droneButtonRects`, one shared rect function for both platforms'
-visuals and hit-tests): a touch is a drone press only when its **onset**
-lands in a rectangle, hit-tested in the surface's own touch handler — never
-via SwiftUI gestures. Everything around and below plays normally; melody
-drags that cross a button keep gliding.
-
-**Hidden while a Joy-Con is attached (both surfaces):** the controller
-plays the drones (**↓ / GL** = toggle continuous drone sequence; ←/→ = octave shift; **L** = the
-strum), so the on-screen buttons vanish — visual and hit-test — and
-reappear on disconnect. Mac: the surface taps only
-`JoyConInput.$connectedName` (observing the whole object would re-run the
-surface at stick rate). iPad: the `connected` bit (bit 2) of the
-JOYCON_STATE flags byte, pushed on attach/disconnect and with every
-scale-sync push (`ScaleSyncReceiver.joyConTilt.connected` →
-`FretPadSurfaceIOS.dronesHidden`). A drone held at attach still releases.
+The Joy-Con controls three mapped drone slots. Both Fret Pad surfaces have
+no on-screen drone buttons; the raga taraf pluck strip spans the full band
+width regardless of controller connection.
 
 **Drone sequence (Down / GL).** Joy-Con ↓ and rear GL share an on/off toggle.
 Switching on plays the next configured drone slot immediately,
 wrapping after the last step. The default is slots **1 → 2 → 3 → 3**:
 Sa → Pa → high Sa → high Sa relative to the lowest drone (the bank labels
-these low Sa · low Pa · Sa). In **Strings → Drone buttons → Drone sequence (Down / GL)**, each step selects one of the three mapped drones; steps can be
+these low Sa · low Pa · Sa). In **Strings → Drones → Drone sequence (Down / GL)**, each step selects one of the three mapped drones; steps can be
 added, removed, or reset. The step labels follow the mapped strings and scale.
 While switched on, the sequence advances every **2 seconds**, even after the button is released. Each
 step releases the previous slot and presses the next, including consecutive
@@ -444,15 +448,15 @@ The register starts low each launch and is not saved in presets. During
 calibration, ↑ still advances the capture. Sympathetic drones retain their
 mapped row pitch.
 
-**Voice.** The buttons drive the **Tanpura voice by default** — a press
+**Voice.** The sequence drives the **Tanpura voice by default** — a press
 *plucks* the mapped pitch in the selected drone register (`TanpuraEngine`, [tanpura-voice.md](tanpura-voice.md)),
-holding an on-screen drone button re-plucks every `tp_drone_cycle` s, release rings out on the
-string's t60. The **Strings tab's "Drone buttons" section holds the Voice
+each sequence step plucks once and release rings out on the
+string's t60. The **Strings tab's "Drones" section holds the Voice
 picker** (`AppController.droneVoice` → `AudioEngine.setDroneVoiceMode`);
 **Sympathetic strings** swells the mapped String-voice jawari-taraf row
 instead. Mapping, labels and signal path apply to both modes.
 
-- **Mapping**: each button plucks **ONE sympathetic string**, mapped in the
+- **Mapping**: each drone slot plucks **ONE sympathetic string**, mapped in the
   Strings tab (`InstrumentState.droneStringIds`, 3 × optional
   `StringSpec.id`, persisted with the instrument document; nil = inert). It
   supplies the reference pitch; Tanpura applies the selected octave offset.
@@ -462,23 +466,18 @@ instead. Mapping, labels and signal path apply to both modes.
   **Auto-mapping**: fresh documents and every bank regeneration map each
   slot to the highest-gain enabled string within ±100 ¢ of low Sa · low Pa
   · Sa; manual mappings otherwise stick (a deleted row's mapping prunes to
-  nil). Mapping changes don't rebuild — the buttons retarget
+  nil). Mapping changes don't rebuild — the slots retarget
   (`AudioEngine.setDroneMappedFreqs`, releasing any held button first).
-- **Labels**: `FretArrangement.droneRatios` is **display-only** — the Mac
-  writes the mapped strings' reference ratios vs the played tonic into the
-  arrangement, so labels ride the autosave + iPad sync. A button is named
-  like a fret (`scaleLabel(forRatio:degrees:)`, nearest degree in any
-  octave). An unmapped slot keeps its last ratio.
-- **Signal path**: both surfaces call `PitchPadEngine.setDrone(_:pressed:)`,
-  which flips a held-state bit (`droneMask`) in the outbound TLP state frame
-  — latest-wins and stuck-drone safe; multi-finger safe on iPad
-  (refcounted). `LinkIngest`
-  diffs the mask edges → `setDronePressed` → `BowEngine.dronePress/
-  droneRelease` → the kernel's `bow_poly_jt_pluck` / `bow_poly_jt_drone` /
-  `_drone_env` + `_drone_tone`, applied inside `jt_tick_string` so every
-  path gets it and the unused path stays byte-null. Held drones re-arm
-  after a structural rebuild (`reapplyHeldDrones`); a release skips rows
-  another held button maps to.
+- **Labels**: the Strings tab names each mapped drone from its string and
+  the scale's degree labels. The legacy `FretArrangement.droneRatios` and
+  TLP `droneMask` fields remain compatible, but the pad UI does not display
+  drone labels or emit drone presses.
+- **Signal path**: `AppController.sequenceDroneButton` and its timer call
+  `AudioEngine.setDronePressed` directly. The Joy-Con sequence bypasses the
+  same-slot `tp_drone_cycle` timer. Sympathetic-mode presses resolve the
+  mapped row through `BowEngine.dronePress` / `droneRelease`; held drones
+  re-arm after a structural rebuild, and a release skips rows another held
+  slot maps to.
 - **Excitation** (sympathetic mode): a **slewed drive**, no impulse — the
   envelope swells over the attack time toward `level + onset boost`, the
   boost decays into the sustain, release drops the drive. The drive is
@@ -590,28 +589,30 @@ TarabdaarMac edits, Tarabdaar performs: the Mac pushes
 (`Tarabdaar/Tarabdaar/PitchPadView_iOS.swift`).
 
 **What syncs (Mac → iPad, one-way).** The layout travels as the TLP
-`FRET_ARRANGEMENT` event (`FretArrangementSysEx` codec, blob **v6**:
-`[ghostQuarterOctaves][flags][count]` then
-`[degreeIndex][x14: 2×7-bit][topY][bottomY][enabled]` per segment, then the
-3 drone ratios as 14-bit cents-above-−1200; `flags` reserved, always 0),
-beside `SCALE_STATE` whenever the arrangement changes. Pre-v6 blobs are
-rejected → default. `ScaleSyncReceiver` decodes it into `fretArrangement`
+`FRET_ARRANGEMENT` event (`FretArrangementSysEx`, TLP **v25**):
+`[ghostQuarterOctaves][flags=8][count]`, then `[degreeIndex][row: 1…5]`
+per assigned fret, followed by three 14-bit drone display ratios. Flag bit 3
+selects the five-row format. The receiver derives x, row height and overlaps.
+Cached three-row blobs map 1/2/3 to 1/3/5; their former raga masks are ignored.
+Older coordinate blobs migrate through the same three-row mapping. Both live
+peers must use v25.
+The arrangement travels beside `SCALE_STATE` whenever it changes.
+`ScaleSyncReceiver` decodes it into `fretArrangement`
 (persisted by `FretArrangementSyncStore` for offline relaunch; a
-never-synced iPad falls back to the keyboard layout built from the synced
+never-synced iPad falls back to the Pilu layout built from the synced
 scale). The synced `marginPixels` carries the Mac's **Snap**. The pitch
 warp, octave shift, strike blend window and Joy-Con `connected` flag ride
 JOYCON_STATE; the chord selection is the one iPad → Mac member of the
 family. Wire: [MIDI & Audio](midi-and-audio.md).
 
 The iPad surface is **always perform mode** and **fully multitouch** — each
-finger gets its own onset snap decision and keeps its own `snapOffsetLog`.
+finger gets its own onset snap decision and keeps its own onset offset per region.
 The frets live in a **band** (`fretPadBandRect`): a full-width strip
 spanning `Config.fretPadHeightFraction` (0.5) of the surface height with
 its top at `Config.fretPadBandTopFraction` (0.3 — a little below centred),
 with a hairline border. The space above/below
 is dead except the **raga taraf pluck strip** immediately above the band,
-the **drone buttons** (and the **chord bar** when it is
-shown). Both surfaces draw the whole
+and the **chord bar** when it is shown. Both surfaces draw the whole
 picture, and the Mac tab letterboxes to `iPadSurfaceAspect`, so **what you
 see on the iPad is exactly what the Fret Pad tab shows**.
 
@@ -638,15 +639,15 @@ surrounding half-octave — see
 
 - `Packages/TarabdaarCore/Sources/TarabdaarCore/FretPadGeometry.swift` —
   `FretSegment` / `FretLayoutPreset` / `FretArrangement`, `fretPadBandRect`,
-  `droneButtonRects`, band↔pixel mapping, `fretPlacements`, the field
-  (`fretFieldLog`, `fretColumnLog`, `fretWarp`), the contour solver,
-  `fretSnap`, `fretGrab`, `fretFillCells`.
+  band↔pixel mapping, `fretPlacements`, the field
+  (`fretFieldLog`, `fretWarp`),
+  `fretOnset`, `fretAssignment`, `fretFillCells`.
 - `.../ChordBar.swift` — chord derivation, numerals, cells, the Shepard law.
 - `.../FretTouchPlayer.swift` — the touch pipeline (onset · drag · settle · release).
+- `.../FretPadSharedViews.swift` — row backgrounds, scale-pitch grid, fret strokes and shared overlays.
 - `.../FretDragAssist.swift` — the drag assist.
 - `.../FretArrangementStore.swift` — `_Current.json` debounced atomic
-  autosave, doc **v4** (older rejected → default; retired keys decode
-  away); the named layouts (`savedNames` / `save` / `load` / `delete`) with
+  autosave, doc **v7** (v4–v6 migrate; older rejected → default); the named layouts (`savedNames` / `save` / `load` / `delete`) with
   menu actions on `AppController` (`loadFretLayout(preset:)` /
   `saveFretLayout(name:)` / `loadFretLayout(name:)` /
   `deleteFretLayout(name:)`).
@@ -655,9 +656,9 @@ surrounding half-octave — see
   `JoyConTiltDisplay` (`fieldWarp`, `octaveShift`, `connected`,
   `strikeWindowS`, the volume readout).
 - `TarabdaarMac/Views/FretPadView.swift` — the Mac tab: toolbar, Canvas
-  surface, AppKit mouse capture, drone buttons, chord bar, `ScaleListEditor`.
+  surface, AppKit mouse capture, chord bar, `ScaleListEditor`.
 - `Tarabdaar/Tarabdaar/PitchPadView_iOS.swift` — `FretPadViewIOS`,
-  `FretPadSurfaceIOS`, `DroneStripIOS`, the toolbar and scopes.
+  `FretPadSurfaceIOS`, the toolbar and scopes.
 
 Editing and Mac-side persistence stay Mac-only; the iPad only receives and
 performs.

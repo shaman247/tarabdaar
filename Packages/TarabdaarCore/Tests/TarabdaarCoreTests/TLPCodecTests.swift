@@ -68,6 +68,45 @@ final class TLPCodecTests: XCTestCase {
         }
     }
 
+    /// Assist controls retain native precision and reject invalid or out-of-range wire values.
+    func testAssistControlsRoundTripAndValidate() throws {
+        var ordered = FretAssistSettings()
+        let controls: [(FretAssistControl, Double)] = [
+            (.amount, 0.125), (.radius, 2.5), (.stillRadius, 6), (.dwell, 321),
+            (.ramp, 234), (.settle, 23), (.slew, 2222), (.turnGain, 3),
+            (.turnDecay, 45), (.release, 36),
+        ]
+        for (control, value) in controls { ordered[control] = value }
+        let packet = TLPFrame.joyConState(TLPJoyConState(flags: 0, stateSeq: 0,
+            timestampUs: 0, stickX: 128, stickY: 128, wrist1: 128, wrist2: 128,
+            fretAssist: ordered)).encode()
+        let expected: [UInt8] = controls.flatMap { _, value in
+            let bits = Float(value).bitPattern
+            return (0..<4).map { UInt8(truncatingIfNeeded: bits >> ($0 * 8)) }
+        }
+        XCTAssertEqual(Array(packet.suffix(40)), expected, "v23 assist order is a wire contract")
+        for fraction in [0.0, 0.371, 1.0] {
+            var settings = FretAssistSettings()
+            for control in FretAssistControl.allCases {
+                let spec = ParamRegistry.spec(control.key)!
+                settings[control] = spec.lo + fraction * (spec.hi - spec.lo)
+            }
+            let frame = TLPFrame.joyConState(TLPJoyConState(flags: 0, stateSeq: 0,
+                timestampUs: 0, stickX: 128, stickY: 128, wrist1: 128, wrist2: 128,
+                fretAssist: settings))
+            XCTAssertEqual(TLPFrame.decode(frame.encode()), frame)
+            for control in FretAssistControl.allCases {
+                for invalid: Float in [.nan, .infinity, -1, 1e8] {
+                    var bytes = frame.encode()
+                    let offset = bytes.count - 4 * FretAssistControl.allCases.count + 4 * control.rawValue
+                    let bits = invalid.bitPattern
+                    for byte in 0..<4 { bytes[offset + byte] = UInt8(truncatingIfNeeded: bits >> (byte * 8)) }
+                    XCTAssertNil(TLPFrame.decode(bytes))
+                }
+            }
+        }
+    }
+
     /// Ten-byte touch records preserve radius and its quarter-point encoding.
     func testTouchRadiusRoundTrip() {
         let frame = TLPFrame.perfState(samplePerf(touches: 4))

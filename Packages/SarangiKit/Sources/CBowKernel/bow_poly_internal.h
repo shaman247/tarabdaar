@@ -105,6 +105,7 @@ typedef struct {
 typedef struct {
     /* --- static config (deep copies; C owns the memory) --- */
     double sr;
+    double *observationForce; /* Optional caller-owned output; never feeds physics. */
     int nb;
     int K;
     double *ba1, *ba2, *bn0, *bA, *bC;

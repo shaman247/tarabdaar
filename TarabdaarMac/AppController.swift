@@ -160,7 +160,7 @@ final class AppController: ObservableObject {
     @Published private(set) var fretFieldWarp: Double = 0
 
     /// The Mac → iPad JOYCON_STATE mirror: the axes the pad only draws,
-    /// plus the four fields it acts on.
+    /// plus resolved pad controls.
     let joyConDisplay = JoyConDisplayRelay()
 
     /// Every touch currently DOWN with its latest finger pitch, oldest first
@@ -542,6 +542,14 @@ final class AppController: ObservableObject {
             DispatchQueue.main.async { [weak self] in self?.pitchProfile.amount = value }
         case .pitchAccent:
             audio.setPitchAccent(value)
+        case .fretAssist(let control):
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let before = self.fretPad.fretAssistSettings
+                self.fretPad.fretAssistSettings[control] = value
+                guard self.fretPad.fretAssistSettings != before else { return }
+                self.sendJoyConDisplay()
+            }
         case .fretWarp:
             // Published for the Mac pad, relayed to the iPad, shapes the glide queue.
             let v = min(max(value, 0), 1)
@@ -646,7 +654,7 @@ final class AppController: ObservableObject {
         // Restore the last-edited arrangement, or build a starter from the
         // scale. (The autosave sink is wired in `start()`.)
         self.fretArrangement = FretArrangementStore.loadCurrent()
-            ?? FretArrangement.keyboardArrangement(
+            ?? FretArrangement.defaultArrangement(
                 degrees: scaleDegrees(from: self.pitchPad.scale))
         // Loads the persisted/default document and builds the tarab tuning.
         self.sarangi = SarangiStore(audio: audio)
@@ -743,7 +751,7 @@ final class AppController: ObservableObject {
         // (`setMapping` below arms its timers).
         axes.onApply = { [weak self] apps in self?.applyControlBatch(apps) }
         axes.paramRest = { [weak self] key in self?.paramValue(key) ?? 0 }
-        // The JOYCON_STATE mirror: the send plus the four acted-on fields.
+        // The JOYCON_STATE mirror: the send plus the resolved pad controls.
         joyConDisplay.send = { [weak self] display, immediate in
             self?.link.setJoyConState(display, immediate: immediate)
         }
@@ -754,6 +762,7 @@ final class AppController: ObservableObject {
             self?.axes.strikeWindowS ?? 2.0
         }
         joyConDisplay.fieldWarp = { [weak self] in self?.fretFieldWarp ?? 0 }
+        joyConDisplay.fretAssist = { [weak self] in self?.fretPad.fretAssistSettings ?? FretAssistSettings() }
         joyConDisplay.octaveShift = { [weak self] in
             self?.pitchPad.octaveShift ?? 0
         }
@@ -1216,9 +1225,7 @@ final class AppController: ObservableObject {
         link.send(event: .scaleState(blob: PitchScaleSysEx.encodeBlob(state)))
         if ipadLayout == .fretPad {
             link.send(event: .fretArrangement(
-                blob: FretArrangementSysEx.encodeBlob(fretArrangement.withRagaStrings(
-                    ratios: sarangi.state.enabledRagaRatios,
-                    degrees: scaleDegrees(from: pitchPad.scale)))))
+                blob: FretArrangementSysEx.encodeBlob(fretArrangement)))
         }
         link.send(event: .tarafBank(audio.tarafBank))
         // A freshly-linked iPad must also learn the JOYCON_STATE fields.
@@ -1412,23 +1419,49 @@ final class AppController: ObservableObject {
     /// Capture the whole rig: sarangi document, physics overrides, resting
     /// values, composites, bindings, voice routing. One preset = one rig.
     func capturePreset(name: String) -> TarabdaarPreset {
+        // Capture the authoritative tuning even while its follower debounce is pending.
+        if sarangi.state.scaleRatios != fretDegrees.map(\.ratio)
+            || sarangi.state.tonicHz != tuning.tonicHz { syncTarabFromScale() }
         var p = TarabdaarPreset()
+        p.version = TarabdaarPreset.currentVersion
         p.name = name
         p.savedAt = ISO8601DateFormatter().string(from: Date())
+        p.savedBy = "TarabdaarMac " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")
+            + " (" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown") + ")"
         p.instrument = sarangi.state
-        p.paramValues = paramValues            // every parameter, one section
-        p.fxCurves = fxEQCurves.isEmpty ? nil : fxEQCurves
+        // Resolve defaults, not modulation or hybrid build-time capacity.
+        p.paramValues = Dictionary(uniqueKeysWithValues: ParamRegistry.all.map {
+            ($0.key, paramValue($0.key))
+        })
+        p.fxCurves = fxEQCurves                // empty explicitly restores a flat rack
         p.bowAxisCurves = bowAxisCurves
         p.composites = composites
         p.tiltMapping = tiltMapping
         p.mainInstrument = mainInstrument.rawValue
         p.droneVoice = droneVoice.rawValue
         p.droneSequence = droneSequenceSteps
+        p.playingSurface = PresetPlayingSurface(scale: tuning.scale, arrangement: fretArrangement,
+            snapPixels: fretPad.marginPixels, primeLimit: fretPad.primeLimit)
         return p
     }
 
     /// Apply whatever sections `p` carries; missing sections are skipped.
-    func applyPreset(_ p: TarabdaarPreset) {
+    func applyPreset(_ p: TarabdaarPreset) throws {
+        try p.validate()                      // fail before touching the running rig
+        axes.setMapping(DimensionMapping(mappings: [:]))
+        rebuildFlush.cancel()
+        if let scale = p.resolvedScale(current: tuning.scale) {
+            pitchPad.panic()
+            tuning.scale = scale
+            if let inst = p.instrument { tuning.setTonic(hz: inst.tonicHz) }
+            pitchPad.currentScaleName = nil
+            if let surface = p.playingSurface {
+                fretArrangement = surface.arrangement
+                fretPad.marginPixels = surface.snapPixels
+                fretPad.primeLimit = surface.primeLimit
+                fretLayoutName = nil
+            }
+        }
         if let curves = p.resolvedBowAxisCurves() {
             bowAxisCurves = curves
             applyBowAxisCurves()
@@ -1454,7 +1487,6 @@ final class AppController: ObservableObject {
             if !legacy.isEmpty { fxEQCurves = legacy; applyEQCurves() }
         }
         if let c = p.composites { composites = c }
-        if let t = p.tiltMapping { tiltMapping = t }
         if let steps = p.droneSequence { droneSequenceSteps = DroneSequence.normalized(steps) }
         if let m = p.mainInstrument,
            let inst = AudioEngine.MainInstrument(rawValue: m) {
@@ -1464,6 +1496,8 @@ final class AppController: ObservableObject {
            let mode = AudioEngine.DroneVoiceMode(rawValue: d) {
             droneVoice = mode
         }
+        if let t = p.tiltMapping { tiltMapping = t }
+        else { axes.setMapping(tiltMapping); axes.reapply() }
     }
 
     /// The shipped default as a full rig: generated bank, artifact physics,
@@ -1507,7 +1541,7 @@ final class AppController: ObservableObject {
     @discardableResult
     func loadPresetFromLibrary(name: String) throws -> TarabdaarPreset {
         let p = try presetLibrary.load(name: name)
-        applyPreset(p)
+        try applyPreset(p)
         return p
     }
 

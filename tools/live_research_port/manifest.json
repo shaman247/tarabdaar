@@ -1,0 +1,65 @@
+{
+  "sources": {
+    "output/reference_onsets/neighborhood-model/short-time-timbre/shared-response/models/both12.json": "d8ef450aa5d39a853039ab1973e562bdd977e4841af3db220b8b4dc41b5333aa",
+    "output/reference_onsets/neighborhood-model/factorized-empirical-timbre/native/gesture-1-1/13/coefficients.json": "f76bd912ae9c0a5ff9b5e0c626651946c2c96fc3de41c6e4e765c5aa68482d97",
+    "output/reference_onsets/neighborhood-model/tail-transfer/ir/room-1.6.npy": "7ab771c7e43ca0185bdbbfe065daa683873e38c894956211c9c346ebadaac721",
+    "output/reference_onsets/neighborhood-model/tail-transfer/model.json": "39466adb12237abfd9d93bb34db32628bef38c4696c5b5034a33164edb29aa74",
+    "output/reference_onsets/neighborhood-model/joint-bow-acoustic/localized/paired/selection.json": "6449a54af5a22fad8fdd5007153c6f57f9b9beb2607055b6ac064d4637fc4e1f",
+    "output/reference_onsets/neighborhood-model/tail-transfer-gap/quiet-decay/fullness-followups/response.json": "32926f3d2f4d92440f72c0623b745036b734076991456efb922f75b2dec71552"
+  },
+  "assets": {
+    "Packages/SarangiKit/Sources/SarangiKit/Resources/sarangi_fit_room.f32": "896b287f8b07eac0f6d38e7d8f5aafcb18e99e70b053a65c7c584622b38b9f20",
+    "Packages/SarangiKit/Sources/SarangiKit/Resources/sarangi_fit.json": "80788cc541373fb2f112405b4804416b4e249036a89d41b4ffcbfa54898522f0"
+  },
+  "validation": {
+    "gain_max_error_db": 1.1267431432315789e-11,
+    "minimum_phase_response": [
+      {
+        "hz": 100,
+        "rms_db": 0.0031048320858954506,
+        "p95_db": 0.004848141908001313,
+        "max_db": 0.030640748745555904
+      },
+      {
+        "hz": 160,
+        "rms_db": 0.0007512378575667005,
+        "p95_db": 0.0014103158298328644,
+        "max_db": 0.003851562780776696
+      },
+      {
+        "hz": 220,
+        "rms_db": 0.0006767815884153464,
+        "p95_db": 0.0014835896401095283,
+        "max_db": 0.0038603299839761185
+      },
+      {
+        "hz": 329,
+        "rms_db": 0.0004999922290771229,
+        "p95_db": 0.00048293460438572633,
+        "max_db": 0.003924344662424417
+      },
+      {
+        "hz": 490,
+        "rms_db": 0.000478801662664697,
+        "p95_db": 0.00032481272220552526,
+        "max_db": 0.0038064373899593384
+      },
+      {
+        "hz": 800,
+        "rms_db": 0.00048544910353910556,
+        "p95_db": 0.00034808230574867594,
+        "max_db": 0.003867647469378177
+      },
+      {
+        "hz": 1200,
+        "rms_db": 0.0005121153681652209,
+        "p95_db": 0.0003078949837349576,
+        "max_db": 0.004079784718329815
+      }
+    ],
+    "room_max_sample_error": 5.963111948670274e-19,
+    "room_peak_127_frame_ms": 0.178167,
+    "byte_null": true,
+    "reset_silence": true
+  }
+}

@@ -339,6 +339,8 @@ public final class PitchPadEngine: ObservableObject {
     /// synced state. Unused on the Mac.
     @Published public var layout: PadLayout = .pitchPad
     public let sounding = SoundingState()
+    /// Main-thread resolved assist controls; read at every touch event and settle tick.
+    public var fretAssistSettings = FretAssistSettings()
     /// Prime-limit filter for snap targets (5 = classical 5-limit JI).
     /// Changing it invalidates the snap-targets cache.
     @Published public var primeLimit: Int = 5 {
@@ -511,12 +513,6 @@ public final class PitchPadEngine: ObservableObject {
 
     /// Publish the current Strike envelope before a touch onset.
     public func setStrike(_ level: Double) { playState.setStrike(level) }
-
-    /// Drone button `index` (0–2) press/release: a held-state bit in the
-    /// outbound frame (latest-wins, stuck-drone safe by construction).
-    public func setDrone(_ index: Int, pressed: Bool) {
-        playState.setDrone(index, pressed)
-    }
 
     // MARK: - Chord bar
 

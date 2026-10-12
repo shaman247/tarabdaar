@@ -27,7 +27,7 @@ Factory bindings pair the wrist and arm directions with matching curves: up/down
 
 ## Playing notes
 
-Touch a fret on the Fret Pad to sound its pitch. Each fret is a vertical segment placed freely across the surface; a touch that starts within the Snap distance of a fret (and inside its vertical extent) snaps to that fret's exact pitch, while starting in open space plays the continuous fret field — the approach path into a note. The base layout sits in a band across the lower-middle of the surface and repeats up and down as read-only octave-ghost copies. Press-to-sound **drone buttons** sit inside the right edge; the **chord bar** strip below the band (hidden for now) selects a triad for the Joy-Con strum. See [Fret Pad](fret-pad.md).
+Touch a fret on the Fret Pad to sound its pitch. Each fret is a vertical segment placed freely across the surface; a touch that starts within the Snap distance of a fret (and inside its vertical extent) snaps to that fret's exact pitch, while starting in open space plays the continuous fret field — the approach path into a note. The base layout sits in a band across the lower-middle of the surface and repeats up and down as read-only octave-ghost copies. Drones are controlled from the Joy-Con; the **chord bar** strip below the band (hidden for now) selects a triad for the Joy-Con strum. See [Fret Pad](fret-pad.md).
 
 Multiple fingers play polyphonically — every touch mounts its own fresh string on the Mac. There is no mono/poly toggle.
 
@@ -57,7 +57,7 @@ The iPad toolbar shows each source live (arm/wrist/stick squares, the strike and
 
 Dpad ←/→ shift the playing range by whole octaves (±3; the toolbars read "Oct +1"); a sounding note keeps its octave, the next onset takes the new one. Drones, the tarab and the strum do not shift. The strum plays the configured chord — or the chord-bar selection — on the sympathetic strings.
 
-Dpad **↓** or the rear **GL** button plays the next drone in a repeating **Sa → Pa → high Sa → high Sa** sequence, using the three existing drone mappings. Configure the steps in **Strings → Drone buttons → Drone sequence (Down / GL)**. Each press advances immediately; holding advances every **2 seconds**. Both buttons share the sequence, which keeps running until both are released. Tanpura drones start **one octave lower**; **↑** toggles back to the original octave and down again, taking effect on the next pluck. The octave selection starts low each launch. During calibration, ↓ still redoes the previous phase and ↑ advances it, without changing the sequence or octave.
+Dpad **↓** or the rear **GL** button plays the next drone in a repeating **Sa → Pa → high Sa → high Sa** sequence, using the three existing drone mappings. Configure the steps in **Strings → Drones → Drone sequence (Down / GL)**. A press starts the sequence immediately; it advances every **2 seconds** after release. The next press of either button stops it. Tanpura drones start **one octave lower**; **↑** toggles back to the original octave and down again, taking effect on the next pluck. The octave selection starts low each launch. During calibration, ↓ still redoes the previous phase and ↑ advances it, without changing the sequence or octave.
 
 ## Scale editing (on the Mac)
 
@@ -85,7 +85,7 @@ The profile resets on scale or tonic changes and on app restart.
 
 ## Instruments
 
-The Live tab (⌘1) picks the played voice: **String** (bowed, the default), **Tanpura** or **Sitar** (plucked — a fret touch plucks at the exact bent pitch, drags retune the ringing string). The Strings tab's drone Voice picker chooses the Tanpura or the sympathetic strings for the drone buttons.
+The Live tab (⌘1) picks the played voice: **String** (bowed, the default), **Tanpura** or **Sitar** (plucked — a fret touch plucks at the exact bent pitch, drags retune the ringing string). The Strings tab's drone Voice picker chooses the Tanpura or the sympathetic strings for the Joy-Con drone sequence.
 
 ## PANIC
 

@@ -46,7 +46,17 @@ public struct PresetLibrary {
         try FileManager.default.createDirectory(at: directory,
                                                 withIntermediateDirectories: true)
         let url = url(for: p.name)
-        try p.encoded().write(to: url)
+        let data = try p.encoded()
+        // Validate the serialized bytes before replacing the only good copy.
+        _ = try TarabdaarPreset.decode(data)
+        if FileManager.default.fileExists(atPath: url.path) {
+            let backups = directory.appendingPathComponent("Backups", isDirectory: true)
+            try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
+            let previous = try Data(contentsOf: url)
+            try previous.write(to: backups.appendingPathComponent(p.name + "-" + UUID().uuidString)
+                .appendingPathExtension(Self.ext), options: .atomic)
+        }
+        try data.write(to: url, options: .atomic)
         return url
     }
 

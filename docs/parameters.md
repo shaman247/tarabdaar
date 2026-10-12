@@ -139,7 +139,7 @@ its range widens the slider rather than being clamped.
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
-| `bow_vib_cents` | vibrato depth (¢) | 0 … 60 | 25 built · rests at 0× the built value | per-note | hybrid | Sets peak pitch-modulation depth in cents for the String voice's vibrato control. It rests at 0; rate is set separately.<br>**Low:** Narrower pitch movement; 0 disables this added modulation.<br>**High:** Wider excursions above and below the played pitch. |
+| `bow_vib_cents` | vibrato depth (¢) | 0 … 60 | 0 built · rests at 0× the built value | per-note | hybrid | Sets peak pitch-modulation depth in cents for the String voice's vibrato control. It rests at 0; rate is set separately.<br>**Low:** Narrower pitch movement; 0 disables this added modulation.<br>**High:** Wider excursions above and below the played pitch. |
 | `bow_vib_hz` | vibrato rate (Hz) | 3 … 9 | 5.5 | per-note | in-place | Sets the cycle rate of the String voice's vibrato modulation. Has no audible effect when vibrato depth is 0.<br>**Low:** Slower pitch oscillations.<br>**High:** Faster pitch oscillations; it does not increase their depth. |
 | `bow_drift_cents` | pitch drift (¢) | 0 … 8 | 0.55 | per-note | in-place | Sets the scale of slow random pitch wander independently for each held String note, separate from vibrato.<br>**Low:** Steadier pitch; 0 disables this pitch wander.<br>**High:** Wider irregular pitch motion and more shimmer as harmonics cross body resonances. |
 | `bow_drift_hz` | drift bandwidth (Hz) | 0.2 … 6 | 1.2 | per-note | in-place | Sets the bandwidth of the pitch, bow-speed and bow-force drift processes.<br>**Low:** Slow, leisurely wandering.<br>**High:** Quicker random fluctuations; this is not a periodic vibrato rate. |
@@ -161,6 +161,8 @@ its range widens the slider rather than being clamped.
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
+| `bow_width_smp` | bow contact width (samples) | 0 … 24 | 8.58748 (authored 0) | global | in-place |  |
+| `bow_th_tau` | contact thermal relaxation (s) | 0.002 … 0.1 | 0.012 | global | in-place |  |
 | `bow_mu_s` | static friction | 0.4 … 1.2 | 1.06607 (authored 0.8) | global | in-place | Sets the bow's static friction coefficient, governing how strongly rosin can hold the string.<br>**Low:** Weaker stick grip and a smaller gap from sliding friction.<br>**High:** Stronger stick grip and a larger stick/slip contrast, depending on dynamic friction. |
 | `bow_mu_d` | dynamic friction | 0.1 … 0.6 | 0.184372 (authored 0.3) | global | in-place | Sets friction while the string slips under the bow; its gap from static friction shapes bow capture.<br>**Low:** Less sliding drag and a larger stick/slip contrast.<br>**High:** More sliding drag and a smaller contrast when static friction is held fixed. |
 | `bow_v0` | friction corner | 0.05 … 0.5 | 0.107992 (authored 0.2) | global | in-place | Sets the relative-speed scale over which friction changes from sticking to sliding.<br>**Low:** A sharper transition, often giving a brighter attack edge.<br>**High:** A more gradual transition across a wider range of sliding speeds. |
@@ -175,8 +177,8 @@ its range widens the slider rather than being clamped.
 | `bow_release_t60` | release decay (s) | 0 … 20 | 8 | per-note | in-place |  |
 | `bow_gut_g` | round-trip retention | 0.99 … 1 | 1 (authored 0.998) | global | in-place | Sets the fraction of string motion retained on each round trip.<br>**Low:** More energy loss and a shorter, deader response.<br>**High:** Less broadband loss and longer sustain; 1 removes this loss term, while other damping remains. |
 | `bow_gut_fc2` | gut top (Hz) | 500 … 12000 | 3172.33 (authored 3500) | global | in-place | Sets the gut string's additional high-frequency loss cutoff.<br>**Low:** Damps upper harmonics earlier, producing a darker string.<br>**High:** Retains more upper harmonics for a brighter string. |
-| `bow_nut_fc` | nut corner (Hz) | 1000 … 12000 | 8921.51 (authored 5500) | global | in-place | Sets the low-pass cutoff at the nut or stopping finger.<br>**Low:** Absorbs more high-frequency energy at that end of the string.<br>**High:** Reflects more upper harmonics back along the string. |
-| `bow_br_fc` | bridge corner (Hz) | 1000 … 12000 | 9000 (authored 6750) | global | in-place | Sets the low-pass cutoff at the bridge termination.<br>**Low:** Absorbs more upper harmonics at the bridge.<br>**High:** Retains more high-frequency string energy. |
+| `bow_nut_fc` | nut corner (Hz) | 1000 … 16000 | 8921.51 (authored 5500) | global | in-place | Sets the low-pass cutoff at the nut or stopping finger.<br>**Low:** Absorbs more high-frequency energy at that end of the string.<br>**High:** Reflects more upper harmonics back along the string. |
+| `bow_br_fc` | bridge corner (Hz) | 1000 … 16000 | 9000 (authored 6750) | global | in-place | Sets the low-pass cutoff at the bridge termination.<br>**Low:** Absorbs more upper harmonics at the bridge.<br>**High:** Retains more high-frequency string energy. |
 | `bow_loss_reg` | register damping | 0 … 1.5 | 0.7 | global | in-place | Makes string-loss cutoffs follow pitch below the tonic. Notes at or above the tonic are unchanged.<br>**Low:** Less register tracking; 0 keeps fixed cutoffs.<br>**High:** Low notes become progressively darker; 1 tracks pitch proportionally, above 1 darkens more strongly. |
 
 ### String · Torsion
@@ -321,10 +323,29 @@ its range widens the slider rather than being clamped.
 
 | Key | Name | Range | Default | Scope | Timing | Description |
 |---|---|---|---|---|---|---|
+| `bow_hill_db` | bridge resonance gain (dB) | -12 … 12 | 1.93672 (authored 0) | global | rebuild |  |
+| `bow_hill_f` | bridge resonance frequency (Hz) | 500 … 6000 | 1902.02 (authored 2400) | global | rebuild |  |
+| `bow_hill_q` | bridge resonance Q | 0.2 … 5 | 1.22443 (authored 1.1) | global | rebuild |  |
 | `bow_rad_hp` | radiation HP (Hz) | 50 … 600 | 84.8227 (authored 200) | global | in-place | High-pass filters the String engine's combined played-voice and taraf radiation before the room.<br>**Low:** Retains more bass and low-frequency weight.<br>**High:** Removes more low-frequency energy for a leaner sound. |
 | `bow_rad_lp` | radiation LP (Hz) | 500 … 16000 | 10373.7 (authored 8000) | global | in-place | Low-pass filters the String engine's combined played-voice and taraf radiation before the room.<br>**Low:** Darker output with fewer upper harmonics.<br>**High:** Brighter output with more upper-frequency detail. |
 | `bow_tone_tilt` | tone tilt (bass–treble) | -1 … 1 | 0 | global | live | Tilts the String engine's combined spectrum before the room. Zero leaves the spectral balance flat.<br>**Low:** Negative values favor bass over treble.<br>**High:** Positive values favor treble over bass. |
 | `bow_st_width` | instrument width | 0 … 1 | 0.2 | global | rebuild | Sets stereo spread of the String engine's played voice, taraf, drones and bow noise. Low frequencies stay centered and the mono sum is preserved.<br>**Low:** A narrower instrument; 0 gives a point-like mono source.<br>**High:** More left/right difference in the upper spectrum, giving a wider instrument. |
+
+### Output · Fitted model
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `bow_fit_timbre` | harmonic correction | 0 … 1.5 | 0 | global | live | Scales the fitted pitch, bow and history dependent harmonic correction.<br>**Low:** Original harmonic balance.<br>**High:** Stronger fitted harmonic shaping. |
+| `bow_fit_response` | spectral response | 0 … 1.5 | 0 | global | live | Scales the shared fitted frequency response from 120 Hz to 12 kHz.<br>**Low:** Original frequency response.<br>**High:** Stronger fitted tonal balance. |
+| `bow_fit_memory` | bow history | 0 … 2 | 1 | global | live | Scales the recent bow-history features in the harmonic correction.<br>**Low:** Current bow controls only.<br>**High:** Stronger dependence on recent bow changes. |
+| `bow_fit_smooth_ms` | timbre smoothing (ms) | 10 … 150 | 30 | global | live | Sets the causal smoothing time of fitted harmonic gains.<br>**Low:** Faster timbral response.<br>**High:** More gradual harmonic motion. |
+| `bow_fit_ring` | acoustic resonances | 0 … 2 | 0 | global | live | Adds the shared force-driven acoustic resonance bank outside the string feedback path.<br>**Low:** No added acoustic resonances.<br>**High:** Stronger fitted acoustic ringing. |
+| `bow_fit_shelf_db` | upper shelf (dB) | -12 … 12 | 0 | global | live | Sets a 6 kHz shelf ahead of the fitted timbre and room processing.<br>**Low:** Less upper-frequency energy.<br>**High:** More upper-frequency energy. |
+| `bow_fit_room` | acoustic room | 0 … 2 | 0 | global | live | Scales the fitted synthetic room response, separately from the original room and FX reverbs.<br>**Low:** No fitted room.<br>**High:** Stronger acoustic trails; 1 is the fitted response. |
+| `bow_fit_room_low_db` | room lows (dB) | -12 … 12 | 0 | global | live | Adjusts the fitted room response below 1 kHz.<br>**Low:** Less low-frequency room energy.<br>**High:** More low-frequency room energy. |
+| `bow_fit_room_mid_db` | room mids (dB) | -12 … 12 | 0 | global | live | Adjusts the fitted room response from 1 to 3 kHz.<br>**Low:** Less mid-frequency room energy.<br>**High:** More mid-frequency room energy. |
+| `bow_fit_room_high_db` | room highs (dB) | -12 … 12 | 0 | global | live | Adjusts the fitted room response above 3 kHz.<br>**Low:** Darker room trails.<br>**High:** Brighter room trails. |
+| `bow_fit_body` | fitted body radiation | 0 … 1 | 0 | global | in-place | Blends fitted modal radiation residues into the formula body without changing its feedback mobility.<br>**Low:** Original formula radiation.<br>**High:** Fitted radiation profile; body controls remain editable. |
 
 ### Output · Room
 
@@ -340,6 +361,21 @@ its range widens the slider rather than being clamped.
 |---|---|---|---|---|---|---|
 | `ctl_fret_warp` | pitch warp | 0 … 1 | 0 | global | live | Shapes how touch position maps to pitch between the pad's enabled frets.<br>**Low:** At 0, pitch changes evenly through each gap, supporting continuous slides.<br>**High:** At 1, pitch stays near each fret longer and crosses the middle quickly, making runs more nearly quantized. |
 | `ctl_fret_accent` | pitch accent | 0 … 1 | 0 | global | live | Dips played expression between the pad's enabled frets, then restores it at each fret.<br>**Low:** At 0, expression is unaffected by position between frets.<br>**High:** At 1, expression fades out midway through each gap, separating the notes of a glided run. |
+
+### Controls · Fret assist
+
+| Key | Name | Range | Default | Scope | Timing | Description |
+|---|---|---|---|---|---|---|
+| `ctl_fret_assist_amount` | correction amount | 0 … 1 | 1 | per-note | live |  |
+| `ctl_fret_assist_radius` | capture radius (× Snap) | 0 … 4 | 1.75 | per-note | live |  |
+| `ctl_fret_assist_still_px` | pause radius (px) | 0.1 … 12 | 2 | per-note | live |  |
+| `ctl_fret_assist_dwell_ms` | pause delay (ms) | 0 … 1000 | 100 | per-note | live |  |
+| `ctl_fret_assist_ramp_ms` | pause ramp (ms) | 1 … 1000 | 150 | per-note | live |  |
+| `ctl_fret_assist_settle_ms` | settle time (ms) | 1 … 500 | 5 | per-note | live |  |
+| `ctl_fret_assist_slew` | correction limit (¢/s) | 50 … 6000 | 1500 | per-note | live |  |
+| `ctl_fret_assist_turn` | turn pull | 0 … 4 | 2 | per-note | live |  |
+| `ctl_fret_assist_turn_ms` | turn decay (ms) | 1 … 500 | 26 | per-note | live |  |
+| `ctl_fret_assist_release_px` | release distance (px) | 1 … 96 | 12 | per-note | live |  |
 
 ### Controls · Glide
 

@@ -104,26 +104,69 @@ The Strings tab also holds the drone-button mapping and the **strum set** (`Inst
 - **A hard shake can strike it** (`ctl_strum_thresh`, 0…1, default 1 = off): the iPad's strike envelope crossing the threshold triggers as an L press and releases when it falls back below, with a 100 ms retrigger cooldown (the L button ignores the cooldown).
 - **The chord bar overrides the set.** With a chord selected in the strip below the Fret Pad's band ([Fret Pad](fret-pad.md)), the strum plays THAT chord — octave-agnostic, sounded under the **Shepard register law** (`shepardChordNotes`: pitch-class chord tones as raised-cosine-weighted octave copies centered in the octave below the tonic, so a VII chord sits no higher than a I chord); deselecting falls back to the configured set. A selection change while the chord is RINGING retunes it in place — surviving members glide, surplus notes release, extra members strike fresh (`AppController.retuneStrumChord`).
 
+## Fitted observation controls
+
+**Output · Fitted model** exposes the shared research timbre and acoustic
+response. Harmonic correction and spectral response are independent live
+amounts (0 bypass, 1 fitted). Bow history scales the 180 ms control-memory
+features; timbre smoothing sets the 10–150 ms gain response, default 30 ms.
+The upper shelf controls 6 kHz coloration. Acoustic room controls the fitted
+synthetic convolution, with separate low/mid/high gains at 1 and 3 kHz.
+Acoustic resonances adds force-driven output modes; it never replaces the
+physical taraf or enters its feedback. Fitted body radiation blends the
+shared modal residues in place, retaining the body's mobility coefficients.
+
+Every added sound stage defaults to zero. Saved presets carry these controls
+through the ordinary parameter dictionary and mappings; loading a preset that
+omits them restores bypass. The factory artifact remains unchanged. The
+research preset uses fitted main-voice settings and the user's existing taraf,
+scale and controller rig. The old room and FX reverbs remain independently
+available; the research preset sets the original room mix to zero.
+
+The registry also exposes the fitted contact width and thermal relaxation in
+String · Friction, and bridge-resonance gain, frequency and Q in Output · Tone
+& stereo. These values pass through preset loading as model scalars. Preset
+conversion retains the saved resting values of performance controls; an
+artifact's vibrato capacity does not activate vibrato. `paramdoc --json`
+provides the same strategy and resting-default metadata to the converter.
+The converter takes an explicit verified version-2 production preset and rejects a
+snapshot without bridge/pitch-source tags or the complete current parameter set.
+Its hashed research profile names the only parameters it may replace. Both
+taraf banks, including disabled rows, controller bindings, bow-axis curves,
+scale/fret layout, routing and unrelated parameter values remain exact copies.
+A sidecar audit lists every changed value and the preserved sections.
+Preset equality alone cannot validate a source captured by an older app;
+compare its banks and bindings with the current rig before conversion.
+
+The live timbre correction is causal. It converts the fitted spectral gains to
+a minimum-phase FIR and crossfades successive filters, with no fixed lookahead
+or block delay. This preserves fitted magnitudes while changing phase and
+transient fine structure relative to the offline centered transform. The
+fitted room retains its full synthetic impulse response. Details and
+reproducibility: [live research port](../tools/live_research_port/README.md).
+
 ## The factory preset
 
 One factory preset ships — **"Default (Sarangi Live) — Pilu"** (`SarangiStore.loadSarangiLiveDefault` + `StringParamStore.resetToDefault`), also the fresh-install default: untouched artifact physics + the generated seed bank, replaced by the Fret Pad scale on the first push. The whole `InstrumentState` persists to UserDefaults (`tarabdaar.sarangiState.v8`).
 
 ## Saving and loading presets
 
-Four UserDefaults keys hold the editable state: the sarangi `InstrumentState` (`tarabdaar.sarangiState.v8`), every parameter's resting value (`tarabdaar.paramValues.v2` — physics scalars, live knobs and hybrids in one dictionary; a key that is absent rests at its default), composites (`tarabdaar.compositeParams.v1`) and tilt bindings (`tarabdaar_dimensionMapping_v6`). Bindings and composites modulate on top of the resting values and never write them.
+UserDefaults persists the sarangi `InstrumentState` (`tarabdaar.sarangiState.v8`), every parameter's resting value (`tarabdaar.paramValues.v2` — physics scalars, live knobs and hybrids in one dictionary; a key that is absent rests at its default), composites (`tarabdaar.compositeParams.v1`) and tilt bindings (`tarabdaar_dimensionMapping_v6`), alongside the curve and routing stores. Bindings and composites modulate on top of the resting values and never write them.
 
-They save and load as **one `TarabdaarPreset` document** — one preset is one rig (`Packages/TarabdaarCore/.../PresetDocument.swift`; data, not UI, hence the package) via `AppController.capturePreset(name:)` / `applyPreset(_:)`, driven from the Parameters-tab toolbar (`PresetToolbar`). A preset carries every section: the sarangi document, `paramValues` (every parameter's resting value), the composites, `tiltMapping`, voice routing and the Joy-Con `droneSequence` (ordered drone-slot indices, including repeated steps). Every section is optional, so a partial file applies exactly the sections it carries; a file from before the one store carries `stringOverrides` too, and both merge on load.
+They save and load as **one `TarabdaarPreset` document** via `AppController.capturePreset(name:)` / `applyPreset(_:)`. New saves are complete version-2 snapshots: both string banks and their identities, follower and drone/strum assignments, every resolved parameter rest (including defaults), all EQ and bow-axis curves, composites, controller bindings, voice routing, drone sequence, full scale points/labels, tonic, fret positions/extents, octave display range, snap distance and prime limit. Hybrid rests remain performance values; build-time vibrato capacity is never saved as an active depth. Empty EQ and composite sections are explicit, so loading a flat/empty setup clears the previous rig's values. The snapshot records the writing app's version/build. Device connections and calibrations, held notes, live sensor positions and temporary performance octave shifts remain session/device state.
 
-**No file panels.** Saved presets live in the app-managed **library** (`PresetLibrary`, `Application Support/Tarabdaar/Presets/`, one `.tarabdaar` file per preset named after it): **Save preset…** asks only for a NAME (same name = overwrite, the popover says so), and every saved preset appears in the **Load preset** menu automatically, under the factory default (`AppController.loadFactoryPreset`, which resets the whole rig — bank, physics, parameter values, composites AND tilt bindings). A **Delete preset** submenu removes entries. The menu refreshes on every save/delete and on toolbar appear, so a `.tarabdaar` file dropped into the folder by hand shows up too — that folder IS the import/export surface. Guards: `PresetLibraryTests`, `PresetCodingTests`.
+Version 2 stores its required sections inside `snapshot`. A legacy flat-format reader sees no applicable sections rather than loading half a rig. The current reader rejects unsupported versions, incomplete snapshots, missing modern string-bank tags, unknown active controller targets and unsupported snapshot parameter keys before changing live state. Legacy version-1 full and partial files remain readable; missing sections in those files still leave existing state alone. Loading applies the saved scale and tonic to the shared `Tuning` before installing the string bank, and discards pending gesture rebuilds from the previous rig. The bank therefore retains its row identities through the subsequent scale sync.
+
+**No file panels.** Saved presets live in the app-managed **library** (`PresetLibrary`, `Application Support/Tarabdaar/Presets/`, one `.tarabdaar` file per preset named after it). **Save preset…** asks for a name. The library validates the encoded document, preserves the previous bytes under `Presets/Backups/` on overwrite, then replaces the preset atomically. A failed encode/validation does not overwrite the existing file. Every saved preset appears in **Load preset**; backups stay outside that menu. **Delete preset** removes the selected library entry. The menu refreshes on save/delete and toolbar appearance, so copying a `.tarabdaar` file into the folder imports it. Guards: `PresetCodingTests`.
 
 **Traps:**
 
-- A tilt binding survives a round-trip **only through its `MapTarget.storageKey`**. Unknown `param:` keys are silently dropped on load (`DimensionMapping.pruned`) — rename a parameter key and every binding to it disappears from the preset without an error.
+- A tilt binding survives a round-trip **only through its `MapTarget.storageKey`**. Version-2 snapshots reject unknown active targets. Legacy mappings still prune unknown `param:` keys (`DimensionMapping.pruned`), so renaming a parameter requires a migration for older files.
 - `StringParamStore.replaceOverrides` **clears `dirtyKeys`** to force the full rebuild path rather than the in-place push. That is required: a preset can move keys that resize tables, which the in-place path refuses.
 
 ## Drones
 
-Three press-to-sound drone buttons inside the Fret Pad's right edge each pluck **one mapped sympathetic string** (Strings tab "Drone buttons" section, `InstrumentState.droneStringIds`; auto-mapped to the loudest strings near low Sa · low Pa · Sa) — on the Tanpura drone voice by default, on the legacy jt swell via the tab's Voice picker. There are no dedicated drone rows: Tanpura drones sound one octave below the mapped row by default, with Joy-Con Up toggling the original octave for subsequent plucks; sympathetic drones sound exactly as their row is tuned, and an unmapped/disabled/unselected row leaves the button silent. Full treatment and calibrated levels: [Fret Pad](fret-pad.md).
+The Joy-Con drone sequence uses three slots, each mapped to **one sympathetic string** (Strings tab "Drones" section, `InstrumentState.droneStringIds`; auto-mapped to the loudest strings near low Sa · low Pa · Sa) — on the Tanpura drone voice by default, on the legacy jt swell via the tab's Voice picker. There are no dedicated drone rows: Tanpura drones sound one octave below the mapped row by default, with Joy-Con Up toggling the original octave for subsequent plucks; sympathetic drones sound exactly as their row is tuned, and an unmapped/disabled/unselected row leaves the slot silent. Full treatment and calibrated levels: [Fret Pad](fret-pad.md).
 
 ## Levels
 

@@ -93,6 +93,26 @@ public final class StringVoiceSource {
     /// them. `bow_jt_inject` is internal (the inject-ring arm has no registry
     /// key); everything else is a `ParamRegistry` key.
     private static let controlKnobs: [ControlKnob] = [
+        ControlKnob("bow_fit_timbre", { min(max($0, 0), 1.5) },
+                    { $0.setFittedControl(0, $1) }),
+        ControlKnob("bow_fit_response", { min(max($0, 0), 1.5) },
+                    { $0.setFittedControl(1, $1) }),
+        ControlKnob("bow_fit_memory", { min(max($0, 0), 2) },
+                    { $0.setFittedControl(2, $1) }),
+        ControlKnob("bow_fit_smooth_ms", { min(max($0, 10), 150) },
+                    { $0.setFittedControl(3, $1) }),
+        ControlKnob("bow_fit_room", { min(max($0, 0), 2) },
+                    { $0.setFittedControl(4, $1) }),
+        ControlKnob("bow_fit_room_low_db", { min(max($0, -12), 12) },
+                    { $0.setFittedControl(5, $1) }),
+        ControlKnob("bow_fit_room_mid_db", { min(max($0, -12), 12) },
+                    { $0.setFittedControl(6, $1) }),
+        ControlKnob("bow_fit_room_high_db", { min(max($0, -12), 12) },
+                    { $0.setFittedControl(7, $1) }),
+        ControlKnob("bow_fit_ring", { min(max($0, 0), 2) },
+                    { $0.setFittedControl(8, $1) }),
+        ControlKnob("bow_fit_shelf_db", { min(max($0, -12), 12) },
+                    { $0.setFittedControl(9, $1) }),
         ControlKnob("bow_attack_sharpness", unit, { $0.setAttackSharpness($1) }),
         // top of range = bypass: hand the engine 0 so it restores the exact
         // build-time coefficient (byte-null) — this one rests at 20 kHz

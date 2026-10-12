@@ -27,6 +27,17 @@ final class ParamUnificationTests: XCTestCase {
                               "\(key) is .live — it does not belong in "
                               + "inPlaceKeys")
         }
+        for control in FretAssistControl.allCases {
+            let spec = ParamRegistry.spec(control.key)!
+            guard case .fretAssist(let routed) = spec.target else {
+                XCTFail("\(control.key) does not reach the pad assist")
+                continue
+            }
+            XCTAssertEqual(routed, control)
+            XCTAssertEqual(spec.apply, .live)
+            XCTAssertEqual(MapTarget.from(storageKey: MapTarget(paramKey: spec.key).storageKey)?.paramKey,
+                           spec.key)
+        }
     }
 
     /// DEFAULT = ENGINE TRUTH: for a key the artifact does not carry, the
@@ -46,6 +57,7 @@ final class ParamUnificationTests: XCTestCase {
                        ParamRegistry.spec("bow_attack_sharpness")?.def)
         // Mirrors the fallbacks in BowControls.swift (init/updateLiveParams).
         let engineFallback: [String: Double] = [
+            "bow_fit_body": 0,             // BowTables.buildOpenString
             "bow_jt_dual_pluck_level": 0.5, // BowEngine
             "bow_body_tail_seed": 1.0,      // BowTables.buildOpenString
         ]
@@ -84,6 +96,16 @@ final class ParamUnificationTests: XCTestCase {
             "bow_vib_cents",
             "bow_vib_hz",
             "ctl_strike_window",
+            "ctl_fret_assist_amount",
+            "ctl_fret_assist_radius",
+            "ctl_fret_assist_still_px",
+            "ctl_fret_assist_dwell_ms",
+            "ctl_fret_assist_ramp_ms",
+            "ctl_fret_assist_settle_ms",
+            "ctl_fret_assist_slew",
+            "ctl_fret_assist_turn",
+            "ctl_fret_assist_turn_ms",
+            "ctl_fret_assist_release_px",
             "ctl_glide_on",
             "ctl_glide_grace",
             "ctl_glide_rate",

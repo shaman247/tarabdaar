@@ -141,29 +141,22 @@ public enum SyncedScaleStore {
 /// `FRET_ARRANGEMENT` event and is what the iPad's persisted store holds.
 /// Sent only while the Fret Pad is the active layout.
 ///
-/// Blob: `[ghostQuarterOctaves][flags][count]`, per segment
-/// `[degreeIndex][x14: 2×7-bit][topY][bottomY][enabled][ragaOctaves]`, then the 3
-/// drone-button ratios as 14-bit cents above −1200 (0.25–4.0). `flags`
-/// bit 0 marks raga masks (bits 0…4 = octaves −2…+2). Older cached blobs
-/// without masks decode with every fret eligible. The blob's version is TLP's.
-/// The fret pitch warp is deliberately NOT here — `ctl_fret_warp` is a
-/// live registry param relayed over JOYCON_STATE.
+/// Blob: `[ghostQuarterOctaves][flags=8][count]`, then
+/// `[degreeIndex][row: 1…5]` per fret and 3 drone ratios.
+/// Flag bit 3 selects five-row pairs. Legacy bit 2 selects three-row pairs.
+/// Cached legacy centres and extents migrate to rows. TLP versions the live wire.
+/// The live fret warp travels separately in JOYCON_STATE.
 public enum FretArrangementSysEx {
     /// The raw binary blob — the TLP `FRET_ARRANGEMENT` event payload.
     public static func encodeBlob(_ a: FretArrangement) -> [UInt8] {
         func b7(_ v: Int) -> UInt8 { UInt8(max(0, min(127, v))) }
         let segments = a.segments.prefix(127)
         var blob: [UInt8] = [b7(Int((a.ghostExtentOctaves * 4).rounded())),
-                             1,   // per-segment raga octave masks
+                             8,   // five-row pitch/row pairs
                              UInt8(segments.count)]
         for s in segments {
             blob.append(b7(s.degreeIndex))
-            let x14 = max(0, min(16383, Int((s.x * 16383).rounded())))
-            put14(&blob, x14)
-            blob.append(b7(Int((s.topY * 127).rounded())))
-            blob.append(b7(Int((s.bottomY * 127).rounded())))
-            blob.append(s.enabled ? 1 : 0)
-            blob.append(s.ragaOctaves & 0x1F)
+            blob.append(UInt8(s.row.rawValue))
         }
         for i in 0..<FretArrangement.droneCount {
             let r = i < a.droneRatios.count ? a.droneRatios[i]
@@ -180,20 +173,35 @@ public enum FretArrangementSysEx {
         guard blob.count >= 3 else { return nil }
 
         let extent = Double(blob[0]) / 4.0
+        guard blob[1] & ~UInt8(15) == 0 else { return nil }
         let hasRagaMasks = blob[1] & 1 != 0
-        let segmentSize = hasRagaMasks ? 7 : 6
+        let fiveRows = blob[1] & 8 != 0
+        let rows = blob[1] & 4 != 0
+        let pairs = blob[1] & 2 != 0
+        guard [rows, pairs, fiveRows].filter({ $0 }).count <= 1 else { return nil }
+        let segmentSize = (fiveRows || rows ? 2 : pairs ? 3 : 6) + (hasRagaMasks ? 1 : 0)
         let count = Int(blob[2])
+        if pairs || rows || fiveRows {
+            guard blob.count == 3 + count * segmentSize + 2 * FretArrangement.droneCount
+            else { return nil }
+        }
         var i = 3
         var segments: [FretSegment] = []
         for _ in 0..<count {
             guard i + segmentSize <= blob.count else { return nil }
-            let x14 = get14(blob, i + 1)
-            segments.append(FretSegment(degreeIndex: Int(blob[i]),
-                                        x: Double(x14) / 16383.0,
-                                        topY: Double(blob[i + 3]) / 127.0,
-                                        bottomY: Double(blob[i + 4]) / 127.0,
-                                        enabled: blob[i + 5] != 0))
-            if hasRagaMasks { segments[segments.count - 1].ragaOctaves = blob[i + 6] & 0x1F }
+            let row: FretRow
+            if rows || fiveRows {
+                guard let decoded = fiveRows ? FretRow(rawValue: Int(blob[i + 1]))
+                    : FretRow.legacy(Int(blob[i + 1])) else { return nil }
+                row = decoded
+            } else {
+                let y = pairs ? Double(get14(blob, i + 1)) / 16383
+                    : (Double(blob[i + 3]) + Double(blob[i + 4])) / 254
+                let old = (1...3).min { abs((3.5 - Double($0)) / 3 - y) < abs((3.5 - Double($1)) / 3 - y) }!
+                row = FretRow.legacy(old)!
+            }
+            let fret = FretSegment(degreeIndex: Int(blob[i]), row: row)
+            if rows || fiveRows || pairs || blob[i + 5] != 0 { segments.append(fret) }
             i += segmentSize
         }
         var drones = FretArrangement.defaultDroneRatios
@@ -250,7 +258,8 @@ extension JoyConTiltDisplay {
                   wristRate3: ax(s.wristRate3),
                   accel1: ax(s.accel1), accel2: ax(s.accel2),
                   accel3: ax(s.accel3),
-                  accelLevel: Double(s.accelLevel) / 255.0)
+                  accelLevel: Double(s.accelLevel) / 255.0,
+                  fretAssist: s.fretAssist)
     }
 
     public func frame(stateSeq: UInt16, timestampUs: UInt32,
@@ -277,14 +286,15 @@ extension JoyConTiltDisplay {
             wristRate1: b(wristRate1), wristRate2: b(wristRate2),
             wristRate3: b(wristRate3),
             accel1: b(accel1), accel2: b(accel2), accel3: b(accel3),
-            accelLevel: UInt8(min(max(accelLevel, 0), 1) * 255.0 + 0.5))
+            accelLevel: UInt8(min(max(accelLevel, 0), 1) * 255.0 + 0.5),
+            fretAssist: fretAssist)
     }
 }
 
 /// One Mac→iPad display frame (axes −1…+1): Joy-Con stick, fused wrist
 /// attitude, Mac-evaluated ARM axes (`armLive` = a calibration drives
-/// them), liveness flags, and the fields the iPad ACTS on: `connected`
-/// (hides the drone buttons), `fieldWarp`, `octaveShift`.
+/// them), liveness flags, and the fields the iPad ACTS on: `fieldWarp`,
+/// `octaveShift` and resolved fret assist.
 public struct JoyConTiltDisplay: Equatable {
     public var stickX: Double
     public var stickY: Double
@@ -316,6 +326,8 @@ public struct JoyConTiltDisplay: Equatable {
     /// `ctl_fret_warp` (0…1); the fret field resolves touch pitch through
     /// it. 0 when never received.
     public var fieldWarp: Double
+    /// Resolved drag-assist controls; defaults while the link is unavailable.
+    public var fretAssist: FretAssistSettings
     /// The playing-range octave shift (−3…+3), ONSET-captured per touch by
     /// `PitchPadEngine.octaveShift`. 0 when never received.
     public var octaveShift: Int
@@ -329,7 +341,8 @@ public struct JoyConTiltDisplay: Equatable {
                 wristRate1: Double = 0, wristRate2: Double = 0,
                 wristRate3: Double = 0, accel1: Double = 0,
                 accel2: Double = 0, accel3: Double = 0,
-                accelLevel: Double = 0) {
+                accelLevel: Double = 0,
+                fretAssist: FretAssistSettings = FretAssistSettings()) {
         self.stickX = stickX
         self.stickY = stickY
         self.wrist1 = wrist1
@@ -351,6 +364,7 @@ public struct JoyConTiltDisplay: Equatable {
         self.connected = connected
         self.strikeWindowS = strikeWindowS
         self.fieldWarp = min(max(fieldWarp, 0), 1)
+        self.fretAssist = fretAssist
         self.octaveShift = min(max(octaveShift,
                                    PitchPadEngine.octaveShiftRange.lowerBound),
                                PitchPadEngine.octaveShiftRange.upperBound)
@@ -380,7 +394,7 @@ public final class ScaleSyncReceiver: ObservableObject {
     @Published public private(set) var fretArrangement: FretArrangement?
 
     /// The Mac's Joy-Con display stream (not persisted); the surface acts
-    /// on `connected`, `fieldWarp` and `octaveShift`.
+    /// on `connected`, `fieldWarp`, `octaveShift` and resolved fret assist.
     @Published public private(set) var joyConTilt = JoyConTiltDisplay.idle
 
     /// Fired on main with each applied state (also persisted here).

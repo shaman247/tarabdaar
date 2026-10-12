@@ -52,8 +52,7 @@ public enum Config {
     /// fraction of the surface height, its top at `fretPadBandTopFraction`
     /// (`fretPadBandRect`). Both platforms draw the full surface — the Mac
     /// tab letterboxes to `iPadSurfaceAspect` and mirrors the iPad exactly:
-    /// the bordered band, the dead space above/below it, and the drone
-    /// buttons at their full-surface position.
+    /// the band and the surrounding space, including the taraf pluck strip.
     public static let fretPadHeightFraction: CGFloat = 0.5
     /// The band's top edge as a fraction of the surface height. 0.25 is
     /// centred, 0.5 flush with the bottom; 0.3 sits it a little below

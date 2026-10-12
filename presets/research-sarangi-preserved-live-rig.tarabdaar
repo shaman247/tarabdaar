@@ -1,0 +1,1215 @@
+{
+  "name" : "Research sarangi - preserved live rig",
+  "savedAt" : "2026-10-10T21:47:49Z",
+  "savedBy" : "TarabdaarMac 1.0 (1)",
+  "snapshot" : {
+    "bowAxisCurves" : {
+      "expr" : [
+        {
+          "x" : 0,
+          "y" : 0
+        },
+        {
+          "x" : 1,
+          "y" : 1
+        }
+      ],
+      "pos" : [
+        {
+          "x" : 0,
+          "y" : 0
+        },
+        {
+          "x" : 0.1,
+          "y" : 0.1
+        },
+        {
+          "x" : 0.2,
+          "y" : 0.2
+        },
+        {
+          "x" : 0.3,
+          "y" : 0.3
+        },
+        {
+          "x" : 0.4,
+          "y" : 0.4
+        },
+        {
+          "x" : 0.5,
+          "y" : 0.5
+        },
+        {
+          "x" : 0.6,
+          "y" : 0.6
+        },
+        {
+          "x" : 0.7,
+          "y" : 0.7
+        },
+        {
+          "x" : 0.8,
+          "y" : 0.8
+        },
+        {
+          "x" : 0.9,
+          "y" : 0.9
+        },
+        {
+          "x" : 1,
+          "y" : 1
+        }
+      ],
+      "press" : [
+        {
+          "x" : 0,
+          "y" : 0
+        },
+        {
+          "x" : 0.1,
+          "y" : 0.1
+        },
+        {
+          "x" : 0.2,
+          "y" : 0.2
+        },
+        {
+          "x" : 0.3,
+          "y" : 0.3
+        },
+        {
+          "x" : 0.4,
+          "y" : 0.4
+        },
+        {
+          "x" : 0.5,
+          "y" : 0.5
+        },
+        {
+          "x" : 0.6,
+          "y" : 0.6
+        },
+        {
+          "x" : 0.7,
+          "y" : 0.7
+        },
+        {
+          "x" : 0.8,
+          "y" : 0.8
+        },
+        {
+          "x" : 0.9,
+          "y" : 0.9
+        },
+        {
+          "x" : 1,
+          "y" : 1
+        }
+      ]
+    },
+    "composites" : [
+
+    ],
+    "droneSequence" : [
+      0,
+      1,
+      2
+    ],
+    "droneVoice" : "tanpura",
+    "fxCurves" : {
+
+    },
+    "instrument" : {
+      "droneStringIds" : [
+        "6D717D0D-E85E-4784-9362-8C17EBFDB208",
+        "F6499205-5EFC-4C6C-AB54-F519F6A85CF4",
+        "A0138E8E-D577-4CB3-B99D-35F2B1E041DC"
+      ],
+      "follower" : {
+        "enabled" : false,
+        "gain" : 2,
+        "t60" : 10
+      },
+      "scaleRatios" : [
+        1,
+        1.0666666666666667,
+        1.125,
+        1.2,
+        1.25,
+        1.3333333333333333,
+        1.40625,
+        1.5,
+        1.6,
+        1.6666666666666667,
+        1.7777777777777777,
+        1.875
+      ],
+      "schemaVersion" : 6,
+      "strings" : [
+        {
+          "degree" : 0,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "967DDAC2-F30D-4254-B840-10BC97FC1E98",
+          "octave" : -1,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 7,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "F6499205-5EFC-4C6C-AB54-F519F6A85CF4",
+          "octave" : -1,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 0,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "6DCB6B43-F28E-46E7-B6F5-7B393D019823",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 1,
+          "enabled" : false,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "FC3B0D89-F075-46CE-9635-417CD855C35C",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 2,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "634C7D3C-903F-4C4B-8E1F-3E93BAA9966F",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 3,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "0A4E9ADD-7492-4437-AC7D-A00276112CA9",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 4,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "BD1D6BC6-DBC2-4021-844A-6E7940905609",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 5,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "9BF0F78C-7ADD-467C-B004-5F1FDF3C8418",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 6,
+          "enabled" : false,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "1E63EE0C-331A-4C3F-A42B-213CA1FFD7FC",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 7,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "31FDF7B1-7DE5-43CB-9FB4-E8136876707A",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 8,
+          "enabled" : false,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "3808FFC7-A258-4315-855D-F0853E9614CE",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 9,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "74BE5465-E2E5-4146-8C56-E81F03822DFF",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 10,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "7B352B3F-19F7-4A0E-B48A-B9DCA106CEFF",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 11,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "E906BBC5-C006-48E2-8EF4-16C73581A85C",
+          "octave" : 0,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 0,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "3A857C13-E577-45F8-99D9-8C6DE314D2E8",
+          "octave" : 1,
+          "set" : "raga",
+          "t60" : 4
+        },
+        {
+          "degree" : 0,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.95,
+          "id" : "6D717D0D-E85E-4784-9362-8C17EBFDB208",
+          "octave" : -1,
+          "set" : "chromatic",
+          "t60" : 9
+        },
+        {
+          "degree" : 2,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.8,
+          "id" : "FD029CBE-04B2-4CDD-B93B-48FF1832EC5D",
+          "octave" : -1,
+          "set" : "chromatic",
+          "t60" : 4.5
+        },
+        {
+          "degree" : 7,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "468F6F24-EF92-456E-951F-8C13EBA3E20D",
+          "octave" : -1,
+          "set" : "chromatic",
+          "t60" : 8
+        },
+        {
+          "degree" : 0,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.95,
+          "id" : "A0138E8E-D577-4CB3-B99D-35F2B1E041DC",
+          "octave" : 0,
+          "set" : "chromatic",
+          "t60" : 7
+        },
+        {
+          "degree" : 1,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "F5D34C6D-7541-4607-8F0B-8964CFC1570A",
+          "octave" : 0,
+          "set" : "chromatic",
+          "t60" : 3
+        },
+        {
+          "degree" : 2,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "891A911D-9BD3-4143-87F8-163351F0D6C7",
+          "octave" : 0,
+          "set" : "chromatic",
+          "t60" : 3
+        },
+        {
+          "degree" : 3,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "25DD8839-D4D2-4B5C-8CC9-7BE9D78914C1",
+          "octave" : 0,
+          "set" : "chromatic",
+          "t60" : 3
+        },
+        {
+          "degree" : 4,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.85,
+          "id" : "1FB7D4B5-DF3C-4398-B04F-EA22AAA6235D",
+          "octave" : 0,
+          "set" : "chromatic",
+          "t60" : 3
+        },
+        {
+          "degree" : 7,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.9,
+          "id" : "B65F4693-F314-4F05-96DF-6BC948D4897A",
+          "octave" : 0,
+          "set" : "chromatic",
+          "t60" : 4.5
+        },
+        {
+          "degree" : 0,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.7,
+          "id" : "1E245A4A-9F7E-4366-9517-EFC1708F62B9",
+          "octave" : 1,
+          "set" : "chromatic",
+          "t60" : 2.5
+        },
+        {
+          "degree" : 1,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.7,
+          "id" : "99A7E9B2-D519-41F4-A6D2-51A8EA7FD593",
+          "octave" : 1,
+          "set" : "chromatic",
+          "t60" : 2.5
+        },
+        {
+          "degree" : 2,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.7,
+          "id" : "35B64227-9B34-4B9F-84EC-1E38952A19DE",
+          "octave" : 1,
+          "set" : "chromatic",
+          "t60" : 2.5
+        },
+        {
+          "degree" : 3,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.7,
+          "id" : "0C947AE9-7C08-4E3B-B739-95E8F42E7E8C",
+          "octave" : 1,
+          "set" : "chromatic",
+          "t60" : 2.5
+        },
+        {
+          "degree" : 4,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.7,
+          "id" : "A9026D96-6A51-49C3-884D-1A1036840989",
+          "octave" : 1,
+          "set" : "chromatic",
+          "t60" : 2.5
+        },
+        {
+          "degree" : 5,
+          "enabled" : true,
+          "followsScale" : true,
+          "gain" : 0.7,
+          "id" : "12774A87-4C36-4200-BD25-3EA4FE9DDB92",
+          "octave" : 1,
+          "set" : "chromatic",
+          "t60" : 2.5
+        }
+      ],
+      "strumStringIds" : [
+        "6D717D0D-E85E-4784-9362-8C17EBFDB208"
+      ],
+      "tonicHz" : 293.66694446059995
+    },
+    "mainInstrument" : "string",
+    "name" : "Research sarangi - preserved live rig",
+    "paramValues" : {
+      "bow_Zt" : 11.98867882514921,
+      "bow_attack_sharpness" : 0.8,
+      "bow_bal" : 0,
+      "bow_body_air_ratio" : 0.7777820589223472,
+      "bow_body_c0" : 0.9551669245026767,
+      "bow_body_modes" : 9,
+      "bow_body_q" : 22.29659954543438,
+      "bow_body_q_air" : 27.86065,
+      "bow_body_rad" : 2.2925762626177533,
+      "bow_body_scale" : 1.1918009749399632,
+      "bow_body_tail_f0" : 227.99660318491618,
+      "bow_body_tail_f1" : 9845.521436263823,
+      "bow_body_tail_n" : 150,
+      "bow_body_tail_q" : 60.33825406393818,
+      "bow_body_tail_rad" : 1.0139578331352421,
+      "bow_body_tail_seed" : 52,
+      "bow_body_tail_y" : 0.4,
+      "bow_body_y" : 0.15,
+      "bow_br_fc" : 12258.277754665447,
+      "bow_drift_cents" : 0.55,
+      "bow_drift_db" : 0.15,
+      "bow_drift_force_db" : 0.3,
+      "bow_drift_hz" : 1.2,
+      "bow_expr" : 0.5897230691056911,
+      "bow_expr_lift" : 0.2,
+      "bow_f_cap" : 1.5,
+      "bow_fit_body" : 1,
+      "bow_fit_memory" : 1,
+      "bow_fit_response" : 1,
+      "bow_fit_ring" : 1,
+      "bow_fit_room" : 1,
+      "bow_fit_room_high_db" : 0,
+      "bow_fit_room_low_db" : 0,
+      "bow_fit_room_mid_db" : 0,
+      "bow_fit_shelf_db" : 4,
+      "bow_fit_smooth_ms" : 30,
+      "bow_fit_timbre" : 1,
+      "bow_gain" : 4,
+      "bow_glide_dip_db" : 5,
+      "bow_glide_dip_rate" : 900,
+      "bow_grip_beta" : 0,
+      "bow_grip_confirm_ms" : 60,
+      "bow_grip_db" : 0,
+      "bow_grip_hold_ms" : 200,
+      "bow_grip_ms" : 30,
+      "bow_grip_rel_ms" : 250,
+      "bow_grip_release" : 1.5,
+      "bow_grip_thresh" : 1,
+      "bow_grip_v_db" : 0,
+      "bow_grip_wait_ms" : 150,
+      "bow_gut_fc2" : 4091.0269165837767,
+      "bow_gut_g" : 0.9992996310476682,
+      "bow_hill_db" : -2.3998911468483817,
+      "bow_hill_f" : 2913.969257995909,
+      "bow_hill_q" : 0.6872753591665157,
+      "bow_jt_alpha" : 1.3,
+      "bow_jt_apex" : 1e-05,
+      "bow_jt_body" : 0,
+      "bow_jt_bow_bloom" : 0.8254662298387097,
+      "bow_jt_bst" : 0.0002,
+      "bow_jt_cap" : 0,
+      "bow_jt_cap_ratio" : 1,
+      "bow_jt_couple" : 0,
+      "bow_jt_damp" : 0,
+      "bow_jt_drive" : 0.01151171875,
+      "bow_jt_drive_norm" : 1,
+      "bow_jt_dual_lp" : 20000,
+      "bow_jt_dual_mm" : 0.5,
+      "bow_jt_dual_pluck_level" : 0.5,
+      "bow_jt_dual_select" : 1,
+      "bow_jt_ev_reg" : 0,
+      "bow_jt_fhf" : 4000,
+      "bow_jt_gain" : 0.005405745967741935,
+      "bow_jt_hcb" : 8,
+      "bow_jt_hp" : 0,
+      "bow_jt_lp" : 20000,
+      "bow_jt_norm" : 0,
+      "bow_jt_pluck" : 0,
+      "bow_jt_pluck_decay_ms" : 12,
+      "bow_jt_pulse" : 0,
+      "bow_jt_pulse_attack_ms" : 5,
+      "bow_jt_pulse_decay_ms" : 180,
+      "bow_jt_sav" : 0,
+      "bow_jt_sel" : 0.5,
+      "bow_jt_zone" : 0.006,
+      "bow_jtc_evolve" : 0.053616431451612906,
+      "bow_jtc_gain" : 0.027633568548387097,
+      "bow_jtc_norm" : 0.5284778225806451,
+      "bow_kret" : 0,
+      "bow_lim_rel_ms" : 150,
+      "bow_lim_thresh" : 0.8,
+      "bow_live_beta_hi" : 0.24,
+      "bow_live_beta_lo" : 0.05,
+      "bow_live_press_over" : 1.1692034715331512,
+      "bow_live_press_under" : 0.3225721261100049,
+      "bow_live_trim" : 0.2332,
+      "bow_loss_reg" : 0.7,
+      "bow_mu_d" : 0.10768492400811794,
+      "bow_mu_s" : 1.1252402010068332,
+      "bow_noise" : 0.00332287108570933,
+      "bow_noise_dir" : 0,
+      "bow_nut_fc" : 12258.277754665447,
+      "bow_pos" : 0.9341844512195122,
+      "bow_press" : 0.009400406504065041,
+      "bow_rad_hp" : 76.14227778721997,
+      "bow_rad_lp" : 10373.719407,
+      "bow_release_t60" : 8,
+      "bow_rev_mix" : 0,
+      "bow_rev_rt60" : 1,
+      "bow_rev_width" : 0.8,
+      "bow_slide_acc" : 25000,
+      "bow_slide_dull" : 0.35,
+      "bow_slide_noise" : 0,
+      "bow_slide_rate" : 900,
+      "bow_st_width" : 0.3002772177419355,
+      "bow_th_tau" : 0.01736091218382141,
+      "bow_tilt" : 0.331,
+      "bow_tone_tilt" : 0,
+      "bow_tors_c" : 0.050326090597101684,
+      "bow_tors_g" : 0.959677,
+      "bow_tors_ratio" : 4.466529,
+      "bow_v0" : 0.07352921130064047,
+      "bow_v_hi" : 0.14,
+      "bow_v_lo" : 0.065,
+      "bow_vib_cents" : 0,
+      "bow_vib_hz" : 5.5,
+      "bow_w" : 0.632167,
+      "bow_width_smp" : 8.374121263498374,
+      "bow_yinf" : 0.021048,
+      "ctl_fret_accent" : 0,
+      "ctl_fret_warp" : 0.5000635162601627,
+      "ctl_glide_catchup" : 1,
+      "ctl_glide_grace" : 150,
+      "ctl_glide_held" : 0.3,
+      "ctl_glide_on" : 1,
+      "ctl_glide_over" : 0.08,
+      "ctl_glide_rate" : 179.76769012347225,
+      "ctl_ipad_accel_smooth" : 0,
+      "ctl_jc_accel_smooth" : 0,
+      "ctl_strike_window" : 2,
+      "ctl_strum_expr" : 0.41673553719008266,
+      "ctl_strum_thresh" : 1,
+      "ctl_taraf_adapt" : 0,
+      "fx_drive_eq_amount" : 1,
+      "fx_drive_eq_on" : 0,
+      "fx_drive_rev_cut" : 10000,
+      "fx_drive_rev_mix" : 0.3,
+      "fx_drive_rev_on" : 0,
+      "fx_drive_rev_size" : 0.93,
+      "fx_drive_rev_type" : 0,
+      "fx_global_eq_amount" : 1,
+      "fx_global_eq_on" : 1,
+      "fx_global_rev_cut" : 10000,
+      "fx_global_rev_mix" : 0.34739740210843373,
+      "fx_global_rev_on" : 0,
+      "fx_global_rev_size" : 0.4680440512048193,
+      "fx_global_rev_type" : 1,
+      "fx_taraf_eq_amount" : 1,
+      "fx_taraf_eq_on" : 0,
+      "fx_taraf_rev_cut" : 10000,
+      "fx_taraf_rev_mix" : 0.3,
+      "fx_taraf_rev_on" : 0,
+      "fx_taraf_rev_size" : 0.93,
+      "fx_taraf_rev_type" : 0,
+      "fx_voice_eq_amount" : 1,
+      "fx_voice_eq_on" : 0,
+      "fx_voice_rev_cut" : 10000,
+      "fx_voice_rev_mix" : 0.7948512801204819,
+      "fx_voice_rev_on" : 0,
+      "fx_voice_rev_size" : 0.93,
+      "fx_voice_rev_type" : 1,
+      "st_gain" : 0.02987298387096774,
+      "st_pluck_drive" : 1,
+      "st_pluck_level" : 1,
+      "st_pluck_touch" : 1,
+      "st_poly" : 4,
+      "st_rel_t60" : 0.15,
+      "st_taraf" : 4,
+      "tp_cascade" : 1,
+      "tp_drone_cycle" : 2.5,
+      "tp_drone_level" : 1,
+      "tp_gain" : 0.02,
+      "tp_jiva_comp" : 1,
+      "tp_pluck_drive" : 1.4307914402173911,
+      "tp_pluck_level" : 1,
+      "tp_pluck_touch" : 0,
+      "tp_poly" : 6,
+      "tp_rel_t60" : 0.4,
+      "tp_taraf" : 0
+    },
+    "playingSurface" : {
+      "droneRatios" : [
+        0.4999983919528265,
+        0.749999290538299,
+        1.0000001891237713
+      ],
+      "fretSegments" : [
+        {
+          "bottomY" : 0.912,
+          "degreeIndex" : 0,
+          "enabled" : true,
+          "topY" : 0.47,
+          "x" : 0
+        },
+        {
+          "bottomY" : 0.46,
+          "degreeIndex" : 1,
+          "enabled" : true,
+          "topY" : 0.108,
+          "x" : 0.09310940439148145
+        },
+        {
+          "bottomY" : 0.892,
+          "degreeIndex" : 2,
+          "enabled" : true,
+          "topY" : 0.54,
+          "x" : 0.16992500144231237
+        },
+        {
+          "bottomY" : 0.46,
+          "degreeIndex" : 3,
+          "enabled" : true,
+          "topY" : 0.108,
+          "x" : 0.2630344058337938
+        },
+        {
+          "bottomY" : 0.892,
+          "degreeIndex" : 4,
+          "enabled" : true,
+          "topY" : 0.54,
+          "x" : 0.32192809488736235
+        },
+        {
+          "bottomY" : 0.892,
+          "degreeIndex" : 5,
+          "enabled" : true,
+          "topY" : 0.54,
+          "x" : 0.41503749927884376
+        },
+        {
+          "bottomY" : 0.46,
+          "degreeIndex" : 6,
+          "enabled" : true,
+          "topY" : 0.108,
+          "x" : 0.4918530963296747
+        },
+        {
+          "bottomY" : 0.912,
+          "degreeIndex" : 7,
+          "enabled" : true,
+          "topY" : 0.51,
+          "x" : 0.5849625007211562
+        },
+        {
+          "bottomY" : 0.46,
+          "degreeIndex" : 8,
+          "enabled" : true,
+          "topY" : 0.108,
+          "x" : 0.6780719051126377
+        },
+        {
+          "bottomY" : 0.892,
+          "degreeIndex" : 9,
+          "enabled" : true,
+          "topY" : 0.54,
+          "x" : 0.7369655941662062
+        },
+        {
+          "bottomY" : 0.46,
+          "degreeIndex" : 10,
+          "enabled" : true,
+          "topY" : 0.108,
+          "x" : 0.8300749985576875
+        },
+        {
+          "bottomY" : 0.892,
+          "degreeIndex" : 11,
+          "enabled" : true,
+          "topY" : 0.54,
+          "x" : 0.9068905956085185
+        }
+      ],
+      "ghostExtentOctaves" : 1,
+      "primeLimit" : 5,
+      "scalePoints" : [
+        {
+          "den" : 1,
+          "enabled" : true,
+          "label" : "S",
+          "num" : 1,
+          "y" : 0.8333333333333334
+        },
+        {
+          "den" : 15,
+          "enabled" : true,
+          "label" : "r",
+          "num" : 16,
+          "y" : 0.3333333333333333
+        },
+        {
+          "den" : 8,
+          "enabled" : true,
+          "label" : "R",
+          "num" : 9,
+          "y" : 0.8333333333333334
+        },
+        {
+          "den" : 5,
+          "enabled" : true,
+          "label" : "g",
+          "num" : 6,
+          "y" : 0.3333333333333333
+        },
+        {
+          "den" : 4,
+          "enabled" : true,
+          "label" : "G",
+          "num" : 5,
+          "y" : 0.8333333333333334
+        },
+        {
+          "den" : 3,
+          "enabled" : true,
+          "label" : "m",
+          "num" : 4,
+          "y" : 0.8333333333333334
+        },
+        {
+          "den" : 32,
+          "enabled" : true,
+          "label" : "M",
+          "num" : 45,
+          "y" : 0.3333333333333333
+        },
+        {
+          "den" : 2,
+          "enabled" : true,
+          "label" : "P",
+          "num" : 3,
+          "y" : 0.8333333333333334
+        },
+        {
+          "den" : 5,
+          "enabled" : true,
+          "label" : "d",
+          "num" : 8,
+          "y" : 0.3333333333333333
+        },
+        {
+          "den" : 3,
+          "enabled" : true,
+          "label" : "D",
+          "num" : 5,
+          "y" : 0.8333333333333334
+        },
+        {
+          "den" : 9,
+          "enabled" : true,
+          "label" : "n",
+          "num" : 16,
+          "y" : 0.3333333333333333
+        },
+        {
+          "den" : 8,
+          "enabled" : true,
+          "label" : "N",
+          "num" : 15,
+          "y" : 0.8333333333333334
+        }
+      ],
+      "snapPixels" : 24
+    },
+    "savedAt" : "2026-10-10T21:47:49Z",
+    "savedBy" : "TarabdaarMac 1.0 (1)",
+    "tiltMapping" : {
+      "mappings" : {
+        "composite4" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.5
+        },
+        "composite5" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.5
+        },
+        "composite6" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.5
+        },
+        "composite7" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.5
+        },
+        "composite8" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.5
+        },
+        "midiCC71" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.5
+        },
+        "midiCC72" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.5
+        },
+        "midiCC73" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.5
+        },
+        "param:bow_attack_sharpness" : {
+          "bindings" : [
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0
+                },
+                {
+                  "x" : 1,
+                  "y" : -0.27980245231607626
+                }
+              ],
+              "dimension" : 10,
+              "offsetOrigin" : 0
+            }
+          ],
+          "defaultValue" : 0.5
+        },
+        "param:bow_bal" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0
+        },
+        "param:bow_body_scale" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 1.325
+        },
+        "param:bow_expr" : {
+          "bindings" : [
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0.1213939269663773
+                },
+                {
+                  "x" : 0.5,
+                  "y" : 0.4004087430426716
+                },
+                {
+                  "x" : 1,
+                  "y" : 0.9023671899091567
+                }
+              ],
+              "dimension" : 0,
+              "offsetOrigin" : 0.4004087430426716
+            }
+          ],
+          "defaultValue" : 0.5516509160482375
+        },
+        "param:bow_gain" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 1
+        },
+        "param:bow_gut_fc2" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 6250
+        },
+        "param:bow_jt_apex" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 2.6000000000000002e-05
+        },
+        "param:bow_jt_damp" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.5
+        },
+        "param:bow_jt_drive" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.1505
+        },
+        "param:bow_jt_ev_reg" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0
+        },
+        "param:bow_jt_gain" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 1.5
+        },
+        "param:bow_jt_lp" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 10500
+        },
+        "param:bow_jtc_evolve" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.5
+        },
+        "param:bow_pos" : {
+          "bindings" : [
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0.864008953531871
+                },
+                {
+                  "x" : 1,
+                  "y" : 0.525687257346585
+                }
+              ],
+              "dimension" : 15,
+              "offsetOrigin" : 0.9076269712430427
+            },
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0
+                },
+                {
+                  "x" : 1,
+                  "y" : -0.2260516008174387
+                }
+              ],
+              "dimension" : 18,
+              "offsetOrigin" : 0
+            },
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0
+                },
+                {
+                  "x" : 1,
+                  "y" : -0.2126830722070845
+                }
+              ],
+              "dimension" : 10,
+              "offsetOrigin" : 0
+            }
+          ],
+          "defaultValue" : 0.8938427643784786
+        },
+        "param:bow_press" : {
+          "bindings" : [
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : -0.09670895776566757
+                },
+                {
+                  "x" : 1,
+                  "y" : 1
+                }
+              ],
+              "dimension" : 11,
+              "offsetOrigin" : 0
+            },
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0
+                },
+                {
+                  "x" : 1,
+                  "y" : 0.004108480926430458
+                }
+              ],
+              "dimension" : 10,
+              "offsetOrigin" : 0
+            },
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0.0016391348773840964
+                },
+                {
+                  "x" : 1,
+                  "y" : 0.37144499318801083
+                }
+              ],
+              "dimension" : 15,
+              "offsetOrigin" : 0
+            }
+          ],
+          "defaultValue" : 0
+        },
+        "param:bow_tilt" : {
+          "bindings" : [
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0
+                },
+                {
+                  "x" : 1,
+                  "y" : -1
+                }
+              ],
+              "dimension" : 16,
+              "offsetOrigin" : 0
+            }
+          ],
+          "defaultValue" : 0.25556586270871984
+        },
+        "param:ctl_fret_accent" : {
+          "bindings" : [
+
+          ],
+          "defaultValue" : 0.5
+        },
+        "param:ctl_fret_warp" : {
+          "bindings" : [
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0
+                },
+                {
+                  "x" : 1,
+                  "y" : 1
+                }
+              ],
+              "dimension" : 18
+            },
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0
+                },
+                {
+                  "x" : 1,
+                  "y" : -1
+                }
+              ],
+              "dimension" : 17,
+              "offsetOrigin" : 0
+            }
+          ],
+          "defaultValue" : 0.5
+        },
+        "param:ctl_glide_rate" : {
+          "bindings" : [
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 2
+                },
+                {
+                  "x" : 1,
+                  "y" : 55.59690054495911
+                }
+              ],
+              "dimension" : 18,
+              "offsetOrigin" : 2
+            },
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 1.1823058583106274
+                },
+                {
+                  "x" : 1,
+                  "y" : -56.60000851498637
+                }
+              ],
+              "dimension" : 17,
+              "offsetOrigin" : 2
+            }
+          ],
+          "defaultValue" : 101
+        },
+        "param:ctl_strum_expr" : {
+          "bindings" : [
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0
+                },
+                {
+                  "x" : 1,
+                  "y" : 1
+                }
+              ],
+              "dimension" : 20,
+              "inputEnd" : 0,
+              "inputStart" : 0.5
+            },
+            {
+              "controlPoints" : [
+                {
+                  "x" : 0,
+                  "y" : 0
+                },
+                {
+                  "x" : 1,
+                  "y" : 1
+                }
+              ],
+              "dimension" : 19,
+              "inputEnd" : 1,
+              "inputStart" : 0.5
+            }
+          ],
+          "defaultValue" : 0.5
+        }
+      },
+      "restLaw" : 1
+    },
+    "version" : 1
+  },
+  "version" : 2
+}

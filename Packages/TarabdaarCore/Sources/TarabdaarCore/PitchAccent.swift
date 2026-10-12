@@ -26,12 +26,12 @@ public struct FretPitchGrid: Equatable, Sendable {
     /// `[0, 1)`, sorted, deduplicated.
     public let degrees: [Double]
 
-    /// The pitches of an arrangement's enabled frets against the ONE
+    /// The pitches of an arrangement's frets against the ONE
     /// scale's `degrees` (a segment whose degree the scale no longer holds
     /// is skipped, as on the pad).
     public init(tonicHz: Double, arrangement: FretArrangement,
                 degrees: [(ratio: Double, label: String)]) {
-        let ratios = arrangement.segments.filter(\.enabled)
+        let ratios = arrangement.segments
             .compactMap { fretRatio($0, degrees: degrees) }
         self.init(tonicHz: tonicHz, ratios: ratios)
     }

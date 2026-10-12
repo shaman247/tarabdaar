@@ -13,7 +13,7 @@ The scale is the set of `PitchPoint` ratios edited in `ScaleListEditor`: add/rem
 
 **The default scale** is 12 just-intonation degrees (1/1 … 15/8) named in **sargam** — `S r R g G m M P d D n N`. Two copies carry these labels: the bundled `TarabdaarMac/Default.json` that loads, and `PitchScale.defaultJI`, the in-code fallback for a missing resource (and the iPad's scale before its first sync) — **keep them in step**.
 
-**One naming.** A point's `label` is its name **everywhere** the app shows that pitch — frets, drone buttons, the Strings tab's degree dropdown, the Scope tab's gridlines — so renaming a degree here renames it across the app (`scaleLabel(degree:octave:degrees:)` / `scaleLabel(forRatio:degrees:)` in `ScaleDegrees.swift`; octave repeats add `'`/`,`). Concert note names (`Scale.noteName`) are a different axis: they label absolute Hz in the tuning readouts, never scale degrees. Guard: `ScaleLabelTests`.
+**One naming.** A point's `label` is its name **everywhere** the app shows that pitch — frets, drone mappings, the Strings tab's degree dropdown, the Scope tab's gridlines — so renaming a degree here renames it across the app (`scaleLabel(degree:octave:degrees:)` / `scaleLabel(forRatio:degrees:)` in `ScaleDegrees.swift`; octave repeats add `'`/`,`). Concert note names (`Scale.noteName`) are a different axis: they label absolute Hz in the tuning readouts, never scale degrees. Guard: `ScaleLabelTests`.
 
 | Degree | Label | Ratio | Cents from 12-TET |
 |--------|-------|-------|-------------------|

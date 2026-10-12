@@ -4,19 +4,17 @@ import QuartzCore
 import TarabdaarCore
 import SwiftUI
 
-/// The **Fret Pad** tab — the playing surface: freely positioned vertical
+/// The **Fret Pad** tab — the playing surface: frequency-aligned vertical
 /// **frets** over a continuous pitch **field** (`fretFieldLog`). A touch
 /// starting within the Snap distance of a fret and inside its extent snaps to
 /// it; elsewhere it plays the field pitch; drags are continuous (field plus
-/// the onset offset). Editing: drag an endpoint to set the extent, drag the
-/// line to move, shift-click to add on the nearest degree, option-right-click
-/// to delete. Right-click toggles the matching raga string. Plays through
+/// the onset offset). Editing: drag a fret vertically, shift-click to add on
+/// the nearest degree, option-right-click to delete. Right-click toggles the matching raga string. Plays through
 /// `controller.fretPad`, reads the scale + tonic from
 /// `controller.pitchPad`; the arrangement syncs to the iPad's `FretPadViewIOS`
 /// as the `FRET_ARRANGEMENT` TLP event. See [docs/fret-pad.md](../../docs/fret-pad.md).
 struct FretPadView: View {
     @ObservedObject var controller: AppController
-    @ObservedObject var sarangi: SarangiStore
     @ObservedObject var audio: AudioEngine
     /// The note emitter (`fretPad`): `marginPixels`, `sounding`.
     @ObservedObject var engine: PitchPadEngine
@@ -33,7 +31,6 @@ struct FretPadView: View {
 
     init(controller: AppController) {
         self.controller = controller
-        self.sarangi = controller.sarangi
         self.audio = controller.audio
         self.engine = controller.fretPad
         self.pitchPad = controller.pitchPad
@@ -52,16 +49,7 @@ struct FretPadView: View {
                                arrangement: $controller.fretArrangement,
                                degrees: degrees,
                                warp: controller.fretFieldWarp,
-                               ragaRatios: sarangi.state.enabledRagaRatios,
-                               toggleRaga: { degree, octave in
-                                   if sarangi.state.scaleRatios != degrees.map(\.ratio)
-                                       || sarangi.state.tonicHz != pitchPad.tonicHz {
-                                       controller.syncTarabFromScale()
-                                   }
-                                   sarangi.toggleRagaString(degree: degree, octave: octave)
-                               },
                                recorder: recorder,
-                               joyCon: controller.joyCon,
                                chordActive: controller.strumChord,
                                onChordTap: { controller.tapChord($0) },
                                tarafBank: audio.tarafBank,
@@ -77,7 +65,6 @@ struct FretPadView: View {
                         .frame(width: 280)
                 }
             }
-            footer
         }
         .padding(12)
         .alert("Save Scale", isPresented: $showingSaveDialog) {
@@ -95,9 +82,6 @@ struct FretPadView: View {
             TextField("Name", text: $layoutSaveName)
             Button("Cancel", role: .cancel) {}
             Button("Save") { controller.saveFretLayout(name: layoutSaveName) }
-        } message: {
-            Text("Enter a name for this fret layout (positions and snap "
-                 + "zones — the scale is saved separately).")
         }
     }
 
@@ -108,12 +92,10 @@ struct FretPadView: View {
                 scaleMenu
                 layoutMenu
                 Button("Reset to Scale") {
-                    controller.loadFretLayout(preset: .keyboard)
+                    controller.loadFretLayout(preset: .pilu)
                 }
-                .help("Rebuild the default fret layout (C Keyboard) from the current scale: 7 evenly-spaced svara columns, komal/tivra stacked above their shuddha partner — a piano keyboard's key spacing.")
                 Toggle("Perform", isOn: $engine.performanceMode)
                     .toggleStyle(.button)
-                    .help("Clean playing surface: editing off, octave gridlines + labels + endpoint handles hidden, octave-repeat frets shown identically to the editable ones, and the scale editor hidden.")
                 recordControl
                 Spacer()
                 SoundingReadout(sounding: engine.sounding,
@@ -142,10 +124,10 @@ struct FretPadView: View {
                 Button("Save “\(name)”") { pitchPad.saveScale(name: name) }
             }
             Divider()
-            // Full factory reset: the default scale AND the C Keyboard layout.
+            // Full factory reset: the default scale AND the Pilu layout.
             Button("Reset to Default") {
                 pitchPad.resetToDefault()
-                controller.loadFretLayout(preset: .keyboard)
+                controller.loadFretLayout(preset: .pilu)
             }
             Menu("Scales") {
                 ForEach(ScalePreset.allCases) { preset in
@@ -199,7 +181,6 @@ struct FretPadView: View {
             Menu("Built-in") {
                 ForEach(FretLayoutPreset.allCases) { preset in
                     Button(preset.label) { controller.loadFretLayout(preset: preset) }
-                        .help(preset.summary)
                 }
             }
 
@@ -310,7 +291,7 @@ struct FretPadView: View {
             spacing: 6, sliderWidth: 80,
             readoutFont: .padCaption.monospacedDigit(),
             readoutWidth: Typography.scaledWidth(36))
-        .help("How strongly the frets warp the pitch space around them (the ctl_fret_warp parameter — also on the Parameters tab, bindable to a tilt/stick axis for live morphing): 0 = linear (pitch moves at a constant rate between frets); higher = pitch plateaus near each fret and transitions quickly through the middle, so a straight slide between two frets traces a logistic curve. The readout shows the LIVE value (binding included). Out of Perform mode the contour lines show the resulting territories.")
+        .help("How strongly the frets warp the pitch space around them (the ctl_fret_warp parameter — also on the Parameters tab, bindable to a tilt/stick axis for live morphing): 0 = linear (pitch moves at a constant rate between frets); higher = pitch plateaus near each fret and transitions quickly through the middle, so a straight slide between two frets traces a logistic curve. The readout shows the LIVE value (binding included).")
     }
 
     /// The tonic, edited here only: **Hz** (the app's one absolute pitch) and
@@ -362,17 +343,6 @@ struct FretPadView: View {
         let c = pitchPad.tonicCents
         return abs(c) < 0.05 ? "" : String(format: "%+.1f¢", c)
     }
-
-    private var footer: some View {
-        HStack {
-            Text(engine.performanceMode
-                 ? "Perform: start on a fret (inside its height) to snap to its pitch; start elsewhere to approach the note freely (pitch interpolates between frets). Drags always glide continuously."
-                 : "Edit: drag a fret = move (any direction)  ·  drag an endpoint = set its extent  ·  drag empty space = play  ·  Shift-click = add a fret  ·  Option-right-click = delete  ·  Faint frets are octave repeats (read-only)")
-                .font(.padCaption2)
-                .foregroundStyle(.secondary)
-            Spacer()
-        }
-    }
 }
 
 // MARK: - Pad surface
@@ -383,38 +353,21 @@ private struct FretPadSurface: View {
     let degrees: [(ratio: Double, label: String)]
     /// The LIVE fret warp (`controller.fretFieldWarp`, binding included).
     let warp: Double
-    let ragaRatios: [Double]
-    let toggleRaga: (Int, Int) -> Void
     /// Stroke recorder for offline assist fitting (no-op unless armed).
     let recorder: FretGestureRecorder
-    /// NOT `@ObservedObject` (stick axes publish at input rate); only
-    /// `$connectedName` is tapped via `onReceive`.
-    let joyCon: JoyConInput
     /// The active strum chord and the chord bar's tap route.
     let chordActive: ChordSelection?
     let onChordTap: (ChordSelection) -> Void
     let tarafBank: TarafBank
     let pluckTaraf: (UInt32, UInt8) -> Void
 
-    /// While a Joy-Con is attached its arrows pluck the drones, so the
-    /// on-screen buttons hide (visual + hit-test).
-    @State private var joyConConnected = false
-
     @State private var activeTouchId: Int? = nil
     @State private var touchCounter: Int = 0
-    /// The segment being edited (moved or resized), and which endpoint.
-    @State private var editGrab: FretGrab = .none
-    /// Pixel delta (segment x/mid-y − click) captured at mouse-down for a move.
-    @State private var moveOffsetX: CGFloat = 0
-    @State private var moveOffsetY: CGFloat = 0
     /// The touch pipeline (onset, drag, settle tick, release).
     @State private var player = FretTouchPlayer()
-    /// Drone button currently held (hit-tested in `handleDown`).
-    @State private var droneDown: Int? = nil
 
     private let edgePad: CGFloat = 16
     private let handleHitRadius: CGFloat = 9
-    private let minHeight: Double = 0.02
 
     /// Horizontal onset-snap half-width in pixels (the Snap slider).
     private var snapDistance: CGFloat { CGFloat(engine.marginPixels) }
@@ -425,81 +378,47 @@ private struct FretPadSurface: View {
                               height: max(1, geo.size.height - 2 * edgePad))
             // The playable band — the frets' coordinate space (the iPad's too).
             let band = fretPadBandRect(in: size)
-            let pluckWidth = joyConConnected ? band.width
-                : max(1, (droneButtonRects(size: size).first?.minX ?? band.maxX) - 8)
             // `body` does NOT re-run during a glide (fills live on `SoundingState`).
             let placements = fretPlacements(
-                arrangement: arrangement.withRagaStrings(ratios: ragaRatios, degrees: degrees),
+                arrangement: arrangement,
                 degrees: degrees, size: band.size)
-            let basePlacements = placements.filter { !$0.isGhost }
+            let editPlacements = engine.performanceMode ? placements : fretPlacements(
+                arrangement: arrangement, degrees: degrees, size: band.size, includeUnassigned: true)
             let chordCells = chordBarCells(arrangement: arrangement,
                                            degrees: degrees,
                                            chords: scaleChords(degrees: degrees),
                                            size: size)
-            // Perform mode: no gridlines, labels or handles.
+            // Perform mode hides assignment candidates and labels.
             let perform = engine.performanceMode
-            let extent = max(0, arrangement.ghostExtentOctaves)
 
             ZStack(alignment: .topLeading) {
                 Color.black
 
                 Canvas { ctx, _ in
                     ctx.translateBy(x: edgePad, y: edgePad)
-                    // Band border — the playable strip against the dead space.
-                    ctx.strokeFretBand(band)
+                    ctx.fillFretBand(band)
                     ctx.translateBy(x: band.minX, y: band.minY)
 
-                    // Octave-band boundaries (hidden in perform).
-                    if !perform {
-                        let lo = Int((-extent).rounded(.up))
-                        let hi = Int((1 + extent).rounded(.down))
-                        for k in lo...hi {
-                            let x = fretPixelX(forBandX: Double(k),
-                                               ghostExtentOctaves: extent,
-                                               width: band.width)
-                            var line = Path()
-                            line.move(to: CGPoint(x: x, y: 0))
-                            line.addLine(to: CGPoint(x: x, y: band.height))
-                            ctx.stroke(line, with: .color(.white.opacity(0.10)),
-                                       lineWidth: 1)
-                        }
-                        // Pitch-field contours: territory boundaries plus
-                        // fainter quarter-pitch lines.
-                        for c in fretFieldContours(placements: placements,
-                                                   size: band.size,
-                                                   warp: warp) {
-                            guard c.points.count >= 2 else { continue }
-                            var line = Path()
-                            line.move(to: c.points[0])
-                            for p in c.points.dropFirst() { line.addLine(to: p) }
-                            ctx.stroke(
-                                line,
-                                with: .color(.white.opacity(c.isBoundary ? 0.28 : 0.10)),
-                                lineWidth: 1)
-                        }
-                    }
+                    ctx.strokeFretPitchGrid(degrees: degrees,
+                                            ghostExtentOctaves: arrangement.ghostExtentOctaves,
+                                            size: band.size)
 
-                    for p in placements {
+                    for p in editPlacements.sorted(by: { !$0.isEnabled && $1.isEnabled }) {
                         let dim = !perform && p.isGhost
-                        let hue = (p.hasRagaString
+                        let hue = (p.isEnabled
                             ? pitchColor(forRatio: p.ratio, lightness: 0.82, chroma: 0.20)
-                            : Color.gray).opacity(dim ? 0.45 : 1.0)
+                            : Color.gray.opacity(0.35)).opacity(dim ? 0.45 : 1.0)
                         ctx.stroke(p.linePath, with: .color(hue), lineWidth: dim ? 1 : 1.5)
                         if !perform {
-                            if !p.isGhost {
-                                for y in [p.topY, p.bottomY] {
-                                    let r: CGFloat = 2.5
-                                    let dot = CGRect(x: p.x - r, y: y - r,
-                                                     width: 2 * r, height: 2 * r)
-                                    ctx.fill(Path(ellipseIn: dot),
-                                             with: .color(.white.opacity(0.85)))
-                                }
-                            }
-                            ctx.draw(
+                            let label = ctx.resolve(
                                 Text(p.name)
                                     .font(.padSmall(12, weight: .semibold))
-                                    .foregroundColor(.white.opacity(p.isGhost ? 0.5 : 1.0)),
-                                at: CGPoint(x: p.x, y: max(8, p.topY - 12)))
+                                    .foregroundColor(hue))
+                            let labelWidth = label.measure(in: band.size).width
+                            ctx.draw(label,
+                                at: CGPoint(x: min(p.x + 4, band.width - labelWidth - 2),
+                                            y: (p.topY + p.bottomY) / 2),
+                                anchor: .leading)
                         }
                     }
                 }
@@ -515,42 +434,30 @@ private struct FretPadSurface: View {
                                edgePad: edgePad, cornerRadius: 5,
                                fontSize: 12)
 
-                // Drone buttons (display only). Hidden while a Joy-Con is
-                // attached (its arrows pluck the drones).
-                if !joyConConnected {
-                    DroneButtonsVisual(ratios: arrangement.droneRatios,
-                                       degrees: degrees,
-                                       held: droneDown.map { [$0] } ?? [],
-                                       size: size, edgePad: edgePad,
-                                       cornerRadius: 8, fontSize: 12)
-                }
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .clipped()
-            .onReceive(joyCon.$connectedName.receive(on: DispatchQueue.main)) {
-                joyConConnected = ($0 != nil)
+            .onChange(of: warp) { _ in
+                player.updateWarp(context: playContext(placements: placements, size: band.size),
+                                  time: CACurrentMediaTime())
             }
             .overlay(
                 FretPadMouseCapture(
                     onMouseDown: { pt in
                         handleDown(at: toLocal(pt), placements: placements,
-                                   base: basePlacements, size: size, band: band,
+                                   editable: editPlacements, size: size, band: band,
                                    chordCells: chordCells)
                     },
                     onMouseDragged: { pt in
                         handleDrag(at: toLocal(pt), placements: placements,
                                    band: band)
                     },
-                    onMouseUp: { handleUp() },
-                    onRightMouseDown: { pt in
-                        handleRightDown(at: toLocal(pt), placements: placements,
-                                        band: band)
-                    }
+                    onMouseUp: { handleUp() }
                 )
             )
             .overlay(alignment: .topLeading) {
                 TarafPluckStrip(bank: tarafBank, scale: engine.scale, pluck: pluckTaraf)
-                    .frame(width: pluckWidth)
+                    .frame(width: band.width)
                     .offset(x: edgePad + band.minX,
                             y: edgePad + band.minY - TarafPluckStrip.height)
             }
@@ -560,16 +467,8 @@ private struct FretPadSurface: View {
     // MARK: Interactions
 
     private func handleDown(at spt: CGPoint, placements: [FretPlacement],
-                            base: [FretPlacement], size: CGSize, band: CGRect,
+                            editable: [FretPlacement], size: CGSize, band: CGRect,
                             chordCells: [ChordBarCell]) {
-        // Drone buttons first (full-surface coords): a click starting in a
-        // button is a drone press. Skipped while hidden (Joy-Con attached).
-        if !joyConConnected,
-           let d = droneButtonRects(size: size).firstIndex(where: { $0.contains(spt) }) {
-            droneDown = d
-            engine.setDrone(d, pressed: true)
-            return
-        }
         // Chord bar: a click in a cell toggles the strum chord (selection only).
         if let cell = chordCells.first(where: { $0.rect.contains(spt) }) {
             onChordTap(ChordSelection(degree: cell.degreeIndex,
@@ -586,27 +485,8 @@ private struct FretPadSurface: View {
             return
         }
 
-        // Edit mode: editing is always on (no modifier needed).
-        let shift = NSEvent.modifierFlags.contains(.shift)
-        let grab = fretGrab(at: pt, placements: base, handleRadius: handleHitRadius)
-
-        // Shift on empty space → add a fret on the nearest degree.
-        if shift, grab == .none {
-            addSegment(at: pt, placements: placements, size: band.size)
-            return
-        }
-
-        // On a fret → move / resize (sound its exact pitch while adjusting).
-        if grab != .none {
-            editGrab = grab
-            if case .move(let id) = grab,
-               let p = base.first(where: { $0.segmentID == id }) {
-                moveOffsetX = p.x - pt.x
-                moveOffsetY = (p.topY + p.bottomY) / 2 - pt.y
-            }
-            if let p = grabbedPlacement(grab, base: base) {
-                beginSounding(weights: [p.id: 1.0], ratio: p.ratio)
-            }
+        if let fret = fretAssignment(at: pt, placements: editable, hitRadius: handleHitRadius) {
+            arrangement.toggle(degreeIndex: fret.degreeIndex, row: fret.row)
             return
         }
 
@@ -635,40 +515,9 @@ private struct FretPadSurface: View {
 
     private func handleDrag(at spt: CGPoint, placements: [FretPlacement],
                             band: CGRect) {
-        // A press holding a drone button never glides or edits.
-        guard droneDown == nil else { return }
         // Band-local; a drag may wander out (the field clamps, edits clamp 0..1).
         let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
         let size = band.size
-        switch editGrab {
-        case .move(let id):
-            guard let idx = segmentIndex(id) else { return }
-            let h = arrangement.segments[idx].height
-            var mid = Double((pt.y + moveOffsetY) / size.height)
-            mid = min(max(h / 2, mid), 1 - h / 2)
-            arrangement.segments[idx].topY = mid - h / 2
-            arrangement.segments[idx].bottomY = mid + h / 2
-            // A move drags x too (clamped to the base band).
-            arrangement.segments[idx].x = clamp01(fretBandX(
-                atPixelX: pt.x + moveOffsetX,
-                ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                width: size.width))
-            return
-        case .resizeTop(let id):
-            guard let idx = segmentIndex(id) else { return }
-            let bottom = arrangement.segments[idx].bottomY
-            arrangement.segments[idx].topY =
-                min(clamp01(Double(pt.y / size.height)), bottom - minHeight)
-            return
-        case .resizeBottom(let id):
-            guard let idx = segmentIndex(id) else { return }
-            let top = arrangement.segments[idx].topY
-            arrangement.segments[idx].bottomY =
-                max(clamp01(Double(pt.y / size.height)), top + minHeight)
-            return
-        case .none:
-            break
-        }
         // Playing: the player glides (field pitch + onset offset + the
         // assist's slewed correction; never a re-snap mid-drag).
         guard let touch = activeTouchId else { return }
@@ -678,93 +527,15 @@ private struct FretPadSurface: View {
     }
 
     private func handleUp() {
-        if let d = droneDown {
-            droneDown = nil
-            engine.setDrone(d, pressed: false)
-            return
-        }
         if let touch = activeTouchId {
-            // an edit-mode sounding never went through `playAt`: bind here too
             player.engine = engine
             player.recorder = recorder
             player.end(touchId: touch, time: CACurrentMediaTime())
         }
         activeTouchId = nil
-        editGrab = .none
-        moveOffsetX = 0
-        moveOffsetY = 0
-    }
-
-    /// Right-click toggles the raga pitch class across all octave copies.
-    /// Option-right-click retains base-fret deletion in edit mode.
-    private func handleRightDown(at spt: CGPoint, placements: [FretPlacement],
-                                 band: CGRect) {
-        let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
-        guard band.contains(spt) else { return }
-        let deleting = NSEvent.modifierFlags.contains(.option)
-        guard !deleting || !engine.performanceMode else { return }
-        let candidates = placements.filter {
-            (!deleting || !$0.isGhost) && abs(pt.x - $0.x) <= handleHitRadius
-                && pt.y >= $0.topY - handleHitRadius && pt.y <= $0.bottomY + handleHitRadius
-        }
-        guard let fret = candidates.min(by: {
-            hypot(pt.x - $0.x, max($0.topY - pt.y, pt.y - $0.bottomY, 0))
-                < hypot(pt.x - $1.x, max($1.topY - pt.y, pt.y - $1.bottomY, 0))
-        }), let idx = segmentIndex(fret.segmentID) else { return }
-        if deleting {
-            arrangement.segments.remove(at: idx)
-        } else if let baseRatio = fretRatio(arrangement.segments[idx], degrees: degrees) {
-            toggleRaga(arrangement.segments[idx].degreeIndex,
-                       Int(log2(fret.ratio / baseRatio).rounded()))
-        }
-    }
-
-    /// Shift-click: add a fret at the click, on the degree nearest the field
-    /// pitch there (circular within the octave), default extent.
-    private func addSegment(at pt: CGPoint, placements: [FretPlacement],
-                            size: CGSize) {
-        guard !degrees.isEmpty else { return }
-        let fieldLog = fretFieldLog(at: pt, placements: placements,
-                                    warp: warp) ?? 0
-        let folded = fieldLog - fieldLog.rounded(.down)
-        var bestIndex = 0
-        var bestDist = Double.infinity
-        for (i, deg) in degrees.enumerated() {
-            let d0 = abs(log2(deg.ratio) - folded)
-            let d = min(d0, 1 - d0)
-            if d < bestDist { bestDist = d; bestIndex = i }
-        }
-        let x = clamp01(fretBandX(atPixelX: pt.x,
-                                  ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                                  width: size.width))
-        let cy = clamp01(Double(pt.y / size.height))
-        let half = 0.075
-        arrangement.segments.append(FretSegment(degreeIndex: bestIndex, x: x,
-                                                topY: clamp01(cy - half),
-                                                bottomY: clamp01(cy + half)))
     }
 
     // MARK: Helpers
-
-    private func beginSounding(weights: [String: Double], ratio: Double) {
-        let touch = nextTouchId()
-        activeTouchId = touch
-        engine.noteOn(touchId: touch, ratio: ratio, weights: weights)
-    }
-
-    private func grabbedPlacement(_ grab: FretGrab,
-                                  base: [FretPlacement]) -> FretPlacement? {
-        let id: UUID?
-        switch grab {
-        case .move(let i), .resizeTop(let i), .resizeBottom(let i): id = i
-        case .none: id = nil
-        }
-        return id.flatMap { gid in base.first { $0.segmentID == gid } }
-    }
-
-    private func segmentIndex(_ id: UUID) -> Int? {
-        arrangement.segments.firstIndex(where: { $0.id == id })
-    }
 
     private func toLocal(_ pt: CGPoint) -> CGPoint {
         CGPoint(x: pt.x - edgePad, y: pt.y - edgePad)
@@ -784,14 +555,12 @@ private struct FretPadMouseCapture: NSViewRepresentable {
     let onMouseDown: (CGPoint) -> Void
     let onMouseDragged: (CGPoint) -> Void
     let onMouseUp: () -> Void
-    let onRightMouseDown: (CGPoint) -> Void
 
     func makeNSView(context: Context) -> CaptureView {
         let v = CaptureView()
         v.onMouseDown = onMouseDown
         v.onMouseDragged = onMouseDragged
         v.onMouseUp = onMouseUp
-        v.onRightMouseDown = onRightMouseDown
         return v
     }
 
@@ -799,14 +568,12 @@ private struct FretPadMouseCapture: NSViewRepresentable {
         v.onMouseDown = onMouseDown
         v.onMouseDragged = onMouseDragged
         v.onMouseUp = onMouseUp
-        v.onRightMouseDown = onRightMouseDown
     }
 
     final class CaptureView: NSView {
         var onMouseDown: ((CGPoint) -> Void)?
         var onMouseDragged: ((CGPoint) -> Void)?
         var onMouseUp: (() -> Void)?
-        var onRightMouseDown: ((CGPoint) -> Void)?
 
         override var isFlipped: Bool { true }
 
@@ -822,9 +589,6 @@ private struct FretPadMouseCapture: NSViewRepresentable {
             onMouseUp?()
         }
 
-        override func rightMouseDown(with event: NSEvent) {
-            onRightMouseDown?(convert(event.locationInWindow, from: nil))
-        }
     }
 }
 

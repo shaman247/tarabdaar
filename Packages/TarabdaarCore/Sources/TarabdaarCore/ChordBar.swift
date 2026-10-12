@@ -239,8 +239,8 @@ public func shepardChordNotes(
 
 /// The chord bar's rectangle in the FULL surface's coordinates: the dead
 /// strip under the playable band, inset a little from the band and the
-/// surface's bottom edge. Shared by both platforms (like
-/// `droneButtonRects`) so layout and hit-tests can never disagree.
+/// surface's bottom edge. Shared by both platforms so layout and hit-tests
+/// can never disagree.
 public func chordBarRect(in size: CGSize) -> CGRect {
     let band = fretPadBandRect(in: size)
     let top = band.maxY + 8
@@ -293,16 +293,17 @@ public func chordBarCells(arrangement: FretArrangement,
         let shift: Int
     }
     var entries: [Entry] = []
-    for segment in arrangement.segments where segment.enabled {
+    for segment in arrangement.segments {
         guard segment.degreeIndex >= 0,
               segment.degreeIndex < degrees.count,
-              segment.degreeIndex < chords.count else { continue }
+              segment.degreeIndex < chords.count,
+              let ratio = fretRatio(segment, degrees: degrees) else { continue }
         for shift in -shifts...shifts {
-            let x = fretPixelX(forBandX: segment.x + Double(shift),
+            let x = fretPixelX(forBandX: log2(ratio) + Double(shift),
                                ghostExtentOctaves: extent, width: size.width)
             guard x >= -1, x <= size.width + 1 else { continue }
             entries.append(Entry(x: x,
-                                 centerY: (segment.topY + segment.bottomY) / 2,
+                                 centerY: segment.y,
                                  degreeIndex: segment.degreeIndex,
                                  shift: shift))
         }

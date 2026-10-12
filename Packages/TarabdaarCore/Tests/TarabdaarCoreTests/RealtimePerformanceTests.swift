@@ -11,7 +11,12 @@ final class RealtimePerformanceTests: XCTestCase {
         try checkFullBank(ragaCount: 12)
     }
 
-    private func checkFullBank(ragaCount: Int) throws {
+    /// Fitted correction and convolution remain within the full physical bank callback budget.
+    func testFittedObservationFullBankRealtime() throws {
+        try checkFullBank(ragaCount: 12, fitted: true)
+    }
+
+    private func checkFullBank(ragaCount: Int, fitted: Bool = false) throws {
         let source = StringVoiceSource()
         let defaults = Presets.state(.sarangiPilu).resolvedStrings
         let raga = defaults.filter { !$0.chromatic }
@@ -22,6 +27,12 @@ final class RealtimePerformanceTests: XCTestCase {
         let rows = engine.jtDualRows.sorted()
         XCTAssertEqual(rows.count, ragaCount)
         source.setEngine(engine, crossfadeMs: 0)
+        if fitted {
+            for key in ["bow_fit_timbre", "bow_fit_response", "bow_fit_ring", "bow_fit_room"] {
+                source.setControl(key, 1)
+            }
+            source.setControl("bow_fit_shelf_db", 4)
+        }
         let frames = Int(Config.preferredOutputBufferFrames), scale = 256/frames
         let count = 900*scale, interval = Double(frames)/48000
         var left = [Float](repeating: 0, count: frames), right = left
@@ -40,6 +51,11 @@ final class RealtimePerformanceTests: XCTestCase {
             }
             if block % (40*scale) == 0 {
                 source.setControl("bow_jt_dual_select", Double(block % (200*scale))/Double(200*scale))
+            }
+            if fitted && block % (10*scale) == 0 {
+                source.setControl("bow_fit_timbre", 0.75 + 0.25*sin(Double(block)/80))
+                source.setControl("bow_fit_response", 0.75 + 0.25*cos(Double(block)/80))
+                source.setControl("bow_fit_room_high_db", 6*sin(Double(block)/100))
             }
             if block == 200*scale { source.setControl("bow_jt_dual_lp", 4000) }
             if block == 500*scale { source.setControl("bow_jt_dual_lp", 20000) }

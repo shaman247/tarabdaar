@@ -21,7 +21,7 @@ extension FretPlacement {
 ///
 /// All of these are DISPLAY ONLY (`allowsHitTesting(false)`): presses are
 /// hit-tested in each surface's own touch handler against the same
-/// geometry (`droneButtonRects`, `chordBarCells`), never through SwiftUI
+/// geometry (`chordBarCells`), never through SwiftUI
 /// gestures, so they cannot interfere with melody multitouch.
 
 // MARK: - Chord bar
@@ -74,66 +74,41 @@ public struct ChordBarVisual: View {
     }
 }
 
-// MARK: - Drone buttons
+// MARK: - Band background and pitch grid
 
-/// The drone buttons (`droneButtonRects`), named by the scale
-/// (`scaleLabel(forRatio:)`) and tinted by pitch.
-public struct DroneButtonsVisual: View {
-    public let ratios: [Double]
-    /// The scale's degrees — the buttons take their names from it.
-    public let degrees: [(ratio: Double, label: String)]
-    public let held: Set<Int>
-    public let size: CGSize
-    public let edgePad: CGFloat
-    public let cornerRadius: CGFloat
-    public let fontSize: CGFloat
-
-    public init(ratios: [Double],
-                degrees: [(ratio: Double, label: String)],
-                held: Set<Int>, size: CGSize, edgePad: CGFloat,
-                cornerRadius: CGFloat, fontSize: CGFloat) {
-        self.ratios = ratios
-        self.degrees = degrees
-        self.held = held
-        self.size = size
-        self.edgePad = edgePad
-        self.cornerRadius = cornerRadius
-        self.fontSize = fontSize
-    }
-
-    public var body: some View {
-        let rects = droneButtonRects(size: size)
-        ZStack(alignment: .topLeading) {
-            ForEach(rects.indices, id: \.self) { i in
-                let ratio = i < ratios.count ? ratios[i] : 1.0
-                let hue = pitchColor(forRatio: ratio, lightness: 0.75,
-                                     chroma: 0.17)
-                let r = rects[i]
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .fill(hue.opacity(held.contains(i) ? 0.9 : 0.25))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: cornerRadius)
-                            .stroke(hue.opacity(0.8), lineWidth: 1)
-                    )
-                    .overlay(
-                        Text(scaleLabel(forRatio: ratio, degrees: degrees))
-                            .font(.padSmall(fontSize, weight: .bold))
-                            .foregroundColor(.white)
-                    )
-                    .frame(width: r.width, height: r.height)
-                    .offset(x: edgePad + r.minX, y: edgePad + r.minY)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-}
-
-// MARK: - Band border
+private let fretRowShade = 0.035
 
 public extension GraphicsContext {
-    /// The playable band's border against the dead space around it.
-    func strokeFretBand(_ band: CGRect) {
-        stroke(Path(band), with: .color(.white.opacity(0.12)), lineWidth: 1)
+    /// Row backgrounds, with brighter overlaps and no enclosing border.
+    func fillFretBand(_ band: CGRect) {
+        for row in FretRow.allCases {
+            let rect = CGRect(x: band.minX, y: band.minY + (row.y - FretSegment.height / 2) * band.height,
+                              width: band.width, height: FretSegment.height * band.height)
+            fill(Path(rect), with: .color(.white.opacity(fretRowShade)))
+        }
+    }
+
+    /// Scale-pitch guides span the band, including unassigned pitches and octave copies.
+    func strokeFretPitchGrid(degrees: [(ratio: Double, label: String)],
+                             ghostExtentOctaves: Double, size: CGSize) {
+        let extent = max(0, ghostExtentOctaves)
+        for degree in degrees where degree.ratio.isFinite && degree.ratio > 0 {
+            let pitch = log2(degree.ratio)
+            let tonic = abs(pitch - pitch.rounded()) < 1e-9
+            let shade = tonic ? 0.13 : 0.10
+            let first = Int(ceil(-extent - pitch))
+            let last = Int(floor(1 + extent - pitch))
+            guard first <= last else { continue }
+            for octave in first...last {
+                let x = fretPixelX(forBandX: pitch + Double(octave),
+                                   ghostExtentOctaves: extent, width: size.width)
+                var line = Path()
+                line.move(to: CGPoint(x: x, y: 0))
+                line.addLine(to: CGPoint(x: x, y: size.height))
+                // Opaque gray keeps the guide's shade constant across both backgrounds.
+                stroke(line, with: .color(Color(.sRGB, white: shade, opacity: 1)), lineWidth: 1)
+            }
+        }
     }
 }
 
@@ -221,12 +196,15 @@ public extension FretGestureRecorder.Context {
             frets: placements.map {
                 .init(id: $0.id, log2Ratio: log2($0.ratio), x: Double($0.x),
                       topY: Double($0.topY), bottomY: Double($0.bottomY),
-                      ghost: $0.isGhost)
+                      ghost: $0.isGhost, row: $0.row.rawValue)
             },
             snapDistance: Double(snapDistance),
             ghostExtentOctaves: ghostExtentOctaves,
             width: Double(size.width), height: Double(size.height),
             assistParams: ["fieldWarp": fieldWarp,
+                           "amount": assist.amount,
+                           "slewCap": assist.slewCap,
+                           "correctionDecayPx": assist.correctionDecayPx,
                            "speedFloor": assist.speedFloor,
                            "speedCeiling": assist.speedCeiling,
                            "speedTau": assist.speedTau,

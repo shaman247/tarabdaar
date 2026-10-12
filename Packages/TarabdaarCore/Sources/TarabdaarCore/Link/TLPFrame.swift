@@ -14,8 +14,8 @@ public enum TLP {
     /// Protocol version — both apps ship in lockstep; the HELLO range check
     /// refuses a mismatched peer cleanly (the symptom otherwise: "drones and
     /// tilt work, touches are silent").
-    public static let versionMin: UInt16 = 21
-    public static let versionMax: UInt16 = 21
+    public static let versionMin: UInt16 = 25
+    public static let versionMax: UInt16 = 25
     /// Hard cap on an encoded frame.
     public static let maxFrameBytes = 1024
     /// HELLO magic 'TRBL' (LE u32).
@@ -227,7 +227,7 @@ public struct TLPNoteControls: Equatable, Sendable {
 }
 
 /// Mac→iPad display frame, with note-active / expression / pressure / position
-/// bytes appended after accelLevel. Only connected, fieldWarp, and octave act on the pad.
+/// bytes appended after accelLevel, followed by the resolved fret-assist controls.
 public struct TLPJoyConState: Equatable, Sendable {
     public static let flagStickLive: UInt8 = 1 << 0
     public static let flagBodyLive: UInt8 = 1 << 1
@@ -267,6 +267,7 @@ public struct TLPJoyConState: Equatable, Sendable {
     public var accel3: UInt8
     public var accelLevel: UInt8
     public var noteControls: TLPNoteControls
+    public var fretAssist: FretAssistSettings
 
     public init(flags: UInt8, stateSeq: UInt16, timestampUs: UInt32,
                 stickX: UInt8, stickY: UInt8, wrist1: UInt8, wrist2: UInt8,
@@ -277,7 +278,8 @@ public struct TLPJoyConState: Equatable, Sendable {
                 wristRate1: UInt8 = 128, wristRate2: UInt8 = 128,
                 wristRate3: UInt8 = 128, accel1: UInt8 = 128,
                 accel2: UInt8 = 128, accel3: UInt8 = 128,
-                accelLevel: UInt8 = 0, noteControls: TLPNoteControls = .idle) {
+                accelLevel: UInt8 = 0, noteControls: TLPNoteControls = .idle,
+                fretAssist: FretAssistSettings = FretAssistSettings()) {
         self.flags = flags
         self.stateSeq = stateSeq
         self.timestampUs = timestampUs
@@ -303,6 +305,7 @@ public struct TLPJoyConState: Equatable, Sendable {
         self.accel3 = accel3
         self.accelLevel = accelLevel
         self.noteControls = noteControls
+        self.fretAssist = fretAssist
     }
 }
 
@@ -396,6 +399,9 @@ extension TLPFrame {
                                     s.accelLevel, s.noteControls.active ? 1 : 0,
                                     s.noteControls.expression, s.noteControls.pressure,
                                     s.noteControls.position])
+            for control in FretAssistControl.allCases {
+                out.appendLE(Float(s.fretAssist[control]).bitPattern)
+            }
         case .event(let seq, let e):
             out.append(typeByte)
             out.appendLE(seq)
@@ -480,9 +486,19 @@ extension TLPFrame {
                   let r3 = r.u8(), let x1 = r.u8(), let x2 = r.u8(),
                   let x3 = r.u8(), let al = r.u8(),
                   let noteActive = r.u8(), noteActive <= 1,
-                  let expression = r.u8(), let pressure = r.u8(), let position = r.u8(),
-                  r.isAtEnd
+                  let expression = r.u8(), let pressure = r.u8(), let position = r.u8()
             else { return nil }
+            var assist = FretAssistSettings()
+            for control in FretAssistControl.allCases {
+                guard let bits = r.u32() else { return nil }
+                let value = Double(Float(bitPattern: bits))
+                let spec = ParamRegistry.spec(control.key)!
+                guard value.isFinite,
+                      value >= Double(Float(spec.lo)), value <= Double(Float(spec.hi))
+                else { return nil }
+                assist[control] = value
+            }
+            guard r.isAtEnd else { return nil }
             return .joyConState(TLPJoyConState(
                 flags: flags, stateSeq: seq, timestampUs: ts,
                 stickX: sx, stickY: sy, wrist1: w1, wrist2: w2,
@@ -491,7 +507,8 @@ extension TLPFrame {
                 wristRate1: r1, wristRate2: r2, wristRate3: r3,
                 accel1: x1, accel2: x2, accel3: x3, accelLevel: al,
                 noteControls: TLPNoteControls(active: noteActive != 0,
-                    expression: expression, pressure: pressure, position: position)))
+                    expression: expression, pressure: pressure, position: position),
+                fretAssist: assist))
         default:
             guard type >= 0x01, type <= 0x3F, let seq = r.u16() else { return nil }
             let event: TLPEvent

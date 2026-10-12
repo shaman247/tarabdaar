@@ -37,6 +37,10 @@ public final class BowEngine {
     private var gainPrev = 1.0
     private var gainPrimed = false
 
+    let fitted: UnsafeMutableRawPointer = BowFitAsset.shared.create()
+    var fitTargets: [Double] = [0, 0, 1, 30, 0, 0, 0, 0, 0, 0]
+    var fitDirty = false
+    private var fitForce: UnsafeMutablePointer<Double>
     var pkernel: UnsafeMutableRawPointer?     // bow_kernel_poly.c
     private var dec: HalfBandDecimator
     private var radFIR: FIRFilter?
@@ -168,6 +172,11 @@ public final class BowEngine {
                 reverbMix: Double, reverbWidth: Double,
                 maxFrames: Int = 4096,
                 maxPoly: Int = 1) {
+        self.fitForce = .allocate(capacity: maxFrames * 2)
+        self.fitForce.initialize(repeating: 0, count: maxFrames * 2)
+        let fitKeys = ["timbre", "response", "memory", "smooth_ms", "room", "room_low_db", "room_mid_db", "room_high_db", "ring", "shelf_db"]
+        for i in fitKeys.indices { fitTargets[i] = bp.v("bow_fit_" + fitKeys[i], fitTargets[i]) }
+        fitDirty = true
         self.sr = sr
         osFactor = max(1, Int(bp.v("bow_os", 2.0).rounded()))
         // the decimator is 2:1 — no other oversampling factor is supported
@@ -552,6 +561,8 @@ public final class BowEngine {
     var liveRampArmed = false
 
     deinit {
+        bow_fit_destroy(fitted)
+        fitForce.deallocate()
         meterChromatic.deallocate()
         meterRaga.deallocate()
         if let pk = pkernel { bow_poly_free(pk) }
@@ -586,6 +597,8 @@ public final class BowEngine {
             for i in 0..<n { outL[i] = 0; outR[i] = 0 }
             return
         }
+        updateFittedControls()
+        bow_poly_observation_force(pk, fitForce)
         applyPendingAxisTransforms()
         if !settlingForPublication { mapper.snapshotPoly(into: &polySnap) }
         // Melody follower: target = the HIGHEST gated note (bend included);
@@ -798,9 +811,13 @@ public final class BowEngine {
                 x = tiltLoShelf.process(x)
                 x = tiltHiShelf.process(x)
             }
-            let wet = reverb.processMono(x)
-            y48[i] = x + wet
+            y48[i] = x
         }
+        y48.withUnsafeMutableBufferPointer { m in
+            bow_fit_process(fitted, m.baseAddress!, nil, fitForce, Int32(n48),
+                            cF0, cVb, cFb, cBeta, cGate, Int32(slotStride), Int32(maxPoly))
+        }
+        for i in 0..<n48 { y48[i] += reverb.processMono(y48[i]) }
         // outGain is interpolated ACROSS the chunk (a chunk-rate step would
         // step the waveform); `gFrom` = where the previous chunk left off
         let gTo = 0.5 * outGain, gFrom = 0.5 * gainPrev
@@ -875,6 +892,17 @@ public final class BowEngine {
                 s = tiltLoShelfS.process(s)
                 s = tiltHiShelfS.process(s)
             }
+            y48[i] = m
+            y48S[i] = s
+        }
+        y48.withUnsafeMutableBufferPointer { m in
+            y48S.withUnsafeMutableBufferPointer { side in
+                bow_fit_process(fitted, m.baseAddress!, side.baseAddress!, fitForce, Int32(n48),
+                                cF0, cVb, cFb, cBeta, cGate, Int32(slotStride), Int32(maxPoly))
+            }
+        }
+        for i in 0..<n48 {
+            let m = y48[i], s = y48S[i]
             let (wl, wr) = reverb.processMonoStereo(m)
             let g = gFrom + dg * Double(i)      // see postChain
             outL[i] = g * (m + s + wl)
@@ -902,6 +930,8 @@ public final class BowEngine {
             cBeta[i] = beta[i]; cGate[i] = gate[i]
         }
         guard let pk = pkernel else { return }
+        updateFittedControls()
+        bow_poly_observation_force(pk, fitForce)
         y96.withUnsafeMutableBufferPointer { yb in
             bow_poly_process(pk, Int32(nk), Int32(slotStride),
                              cF0, cVb, cFb, cBeta, cGate, cXv,
@@ -957,6 +987,7 @@ public final class BowEngine {
     public func reset() {
         // kernel state is the INSTRUMENT's physical state, rebuilt from silence
         dec.reset()
+        bow_fit_reset(fitted)
         radFIR?.reset()
         radLp?.reset()
         radHill?.reset()

@@ -3,8 +3,8 @@
 The **Tanpura** is Tarabdaar's second voice: a **modal-contact tanpura
 string** with the SAV energy-stable jawari contact — strings settling onto
 the curved bone with the jiva thread, fitted offline against real tanpura
-recordings. By default it is **the drone voice** (the Fret Pad drone buttons
-pluck it); the **Live tab's Instrument picker** can make it the **main
+recordings. By default it is **the drone voice** (the Joy-Con drone sequence
+plucks it); the **Live tab's Instrument picker** can make it the **main
 instrument**, turning fret notes into plucks. The same engine, mounted from
 a different artifact, is the [Sitar voice](sitar-voice.md). (Port and
 fitting history: not present — see `docs/history/`.)
@@ -82,9 +82,9 @@ both registers (50 ¢ lookup tolerance guards a mid-rebuild mismatch).
 The controller's **Down / GL** buttons toggle one continuous sequence on/off.
 Switching on plays immediately and advances every **2 seconds**, including
 consecutive steps on the same slot; releasing the button leaves it running.
-The next press of either button stops it and lets the current string ring out. It bypasses the same-slot timer. Holding an **on-screen**
-drone button instead re-plucks that drone every `tp_drone_cycle` s (default
-2.5; below 0.1 = off; read each hop). Both paths use the selected drone octave.
+The next press of either button stops it and lets the current string ring out.
+The sequence bypasses the same-slot `tp_drone_cycle` timer and uses the
+selected drone octave. The Fret Pad has no on-screen drone buttons.
 The main Tanpura instrument follows fret pitches unchanged. Switching the
 drone voice (Strings tab → Voice) releases everything and the buttons start
 clean; sympathetic mode uses the mapped row's own pitch and keeps its own

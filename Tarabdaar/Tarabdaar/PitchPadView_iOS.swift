@@ -666,11 +666,9 @@ struct FretPadViewIOS: View {
                           fingerAccel: fingerAccel,
                           showGyro: $showGyro)
             // The raga pluck strip sits immediately above the playable band.
-            // Drone buttons hide while a Joy-Con is attached to the Mac.
             FretPadSurfaceIOS(engine: engine, arrangement: arrangement,
                               fieldWarp: scaleSync.joyConTilt.fieldWarp,
                               recorder: recorder,
-                              dronesHidden: scaleSync.joyConTilt.connected,
                               motion: motion,
                               tarafBank: scaleSync.tarafBank,
                               pluckTaraf: pluckTaraf)
@@ -843,22 +841,17 @@ private final class FretLayoutMemo {
 private struct FretPadSurfaceIOS: View {
     @ObservedObject var engine: PitchPadEngine
     let arrangement: FretArrangement
-    /// The Mac's live `ctl_fret_warp` (JOYCON_STATE relay) — every onset/move
-    /// resolves through it. 0 (linear) while the link is down.
+    /// The Mac's live `ctl_fret_warp` (JOYCON_STATE relay), including held
+    /// fingers. 0 (linear) while the link is down.
     let fieldWarp: Double
     /// Stroke recorder for offline assist fitting (no-op unless armed).
     let recorder: FretGestureRecorder
-    /// While a Joy-Con is attached to the Mac its arrows play the drones, so
-    /// the on-screen buttons hide (visual + hit-test).
-    let dronesHidden: Bool
     /// Motion source for the Strike envelope and scope activity.
     let motion: MotionManager?
     let tarafBank: TarafBank
     let pluckTaraf: (UInt32, UInt8) -> Void
     /// The touch pipeline (onset, drag, settle tick, release).
     @State private var player = FretTouchPlayer()
-    /// Touches holding a drone button (touchId → button index).
-    @State private var droneTouches: [Int: Int] = [:]
     /// Per-touch indicator — a class so the settle timer can feed it.
     @StateObject private var indicators = TouchIndicatorModel()
     /// The fret and chord-bar layout, memoised on what changes it.
@@ -874,24 +867,22 @@ private struct FretPadSurfaceIOS: View {
                               height: max(1, geo.size.height - 2 * edgePad))
             // The playable band — the frets' coordinate space.
             let band = fretPadBandRect(in: size)
-            let pluckWidth = dronesHidden ? band.width
-                : max(1, (droneButtonRects(size: size).first?.minX ?? band.maxX) - 8)
             let (degrees, placements, chordCells) = layout.resolve(
                 arrangement: arrangement, scale: engine.scale, size: size)
 
             ZStack(alignment: .topLeading) {
                 Color.black
 
-                // Always perform mode: fret lines only, ghosts like base frets.
+                // Always perform mode: scale guides and fret lines, ghosts like base frets.
                 Canvas { ctx, _ in
                     ctx.translateBy(x: edgePad, y: edgePad)
-                    // Band border — the playable strip against the dead space.
-                    ctx.strokeFretBand(band)
+                    ctx.fillFretBand(band)
                     ctx.translateBy(x: band.minX, y: band.minY)
+                    ctx.strokeFretPitchGrid(degrees: degrees,
+                                            ghostExtentOctaves: arrangement.ghostExtentOctaves,
+                                            size: band.size)
                     for p in placements {
-                        let hue = p.hasRagaString
-                            ? pitchColor(forRatio: p.ratio, lightness: 0.82, chroma: 0.20)
-                            : Color.gray
+                        let hue = pitchColor(forRatio: p.ratio, lightness: 0.82, chroma: 0.20)
                         ctx.stroke(p.linePath, with: .color(hue), lineWidth: 1.5)
                     }
                 }
@@ -910,15 +901,6 @@ private struct FretPadSurfaceIOS: View {
                                edgePad: edgePad, cornerRadius: 6,
                                fontSize: 14)
 
-                // Drone buttons (display only; hidden with a Joy-Con attached).
-                if !dronesHidden {
-                    DroneButtonsVisual(ratios: arrangement.droneRatios,
-                                       degrees: degrees,
-                                       held: Set(droneTouches.values),
-                                       size: size, edgePad: edgePad,
-                                       cornerRadius: 10, fontSize: 15)
-                }
-
                 TouchOverlayView(
                     onTouchBegan: { ev in began(ev, placements: placements,
                                                 size: size, band: band,
@@ -927,14 +909,6 @@ private struct FretPadSurfaceIOS: View {
                                                 size: size, band: band) },
                     onTouchEnded: { id in
                         let now = CACurrentMediaTime()
-                        // Drone touch: release the button (unless another
-                        // finger holds it) and skip the note path.
-                        if let d = droneTouches.removeValue(forKey: id) {
-                            if !droneTouches.values.contains(d) {
-                                engine.setDrone(d, pressed: false)
-                            }
-                            return
-                        }
                         player.end(touchId: id, time: now)
                         indicators.end(id)
                         motion?.noteEnded(id, at: now)   // scope coloring
@@ -943,12 +917,16 @@ private struct FretPadSurfaceIOS: View {
                 .padding(edgePad)
 
                 TarafPluckStrip(bank: tarafBank, scale: engine.scale, pluck: pluckTaraf)
-                    .frame(width: pluckWidth)
+                    .frame(width: band.width)
                     .offset(x: edgePad + band.minX,
                             y: edgePad + band.minY - TarafPluckStrip.height)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .clipped()
+            .onChange(of: fieldWarp) { _ in
+                player.updateWarp(context: playContext(placements: placements, size: band.size),
+                                  time: CACurrentMediaTime())
+            }
         }
     }
 
@@ -958,14 +936,6 @@ private struct FretPadSurfaceIOS: View {
                        size: CGSize, band: CGRect,
                        chordCells: [ChordBarCell]) {
         let spt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
-        // Drone buttons first (onsets only; skipped while hidden).
-        if !dronesHidden,
-           let d = droneButtonRects(size: size).firstIndex(where: { $0.contains(spt) }) {
-            let alreadyHeld = droneTouches.values.contains(d)
-            droneTouches[ev.touchId] = d
-            if !alreadyHeld { engine.setDrone(d, pressed: true) }
-            return
-        }
         // Chord bar: a tap toggles the strum chord (selection only, onsets).
         if let cell = chordCells.first(where: { $0.rect.contains(spt) }) {
             engine.toggleChordSelection(
@@ -1010,8 +980,6 @@ private struct FretPadSurfaceIOS: View {
     /// slewed correction; never a re-snap mid-drag); the indicator follows.
     private func moved(_ ev: TouchEvent, placements: [FretPlacement],
                        size: CGSize, band: CGRect) {
-        // A finger holding a drone button never glides.
-        guard droneTouches[ev.touchId] == nil else { return }
         let spt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
         let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
         guard let out = player.move(touchId: ev.touchId, at: pt,

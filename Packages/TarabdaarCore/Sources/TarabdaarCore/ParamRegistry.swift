@@ -124,6 +124,8 @@ public enum ParamTarget: Sendable {
     case glideQueue
     /// The fret field's pitch warp: the glide queue, the Mac pad, the iPad.
     case fretWarp
+    /// The pad's per-touch magnetic correction, relayed after Mac-side mapping.
+    case fretAssist(FretAssistControl)
     /// The pitch accent (`AudioEngine.setPitchAccent`): expression dips between frets.
     case pitchAccent
     /// Performance-history attenuation of the taraf radiation.
@@ -503,6 +505,12 @@ public enum ParamRegistry {
         ]),
 
         ("String · Friction", [
+            ParamSpec("bow_width_smp", "bow contact width (samples)", group: "String · Friction",
+                      0, 24, 0,
+                      effect: "", low: "", high: ""),
+            ParamSpec("bow_th_tau", "contact thermal relaxation (s)", group: "String · Friction",
+                      0.002, 0.1, 0.012,
+                      effect: "", low: "", high: ""),
             ParamSpec("bow_mu_s", "static friction", group: "String · Friction",
                       0.4, 1.2, 0.8,
                       effect: "Sets the bow's static friction coefficient, governing how strongly rosin can hold the string.",
@@ -551,12 +559,12 @@ public enum ParamRegistry {
                       low: "Damps upper harmonics earlier, producing a darker string.",
                       high: "Retains more upper harmonics for a brighter string."),
             ParamSpec("bow_nut_fc", "nut corner (Hz)", group: "String · Damping",
-                      1000, 12000, 5500,
+                      1000, 16000, 5500,
                       effect: "Sets the low-pass cutoff at the nut or stopping finger.",
                       low: "Absorbs more high-frequency energy at that end of the string.",
                       high: "Reflects more upper harmonics back along the string."),
             ParamSpec("bow_br_fc", "bridge corner (Hz)", group: "String · Damping",
-                      1000, 12000, 6750,
+                      1000, 16000, 6750,
                       effect: "Sets the low-pass cutoff at the bridge termination.",
                       low: "Absorbs more upper harmonics at the bridge.",
                       high: "Retains more high-frequency string energy."),
@@ -998,6 +1006,15 @@ public enum ParamRegistry {
         ]),
 
         ("Output · Tone & stereo", [
+            ParamSpec("bow_hill_db", "bridge resonance gain (dB)", group: "Output · Tone & stereo",
+                      -12, 12, 0,
+                      effect: "", low: "", high: ""),
+            ParamSpec("bow_hill_f", "bridge resonance frequency (Hz)", group: "Output · Tone & stereo",
+                      500, 6000, 2400,
+                      effect: "", low: "", high: ""),
+            ParamSpec("bow_hill_q", "bridge resonance Q", group: "Output · Tone & stereo",
+                      0.2, 5, 1.1,
+                      effect: "", low: "", high: ""),
             ParamSpec("bow_rad_hp", "radiation HP (Hz)", group: "Output · Tone & stereo",
                       50, 600, 200,
                       effect: "High-pass filters the String engine's combined played-voice and taraf radiation before the room.",
@@ -1018,6 +1035,43 @@ public enum ParamRegistry {
                       effect: "Sets stereo spread of the String engine's played voice, taraf, drones and bow noise. Low frequencies stay centered and the mono sum is preserved.",
                       low: "A narrower instrument; 0 gives a point-like mono source.",
                       high: "More left/right difference in the upper spectrum, giving a wider instrument."),
+        ]),
+
+        ("Output · Fitted model", [
+            ParamSpec("bow_fit_timbre", "harmonic correction", group: "Output · Fitted model",
+                      0, 1.5, 0, apply: .live,
+                      effect: "Scales the fitted pitch, bow and history dependent harmonic correction.", low: "Original harmonic balance.", high: "Stronger fitted harmonic shaping."),
+            ParamSpec("bow_fit_response", "spectral response", group: "Output · Fitted model",
+                      0, 1.5, 0, apply: .live,
+                      effect: "Scales the shared fitted frequency response from 120 Hz to 12 kHz.", low: "Original frequency response.", high: "Stronger fitted tonal balance."),
+            ParamSpec("bow_fit_memory", "bow history", group: "Output · Fitted model",
+                      0, 2, 1, apply: .live,
+                      effect: "Scales the recent bow-history features in the harmonic correction.", low: "Current bow controls only.", high: "Stronger dependence on recent bow changes."),
+            ParamSpec("bow_fit_smooth_ms", "timbre smoothing (ms)", group: "Output · Fitted model",
+                      10, 150, 30, apply: .live,
+                      effect: "Sets the causal smoothing time of fitted harmonic gains.", low: "Faster timbral response.", high: "More gradual harmonic motion."),
+            ParamSpec("bow_fit_ring", "acoustic resonances", group: "Output · Fitted model",
+                      0, 2, 0, apply: .live,
+                      effect: "Adds the shared force-driven acoustic resonance bank outside the string feedback path.", low: "No added acoustic resonances.", high: "Stronger fitted acoustic ringing."),
+            ParamSpec("bow_fit_shelf_db", "upper shelf (dB)", group: "Output · Fitted model",
+                      -12, 12, 0, apply: .live,
+                      effect: "Sets a 6 kHz shelf ahead of the fitted timbre and room processing.", low: "Less upper-frequency energy.", high: "More upper-frequency energy."),
+            ParamSpec("bow_fit_room", "acoustic room", group: "Output · Fitted model",
+                      0, 2, 0, apply: .live,
+                      effect: "Scales the fitted synthetic room response, separately from the original room and FX reverbs.", low: "No fitted room.", high: "Stronger acoustic trails; 1 is the fitted response."),
+            ParamSpec("bow_fit_room_low_db", "room lows (dB)", group: "Output · Fitted model",
+                      -12, 12, 0, apply: .live,
+                      effect: "Adjusts the fitted room response below 1 kHz.", low: "Less low-frequency room energy.", high: "More low-frequency room energy."),
+            ParamSpec("bow_fit_room_mid_db", "room mids (dB)", group: "Output · Fitted model",
+                      -12, 12, 0, apply: .live,
+                      effect: "Adjusts the fitted room response from 1 to 3 kHz.", low: "Less mid-frequency room energy.", high: "More mid-frequency room energy."),
+            ParamSpec("bow_fit_room_high_db", "room highs (dB)", group: "Output · Fitted model",
+                      -12, 12, 0, apply: .live,
+                      effect: "Adjusts the fitted room response above 3 kHz.", low: "Darker room trails.", high: "Brighter room trails."),
+            ParamSpec("bow_fit_body", "fitted body radiation", group: "Output · Fitted model",
+                      0, 1, 0,
+                      effect: "Blends fitted modal radiation residues into the formula body without changing its feedback mobility.",
+                      low: "Original formula radiation.", high: "Fitted radiation profile; body controls remain editable."),
         ]),
 
         ("Output · Room", [
@@ -1049,6 +1103,39 @@ public enum ParamRegistry {
                       effect: "Dips played expression between the pad's enabled frets, then restores it at each fret.",
                       low: "At 0, expression is unaffected by position between frets.",
                       high: "At 1, expression fades out midway through each gap, separating the notes of a glided run."),
+        ]),
+
+        ("Controls · Fret assist", [
+            ParamSpec("ctl_fret_assist_amount", "correction amount", group: "Controls · Fret assist",
+                      0, 1, 1, apply: .live, target: .fretAssist(.amount), scope: .perNote,
+                      effect: "", low: "", high: ""),
+            ParamSpec("ctl_fret_assist_radius", "capture radius (× Snap)", group: "Controls · Fret assist",
+                      0, 4, 1.75, apply: .live, target: .fretAssist(.radius), scope: .perNote,
+                      effect: "", low: "", high: ""),
+            ParamSpec("ctl_fret_assist_still_px", "pause radius (px)", group: "Controls · Fret assist",
+                      0.1, 12, 2, apply: .live, target: .fretAssist(.stillRadius), scope: .perNote,
+                      effect: "", low: "", high: ""),
+            ParamSpec("ctl_fret_assist_dwell_ms", "pause delay (ms)", group: "Controls · Fret assist",
+                      0, 1000, 100, apply: .live, target: .fretAssist(.dwell), scope: .perNote,
+                      effect: "", low: "", high: ""),
+            ParamSpec("ctl_fret_assist_ramp_ms", "pause ramp (ms)", group: "Controls · Fret assist",
+                      1, 1000, 150, apply: .live, target: .fretAssist(.ramp), scope: .perNote,
+                      effect: "", low: "", high: ""),
+            ParamSpec("ctl_fret_assist_settle_ms", "settle time (ms)", group: "Controls · Fret assist",
+                      1, 500, 5, apply: .live, target: .fretAssist(.settle), scope: .perNote,
+                      effect: "", low: "", high: ""),
+            ParamSpec("ctl_fret_assist_slew", "correction limit (¢/s)", group: "Controls · Fret assist",
+                      50, 6000, 1500, apply: .live, target: .fretAssist(.slew), scope: .perNote,
+                      effect: "", low: "", high: ""),
+            ParamSpec("ctl_fret_assist_turn", "turn pull", group: "Controls · Fret assist",
+                      0, 4, 2, apply: .live, target: .fretAssist(.turnGain), scope: .perNote,
+                      effect: "", low: "", high: ""),
+            ParamSpec("ctl_fret_assist_turn_ms", "turn decay (ms)", group: "Controls · Fret assist",
+                      1, 500, 26, apply: .live, target: .fretAssist(.turnDecay), scope: .perNote,
+                      effect: "", low: "", high: ""),
+            ParamSpec("ctl_fret_assist_release_px", "release distance (px)", group: "Controls · Fret assist",
+                      1, 96, 12, apply: .live, target: .fretAssist(.release), scope: .perNote,
+                      effect: "", low: "", high: ""),
         ]),
 
         ("Controls · Glide", [
@@ -1281,7 +1368,7 @@ public enum ParamRegistry {
     /// See docs/sound-design.md.
     public static let inPlaceKeys: Set<String> = Set([
         // --- kernel scalars ---
-        "bow_Zt", "bow_body_c0", "bow_br_fc",
+        "bow_Zt", "bow_body_c0", "bow_br_fc", "bow_width_smp", "bow_th_tau",
         "bow_gut_fc2", "bow_gut_g", "bow_loss_reg",
         "bow_mu_d",
         "bow_mu_s", "bow_noise", "bow_noise_dir", "bow_nut_fc",
@@ -1312,7 +1399,7 @@ public enum ParamRegistry {
         // The body modal bank (histories kept) and the modal-jawari tables
         // (the wrap is kept, so the web relaxes into its new geometry).
         // `bow_body_modes` is NOT here: it resizes the bank.
-        "bow_body_air_ratio", "bow_body_q", "bow_body_q_air",
+        "bow_fit_body", "bow_body_air_ratio", "bow_body_q", "bow_body_q_air",
         "bow_body_rad", "bow_body_scale", "bow_body_y",
         "bow_jt_alpha", "bow_jt_apex", "bow_jt_bst",
         "bow_jt_fhf", "bow_jt_gain", "bow_jt_hcb", "bow_jt_norm",

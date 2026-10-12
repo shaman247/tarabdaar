@@ -36,6 +36,10 @@ px** (radiusScale × Snap, distance to the fret line's x), not log-pitch, and
 each recorded ctx fret carries its pixel `x` (record v2). v1 recordings (made
 on the pitch-mapped ribbon) still load — the fret x is derived from the old
 x↔pitch mapping — but the live surface has changed; prefer fresh recordings.
+Record v5 includes each fret's five-row identity and nine uncorrected region
+pitches per event. Each overlap corrects against its adjacent rows' union;
+corrections blend across region boundaries. Replay retains v4's hard boundaries
+and v3's three rows with gap interpolation.
 """
 
 import json
@@ -126,6 +130,13 @@ def load_strokes(paths, snap_px=None):
                 events=ev, moves=moves, endT=float(s["endT"]),
                 frets=[(fret_x(f), f["log2Ratio"], f["topY"], f["bottomY"])
                        for f in ctx["frets"]],
+                rows={row: [(fret_x(f), f["log2Ratio"], f["topY"], f["bottomY"])
+                            for f in ctx["frets"] if f.get("row") == row]
+                      for row in (1, 2, 3) if any(f.get("row") == row for f in ctx["frets"])},
+                regions=overlap_regions(ctx["frets"], fret_x) if s.get("v", 1) >= 4 else {},
+                blend_regions=s.get("v", 1) >= 5,
+                row_overlap=recorded_overlap(ctx["frets"], ctx["height"]) if s.get("v", 1) >= 4 else .2,
+                height=float(ctx["height"]),
                 radius=radius, params=ctx.get("assistParams", {}) or {},
             ))
     return strokes
@@ -149,12 +160,66 @@ def candidate(frets, radius, x, y):
     return best, bd, bx
 
 
+def overlap_regions(frets, fret_x):
+    rows = {row: [(fret_x(f), f["log2Ratio"], f["topY"], f["bottomY"])
+                  for f in frets if f.get("row") == row] for row in range(1, 6)}
+    return {region: rows[(region + 1) // 2] if region % 2
+            else rows[region // 2] + rows[region // 2 + 1] for region in range(1, 10)}
+
+
+def recorded_overlap(frets, height):
+    """Recover five-row geometry from the recorded equal fret heights."""
+    if not frets:
+        return .2
+    fret_height = frets[0]["bottomY"] - frets[0]["topY"]
+    return (5 - height / fret_height) / 4
+
+
+def overlap_region(y, height, overlap=.2):
+    h = 1 / (5 - 4 * overlap)
+    def center(row): return 1 - h / 2 - (row - 1) * h * (1 - overlap)
+    v = y / height
+    for row in range(1, 5):
+        if center(row) - h / 2 - 1e-12 <= v <= center(row + 1) + h / 2 + 1e-12:
+            return row * 2
+    return min(range(1, 6), key=lambda row: abs(center(row) - v)) * 2 - 1
+
+
+def overlap_weights(y, height, overlap=.2):
+    h = 1 / (5 - 4 * overlap)
+    half_width = overlap * h / 4
+    v = y / height
+    for lower in range(1, 9):
+        row = (lower + 1) // 2
+        boundary = 1 - h - (row - 1) * h * (1 - overlap) + (overlap * h if lower % 2 else 0)
+        if abs(v - boundary) < half_width:
+            blend = smoothstep((boundary + half_width - v) / (2 * half_width))
+            return {lower: 1 - blend, lower + 1: blend}
+    return {overlap_region(y, height, overlap): 1.0}
+
+
+def row_weights(rows, y):
+    bands = sorted((frets[0][2], frets[0][3], row) for row, frets in rows.items())
+    if y <= bands[0][1]:
+        return {bands[0][2]: 1.0}
+    for upper, lower in zip(bands, bands[1:]):
+        if y < lower[0]:
+            t = (y - upper[1]) / (lower[0] - upper[1])
+            return {upper[2]: 1 - t, lower[2]: t}
+        if y <= lower[1]:
+            return {lower[2]: 1.0}
+    return {bands[-1][2]: 1.0}
+
+
 def replay(stroke, params):
     """Causal replica of FretDragAssist. Returns (times, u, out) arrays."""
     floor, ceil = params["speedFloor"], params["speedCeiling"]
     stau, ctau = params["speedTau"], params["settleTau"]
     turn_gain = params.get("turnGain", 0.0)
     turn_tau = params.get("turnTau", 0.06)
+    amount = params.get("amount", 1.0)
+    slew_cap = params.get("slewCap", SLEW_CAP)
+    decay_px = params.get("correctionDecayPx", CORR_DECAY_PX)
     still_r = params.get("stillRadiusPx", 2.0)
     dwell_min = params.get("stopDwellMin", 0.10)
     dwell_ramp = params.get("stopDwellRamp", 0.15)
@@ -168,7 +233,11 @@ def replay(stroke, params):
                    + [(t, -1, True) for t in ticks])
 
     speed = ceil
-    corr = 0.0
+    regions = stroke.get("regions", {})
+    overlap = stroke.get("row_overlap", .2)
+    rows = regions or stroke.get("rows", {})
+    corrections = {row: 0.0 for row in rows} if rows else {0: 0.0}
+    row_logs = moves[0, 6:15 if regions else 9] if rows else None
     impulse = 0.0
     dx_sign = 0
     last_x, last_y, last_u = moves[0, 1], moves[0, 2], moves[0, 3]
@@ -195,6 +264,8 @@ def replay(stroke, params):
                     impulse = 1.0          # causal direction flip
                 dx_sign = s
             last_x, last_y, last_u = x, moves[idx, 2], moves[idx, 3]
+            if rows:
+                row_logs = moves[idx, 6:15 if regions else 9]
             last_move = t
         last_update = t
         # Stopped-detector gate (mirrors FretDragAssist, 2026-08-17): the
@@ -204,26 +275,42 @@ def replay(stroke, params):
             anchor_x, anchor_y, still_start = last_x, last_y, t
         w = smoothstep((t - still_start - dwell_min) / dwell_ramp)
         gate = min(1.0, max(w, turn_gain * impulse))
-        cand, d, cx = candidate(frets, radius, last_x, last_y)
-        # A receding candidate (moving away, speed above the stationary
-        # floor) exerts no pull; with no qualifying pull, a MOVING touch
-        # sheds the carried correction while a stationary one keeps it
-        # frozen. Mirrors FretDragAssist.integrate.
-        receding = (cand is not None and dx_sign != 0 and speed > floor
-                    and cx != last_x
-                    and (1 if cx > last_x else -1) != dx_sign)
-        if cand is not None and not receding:
-            prox = min(1.0, max(0.0, 2.0 * (1.0 - d / radius)))
-            rate = (1 - math.exp(-dt / ctau)) * gate * prox
-            step = ((cand - last_u) - corr) * rate
-            cap = SLEW_CAP * dt
-            corr += min(cap, max(-cap, step))
-        elif corr != 0.0:
-            mv = smoothstep((speed - floor) / floor)
-            rate = (1 - math.exp(-speed * dt / CORR_DECAY_PX)) * mv
-            step = -corr * rate
-            cap = SLEW_CAP * dt
-            corr += min(cap, max(-cap, step))
+        for row in corrections:
+            corr = corrections[row]
+            row_frets = rows[row] if rows else frets
+            candidate_y = (row_frets[0][2] + row_frets[0][3]) / 2 if rows and row_frets else last_y
+            if regions:
+                row_frets = [(fx, log, -float("inf"), float("inf")) for fx, log, _, _ in row_frets]
+            raw = row_logs[row - 1] if rows else last_u
+            cand, d, cx = candidate(row_frets, radius, last_x, candidate_y) if radius > 0 else (None, 0, None)
+            # A receding candidate (moving away, speed above the stationary
+            # floor) exerts no pull; with no qualifying pull, a MOVING touch
+            # sheds the carried correction while a stationary one keeps it
+            # frozen. Mirrors FretDragAssist.integrate.
+            receding = (cand is not None and dx_sign != 0 and speed > floor
+                        and cx != last_x
+                        and (1 if cx > last_x else -1) != dx_sign)
+            if amount == 0:
+                step = -corr * (1 - math.exp(-dt / ctau))
+                cap = slew_cap * dt
+                corr += min(cap, max(-cap, step))
+            elif cand is not None and not receding:
+                prox = min(1.0, max(0.0, 2.0 * (1.0 - d / radius)))
+                rate = (1 - math.exp(-dt / ctau)) * gate * prox
+                step = ((cand - raw) * amount - corr) * rate
+                cap = slew_cap * dt
+                corr += min(cap, max(-cap, step))
+            elif corr != 0.0:
+                mv = smoothstep((speed - floor) / floor)
+                rate = (1 - math.exp(-speed * dt / decay_px)) * mv
+                step = -corr * rate
+                cap = slew_cap * dt
+                corr += min(cap, max(-cap, step))
+            corrections[row] = corr
+        weights = (overlap_weights(last_y, stroke["height"], overlap) if stroke.get("blend_regions")
+                   else {overlap_region(last_y, stroke["height"], overlap): 1.0} if regions
+                   else row_weights(rows, last_y) if rows else {0: 1.0})
+        corr = sum(corrections[row] * weights.get(row, 0) for row in corrections)
         T.append(t)
         U.append(last_u)
         O.append(last_u + corr)
@@ -605,6 +692,36 @@ def cmd_fit(paths, tokens=None, fast=False, snap_px=None):
 def cmd_selftest():
     """Synthesize strokes (known intent), run the whole pipeline —
     including a connected 9-note phrase stroke through phrase alignment."""
+    # Per-row corrections use separate raw inputs and blend only across gaps.
+    rows = {1: [(100, 0, 200, 300)], 2: [(110, 1, 0, 100)]}
+    events = np.array([[t, 105, 160, .6 * .08 + .4 * .95, .4, 0, .08, .95, 0]
+                       for t in np.arange(0, 1, 1 / 60)])
+    row_stroke = dict(rows=rows, frets=rows[1] + rows[2], moves=events,
+                      events=events, endT=1.0, radius=24)
+    params = dict(DEFAULTS, speedFloor=59, speedCeiling=375, speedTau=.026,
+                  settleTau=.005, radiusScale=1.75, turnGain=2, turnTau=.026)
+    assert abs(replay(row_stroke, params)[2][-1] - .4) < 1e-10
+    for overlap in [.2, .3]:
+        height = (5 - 4 * overlap) * 100
+        lower = (0, 0, height - 100, height)
+        upper = (100, 1, height - (2 - overlap) * 100, height - (1 - overlap) * 100)
+        recorded = [{"topY": lower[2], "bottomY": lower[3]}]
+        resolved = recorded_overlap(recorded, height)
+        assert abs(resolved - overlap) < 1e-12
+        region_frets = {region: [] for region in range(1, 10)}
+        region_frets.update({1: [lower], 2: [lower, upper], 3: [upper]})
+        y = (lower[2] + upper[3]) / 2
+        events = np.array([[t, 70, y, .6, 1, 0, .08, .6, .95, 0, 0, 0, 0, 0, 0]
+                           for t in np.arange(0, 1, 1 / 60)])
+        union_stroke = dict(regions=region_frets, frets=region_frets[2], moves=events,
+                            events=events, endT=1.0, radius=100, height=height, row_overlap=resolved)
+        assert abs(replay(union_stroke, params)[2][-1] - 1) < 1e-10
+        # A settled union correction blends with the neighboring interior at the edge.
+        events = events.copy()
+        events[:, 2] = upper[3]
+        events[:, 3] = (.08 + .6) / 2
+        boundary_stroke = dict(union_stroke, events=events, moves=events, blend_regions=True)
+        assert abs(replay(boundary_stroke, params)[2][-1] - .5) < 1e-10
     rng = np.random.default_rng(7)
     width, height = 1400.0, 900.0
     frets = [dict(id=f"f{i}", log2Ratio=-0.5 + i / 12.0,

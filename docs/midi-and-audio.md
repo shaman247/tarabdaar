@@ -20,7 +20,7 @@ Reassembly on both ends is **per source** (keyed by the CoreMIDI connection refC
 
 ## Frames (`TLPFrame.swift`)
 
-Little-endian, explicitly encoded byte tables, one frame per envelope. `TLP.versionMin/Max` are 21/21 (the scale and arrangement blobs carry no version of their own — this one is theirs); HELLO intersects version ranges, so a mismatched peer stays down cleanly instead of half-decoding (the symptom of a skipped iPad install is "drones and tilt work, touches are silent" — header-only frames decode while resized touch records don't; install both apps together).
+Little-endian, explicitly encoded byte tables, one frame per envelope. `TLP.versionMin/Max` are 25/25 (the scale and arrangement blobs carry no version of their own — this one is theirs); HELLO intersects version ranges, so a mismatched peer stays down cleanly instead of half-decoding (the symptom of a skipped iPad install is "drones and tilt work, touches are silent" — header-only frames decode while resized touch records don't; install both apps together).
 
 | Type | Name | Class | Direction |
 |---|---|---|---|
@@ -28,7 +28,7 @@ Little-endian, explicitly encoded byte tables, one frame per envelope. `TLP.vers
 | `0x03` / `0x04` | PING / PONG | event | the Mac measures RTT + clock offset (`TarabLink:` lines in Console) |
 | `0x08` | PANIC | event | both; routed through the surgical drop path below |
 | `0x10` | SCALE_STATE | event | Mac → iPad, the scale blob (v4) |
-| `0x11` | FRET_ARRANGEMENT | event | Mac → iPad, the arrangement blob with raga octave masks (v21) |
+| `0x11` | FRET_ARRANGEMENT | event | Mac → iPad, five-row pitch/row assignments (v25) |
 | `0x12` | TARAF_BANK | event | Mac → iPad, running row identities and display pitches (v19) |
 | `0x13` | TARAF_PLUCK | event | iPad → Mac, one discrete pluck in that bank (v19) |
 | `0x1F` | RESYNC_REQUEST | event | iPad → Mac; the host replies with all sync payloads |
@@ -46,7 +46,7 @@ Events (`0x01–0x3F`) are `[type][eventSeq u16]` + payload, reliable, never dro
 | `timestampUs` | u32 | sender monotonic µs (wraps ~71.6 min) |
 | `tiltX/Y/Z` | s16 ×3 | the raw tilt report, ±32767 ↔ −1…+1 (~0.005° steps), atomic with pitch |
 | `accelX/Y/Z` | s16 ×3 | raw `userAcceleration`, ±4 g full scale — display only (`LinkIngest.onAccel` → the Setup tab's received-acceleration view); no binding or physics reads them |
-| `droneMask` | u8 | bits 0–2 = drone buttons held (held state; the Mac acts on edges) |
+| `droneMask` | u8 | legacy bits 0–2 = drones held; retained for compatibility, 0 from the current pad UI |
 | `strike` | u8 | the accelerometer strike envelope, 0–255 ↔ 0…1 (`LinkIngest.onStrike` → the `.strike`/`.acceleration` pair — see [Sensors](sensors.md)); 0 from producers without an accelerometer |
 | `chordDegree`, `chordOctave` | u8, i8 | the chord bar selection as held state: degree index (0xFF = none) + octave (always 0 on the wire — reserved, still decoded); the Mac acts on change edges (`LinkIngest.onChordSelect` → `AppController.strumChord`) — see [Fret Pad](fret-pad.md) |
 | `touchCount` | u8 | then per touch: |
@@ -62,7 +62,7 @@ The touch record is 10 bytes. The `TLPTouch` STRUCT also carries `exprScale` and
 
 ### `0x41 JOYCON_STATE` (Mac → iPad)
 
-`[type][flags][stateSeq u16][timestampUs u32]` then the u8 fields below in this order.
+`[type][flags][stateSeq u16][timestampUs u32]` then the u8 fields below in this order, followed by note-control bytes and ten fret-assist f32 values.
 
 | Field | Encoding | Acted on by the pad? |
 |---|---|---|
@@ -77,13 +77,25 @@ The touch record is 10 bytes. The `TLPTouch` STRUCT also carries `exprScale` and
 | `accel1–3` | same; the fusion's gravity-removed acceleration per body axis over `JoyConWristMotion.accelFullScaleG` (±1 g) | display (`WristMotionPane`, the accel bars) |
 | `accelLevel` | 0–255 ↔ 0…1; the magnitude of `accel1–3` over the same 1 g full scale (deliberately NOT the Joy-Con Accel control axis: its `StrikeLaw` 0.01–0.5 g log scale reads 0.1 on rest noise and rails on a gentle move) | display (`WristMotionPane`, the combined accel bar) |
 
-Flags: bit 0 stick live (while connected, including at centre), bit 1 wrist/body live, bit 2 **`connected`** (a Joy-Con is attached — the pad hides its drone buttons), bit 3 arm live (a calibration is driving). `connected`, `fieldWarp` and `octave` are the three fields the pad ACTS on; everything else is display. Nothing persists; a link drop or staleness resets the display to idle (`JoyConTiltDisplay.idle`), which also un-hides the drone buttons. Sent via `JoyConDisplayRelay` → `link.setJoyConState` on each change-gated stick/arm/wrist/volume update: axis motion is link-paced, an edge on an acted-on field goes out immediately (the relay compares against the last frame it sent), and a resync re-sends the frame outright.
+Flags: bit 0 stick live (while connected, including at centre), bit 1 wrist/body live, bit 2 **`connected`** (a Joy-Con is attached), bit 3 arm live (a calibration is driving). `fieldWarp`, `octave` and the resolved fret-assist controls act on the pad; everything else is display. Nothing persists; a link drop or staleness resets the display to idle (`JoyConTiltDisplay.idle`). Sent via `JoyConDisplayRelay` → `link.setJoyConState` on each change-gated stick/arm/wrist/volume update: axis motion is link-paced, an edge on connected/strike-window/warp/octave goes out immediately (the relay compares against the last frame it sent), and a resync re-sends the frame outright.
 
 **Volume readout sources**: three independent readings for **Main** (orange), **Chromatic** (cyan) and **Raga** (purple). The main reading combines the String voice bus with the tanpura/sitar node's `outputLevel` only while that node is the main instrument; the drone is excluded. The two taraf readings sum row radiation by the table's chromatic flag (the follower belongs to chromatic), after row gains, caps, the common body/tone filters and gain. A shadow linear filter separates chromatic from the summed signal without changing the audio arithmetic; raga is the remaining contribution. Their samples follow the same async FIFO, fade and underrun hold as the audible web. Both include `bow_bal` and output gain, but tap before the shared taraf FX insert, whose nonlinear output cannot be uniquely assigned to either bank. The main tap remains after its voice FX and balance; the combined taraf meter remains available internally after its FX. These are bus levels, before the final room/global FX/limiter. Metering preserves rendered bytes (`ByteNullContractTests`, `DualTarafTests.testBankMeterIsolation`).
 
 Levels are **unsmoothed interval RMS** (integrate-and-dump), so decay rates on the scope follow the buses. A 60 Hz `VolumeMeterRelay` polls `AudioEngine.volumeLevels()` (the ONE poller — it owns the dump) → `TarabLink.setVolumeLevels`, change-gated on all three encoded bytes. TLP v20 carries the three adjacent bytes after `strikeWin`; both apps must use the same version. On the iPad they land in `ScaleSyncReceiver.volumeHistory` (not the published tilt display), polled by the scope's `TimelineView` at UI rate. Each source has its own colored trace and labeled dB reading in a separate block below the 120-point graph; silence shows −∞. A stale or dropped link records zeros for all three.
 
 The iPad's Expression / Pressure / Position readout receives four additional bytes after `accelLevel`: `noteActive` (0 or 1), then `expression`, `pressure`, and `position` (each 0–255 ↔ 0…1). These are display-only. The Mac polls the String voice mapper at 15 Hz using the volume relay's timer, selects the highest-pitched gated slot, and includes that slot's expression scale (strum and pitch accent). Selection follows glides and falls back when the top note releases. Released tails and plucked voices have no active bow-control readout. Changed bytes ride the paced `JOYCON_STATE`; unchanged values remain on its heartbeat. The iPad polls a separate locked snapshot at 15 Hz, showing dashes when inactive, disconnected, or stale; these updates do not publish the whole toolbar.
+
+**Fret assist (v23).** After `noteControls.position`, ten little-endian f32
+values carry the Mac-resolved assist settings in this fixed order: amount,
+capture radius (× Snap), pause radius (px), pause delay (ms), pause ramp
+(ms), settle time (ms), slew limit (¢/s), turn pull, turn decay (ms), and
+release distance (px). Non-finite or out-of-range values reject the frame.
+These continuous controls use the paced, latest-wins state lane and resend
+on resync; they do not send reliable events for each mapping update.
+The iPad applies them to `PitchPadEngine.fretAssistSettings` on main, and
+`FretTouchPlayer` reads them at onset, movement and every settle tick.
+Disconnect/staleness restores registry defaults. The Mac alone persists
+rests and evaluates mappings. Both apps must use protocol version 25.
 
 ### Taraf strip events
 
@@ -105,7 +117,11 @@ Local Mac strip gestures use the same revision-checked entry point.
 
 ### Sync events
 
-`SCALE_STATE` and `FRET_ARRANGEMENT` carry the binary blobs raw (`[len u16][blob]`): `PitchScaleSysEx.encodeBlob` (`[tonic][tonicCents14][margin][layout][count]`, then per point `num/den` 14-bit pairs, `y`, `enabled`, length-prefixed UTF-8 label) and `FretArrangementSysEx.encodeBlob`; neither carries a version byte — TLP's version is theirs. The synced state is a `SyncedScaleState` = scale + `tonicMidi` + `tonicCents` (±50 ¢ at 0.01 ¢ — the tonic is set in Hz on the Mac) + `marginPixels` + `layout` (`PadLayout`, always `.fretPad`; the enum keeps its other cases because the blob encodes the raw value). Older blob versions are rejected; both apps ship the format together. Each arrangement segment includes a five-bit raga membership mask (octaves −2…+2), marked by arrangement flags bit 0. This is a one-way projection of enabled raga rows, omitted from saved Mac layouts. Cached pre-mask arrangements decode with all frets eligible until the next sync. The fret pitch warp is deliberately NOT in the arrangement blob — it is a live param relayed via `fieldWarp`.
+`SCALE_STATE` and `FRET_ARRANGEMENT` carry the binary blobs raw (`[len u16][blob]`): `PitchScaleSysEx.encodeBlob` (`[tonic][tonicCents14][margin][layout][count]`, then per point `num/den` 14-bit pairs, `y`, `enabled`, length-prefixed UTF-8 label) and `FretArrangementSysEx.encodeBlob`; neither carries a version byte — TLP's version is theirs. The synced state is a `SyncedScaleState` = scale + `tonicMidi` + `tonicCents` (±50 ¢ at 0.01 ¢ — the tonic is set in Hz on the Mac) + `marginPixels` + `layout` (`PadLayout`, always `.fretPad`; the enum keeps its other cases because the blob encodes the raw value). Older blob versions are rejected; both apps ship the format together. Arrangement flags bit 3 selects five-row pitch/row pairs: `[degreeIndex][row: 1…5]`.
+Only assigned frets are sent. The receiver derives frequency-aligned x coordinates,
+equal heights and 30% overlaps. Cached three-row blobs (bit 2) migrate rows 1/2/3
+to 1/3/5; old raga membership masks (bit 0) are consumed and ignored. Older
+coordinate blobs migrate through their nearest old row and omit disabled frets. The fret pitch warp is deliberately NOT in the arrangement blob — it is a live param relayed via `fieldWarp`.
 
 The iPad requests a fresh snapshot after every compatible host `HELLO`, including a host restart while the pad still considers the link up. This recovers an initial snapshot sent before the MIDI port was ready or before `HELLO` reset the receiver's event sequence epoch. Incompatible hosts do not trigger a sync request.
 

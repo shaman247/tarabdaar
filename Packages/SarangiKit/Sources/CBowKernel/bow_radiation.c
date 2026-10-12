@@ -138,3 +138,10 @@ void bow_radiation_destroy(void *state) {
 #endif
     free(s);
 }
+
+void bow_radiation_reset(void *state) {
+    Radiation *s=state;if(!s)return;
+    memset(s->history,0,sizeof(s->history));memset(s->input,0,sizeof(s->input));
+    memset(s->output,0,sizeof(s->output));memset(s->overlap,0,sizeof(s->overlap));
+    memset(s->active,0,sizeof(s->active));s->position=s->cursor=0;
+}

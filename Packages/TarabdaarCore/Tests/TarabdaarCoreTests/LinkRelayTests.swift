@@ -98,6 +98,19 @@ final class LinkRelayTests: XCTestCase {
         relay.setStick(0.7, 0)
         XCTAssertFalse(sent.last?.1 ?? true, "and the next axis push is paced again")
 
+        var assist = FretAssistSettings()
+        assist[.amount] = 0.25
+        assist[.dwell] = 321
+        relay.fretAssist = { assist }
+        relay.push()
+        XCTAssertFalse(sent.last?.1 ?? true, "continuous assist mappings use the paced state lane")
+        let wire = relay.frame().frame(stateSeq: 1, timestampUs: 0,
+                                      volVoice: 0, volChromatic: 0, volRaga: 0)
+        XCTAssertEqual(JoyConTiltDisplay(frame: wire).fretAssist, assist)
+        relay.resend()
+        XCTAssertEqual(sent.last?.0.fretAssist, assist)
+        XCTAssertTrue(sent.last?.1 ?? false, "resync sends the current resolved controls")
+
         let rest = JoyConDisplayRelay()
         XCTAssertFalse(rest.frame().stickLive)
         rest.connected = { true }

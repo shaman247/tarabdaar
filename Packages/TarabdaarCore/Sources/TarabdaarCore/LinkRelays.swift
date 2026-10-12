@@ -30,16 +30,15 @@ public struct JoyConWristMotion: Equatable {
 /// THE JOY-CON DISPLAY MIRROR (Mac → iPad, latest-wins `JOYCON_STATE`).
 ///
 /// Holds the axis values the iPad only DRAWS (stick, wrist, calibrated
-/// arm) and assembles them with the fields the pad ACTS on — `connected`
-/// (hides the drone buttons), `strikeWindowS` (the scope's onset fade),
-/// `fieldWarp` (the fret field's pitch warp) and `octaveShift` (the
-/// playing range) — into one frame. Extracted from `AppController`, which
-/// supplies those four as providers and the send as a closure, so nothing
+/// arm), connection status and `strikeWindowS` (the scope's onset fade),
+/// together with the fields the pad acts on:
+/// `fieldWarp` (the fret field's pitch warp), `octaveShift` (the
+/// playing range) and resolved fret-assist controls — into one frame.
+/// `AppController` supplies providers and the send as a closure, so nothing
 /// here needs `TarabLink` itself.
 ///
-/// Main queue only. The link paces axis motion; an EDGE on one of the
-/// acted-on fields goes out immediately — the relay compares them against
-/// the last frame it sent, so no caller decides.
+/// Main queue only. The link paces axis motion and continuous assist controls;
+/// connected/strike-window/warp/octave edges go out immediately.
 public final class JoyConDisplayRelay {
 
     /// `(display, immediate)` → `TarabLink.setJoyConState`.
@@ -47,6 +46,7 @@ public final class JoyConDisplayRelay {
     public var connected: () -> Bool = { false }
     public var strikeWindowS: () -> Double = { 2.0 }
     public var fieldWarp: () -> Double = { 0 }
+    public var fretAssist: () -> FretAssistSettings = { FretAssistSettings() }
     public var octaveShift: () -> Int = { 0 }
 
     /// Latest axis values. Wrist is nil until the fusion runs; arm is nil
@@ -100,14 +100,14 @@ public final class JoyConDisplayRelay {
             accel1: wrist?.accel.x ?? 0,
             accel2: wrist?.accel.y ?? 0,
             accel3: wrist?.accel.z ?? 0,
-            accelLevel: wrist?.accelLevel ?? 0)
+            accelLevel: wrist?.accelLevel ?? 0,
+            fretAssist: fretAssist())
     }
 
-    /// Assemble and send. Paced, unless an acted-on field changed since the
-    /// last send (or nothing has been sent yet) — then immediate.
+    /// Assemble and send, pacing assist mappings and sending discrete edges immediately.
     public func push() {
         let f = frame()
-        let edge = lastSent.map { !Self.sameActedOnFields($0, f) } ?? true
+        let edge = lastSent.map { !Self.sameImmediateFields($0, f) } ?? true
         lastSent = f
         send(f, edge)
     }
@@ -120,7 +120,7 @@ public final class JoyConDisplayRelay {
         send(f, true)
     }
 
-    private static func sameActedOnFields(_ a: JoyConTiltDisplay,
+    private static func sameImmediateFields(_ a: JoyConTiltDisplay,
                                           _ b: JoyConTiltDisplay) -> Bool {
         a.connected == b.connected && a.strikeWindowS == b.strikeWindowS
             && a.fieldWarp == b.fieldWarp && a.octaveShift == b.octaveShift

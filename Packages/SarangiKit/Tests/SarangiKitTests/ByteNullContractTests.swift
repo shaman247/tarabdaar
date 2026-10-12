@@ -100,6 +100,11 @@ final class ByteNullContractTests: XCTestCase {
         let reference = phrase(makeEngine())
         XCTAssertTrue(reference.contains { $0 != 0 }, "the phrase must make sound")
         let cases: [(String, (BowEngine) -> Void)] = [
+            ("fitted observations at zero", { e in
+                for i in [0, 1, 4, 8, 9] { e.setFittedControl(i, 0) }
+                e.setFittedControl(2, 2); e.setFittedControl(3, 150)
+                for i in 5...7 { e.setFittedControl(i, 12) }
+            }),
             ("raga pluck loudness with backend off", { $0.setJtDualPluckLevel(1) }),
             ("raga bow bloom with backend off", { $0.setJtBowBloom(1) }),
             ("two-direction selectivity with backend off", { $0.setJtDualSelectivity(1) }),

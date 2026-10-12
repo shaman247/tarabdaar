@@ -124,4 +124,120 @@ final class PresetCodingTests: XCTestCase {
         XCTAssertThrowsError(try TarabdaarPreset.decode(Data("{}".utf8)))
         XCTAssertThrowsError(try TarabdaarPreset.decode(Data("not json".utf8)))
     }
+    private func completeSnapshot() -> TarabdaarPreset {
+        var p = fullPreset()
+        p.version = TarabdaarPreset.currentVersion
+        p.savedBy = "Preset regression fixture"
+        p.stringOverrides = nil
+        p.paramValues = ["bow_expr": 0.4, "bow_vib_cents": 0, "bow_jtc_norm": 0.53]
+        p.fxCurves = [:]
+        p.bowAxisCurves = TarabdaarPreset.factoryBowAxisCurves()
+        p.mainInstrument = "sitar"
+        p.droneVoice = "sympathetic"
+        let scale = PitchScale(points: p.instrument!.scaleRatios.enumerated().map { index, ratio in
+            let f = bestFraction(ratio)
+            return PitchPoint(num: f.num, den: f.den, y: 0.3, label: "degree \(index)")
+        })
+        p.playingSurface = PresetPlayingSurface(scale: scale,
+            arrangement: FretArrangement(segments: [
+                FretSegment(degreeIndex: 1, row: .middle)
+            ], ghostExtentOctaves: 1.25), snapPixels: 19, primeLimit: 7)
+        return p
+    }
+
+    /// Complete snapshots retain every section and cannot partially load through the old flat reader.
+    func testCompleteSnapshotPreservesBanksCurvesRoutingAndSurface() throws {
+        let a = completeSnapshot()
+        let data = try a.encoded()
+        let b = try TarabdaarPreset.decode(data)
+        XCTAssertEqual(try b.encoded(), data)
+        XCTAssertEqual(b.instrument?.strings, a.instrument?.strings)
+        XCTAssertEqual(b.instrument?.droneStringIds, a.instrument?.droneStringIds)
+        XCTAssertEqual(b.instrument?.strumStringIds, a.instrument?.strumStringIds)
+        XCTAssertEqual(b.instrument?.follower, a.instrument?.follower)
+        XCTAssertEqual(b.fxCurves, [:]) // Explicit flat rack, not an omitted section.
+        XCTAssertEqual(b.playingSurface?.scalePoints, a.playingSurface?.scalePoints)
+        XCTAssertEqual(b.playingSurface?.fretSegments.first?.row, .middle)
+        XCTAssertEqual(b.resolvedScale(current: .defaultJI)?.points, a.playingSurface?.scalePoints)
+        struct OldReader: Decodable {
+            let version: Int
+            let name: String
+            let instrument: InstrumentState?
+            let paramValues: [String: Double]?
+            let tiltMapping: DimensionMapping?
+        }
+        let old = try JSONDecoder().decode(OldReader.self, from: data)
+        XCTAssertNil(old.instrument)
+        XCTAssertNil(old.paramValues)
+        XCTAssertNil(old.tiltMapping)
+    }
+
+    /// Corrupt, downgraded and unsupported snapshots fail before any live state can be applied.
+    func testIncompleteAndUnsupportedSnapshotsAreRejected() throws {
+        let data = try completeSnapshot().encoded()
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var raw = original
+        raw["version"] = TarabdaarPreset.currentVersion + 1
+        XCTAssertThrowsError(try TarabdaarPreset.decode(JSONSerialization.data(withJSONObject: raw)))
+        for section in ["instrument", "paramValues", "fxCurves", "bowAxisCurves", "tiltMapping", "playingSurface"] {
+            raw = original
+            var body = raw["snapshot"] as! [String: Any]
+            body.removeValue(forKey: section)
+            raw["snapshot"] = body
+            XCTAssertThrowsError(try TarabdaarPreset.decode(JSONSerialization.data(withJSONObject: raw)), section)
+        }
+        var body = original["snapshot"] as! [String: Any]
+        var instrument = body["instrument"] as! [String: Any]
+        var strings = instrument["strings"] as! [[String: Any]]
+        strings[0].removeValue(forKey: "set")
+        instrument["strings"] = strings
+        body["instrument"] = instrument
+        // This is exactly the old-app failure: a modern schema with the bank tags stripped.
+        XCTAssertThrowsError(try TarabdaarPreset.decode(JSONSerialization.data(withJSONObject: body)))
+        var unsupported = completeSnapshot()
+        unsupported.paramValues?["future_dsp_knob"] = 1
+        XCTAssertThrowsError(try unsupported.encoded())
+        unsupported = completeSnapshot()
+        unsupported.tiltMapping?.mappings["param:future_controller_target"] = ParameterMapping(
+            bindings: [DimensionBinding(dimension: .tilt2, rangeMin: 0, rangeMax: 1)])
+        XCTAssertThrowsError(try unsupported.encoded())
+    }
+
+    /// Overwrites retain the previous bytes and a failed validation leaves the saved rig intact.
+    func testLibraryOverwriteBackupAndFailedSave() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let library = PresetLibrary(directory: directory)
+        var a = completeSnapshot()
+        let url = try library.save(a, name: "Working rig")
+        let first = try Data(contentsOf: url)
+        a.paramValues?["bow_expr"] = 0.7
+        try library.save(a, name: "Working rig")
+        XCTAssertEqual(library.names(), ["Working rig"])
+        XCTAssertEqual(try library.load(name: "Working rig").paramValues?["bow_expr"], 0.7)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: directory.appendingPathComponent("Backups"), includingPropertiesForKeys: nil)
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(backups.first)), first)
+        let good = try Data(contentsOf: url)
+        a.fxCurves = nil
+        XCTAssertThrowsError(try library.save(a, name: "Working rig"))
+        XCTAssertEqual(try Data(contentsOf: url), good)
+    }
+
+    /// A pending gesture from the replaced rig cannot overwrite a new preset's settings.
+    func testPresetSwitchDiscardsPendingGestureRebuilds() {
+        var scheduled: [() -> Void] = []
+        var applied: [[String: Double]] = []
+        let flush = DebouncedParamFlush(schedule: { _, work in scheduled.append(work) },
+                                       flush: { applied.append($0) })
+        flush.queue(["bow_body_q": 40])
+        flush.cancel()
+        flush.queue(["bow_body_q": 12])
+        scheduled[0]()
+        XCTAssertTrue(applied.isEmpty)
+        scheduled[1]()
+        XCTAssertEqual(applied, [["bow_body_q": 12]])
+    }
+
 }

@@ -1,10 +1,10 @@
 import Foundation
 import QuartzCore
 
-/// THE FRET-PAD TOUCH PIPELINE both surfaces play through. Onset: snap
-/// within the Snap distance of a fret inside its extent, else the field
-/// pitch. Drag: the field pitch plus the touch's onset offset, then the
-/// drag assist's slewed correction — never a re-snap. Release. And the
+/// THE FRET-PAD TOUCH PIPELINE both surfaces play through. Each row interior and
+/// overlap resolves its own onset snap, field pitch and slewed drag correction.
+/// An overlap uses the union of its neighbors; boundary blends include snap and correction.
+/// Drags never re-snap. Release. And the
 /// 60 Hz settle tick while any touch is down, which glides the assist's
 /// output and feeds the stroke recorder. Owns the per-touch snap offsets,
 /// the assist and the timer; a surface keeps only its pointer model and
@@ -37,8 +37,12 @@ public final class FretTouchPlayer {
     /// Per settle tick, after the glide (the iPad's indicators ride it).
     public var onTick: ((Int, FretDragAssist.Output) -> Void)?
 
-    /// Per-touch log2 offset captured at a snapped onset (0 if unsnapped).
-    private var snapOffsets: [Int: Double] = [:]
+    private struct Touch {
+        var point: CGPoint
+        /// Per-region log2 offsets captured at onset (0 if unsnapped).
+        let offsets: [FretRegion: Double]
+    }
+    private var touches: [Int: Touch] = [:]
     private var timer: Timer?
 
     public init() {}
@@ -53,32 +57,18 @@ public final class FretTouchPlayer {
                       radiusPt: Double = 0,
                       time now: TimeInterval) -> Bool {
         guard let engine, let recorder,
-              let fieldLog = fretFieldLog(at: pt, placements: c.placements,
-                                          warp: c.warp)
-        else { return false }   // no frets — nothing to play
-        let offset: Double
-        let onsetLog: Double
-        let weights: [String: Double]
-        if c.snapDistance > 0,
-           let hit = fretSnap(at: pt, placements: c.placements,
-                              snapDistance: c.snapDistance) {
-            offset = log2(hit.ratio) - fieldLog
-            onsetLog = log2(hit.ratio)
-            weights = [hit.id: 1.0]
-        } else {
-            offset = 0
-            onsetLog = fieldLog
-            weights = [:]
-        }
-        snapOffsets[touchId] = offset
-        engine.noteOn(touchId: touchId, ratio: pow(2.0, onsetLog),
-                      weights: weights,
-                      radiusPt: radiusPt,
+              let onset = fretOnset(at: pt, placements: c.placements,
+                                    snapDistance: c.snapDistance, warp: c.warp)
+        else { return false }
+        assist.settings = engine.fretAssistSettings
+        touches[touchId] = Touch(point: pt, offsets: onset.offsets)
+        engine.noteOn(touchId: touchId, ratio: pow(2, onset.pitch),
+                      weights: onset.weights, radiusPt: radiusPt,
                       fretPosition: fretPosition(at: pt, placements: c.placements,
                                                  padHeight: c.size.height))
         assist.setContext(placements: c.placements, snapDistance: c.snapDistance)
         assist.begin(touchId: touchId, x: pt.x, y: pt.y,
-                     uncorrectedLog: fieldLog + offset, time: now)
+                     uncorrectedLog: onset.pitch, time: now, regionLogs: onset.logs)
         if recorder.isRecording {
             recorder.begin(touchId: touchId,
                            context: .snapshot(
@@ -86,8 +76,9 @@ public final class FretTouchPlayer {
                                snapDistance: c.snapDistance,
                                ghostExtentOctaves: c.ghostExtentOctaves,
                                fieldWarp: c.warp, assist: assist),
-                           offset: offset, x: pt.x, y: pt.y,
-                           u: fieldLog + offset, o: onsetLog, time: now)
+                           offset: fretRegionValue(onset.offsets, atY: pt.y, placements: c.placements) ?? 0,
+                           x: pt.x, y: pt.y, u: onset.pitch, o: onset.pitch, time: now,
+                           regionLogs: onset.logs)
         }
         startTimerIfNeeded()
         return true
@@ -99,33 +90,60 @@ public final class FretTouchPlayer {
     public func move(touchId: Int, at pt: CGPoint, context c: Context,
                      radiusPt: Double? = nil,
                      time now: TimeInterval) -> FretDragAssist.Output? {
-        guard let engine, let recorder,
-              let offset = snapOffsets[touchId],
-              let fieldLog = fretFieldLog(at: pt, placements: c.placements,
-                                          warp: c.warp)
-        else { return nil }
+        guard let engine, let recorder, var touch = touches[touchId] else { return nil }
+        touch.point = pt
+        let regionLogs = regionPitches(for: touch, context: c)
+        guard let raw = fretRegionValue(regionLogs, atY: pt.y, placements: c.placements) else { return nil }
+        touches[touchId] = touch
+        assist.settings = engine.fretAssistSettings
         assist.setContext(placements: c.placements, snapDistance: c.snapDistance)
         let out = assist.move(touchId: touchId, x: pt.x, y: pt.y,
-                              uncorrectedLog: fieldLog + offset, time: now)
+                              uncorrectedLog: raw, time: now, regionLogs: regionLogs)
         engine.glide(touchId: touchId, ratio: pow(2.0, out.log2Pitch),
                      weights: out.weights,
                      fretPosition: fretPosition(at: pt, placements: c.placements,
                                                 padHeight: c.size.height))
         if let radiusPt { engine.setTouchRadius(touchId: touchId, radiusPt: radiusPt) }
         recorder.sample(touchId: touchId, x: pt.x, y: pt.y,
-                        u: fieldLog + offset, o: out.log2Pitch, time: now)
+                        u: raw, o: out.log2Pitch, time: now, regionLogs: regionLogs)
         return out
+    }
+
+    /// Re-evaluate held fingers when warp changes, without a new onset or
+    /// a synthetic move that would disturb the assist's motion history.
+    public func updateWarp(context c: Context, time now: TimeInterval) {
+        guard !touches.isEmpty else { return }
+        assist.setContext(placements: c.placements, snapDistance: c.snapDistance)
+        tick(time: now, regionLogs: touches.mapValues { regionPitches(for: $0, context: c) })
+    }
+
+    private func regionPitches(for touch: Touch, context c: Context) -> [FretRegion: Double] {
+        fretRegionFields(atX: touch.point.x, placements: c.placements, warp: c.warp)
+            .reduce(into: [:]) { result, entry in
+                result[entry.key] = entry.value + (touch.offsets[entry.key] ?? 0)
+            }
     }
 
     /// Release.
     public func end(touchId: Int, time now: TimeInterval) {
-        snapOffsets.removeValue(forKey: touchId)
+        touches.removeValue(forKey: touchId)
         engine?.noteOff(touchId: touchId)
         assist.end(touchId: touchId)
         recorder?.end(touchId: touchId, time: now)
         if assist.isEmpty {
             timer?.invalidate()
             timer = nil
+        }
+    }
+
+    /// Settle at the last pointer positions, optionally refreshing the field first.
+    func tick(time now: TimeInterval, regionLogs: [Int: [FretRegion: Double]] = [:]) {
+        if let engine { assist.settings = engine.fretAssistSettings }
+        for (id, out) in assist.tick(time: now, regionLogs: regionLogs) {
+            engine?.glide(touchId: id, ratio: pow(2.0, out.log2Pitch), weights: out.weights)
+            recorder?.sampleTick(touchId: id, u: out.uncorrectedLog, o: out.log2Pitch, time: now,
+                                 regionLogs: regionLogs[id])
+            onTick?(id, out)
         }
     }
 
@@ -136,13 +154,7 @@ public final class FretTouchPlayer {
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0,
                                      repeats: true) { [weak self] t in
             guard let self else { t.invalidate(); return }
-            let now = CACurrentMediaTime()
-            for (id, out) in self.assist.tick(time: now) {
-                self.engine?.glide(touchId: id, ratio: pow(2.0, out.log2Pitch),
-                                   weights: out.weights)
-                self.recorder?.sampleTick(touchId: id, o: out.log2Pitch, time: now)
-                self.onTick?(id, out)
-            }
+            self.tick(time: CACurrentMediaTime())
             if self.assist.isEmpty { t.invalidate() }
         }
     }

@@ -505,6 +505,7 @@ public enum BowTables {
                 }
             }
         }
+        if bp.v("bow_fit_body", 0) != 0 { BowFitAsset.shared.applyRadiation(to: &t, bp: bp) }
         let yinf = bp.v("bow_yinf", 0.0)
         let bc = brgCoeffs(fB: bp.v("bow_brg_f", 700.0),
                            qB: bp.v("bow_brg_q", 0.55), sr: sr)

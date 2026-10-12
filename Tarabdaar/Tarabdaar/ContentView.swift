@@ -119,13 +119,14 @@ struct ContentView: View {
                 // (main-thread model, like applyJoyCon's publish).
                 let oct = display.octaveShift
                 DispatchQueue.main.async {
-                    guard let pad, pad.octaveShift != oct else { return }
-                    pad.octaveShift = oct
+                    guard let pad else { return }
+                    pad.fretAssistSettings = display.fretAssist
+                    if pad.octaveShift != oct { pad.octaveShift = oct }
                 }
             }
             // Link gone (down or stale) → the Mac's display axes are
             // history: dim every square (the arm pane falls back to the
-            // iPad's own raw attitude) and un-hide the drone buttons.
+            // iPad's own raw attitude).
             link.onStatus = { [weak scaleSync, weak pad] status in
                 if !status.isUp || status.isStale {
                     scaleSync?.applyJoyCon(.idle)
@@ -138,8 +139,9 @@ struct ContentView: View {
                     // the engine must agree (a re-link resends the truth
                     // via the forced state push).
                     DispatchQueue.main.async {
-                        guard let pad, pad.octaveShift != 0 else { return }
-                        pad.octaveShift = 0
+                        guard let pad else { return }
+                        pad.fretAssistSettings = FretAssistSettings()
+                        if pad.octaveShift != 0 { pad.octaveShift = 0 }
                     }
                 }
             }
@@ -165,7 +167,7 @@ struct ContentView: View {
         FretPadViewIOS(engine: pad, noteManager: noteManager, scaleSync: scaleSync,
                        midi: midi,
                        arrangement: scaleSync.fretArrangement
-                           ?? FretArrangement.keyboardArrangement(
+                           ?? FretArrangement.defaultArrangement(
                                degrees: scaleDegrees(from: pad.scale)),
                        pluckTaraf: { revision, row in
                            link.send(event: .tarafPluck(revision: revision, row: row))
