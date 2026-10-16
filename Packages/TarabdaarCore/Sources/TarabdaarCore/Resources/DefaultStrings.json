@@ -1,0 +1,299 @@
+{
+  "droneSequence": [
+    0,
+    1,
+    2
+  ],
+  "droneStringIds": [
+    "09B7244D-DE63-479D-9366-FF21815DED6A",
+    "F2660331-A50F-4949-BE47-19FB1FBCABAA",
+    "F3446662-900D-429C-AD46-ABDA6E172A4B"
+  ],
+  "droneVoice": "tanpura",
+  "strings": [
+    {
+      "degree": 0,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "10D5AA1C-EBA9-493E-A8D2-50258C3AF5FA",
+      "octave": -1,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 7,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "F2660331-A50F-4949-BE47-19FB1FBCABAA",
+      "octave": -1,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 0,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "593D172D-A08C-4E62-AF06-42F88096F6F3",
+      "octave": 0,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 1,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "4E126AF0-7E9E-438C-A34A-C6AF70029397",
+      "octave": 0,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 2,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "AC98ED09-87CF-4651-9A0C-8287E58DB4FB",
+      "octave": 0,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 3,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "19AE4D6B-EA2E-4AE0-9836-559DF92F1B6F",
+      "octave": 0,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 4,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "9535E0DA-03D5-4678-844C-C1C64546DD71",
+      "octave": 0,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 5,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "C213DF12-BED1-4EE1-B753-C70A3624C115",
+      "octave": 0,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 6,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "DE20736F-3423-4641-AD9D-042B4A5C1B41",
+      "octave": 0,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 7,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "B4482A58-E835-4D94-BFE4-FBA8F201976D",
+      "octave": 0,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 8,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "D21BDD40-A432-44C4-B52F-6F62A1516305",
+      "octave": 0,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 0,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "741F33A8-8F64-47D1-A5FE-478124D2AC2A",
+      "octave": 1,
+      "set": "raga",
+      "t60": 4
+    },
+    {
+      "degree": 0,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.95,
+      "id": "09B7244D-DE63-479D-9366-FF21815DED6A",
+      "octave": -1,
+      "set": "chromatic",
+      "t60": 9
+    },
+    {
+      "degree": 2,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.8,
+      "id": "4E0CB81F-2DC4-40FB-990F-AB3260CF2C83",
+      "octave": -1,
+      "set": "chromatic",
+      "t60": 4.5
+    },
+    {
+      "degree": 7,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "0904228F-F47A-4102-BA5F-520A533282E2",
+      "octave": -1,
+      "set": "chromatic",
+      "t60": 8
+    },
+    {
+      "degree": 0,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.95,
+      "id": "F3446662-900D-429C-AD46-ABDA6E172A4B",
+      "octave": 0,
+      "set": "chromatic",
+      "t60": 7
+    },
+    {
+      "degree": 1,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "63852750-C36F-4C8A-953C-2ECD8CE14FC4",
+      "octave": 0,
+      "set": "chromatic",
+      "t60": 3
+    },
+    {
+      "degree": 2,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "4910B396-03E2-49F3-9460-3B5BAC053C17",
+      "octave": 0,
+      "set": "chromatic",
+      "t60": 3
+    },
+    {
+      "degree": 3,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "3B25B950-335E-41B1-91CA-80D878DC878B",
+      "octave": 0,
+      "set": "chromatic",
+      "t60": 3
+    },
+    {
+      "degree": 4,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "8D35D1D8-D228-4F50-BC3A-F1DEBE41765B",
+      "octave": 0,
+      "set": "chromatic",
+      "t60": 3
+    },
+    {
+      "degree": 5,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.85,
+      "id": "562CC7FF-76C5-4F59-A9B5-D1189BA757CF",
+      "octave": 0,
+      "set": "chromatic",
+      "t60": 3
+    },
+    {
+      "degree": 7,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.9,
+      "id": "4DC54778-61ED-4759-BDBD-CE304902D02C",
+      "octave": 0,
+      "set": "chromatic",
+      "t60": 4.5
+    },
+    {
+      "degree": 0,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.7,
+      "id": "D3257C4A-DB53-4564-88F0-D395E1685AA9",
+      "octave": 1,
+      "set": "chromatic",
+      "t60": 2.5
+    },
+    {
+      "degree": 1,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.7,
+      "id": "31FF4D23-8A8F-4AE5-9CAB-3A4E0AC19FA8",
+      "octave": 1,
+      "set": "chromatic",
+      "t60": 2.5
+    },
+    {
+      "degree": 2,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.7,
+      "id": "5E17EB5A-3645-4A72-9077-372FC9A5634C",
+      "octave": 1,
+      "set": "chromatic",
+      "t60": 2.5
+    },
+    {
+      "degree": 3,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.7,
+      "id": "07A53335-BC8E-442A-8E1D-267E1F779A6F",
+      "octave": 1,
+      "set": "chromatic",
+      "t60": 2.5
+    },
+    {
+      "degree": 4,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.7,
+      "id": "769DB0BD-E85F-4A78-8B96-AACB010BF08D",
+      "octave": 1,
+      "set": "chromatic",
+      "t60": 2.5
+    },
+    {
+      "degree": 5,
+      "enabled": true,
+      "followsScale": true,
+      "gain": 0.7,
+      "id": "C70F9558-4359-4594-A6BA-C6567CCD055F",
+      "octave": 1,
+      "set": "chromatic",
+      "t60": 2.5
+    }
+  ],
+  "strumStringIds": [
+    "09B7244D-DE63-479D-9366-FF21815DED6A"
+  ],
+  "version": 1
+}

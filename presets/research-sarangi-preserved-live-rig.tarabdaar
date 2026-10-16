@@ -125,11 +125,6 @@
         "F6499205-5EFC-4C6C-AB54-F519F6A85CF4",
         "A0138E8E-D577-4CB3-B99D-35F2B1E041DC"
       ],
-      "follower" : {
-        "enabled" : false,
-        "gain" : 2,
-        "t60" : 10
-      },
       "scaleRatios" : [
         1,
         1.0666666666666667,
@@ -544,8 +539,6 @@
       "bow_jtc_gain" : 0.027633568548387097,
       "bow_jtc_norm" : 0.5284778225806451,
       "bow_kret" : 0,
-      "bow_lim_rel_ms" : 150,
-      "bow_lim_thresh" : 0.8,
       "bow_live_beta_hi" : 0.24,
       "bow_live_beta_lo" : 0.05,
       "bow_live_press_over" : 1.1692034715331512,
@@ -597,7 +590,6 @@
       "ctl_strike_window" : 2,
       "ctl_strum_expr" : 0.41673553719008266,
       "ctl_strum_thresh" : 1,
-      "ctl_taraf_adapt" : 0,
       "fx_drive_eq_amount" : 1,
       "fx_drive_eq_on" : 0,
       "fx_drive_rev_cut" : 10000,
@@ -738,7 +730,6 @@
         }
       ],
       "ghostExtentOctaves" : 1,
-      "primeLimit" : 5,
       "scalePoints" : [
         {
           "den" : 1,

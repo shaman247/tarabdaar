@@ -9,11 +9,11 @@ final class FretWarpTests: XCTestCase {
     func testRegionBoundariesStayContinuousThroughTheTouchPipeline() throws {
         let degrees = scaleDegrees(from: PitchScale.defaultJI)
         var arrangement = FretArrangement.defaultArrangement(degrees: degrees)
-        for degree in [0, 2, 5, 7] { arrangement.toggle(degreeIndex: degree, row: .lower) }
-        for degree in [1, 6] { arrangement.toggle(degreeIndex: degree, row: .upper) }
+        for degree in [0, 2, 5, 7] { arrangement.toggle(degreeIndex: degree, row: .row3) }
+        for degree in [1, 6] { arrangement.toggle(degreeIndex: degree, row: .row7) }
         let size = CGSize(width: 1000, height: 420)
         let frets = fretPlacements(arrangement: arrangement, degrees: degrees, size: size)
-        let n = try XCTUnwrap(frets.first { !$0.isGhost && $0.degreeIndex == 11 && $0.row == .bottom })
+        let n = try XCTUnwrap(frets.first { !$0.isGhost && $0.degreeIndex == 11 && $0.row == .row1 })
         let x = n.x - 3
         let epsilon = 1e-5
         for snap in [0.0, 60.0] {
@@ -112,39 +112,83 @@ final class FretWarpTests: XCTestCase {
         }
     }
 
-    /// The arrangement sync carries only pitch/row pairs and migrates cached legacy formats.
+    /// The arrangement sync carries only pitch/row assignments and migrates cached legacy formats.
     func testArrangementBlobIsWarpFree() {
         let a = FretArrangement(
-            segments: [FretSegment(degreeIndex: 2, row: .middle)],
+            segments: [FretSegment(degreeIndex: 2, row: .row5)],
             ghostExtentOctaves: 0.75)
         let blob = FretArrangementSysEx.encodeBlob(a)
-        XCTAssertEqual(blob[0], 3, "the first byte is the ghost extent in quarter octaves")
+        XCTAssertEqual(blob[0], 15, "the first byte is the ghost extent in twentieth octaves")
+        XCTAssertEqual(blob[1], 80)
         XCTAssertEqual(blob.count,
-                       3 + 2 * a.segments.count
+                       3 + 3 * a.segments.count
                          + 2 * FretArrangement.droneCount,
                        "no version byte, no trailing warp byte")
         let decoded = FretArrangementSysEx.decodeBlob(blob)!
         XCTAssertEqual(decoded.segments.count, 1)
-        XCTAssertEqual(decoded.segments[0].row, .middle)
+        XCTAssertEqual(decoded.segments[0].row, .row5)
         for end in 0..<blob.count {
             XCTAssertNil(FretArrangementSysEx.decodeBlob(Array(blob.prefix(end))))
         }
         XCTAssertEqual(decoded.ghostExtentOctaves, 0.75)
+        let legacy: [UInt8] = [3, 8, 1, 2, 5, 0, 0, 0, 0, 0, 0]
+        XCTAssertEqual(FretArrangementSysEx.decodeBlob(legacy)?.ghostExtentOctaves, 0.75)
         var invalidRow = blob
         invalidRow[4] = 0
         XCTAssertNil(FretArrangementSysEx.decodeBlob(invalidRow))
+        invalidRow = blob
+        invalidRow[5] = 128
+        XCTAssertNil(FretArrangementSysEx.decodeBlob(invalidRow))
         let oldPair: [UInt8] = [3, 3, 1, 2, 0, 32, 31, 0, 0, 0, 0, 0, 0]
-        XCTAssertEqual(FretArrangementSysEx.decodeBlob(oldPair)?.segments.first?.row, .top)
+        XCTAssertEqual(FretArrangementSysEx.decodeBlob(oldPair)?.segments.first?.row, .row9)
     }
-    /// Cached three-row masks do not become assignments in the new intermediate rows.
+
+    /// Every tenth-octave slider position survives sync without changing the surface span.
+    func testFineOctaveSpanRoundTrip() throws {
+        for step in 0...40 {
+            let span = 1 + Double(step) / 10
+            let arrangement = FretArrangement(segments: [], ghostExtentOctaves: (span - 1) / 2)
+            let decoded = try XCTUnwrap(FretArrangementSysEx.decodeBlob(
+                FretArrangementSysEx.encodeBlob(arrangement)))
+            XCTAssertEqual(1 + 2 * decoded.ghostExtentOctaves, span, accuracy: 1e-12)
+        }
+    }
+    /// Cached layouts preserve their region pitches and ignore retired raga masks.
     func testLegacyRowBlobMigration() throws {
         let old: [UInt8] = [3, 5, 3, 0, 1, 31, 1, 2, 0, 2, 3, 31, 0, 0, 0, 0, 0, 0]
         let decoded = try XCTUnwrap(FretArrangementSysEx.decodeBlob(old))
-        XCTAssertEqual(decoded.segments.map(\.row), [.bottom, .middle, .top])
-        let new = FretArrangement(segments: [.init(degreeIndex: 2, row: .lower), .init(degreeIndex: 3, row: .upper)])
-        XCTAssertEqual(FretArrangementSysEx.decodeBlob(FretArrangementSysEx.encodeBlob(new))?.segments.map(\.row), [.lower, .upper])
+        XCTAssertEqual(decoded.segments.map(\.row), [.row1, .row5, .row9, .row2, .row4, .row6, .row8])
+        let new = FretArrangement(segments: FretRow.allCases.map { .init(degreeIndex: $0.rawValue, row: $0) })
+        XCTAssertEqual(FretArrangementSysEx.decodeBlob(FretArrangementSysEx.encodeBlob(new))?.segments.map(\.row), FretRow.allCases)
+        let five: [UInt8] = [18, 24, 2, 0, 2, 1, 3, 0, 0, 0, 0, 0, 0]
+        let migrated = try XCTUnwrap(FretArrangementSysEx.decodeBlob(five))
+        XCTAssertEqual(migrated.segments.map(\.row), [.row3, .row5, .row2, .row4, .row4, .row6])
+        XCTAssertEqual(migrated.ghostExtentOctaves, 0.9)
+        for flags: UInt8 in [40, 36, 34, 96, 72, 68, 66, 65, 128] {
+            var invalid = five; invalid[1] = flags
+            XCTAssertNil(FretArrangementSysEx.decodeBlob(invalid))
+        }
         let masked: [UInt8] = [8, 1, 2, 0, 0, 0, 0, 127, 1, 31, 1, 0, 0, 0, 127, 0, 0]
-        XCTAssertEqual(FretArrangementSysEx.decodeBlob(masked)?.segments.map(\.degreeIndex), [0])
+        XCTAssertEqual(FretArrangementSysEx.decodeBlob(masked)?.segments.map(\.degreeIndex), [0, 0, 0])
+        var nine: [UInt8] = [18, 48, 2, 0, 1, 1, 9, 0, 0, 0, 0, 0, 0]
+        XCTAssertEqual(FretArrangementSysEx.decodeBlob(nine)?.segments.map(\.row), [.row1, .row9])
+        nine[6] = 10
+        XCTAssertNil(FretArrangementSysEx.decodeBlob(nine))
+    }
+
+    /// All scale pitches in all fifteen rows fit a TLP event without dropping assignments.
+    func testDenseFifteenRowSync() throws {
+        let arrangement = FretArrangement(segments: (0..<127).flatMap { degree in
+            FretRow.allCases.map { FretSegment(degreeIndex: degree, row: $0) }
+        })
+        let blob = FretArrangementSysEx.encodeBlob(arrangement)
+        let frame = TLPFrame.event(seq: 1, .fretArrangement(blob: blob))
+        let bytes = frame.encode()
+        XCTAssertLessThanOrEqual(bytes.count, TLP.maxFrameBytes)
+        XCTAssertEqual(TLPFrame.decode(bytes), frame)
+        let decoded = try XCTUnwrap(FretArrangementSysEx.decodeBlob(blob))
+        XCTAssertEqual(decoded.segments.map { [$0.degreeIndex, $0.row.rawValue] },
+                       arrangement.segments.map { [$0.degreeIndex, $0.row.rawValue] })
     }
 
     /// Within a region the warp is monotone and every assigned pitch stays exact.

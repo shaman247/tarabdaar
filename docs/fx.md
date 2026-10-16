@@ -5,7 +5,7 @@ The **FX tab (⌘6)** is a four-insert effects rack inside the String voice's re
 The Voice insert processes played String radiation; the Taraf insert processes
 both banks. Voice → Taraf also receives injected Tanpura/Sitar excitation.
 Global processes the combined String-engine output, including taraf and room,
-before its limiter; it does not process the separate audible Tanpura/Sitar
+as its final stage; it does not process the separate audible Tanpura/Sitar
 outputs. The generated parameter descriptions name these affected signals.
 
 ## The four insert points

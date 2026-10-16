@@ -50,6 +50,7 @@ python3 tools/gen_docs_html.py
 run_checked xcodebuild \
     -project Tarabdaar/Tarabdaar.xcodeproj \
     -scheme TarabdaarMac \
+    -configuration Release \
     -destination 'platform=macOS,arch=arm64' \
     -derivedDataPath build/mac-ci \
     -quiet build

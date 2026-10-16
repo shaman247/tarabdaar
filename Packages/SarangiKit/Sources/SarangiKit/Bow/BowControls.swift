@@ -7,8 +7,8 @@ import Foundation
 /// each configured BowAxisTransform before the physical control law:
 ///
 ///   * f0    — slot pitch → log-f0 ramped across the block to the latest
-///             target (meend is the finger's own movement), then the
-///             calibrated `pitch_cents` correction.
+///             target (meend is the finger's own movement). The kernel
+///             compensates the loop filters at this requested frequency.
 ///   * gate  — note state through a ~25 ms one-pole.
 ///   * vbow  — the expr axis → dB (rel ∈ [−14, +5]) → v =
 ///             v_ref·10^(rel/(20·dyn_p)) clipped to [v_lo, 1.3·v_hi]
@@ -400,8 +400,6 @@ public struct BowControlFilter: Sendable {
     var gripConfirmS = 0.0       // the low reading must persist this long
     var aDrift = 1.0, driftGain = 0.0   // OU pole + unit-variance step gain
     var aDipAtt = 0.0, aDipRel = 0.0    // dip smoother poles
-    let pitchKnots: [Double], pitchCentsTab: [Double]
-    let pitchRefLog2: Double
     var lf0 = 0.0                // sounding log2 f0 at the last sample
     var gateState = 0.0
     var onsetClock = 1.0e9       // seconds since the current attack began
@@ -443,10 +441,6 @@ public struct BowControlFilter: Sendable {
         aGate = OnePole.pole(tau: 0.025, sr: srk)
         aDipAtt = OnePole.pole(tau: 0.015, sr: srk)
         aDipRel = OnePole.pole(tau: 0.12, sr: srk)
-        // the calibrated 220 Hz-referenced pitch correction table
-        pitchKnots = bp.pitchKnotsOct
-        pitchCentsTab = bp.pitchCents
-        pitchRefLog2 = log2(220.0)
         loadMappingConstants(bp: bp)
     }
 
@@ -507,7 +501,7 @@ public struct BowControlFilter: Sendable {
 
     /// Re-read the mapping constants on a running filter; render state is
     /// untouched so a parameter edit does not re-articulate a sounding
-    /// note (the pitch tables are structural and stay put).
+    /// note.
     public mutating func updateLiveParams(bp: BowParams) {
         loadMappingConstants(bp: bp)
     }
@@ -522,18 +516,6 @@ public struct BowControlFilter: Sendable {
     @inline(__always) private mutating func nextUniform() -> Double {
         rng = XorShift64.step(rng)
         return Double(Int64(bitPattern: rng)) * (1.0 / 9.223372036854775808e18)
-    }
-
-    @inline(__always) func pitchCorrection(_ lf0: Double) -> Double {
-        // piecewise-linear log2(f0/ref) knots → cents, clamped ends
-        let x = lf0 - pitchRefLog2
-        if x <= pitchKnots[0] { return pitchCentsTab[0] }
-        let last = pitchKnots.count - 1
-        if x >= pitchKnots[last] { return pitchCentsTab[last] }
-        var i = 0
-        while i + 1 < pitchKnots.count && pitchKnots[i + 1] < x { i += 1 }
-        let t = (x - pitchKnots[i]) / max(pitchKnots[i + 1] - pitchKnots[i], 1e-12)
-        return pitchCentsTab[i] + t * (pitchCentsTab[i + 1] - pitchCentsTab[i])
     }
 
     /// Fill `n` kernel-rate samples from the mapper state.
@@ -672,7 +654,7 @@ public struct BowControlFilter: Sendable {
             let posE = positionTransform.apply(p.pos + uEnd * (snap.pos - p.pos))
             let tkE = p.tiltDb + uEnd * (snap.tiltDb - p.tiltDb)
             let lfE = lfStart + uEnd * (lfTarget - lfStart)
-            let f0E = exp2(lfE + pitchCorrection(lfE) / 1200.0)
+            let f0E = exp2(lfE)
             // dynamics: expr → dB → v. The law rides [exprLift, 1]; the
             // fade-to-silence zone below the lift must NOT overlap it.
             var vbK: Double
@@ -790,8 +772,7 @@ public struct BowControlFilter: Sendable {
                     lastLf = lf
                     lastLfValid = true
                 }
-                let corr = pitchCorrection(lf)
-                let f0 = exp2(lf + vibOct + corr / 1200.0)
+                let f0 = exp2(lf + vibOct)
                 // Release and glide reconnection retain the shared 25 ms lift.
                 gateState = (1.0 - gatePole) * snap.gate + gatePole * gateState
                 onsetClock += dtk

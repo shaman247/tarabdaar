@@ -51,42 +51,18 @@ Everything else comes from the **dimensions** the Mac's **Controls tab (⌘4)** 
 
 **Attack sharpness** is the single control in String · Attack: 0 gives a slow draw, 1 a fast engagement of bow speed and force. Its value is captured at each new note; bind it to Strike or Joy-Con Accel to shape attacks independently of expression.
 
-The iPad toolbar shows each source live (arm/wrist/stick squares, the strike and finger-accel scopes, the Mac's radiated volume). See [Sensors](sensors.md).
+The Mac's **Live tab (⌘1)** shows arm, wrist and stick motion, the strike and finger-acceleration graphs, and separate Main, Chromatic and Raga volume traces. The iPad keeps the playing surface free of touch indicators and performance readouts. See [Sensors](sensors.md).
 
 ## Octave shift and strum (Joy-Con)
 
-Dpad ←/→ shift the playing range by whole octaves (±3; the toolbars read "Oct +1"); a sounding note keeps its octave, the next onset takes the new one. Drones, the tarab and the strum do not shift. Hold **L** to play the configured chord — or the chord-bar selection — in the selected **main voice**. The chord sustains until release and excites the sympathetic strings like other played notes.
+Dpad ←/→ shift the playing range by whole octaves (±3; the Mac toolbar reads "Oct +1"); a sounding note keeps its octave, the next onset takes the new one. Drones, the tarab and the strum do not shift. Hold **L** to play the configured chord — or the chord-bar selection — in the selected **main voice**. The chord sustains until release and excites the sympathetic strings like other played notes.
 
 Dpad **↓** or the rear **GL** button plays the next drone in a repeating **Sa → Pa → high Sa → high Sa** sequence, using the three existing drone mappings. Configure the steps in **Strings → Drones → Drone sequence (Down / GL)**. A press starts the sequence immediately; it advances every **2 seconds** after release. The next press of either button stops it. Tanpura drones start **one octave lower**; **↑** toggles back to the original octave and down again, taking effect on the next pluck. The octave selection starts low each launch. During calibration, ↓ still redoes the previous phase and ↑ advances it, without changing the sequence or octave.
 
 ## Scale editing (on the Mac)
 
-The iPad is **perform-only**. Scales are designed on the Mac's Fret Pad tab (⌘3): the scale list editor (add/remove/disable pitches, snap to simple fractions, the Scales presets including 12-TET Chromatic) and the tonic in Hz. Edits sync to the iPad within a moment; the iPad opens on the last scale it received. See [Scales & Tuning](scales-and-tuning.md).
-
-## Learn the taraf balance by playing
-
-Open **Strings (⌘2)** to see pitch distributions over 10 seconds, 60 seconds,
-and the whole performance. Notes in different octaves count toward the same
-pitch class; lingering counts more than passing through, and silence ages
-the two recent windows. The histograms record with Adaptation at zero.
-
-Raise **Adaptation** to hear the taraf's gains follow the learned distribution.
-Zero restores the saved levels; full amount keeps the prominent degrees at
-their saved gain and lowers absent ones toward 15%. This affects existing,
-enabled taraf rows on both bridges, and preserves their saved tuning,
-gains and decays. It does not create or enable strings.
-
-To establish the raga quickly, press **Reset & seed** (Joy-Con **Minus**), play
-the basic notes with a brief hold on each (at least 180 ms), then press
-**Finish seed** (Minus again). The recognized degrees light up and start
-with equal weight; continue performing to refine the distribution. **Reset
-performance** (Joy-Con **Capture**) clears everything for a new performance.
-The profile resets on scale or tonic changes and on app restart.
+The iPad is **perform-only**. Scales are designed on the Mac's Fret Pad tab (⌘3): the scale list editor (add/remove/disable pitches, type ratios, the Scales presets including 12-TET Chromatic) and the tonic in Hz. Edits sync to the iPad within a moment; the iPad opens on the last scale it received. See [Scales & Tuning](scales-and-tuning.md).
 
 ## Instruments
 
 The Live tab (⌘1) picks the played voice: **String** (bowed, the default), **Tanpura** or **Sitar** (plucked — a fret touch plucks at the exact bent pitch, drags retune the ringing string). The Strings tab's drone Voice picker chooses the Tanpura or the sympathetic strings for the Joy-Con drone sequence.
-
-## PANIC
-
-The red **PANIC** button in the iPad toolbar clears its touches and releases the Mac's notes and drones belonging to that link. Mac-local pad and controller notes keep their own lifetimes.

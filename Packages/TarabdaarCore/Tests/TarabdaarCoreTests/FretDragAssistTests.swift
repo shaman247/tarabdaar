@@ -13,7 +13,7 @@ final class FretDragAssistTests: XCTestCase {
         for n in 1...40 {
             let time = 0.01 + Double(n) * 0.01
             let raw = 0.1 - Double(n) * 0.001
-            let refreshed = try XCTUnwrap(live.tick(time: time, regionLogs: [1: [.middle: raw]]).first).output
+            let refreshed = try XCTUnwrap(live.tick(time: time, regionLogs: [1: [.row5: raw]]).first).output
             let settled = try XCTUnwrap(reference.tick(time: time).first).output
             XCTAssertEqual(refreshed.stopGate, settled.stopGate)
             XCTAssertEqual(refreshed.weights, settled.weights,
@@ -89,16 +89,18 @@ final class FretDragAssistTests: XCTestCase {
             if n == 60 { XCTAssertEqual(out.log2Pitch, 0, accuracy: 1e-10) }
         }
     }
-    /// An overlap corrects toward its union's nearest fret, independently of either row's correction.
-    func testOverlapCorrectionUsesUnion() {
+    /// Each row corrects against its own assigned frets and keeps separate state on vertical transitions.
+    func testIndependentRowCorrection() {
         let degrees = [(ratio: 1.0, label: "a"), (ratio: 2.0, label: "b")]
-        let layout = FretArrangement(segments: [.init(degreeIndex: 0, row: .bottom),
-                                               .init(degreeIndex: 1, row: .lower)], ghostExtentOctaves: 0)
+        let layout = FretArrangement(segments: [.init(degreeIndex: 0, row: .row1),
+                                               .init(degreeIndex: 1, row: .row3),
+                                               .init(degreeIndex: 0, row: .row2),
+                                               .init(degreeIndex: 1, row: .row2)], ghostExtentOctaves: 0)
         let frets = fretPlacements(arrangement: layout, degrees: degrees, size: CGSize(width: 100, height: 420))
         let a = FretDragAssist()
         a.setContext(placements: frets, snapDistance: 100)
-        let logs: [FretRegion: Double] = [.bottom: 0.08, .lower: 0.95, .bottomLower: 0.6]
-        let regions: [FretRegion] = [.bottom, .lower, .bottomLower]
+        let logs: [FretRegion: Double] = [.row1: 0.08, .row3: 0.95, .row2: 0.6]
+        let regions: [FretRegion] = [.row1, .row3, .row2]
         for (id, region) in regions.enumerated() {
             let y = (region.topY + region.bottomY) / 2 * 420
             a.begin(touchId: id, x: 70, y: y, uncorrectedLog: logs[region]!, time: 0, regionLogs: logs)
@@ -110,7 +112,7 @@ final class FretDragAssistTests: XCTestCase {
         XCTAssertEqual(result[0]!, 0, accuracy: 1e-10)
         XCTAssertEqual(result[1]!, 1, accuracy: 1e-10)
         XCTAssertEqual(result[2]!, 1, accuracy: 1e-10)
-        let y = (FretRegion.bottomLower.topY + FretRegion.bottomLower.bottomY) / 2 * 420
+        let y = (FretRegion.row2.topY + FretRegion.row2.bottomY) / 2 * 420
         let moved = a.move(touchId: 0, x: 70, y: y, uncorrectedLog: 0.6, time: 1.51, regionLogs: logs)
         XCTAssertEqual(moved.log2Pitch, 1, accuracy: 1e-10)
     }

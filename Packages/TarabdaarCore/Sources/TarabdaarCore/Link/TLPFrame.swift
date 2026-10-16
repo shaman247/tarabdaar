@@ -14,8 +14,8 @@ public enum TLP {
     /// Protocol version — both apps ship in lockstep; the HELLO range check
     /// refuses a mismatched peer cleanly (the symptom otherwise: "drones and
     /// tilt work, touches are silent").
-    public static let versionMin: UInt16 = 26
-    public static let versionMax: UInt16 = 26
+    public static let versionMin: UInt16 = 30
+    public static let versionMax: UInt16 = 30
     /// Hard cap on an encoded frame.
     public static let maxFrameBytes = 1024
     /// HELLO magic 'TRBL' (LE u32).
@@ -30,6 +30,8 @@ public enum TLP {
     public static let typeFretArrangement: UInt8 = 0x11
     public static let typeTarafBank: UInt8 = 0x12
     public static let typeTarafPluck: UInt8 = 0x13
+    public static let typeFretRecording: UInt8 = 0x14
+    public static let typeFretRecordingChunk: UInt8 = 0x15
     public static let typeResyncRequest: UInt8 = 0x1F
     public static let typePerfState: UInt8 = 0x40
     public static let typeJoyConState: UInt8 = 0x41
@@ -320,6 +322,8 @@ public enum TLPEvent: Equatable, Sendable {
     case fretArrangement(blob: [UInt8])
     case tarafBank(TarafBank)
     case tarafPluck(revision: UInt32, row: UInt8)
+    case fretRecording(session: UInt32, recording: Bool)
+    case fretRecordingChunk(FretRecordingChunk)
     case resyncRequest
 }
 
@@ -344,6 +348,8 @@ public enum TLPFrame: Equatable, Sendable {
             case .fretArrangement: return TLP.typeFretArrangement
             case .tarafBank: return TLP.typeTarafBank
             case .tarafPluck: return TLP.typeTarafPluck
+            case .fretRecording: return TLP.typeFretRecording
+            case .fretRecordingChunk: return TLP.typeFretRecordingChunk
             case .resyncRequest: return TLP.typeResyncRequest
             }
         }
@@ -427,6 +433,14 @@ extension TLPFrame {
                 }
             case .tarafPluck(let revision, let row):
                 out.appendLE(revision); out.append(row)
+            case .fretRecording(let session, let recording):
+                out.appendLE(session)
+                out.append(recording ? 1 : 0)
+            case .fretRecordingChunk(let chunk):
+                out.appendLE(chunk.session); out.appendLE(chunk.record)
+                out.appendLE(chunk.index); out.appendLE(chunk.count)
+                out.appendLE(UInt16(clamping: chunk.bytes.count))
+                out.append(contentsOf: chunk.bytes)
             case .panic, .resyncRequest:
                 break
             case .scaleState(let blob), .fretArrangement(let blob):
@@ -535,7 +549,7 @@ extension TLPFrame {
                 var ids = Set<UInt8>()
                 for _ in 0..<count {
                     guard let id = r.u8(), id < 128, ids.insert(id).inserted,
-                          let bits = r.u32(), let flags = r.u8(), flags <= 3 else { return nil }
+                          let bits = r.u32(), let flags = r.u8(), flags <= 1 else { return nil }
                     let frequency = Float(bitPattern: bits)
                     guard frequency.isFinite, frequency > 0 else { return nil }
                     rows.append(.init(id: id, frequency: frequency, flags: flags))
@@ -544,6 +558,18 @@ extension TLPFrame {
             case TLP.typeTarafPluck:
                 guard let revision = r.u32(), let row = r.u8(), row < 128 else { return nil }
                 event = .tarafPluck(revision: revision, row: row)
+            case TLP.typeFretRecording:
+                guard let session = r.u32(), let recording = r.u8(), recording <= 1,
+                      recording == 0 || session != 0 else { return nil }
+                event = .fretRecording(session: session, recording: recording != 0)
+            case TLP.typeFretRecordingChunk:
+                guard let session = r.u32(), let record = r.u32(),
+                      let index = r.u16(), let count = r.u16(), let length = r.u16(),
+                      let bytes = r.bytes(Int(length)) else { return nil }
+                let chunk = FretRecordingChunk(session: session, record: record,
+                    index: index, count: count, bytes: bytes)
+                guard chunk.isValid else { return nil }
+                event = .fretRecordingChunk(chunk)
             case TLP.typePanic:
                 event = .panic
             case TLP.typeResyncRequest:

@@ -6,9 +6,12 @@ import SarangiKit
 // parameters, the off-main engine rebuilds and the tarab tuning push.
 extension AudioEngine {
     /// Enable/disable the String voice: creates + connects the node on first
-    /// enable and builds the engine off-main. False if `bowed_string.json` is missing.
+    /// enable, seeds saved controls and builds off-main. False if `bowed_string.json` is missing.
     @discardableResult
-    public func setSarangiModelVoiceEnabled(_ on: Bool) -> Bool {
+    public func setSarangiModelVoiceEnabled(_ on: Bool,
+                                           initialControls: [String: Double] = [:]) -> Bool {
+        graphLock.lock()
+        defer { graphLock.unlock() }
         if on && stringVoiceSource == nil {
             guard Presets.bowedStringParams() != nil else {
                 NSLog("Tarabdaar: bowed_string.json missing from the SarangiKit bundle")
@@ -18,6 +21,10 @@ extension AudioEngine {
             // always armed — the metered render is bit-exact (`BusMeterTests`)
             src.setBusMeter(true)
             stringVoiceSource = src
+        }
+        if on, let src = stringVoiceSource {
+            // Seed saved live controls before the first build can leave this thread.
+            for (key, value) in initialControls { src.setControl(key, value) }
         }
         if let src = stringVoiceSource, on != stringVoiceConnected {
             let wasRunning = engine.isRunning
@@ -45,10 +52,8 @@ extension AudioEngine {
         useSarangiModelVoice = on
         let strings = lastSarangiStrings
         let tonic = lastSarangiTonic
-        let follower = lastSarangiFollower
         lock.unlock()
-        if on { rebuildStringVoice(tonic: tonic, strings: strings,
-                                   follower: follower) }
+        if on { rebuildStringVoice(tonic: tonic, strings: strings) }
         else {
             stringBuilds.invalidate()
             tarafBank = .empty
@@ -125,11 +130,11 @@ extension AudioEngine {
         }
     }
 
-    /// Re-arm held drones on a freshly built engine (it starts silent).
-    private func reapplyHeldDrones(to engine: BowEngine) {
+    /// Re-arm sympathetic holds under touchRoutingLock after the silent replacement publishes.
+    private func reapplyHeldSympatheticDrones(to engine: BowEngine) {
         lock.lock()
         let held = droneHeld.indices
-            .filter { droneHeld[$0] }
+            .filter { droneHeld[$0] && droneVoiceModeStorage == .sympathetic }
             .compactMap { i in droneFreqs[i].map { (hz: $0, chromatic: droneChromatic[i]) } }
         lock.unlock()
         for hz in held {
@@ -141,32 +146,28 @@ extension AudioEngine {
 
     /// Build a fresh String `BowEngine` off-main and publish it; the mapper
     /// keeps held notes/axes across the swap, a newer build supersedes.
-    private func rebuildStringVoice(tonic: Double, strings: [ResolvedString],
-                                    follower: (gain: Double, t60: Double)? = nil) {
+    private func rebuildStringVoice(tonic: Double, strings: [ResolvedString]) {
         guard let src = stringVoiceSource else { return }
         let overrides = stringVoiceOverrides
-        let mapper = src.mapper
         stringBuilds.request(on: stringBuildQueue, build: {
-            guard let engine = StringVoiceSource.buildEngine(tonicHz: tonic,
-                                                  strings: strings,
-                                                  mapper: mapper,
-                                                  overrides: overrides,
-                                                  follower: follower,
-                                                  configureMapper: false,
-                                                  retainJawariTables: false)
+            guard let engine = src.buildEngine(tonicHz: tonic, strings: strings,
+                                               overrides: overrides)
             else { return .failed }
             return .ready(engine)
         }, publish: { [weak self] engine in
             guard let self, let engine else { return }
+            // A release or voice switch must see the complete handoff, never
+            // slip between publication and restoring the replacement's holds.
+            self.touchRoutingLock.lock()
+            defer { self.touchRoutingLock.unlock() }
             self.stringVoiceSource?.setEngine(engine)
             let rows = engine.jtRowFreqs.prefix(128).enumerated().map { index, hz in
                 TarafBank.Row(id: UInt8(index), frequency: Float(hz),
-                    flags: (engine.jtDualRows.contains(index) ? 1 : 0)
-                        | (index == engine.jtFollowerRow ? 2 : 0))
+                    flags: engine.jtDualRows.contains(index) ? 1 : 0)
             }
             self.tarafBank = TarafBank(revision: UInt32.random(in: 1...UInt32.max),
                                       tonic: Float(tonic), rows: rows)
-            self.reapplyHeldDrones(to: engine)
+            self.reapplyHeldSympatheticDrones(to: engine)
         }, failed: {
             NSLog("Tarabdaar: String engine build failed; retaining the last working engine")
         })
@@ -184,7 +185,6 @@ extension AudioEngine {
         let on = useSarangiModelVoice
         let tonic = lastSarangiTonic
         let strings = lastSarangiStrings
-        let follower = lastSarangiFollower
         lock.unlock()
         guard on, let src = stringVoiceSource else { return false }
         // The caller immediately submits a replacement with all current overrides.
@@ -195,7 +195,6 @@ extension AudioEngine {
         let jtTouched = changed.contains { $0.hasPrefix("bow_jt") }
         return src.applyLiveParams(tonicHz: tonic, strings: strings,
                                    overrides: overrides,
-                                   follower: follower,
                                    needsJawariTables: jtTouched)
     }
 
@@ -206,10 +205,8 @@ extension AudioEngine {
         let on = useSarangiModelVoice
         let tonic = lastSarangiTonic
         let strings = lastSarangiStrings
-        let follower = lastSarangiFollower
         lock.unlock()
-        if on { rebuildStringVoice(tonic: tonic, strings: strings,
-                                   follower: follower) }
+        if on { rebuildStringVoice(tonic: tonic, strings: strings) }
     }
 
     /// Main-thread gesture routing; a stale bank can never target a replacement row.
@@ -237,16 +234,15 @@ extension AudioEngine {
 
     /// Push the tarab tuning (tonic + resolved strings) to the String
     /// voice's in-kernel taraf; the build runs off-main. `droneFreqs` = per
-    /// drone button, the mapped string's nominal Hz (nil = inert);
-    /// `follower` = the melody-follower's (gain, t60) when enabled.
+    /// drone button, the mapped string's nominal Hz (nil = inert).
     public func rebuildSarangi(strings: [ResolvedString], tonic: Double,
                                droneFreqs: [Double?] = [],
-                               droneChromatic: [Bool?] = [],
-                               follower: (gain: Double, t60: Double)? = nil) {
+                               droneChromatic: [Bool?] = []) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         lock.lock()
         lastSarangiStrings = strings
         lastSarangiTonic = tonic
-        lastSarangiFollower = follower
         for i in self.droneFreqs.indices {
             self.droneFreqs[i] = droneFreqs.indices.contains(i) ? droneFreqs[i] : nil
             self.droneChromatic[i] = droneChromatic.indices.contains(i) ? droneChromatic[i] : nil
@@ -257,7 +253,6 @@ extension AudioEngine {
         }
         let armModel = useSarangiModelVoice
         lock.unlock()
-        if armModel { rebuildStringVoice(tonic: tonic, strings: strings,
-                                         follower: follower) }
+        if armModel { rebuildStringVoice(tonic: tonic, strings: strings) }
     }
 }

@@ -7,16 +7,6 @@ import CBowKernel
 // recruitment profile. Split out of BowEngine.swift; the stored state
 // these read stays on the type.
 extension BowEngine {
-    /// Performance gain multipliers in kernel row order; the follower stays at unity.
-    public func setPerformanceGains(_ gains: [Double]) {
-        guard let pk = pkernel else { return }
-        var values = gains
-        if values.indices.contains(jtTrackRowIdx) { values[jtTrackRowIdx] = 1 }
-        values.withUnsafeBufferPointer {
-            bow_poly_jt_profile_gains(pk, $0.baseAddress, Int32($0.count))
-        }
-    }
-
     /// async-jt telemetry: (drops, flat-filled samples, FIFO fill, async flag)
     public func jtAsyncStats() -> (drops: Double, flat: Double,
                                    fill: Double, on: Double) {
@@ -28,20 +18,16 @@ extension BowEngine {
     /// The jt row fundamentals (Hz) in kernel order — empty without a jt block.
     public var jtRowFreqs: [Double] { selRowFreqs }
 
-    public var jtFollowerRow: Int { jtTrackRowIdx }
-
     /// The tuning tonic (`f0Open` — the open-string reference).
     public var tonicHz: Double { tables.scalars.f0Open }
 
     /// Per-row drone drive weights: a held row is 1, every other row its
-    /// best kin affinity to the held set (soft-OR) × `droneSpread`. The
-    /// follower row never takes SPREAD drive; an explicit press is honoured.
+    /// best kin affinity to the held set (soft-OR) × `droneSpread`.
     private func droneDriveWeights(rows: Set<Int>) -> [Double] {
         var w = [Double](repeating: 0.0, count: selRowFreqs.count)
         guard !rows.isEmpty else { return w }
         for i in 0..<selRowFreqs.count {
             if rows.contains(i) { w[i] = 1.0; continue }
-            if i == jtTrackRowIdx { continue }
             guard droneSpread > 0.0, selRowFreqs[i] > 0.0 else { continue }
             var miss = 1.0
             for h in rows where selRowFreqs[h] > 0.0 {
@@ -61,7 +47,6 @@ extension BowEngine {
     public func droneRow(forExactHz hz: Double, chromatic: Bool? = nil) -> Int? {
         jtRowFreqs.indices.first {
             jtRowFreqs[$0] == hz && (chromatic == nil || jtRowChromatic[$0] == chromatic)
-                && $0 != jtTrackRowIdx
         }
     }
 
@@ -415,6 +400,23 @@ extension BowEngine {
                             min(max(ratio, 0.01), 4.0))
     }
 
+    /// Stage the chromatic bank compressor without touching render-owned envelopes.
+    public func setChromaticCompressor(ratio: Double, voiceRatio: Double, floorDB: Double) {
+        os_unfair_lock_lock(&tiltLock)
+        jtCompressorPending = (ratio, voiceRatio, floorDB)
+        os_unfair_lock_unlock(&tiltLock)
+    }
+
+    func updateChromaticCompressor() {
+        os_unfair_lock_lock(&tiltLock)
+        let pending = jtCompressorPending
+        jtCompressorPending = nil
+        os_unfair_lock_unlock(&tiltLock)
+        if let pending, let pk = pkernel {
+            bow_poly_jtc_compressor(pk, pending.ratio, pending.voiceRatio, pending.floorDB)
+        }
+    }
+
     /// SETTLE DAMP: direct, unsmoothed taraf t60 override for the build-time
     /// settle pre-roll only (chokes the q0 relax chime in the discarded
     /// blocks). t60 <= 0 restores the natural ring EXACTLY. Never call on a
@@ -444,7 +446,7 @@ extension BowEngine {
     ///  * the RADIATED jt gain (`bow_poly_jt_set_gain_mul`) holds the
     ///    level — the note's fitted power below 0.5, blending to the fixed
     ///    rows·haze + `recruitKinNominal` above; capped ×`bow_jt_sel_comp`.
-    ///    Held drones and the follower count as fully ringing (never pumped).
+    ///    Held drones count as fully ringing (never pumped).
     /// Chords recruit by soft-OR. Weights gate the DRIVE only; the kernel
     /// slews them ~30 ms; rescored per chunk on the render thread.
     public func setTarafSelectivity(_ s01: Double) {
@@ -492,7 +494,7 @@ extension BowEngine {
 
     /// Per-chunk RECRUITMENT update (render thread): score each row's
     /// kinship to the gated pitches, push the per-row drive weights and the
-    /// compensating radiated gain (follower + held drones count as fully
+    /// compensating radiated gain (held drones count as fully
     /// ringing). No gated note holds the last state; back at 0.5 one
     /// all-ones push restores the fitted
     /// taraf and the path goes quiet. No allocation.
@@ -518,13 +520,12 @@ extension BowEngine {
         let t = min(sel, 0.5) * 2.0          // selective half: 0 = kin-only
         let u = max(0.0, (sel - 0.5) * 2.0)  // flat half: 1 = equal
         var changed = false
-        // pInv: rows whose ring does not follow the weights (follower, held
-        // drones) enter both sides of the ratio — a held drone is never boosted
+        // pInv: held drones enter both sides of the ratio so they are never boosted
         var pNow = 0.0, pFit = 0.0, pInv = 0.0
         var nFree = 0
         for i in 0..<selRowFreqs.count {
             var kin2 = 1.0
-            if !neutral, i != jtTrackRowIdx {
+            if !neutral {
                 let fr = selRowFreqs[i]
                 var miss = 1.0
                 for k in 0..<np {
@@ -546,8 +547,7 @@ extension BowEngine {
                     w = t + (1.0 - t) * kin2
                 }
             }
-            let invariant = i == jtTrackRowIdx
-                || (i < droneHeldMask.count && droneHeldMask[i])
+            let invariant = i < droneHeldMask.count && droneHeldMask[i]
             if invariant {
                 pInv += eps + 1.0
             } else {

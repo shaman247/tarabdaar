@@ -23,14 +23,12 @@ final class SarangiStore: ObservableObject {
     /// decode instead and retired keys decode away ignored.
     private static let persistKey = "tarabdaar.sarangiState.v8"
 
-    init(audio: AudioEngine) {
+    init(audio: AudioEngine, defaultState: InstrumentState) {
         self.audio = audio
         if let s = DefaultsStore.load(InstrumentState.self, key: Self.persistKey) {
             self.state = s
         } else {
-            // Fresh install: the Pilu-scale seed. On launch AppController
-            // pushes the Pitch Pad scale over it.
-            self.state = InstrumentState.makeDefault()   // sarangi_pilu seed
+            self.state = defaultState
         }
         rebuildNow()                          // build the initial engine
     }
@@ -88,6 +86,8 @@ final class SarangiStore: ObservableObject {
 
     func removeStrings(_ ids: Set<UUID>) {
         state.strings.removeAll { ids.contains($0.id) }
+        state.droneStringIds = state.droneStringIds.map { $0.flatMap { ids.contains($0) ? nil : $0 } }
+        state.strumStringIds.removeAll { ids.contains($0) }
         scheduleRebuild()
     }
 
@@ -132,18 +132,6 @@ final class SarangiStore: ObservableObject {
     func regenerateChromatic() {
         state.regenerateChromatic()
         rebuildNow()
-    }
-
-    /// Edit the melody-follower string (gain / t60 / enabled) — a
-    /// structural taraf change like any row edit.
-    func followerBinding<V>(_ keyPath: WritableKeyPath<FollowerSpec, V>) -> Binding<V> {
-        Binding(
-            get: { self.state.follower[keyPath: keyPath] },
-            set: { newValue in
-                self.state.follower[keyPath: keyPath] = newValue
-                self.scheduleRebuild()
-            }
-        )
     }
 
     // MARK: - Scale sync (the centralized scale feeds the tarab)
@@ -204,8 +192,7 @@ final class SarangiStore: ObservableObject {
         rebuildDebounce.cancel()
         audio.rebuildSarangi(strings: state.resolvedStrings, tonic: state.tonicHz,
                              droneFreqs: state.droneStringFreqs,
-                             droneChromatic: state.droneStringChromatic,
-                             follower: state.resolvedFollower)
+                             droneChromatic: state.droneStringChromatic)
     }
 
     private func scheduleSave() {

@@ -5,9 +5,9 @@ import SwiftUI
 /// The **Taraf** tab (⌘9): every modal-jawari sympathetic
 /// row, pitch-sorted, one strip each —
 ///
-/// - the scale label (`follow` for the melody follower, `·c` for a
-///   chromatic-bridge row, a moon glyph for a row asleep under the
-///   quiescence gate), its Hz and its radiated level (bar + dB);
+/// - the scale label (`·c` for a chromatic-bridge row, a moon glyph
+///   for a row asleep under the quiescence gate), its Hz and its
+///   radiated level (bar + dB);
 /// - the **modal energy spectrum** — the string's energy per mode, p_k²
 ///   (the kernel's per-mode velocity envelopes squared), 16 modes on 40 dB
 ///   under the row's own peak. The rows radiate their bridge contact
@@ -91,7 +91,7 @@ private struct TarafRowStrip: View {
                 HStack(spacing: 4) {
                     Text(row.label)
                         .font(.padCaption.weight(.semibold))
-                        .foregroundStyle(row.isFollower ? Color.cyan : Color.primary)
+                        .foregroundStyle(.primary)
                     if row.asleep {
                         Image(systemName: "moon.zzz")
                             .font(.padSmall(8))

@@ -26,9 +26,6 @@ public struct InstrumentState: Codable, Sendable {
     /// The Joy-Con L strum set (by `StringSpec.id`) — scale degrees, so the
     /// chord re-voices with the scale. Defaults to low Sa · low Pa.
     public var strumStringIds: [UUID]
-    /// The melody-follower string: pitch = the highest note being played
-    /// (kernel-side). Default disabled (byte-null when off).
-    public var follower: FollowerSpec
     public var schemaVersion: Int
 
     // Retired keys older documents may carry (`fir`, `fx`, `params`,
@@ -154,13 +151,11 @@ public struct InstrumentState: Codable, Sendable {
     public init(tonicHz: Double, scaleRatios: [Double], strings: [StringSpec],
                 droneStringIds: [UUID?]? = nil,
                 strumStringIds: [UUID]? = nil,
-                follower: FollowerSpec = FollowerSpec(),
                 schemaVersion: Int = InstrumentState.currentSchemaVersion) {
         self.tonicHz = tonicHz; self.scaleRatios = scaleRatios
         self.strings = strings
         self.droneStringIds = droneStringIds ?? []
         self.strumStringIds = strumStringIds ?? []
-        self.follower = follower
         self.schemaVersion = schemaVersion
         normalizeStrings()                    // sort + dedup (remaps drones)
         if droneStringIds == nil {
@@ -173,11 +168,11 @@ public struct InstrumentState: Codable, Sendable {
         }
     }
 
-    // Tolerant decode: `droneStringIds`, `strumStringIds`, `follower` and
+    // Tolerant decode: `droneStringIds`, `strumStringIds` and
     // `schemaVersion` default when absent; `scaleRatios` is required.
     private enum CodingKeys: String, CodingKey {
         case tonicHz, scaleRatios, strings, droneStringIds, strumStringIds,
-             follower, schemaVersion
+             schemaVersion
     }
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -192,8 +187,6 @@ public struct InstrumentState: Codable, Sendable {
         droneStringIds = mapping
         strumStringIds = (try? c.decode([UUID].self, forKey: .strumStringIds))
             ?? Self.autoStrumMapping(strings: strings, scaleRatios: scaleRatios)
-        follower = (try? c.decode(FollowerSpec.self, forKey: .follower))
-            ?? FollowerSpec()
         schemaVersion = (try? c.decode(Int.self, forKey: .schemaVersion)) ?? 3
         // Schema < 4: an all-raga document — seed the default chromatic set
         // before applying the schema-5 bank migration.
@@ -227,12 +220,6 @@ public struct InstrumentState: Codable, Sendable {
         let ids = Set(strings.map(\.id))
         droneStringIds = droneStringIds.map { $0.flatMap { ids.contains($0) ? $0 : nil } }
         strumStringIds = strumStringIds.filter { ids.contains($0) }
-    }
-
-    /// The melody follower as the engine consumes it — nil when disabled
-    /// (no jt row is built; byte-null).
-    public var resolvedFollower: (gain: Double, t60: Double)? {
-        follower.enabled ? (follower.gain, follower.t60) : nil
     }
 
     /// Strings as the taraf builder consumes them (it filters `enabled`

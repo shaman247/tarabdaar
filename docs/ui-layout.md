@@ -4,18 +4,18 @@ Two devices, two layouts. The iPad is the controller (touchscreen Fret Pad + til
 
 ## iPad
 
-The iPad's playing surface is the **Fret Pad** (full screen) — the same five-row surface as the Mac's Fret Pad tab. Adjacent rows overlap by 30% of their height; each overlap resolves warp and correction from the union of its neighboring rows. The fret field, onset-only snapping, drag assist and octave-repeat ghosts live in shared `TarabdaarCore` code (`FretPadGeometry.swift`, `PitchPadEngine.swift`); see [Fret Pad](fret-pad.md).
+The iPad's playing surface is the **Fret Pad** (full screen) — the same fifteen-row surface as the Mac's Fret Pad tab. All fifteen rows have equal height and independent pitch assignments. The fret field, onset-only snapping, drag assist and octave-repeat ghosts live in shared `TarabdaarCore` code (`FretPadGeometry.swift`, `PitchPadEngine.swift`); see [Fret Pad](fret-pad.md).
 
 ### Layout
 
-- **Slim toolbar (top)** (`PadToolbarIOS`): **PANIC**; a **Rec** toggle (records play strokes for drag-assist fitting); a **GYRO** toggle that floats a diagnostic overlay over the pad — a rotating 3D trail of RAW CoreMotion attitude with per-axis Δ° readouts, plus an accelerometer twin (raw `userAcceleration`, origin-centred, fixed ±0.5 g scale), both pre-wire and directly comparable against the Mac Setup tab's "Received motion (3D)" / "Received acceleration (3D)" views to split sensor noise from transmission artifacts; a scale-sync indicator; two **tilt squares** — the ARM tilts (Mac-calibrated when a calibration is driving, raw attitude otherwise) and the Joy-Con stick — and the **wrist bar cluster** (`WristMotionPane`): three horizontal bars each for the WRIST tilt (the Joy-Con's fused attitude, or the solved wrist axes once calibrated), its rate (d/dt, ±360°/s full scale) and the gravity-removed acceleration per body axis (±1 g), plus one bar for that acceleration's magnitude on the same 1 g scale — every readout dimming while its source is idle; the motion readouts run wrist, stick, then arm; the **strike scope** (the accelerometer magnitude on the strike law's 0–127 scale, fading over the Mac's `ctl_strike_window`); the **finger-accel scope** (the playing finger's pitch acceleration, −1…+1); the **volume scope** (separate Main, Chromatic and Raga levels from `JOYCON_STATE`, 60 dB scale, with labeled readings below the graph); a live `Hz (label ±cents)` sounding readout tinted in the pitch's hue; the **Oct** chip (the Joy-Con octave shift, dim at 0); a read-only **Tonic** readout; and the USB/Bluetooth transport indicators (green = carrying the link, white = idle, dim = absent) with the carrying bearer named beside them (`USB` / `BT` / `no link`). There is no scale button, no editable tonic, no mapping panel and no calibration — all of that lives on the Mac.
-- **Fret Pad (rest of screen)**: the playing surface, **always in perform mode** — no labels or handles, with faint scale-pitch gridlines, colored fret lines, the field, the live sounding glow, and a per-touch ring with an `original → corrected` readout when a snap or the assist moved the pitch. Touching a fret sounds its pitch (onset snap); dragging glides continuously; multiple fingers play polyphonically. The **chord bar** strip below the fret band is hidden for now (`Config.chordBarShown`).
+- **Status overlay (top)** (`PadToolbarIOS`): shown only for a problem. **no sync** remains until the current live connection has supplied both scale and arrangement; USB/Bluetooth icons appear only while the TLP link is unavailable or stale. The antenna opens BLE-MIDI advertising. Cached layouts do not count as a fresh sync. A healthy connection hides the entire overlay, without moving or resizing the frets.
+- **Fret Pad (full screen)**: always in perform mode, with colored fret lines on pure black and no vertical or horizontal gridlines. Touches have no rings, radius arcs, numeric readouts or sounding glow. The **chord bar** below the band is hidden for now (`Config.chordBarShown`).
 
-A single row of pluckable **raga taraf strings** sits immediately above the playable fret band, aligned to its left edge and spanning its full width. Chromatic strings and the melody follower do not appear in this row. Tap to pluck or drag across it to strum.
+The iPad has no taraf pluck or strumming buttons. The taraf strip lives on the Mac's Fret Pad tab.
 
 The scale and fret layout are designed on the Mac's Fret Pad tab and synced over as TLP events (see [Scale sync](midi-and-audio.md#scale-sync-mac--ipad)).
 
-The unused space above the fret band contains **Expression**, **Pressure**, and **Position** numeric readouts (0.00–1.00) at the upper left, from the Mac's highest-pitched held bowed note. They update at 15 Hz, include the note's expression scaling, and show dashes with no active bowed note or no live link. They are display-only and have no explanatory UI copy.
+The iPad has no recording button, performance readouts, diagnostic graphs, Panic button or Gyro button. **Rec** on the Mac Fret Pad tab records both pads into the Mac recordings folder and shows **Saving** while completed iPad strokes finish transferring. The Mac's Live tab holds the performance graphs and motion meters; Setup holds the received-motion diagnostics.
 
 ### Touch → pitch → wire
 
@@ -39,6 +39,12 @@ Small text — captions, table columns, row labels, pad labels, graph annotation
 - **KeyboardPlayPill** — toggles computer-keyboard note input (off by default): `Keys` (green) when on, `Keys off` otherwise; the popover holds the enable toggle, an **Octave shift** stepper (−3…+3) and a key-layout legend.
 - **Tab picker** — Live / Strings / Fret Pad / Controls / Parameters / FX / Setup / Scope / Taraf / Body / Transforms; ⌘1…⌘9 jump to the first nine, ⌘0 to Body.
 
+### Final output strip
+
+A persistent strip below every tab holds **Output gain** (−60…+24 dB, default 0), a slider and numeric dB entry, and two **Output peak · dBFS** meters for the complete stereo mix. Double-clicking the gain label restores 0 dB. L/R bars hold peaks briefly before falling, with readings below the display floor shown as ≤−60 dBFS; each channel also shows its maximum since reset. The meters follow the linked stereo limiter (default −1 dBFS sample ceiling); **LIMIT** shows its attenuation in dB and turns amber when active. **CLIP** latches red at digital full scale or invalid audio, and **Reset meters** clears output peaks, bus RMS maxima, the gain-reduction hold and the clipping indicator. Meter snapshots are nondestructive, so changing tabs cannot lose an overload. The gain is the ordinary `output_gain_db` parameter and includes all three voices, drones, effects and tails. **Parameters → Output · Final** also exposes **limiter ceiling (dBFS)**, **limiter lookahead (ms)** and **limiter release (ms)**, defaulting to −1, 5 and 120 respectively. All four output controls save with presets.
+
+The second row, **Bus RMS · dBFS · Pre-output gain**, shows **Main** (orange), **Chromatic taraf** (cyan) and **Raga taraf** (purple). Each has a current interval-RMS bar/value and its maximum RMS since **Reset meters**. The existing 60 Hz meter relay retains maxima even between display frames and while other tabs are open; UI reads never consume an audio interval. These are source-bus measurements before final output gain and limiting. The bank taps also precede shared taraf FX, and Main excludes the separate drone voice. They diagnose sustained bus bloom; the L/R meters above continue to show the complete protected output’s sample peaks.
+
 ### Computer keyboard
 
 `KeyboardNotePlayer` (owned by `AppController` as `keyboard`, persisted) plays through the **playing engine** (`controller.pitchPad`) — the same in-process path the on-screen Fret Pad uses — so keyboard notes share the scale and tonic and sound identical to played notes.
@@ -49,7 +55,16 @@ Small text — captions, table columns, row labels, pad labels, graph annotation
 
 ### Live tab (⌘1)
 
-The **Instrument picker** — String (bowed) / Tanpura (plucked) / Sitar (plucked) — then the link (the bearer the iPad's frames arrive on — `iPad over USB` / `iPad over Bluetooth` — with the round trip, or why it is down), and two live **time-series graphs** of the played voice: **PITCH** (log-frequency, y-axis fixed to the Fret Pad's playable range, labelled with the nearest note name + Hz) and **VOLUME** (measured main-voice RMS on the shared −60…0 dBFS scale, including released strings). Both read the nondestructive `AudioEngine.performanceReadout()` cache, so they reflect every source (the iPad, the Mac Fret Pad, the Joy-Con strum). The existing 60 Hz `VolumeMeterRelay` remains the sole reader of the audio meters; its samples update both the Live cache and the iPad display. Touch release clears the pitch without hiding the audio tail. A fixed **6-second** window scrolls smoothly: a 60 Hz timer appends timestamped samples to a ring buffer and a `TimelineView(.animation)` redraws every display frame, placing each sample by its age; traces are Catmull-Rom curves.
+The **Instrument picker** — String (bowed) / Tanpura (plucked) / Sitar (plucked) — and link status lead a scrollable monitor. Wrist tilt, rate and acceleration bars, the Joy-Con stick square and the arm square appear above the graphs. The arm square uses calibrated axes when available and received raw tilt otherwise.
+
+Four graphs share a **6-second** window, sampled at 60 Hz and redrawn at display rate:
+
+- **PITCH**: held pitch in log-frequency, with the Fret Pad's playable range and note-name/Hz readout.
+- **VOLUME**: separate Main (orange), Chromatic (cyan) and Raga (purple) traces and dB readings on the −60…0 dBFS scale, including released tails.
+- **STRIKE**: the received iPad strike envelope before Mac binding smoothing, displayed on the 0–127 scale.
+- **FINGER ACCEL**: the newest held finger's signed pitch acceleration, −1…+1, using a display-only `FingerAccelTracker` over the Mac's wire/local touch registry. It works without a binding.
+
+Pitch and all three volume traces read the nondestructive `AudioEngine.performanceReadout()` cache. The existing `VolumeMeterRelay` remains the sole reader of the audio meters. Touch release clears pitch without hiding ringing tails. The graphs use timestamped samples and Catmull-Rom curves; monitoring does not feed the control or audio path.
 
 ### Strings tab (⌘2)
 
@@ -59,32 +74,31 @@ add button and reset action. Raga has **Regenerate from scale**; chromatic has
 **Reset chromatic set**. Each table stays pitch-sorted with one string per
 pitch. Rows show Pitch, Octave, Hz, Gain, t60 and On. Raga pitches follow the
 scale; chromatic rows retain either scale references or fixed-JI semitones.
-The melody follower sits above the chromatic table and uses its bank controls.
 The header shows the shared tonic. Raga natural physical decay is fitted;
 its row t60 enters level normalization. See [Sarangi](sarangi.md).
 
 Below the tables, **Drone buttons** selects the drone Voice (Tanpura /
 Sympathetic strings), maps the three Fret Pad buttons and edits the drone
-sequence (default 1 → 2 → 3 → 3). Tanpura octave shows −1 or 0. The controller
+sequence (the bundled Strings Default uses 1 → 2 → 3). Tanpura octave shows −1 or 0. The controller
 strum section selects the strings used by the main voice's held chord.
 
-The top of Strings holds the **Performance pitch profile**: aligned 10-second,
-60-second and whole-performance histograms (octave-folded, 10-cent bins,
-percent occupancy), scale labels, per-degree live gain multipliers, the
-**Adaptation** amount, **Reset & seed / Finish seed**, and **Reset performance**.
-Seeded degrees light in the seed row. Recording and adaptation continue
-across tab changes. The Joy-Con Minus and Capture buttons invoke seed and
-reset respectively. See [Sarangi — Performance pitch profile](sarangi.md#performance-pitch-profile-and-adaptive-gain).
+The top of Strings has a preset menu with **Save As…**, save to the current
+name, **Save as Default**, **Load** and **Delete**. One setup includes both
+banks, drone/strum mappings, drone voice and sequence.
+Loading preserves the active scale and tonic. **Default** is always available;
+existing working edits remain autosaved independently.
 
 ### Fret Pad tab (⌘3)
 
-In Edit mode, every scale pitch appears in all five rows. Left-click toggles the pitch in that row; unassigned frets are gray. This edits the layout independently of sympathetic strings. Pilu assigns the former three rows to rows 1, 3 and 5; rows 2 and 4 start empty.
+In Edit mode, every scale pitch appears in all fifteen rows. Left-click toggles the pitch in that row; unassigned frets are gray. This edits the layout independently of sympathetic strings. The Default layout has 39 assignments in rows 1–9; rows 10–15 start empty. The surface spans 2.8 octaves; Pilu remains a separate built-in alternative.
 
-Vertical scale-pitch gridlines remain visible in both Edit and Perform modes, with slightly brighter tonic lines. The row backgrounds have no enclosing border.
+Each pitch column has one scale label centred below the playable band. Labels use the pitch color if any row in the column is assigned and gray otherwise; Perform mode hides them.
 
-The sole playing surface on the Mac and the editor for the surface the iPad mirrors (`FretPadView`): five overlapping rows of fixed-height, frequency-aligned frets, the Snap distance, drag assist, the chord bar, and the **scale selector + list editor + the tonic** (`ScaleListEditor`). The tonic is a **Hz field** with a note menu and a ± cents readout — **the app's one Hz input**; every other pitch is a scale degree relative to it. It edits `controller.pitchPad.scale`, the ONE centralized scale the frets / tarab / iPad sync all read. See [Fret Pad](fret-pad.md) and [Scales & Tuning](scales-and-tuning.md).
+Vertical scale-pitch gridlines remain visible on the Mac in both Edit and Perform modes, with slightly brighter tonic lines. All row backgrounds are pure black, with thin horizontal gridlines between rows and no enclosing border. The iPad keeps the black background and hides both sets of gridlines.
 
-The pluckable **raga taraf strings** form one row immediately above the playable fret band, inside the surface and aligned to its left edge, matching the iPad. It spans the full band width regardless of Joy-Con connection. Chromatic strings and the melody follower are omitted.
+The sole playing surface on the Mac and the editor for the surface the iPad mirrors (`FretPadView`): fifteen adjacent rows of equal-height, frequency-aligned frets, the Snap distance, drag assist, the chord bar, and the **scale selector + list editor + the tonic** (`ScaleListEditor`). The tonic is a **Hz field** with a note menu and a ± cents readout — **the app's one Hz input**; every other pitch is a scale degree relative to it. It edits `controller.pitchPad.scale`, the ONE centralized scale the frets / tarab / iPad sync all read. See [Fret Pad](fret-pad.md) and [Scales & Tuning](scales-and-tuning.md).
+
+The pluckable **raga taraf strings** form one row immediately above the playable fret band, inside the Mac surface and aligned to its left edge. It spans the full band width regardless of Joy-Con connection. Chromatic strings are omitted. Click to pluck or drag across the row to strum.
 
 ### Controls tab (⌘4)
 
@@ -106,8 +120,7 @@ normalization**; their remaining controls describe their respective models. Sear
 "raga", "chromatic" or "shared" finds the corresponding group. Gesture
 bindings, composite members and mapping popovers retain the group-qualified
 name, so the two level controls remain distinguishable outside their sections.
-The inactive legacy `bow_jt_evolve` knob is not offered; chromatic evolution
-also controls the melody follower. [Parameter ownership](sarangi.md#parameter-ownership)
+The inactive legacy `bow_jt_evolve` knob is not offered. [Parameter ownership](sarangi.md#parameter-ownership)
 lists the exact keys and effects.
 
 The header carries the **preset toolbar** — ONE preset covering the whole rig, **no file panels**. **Load preset** lists the shipped default (a full-rig factory reset: bank + untouched physics + default composites and bindings), then every saved preset by name, then a **Delete preset** submenu. **Save preset…** pops a name field; the preset lands in the app-managed library (`Application Support/Tarabdaar/Presets/`, one `.tarabdaar` file each) and appears in the menu at once; saving an existing name overwrites. A preset carries the sarangi document, the physics overrides, every resting value, the composites and the tilt bindings; every section is optional, so a file carrying only some of them loads what it has. **Reset all…** asks for confirmation, then clears the physics overrides (`tarabdaar.stringOverrides.v1`), every resting value (`tarabdaar.controlDefaults.v1`) and the FX curves; composites and tilt bindings stay. See [Parameters](parameters.md) and [Sound Design](sound-design.md).
@@ -118,21 +131,21 @@ One panel per insert point — **Voice → Taraf**, **Voice**, **Taraf**, **Glob
 
 ### Setup tab (⌘7)
 
-Four stacked panels: **Joy-Con**, **Audio** (output device picker), **MIDI** (TLP transport status), and **Connection** (the iPad link: bearer, endpoint, handshake, round trip and peer TLP version; sources and their received frames). The Joy-Con section leads with connection status and **wrist calibration**, followed by controller inputs, stick calibration and motion diagnostics. **Arm fallback** is a collapsed disclosure containing arm calibration. Received motion/acceleration views mirror the iPad's GYRO overlay. See [Sensors](sensors.md).
+Four stacked panels: **Joy-Con**, **Audio** (output device picker), **MIDI** (TLP transport status), and **Connection** (the iPad link: bearer, endpoint, handshake, round trip and peer TLP version; sources and their received frames). The Joy-Con section leads with connection status and **wrist calibration**, followed by controller inputs, stick calibration and motion diagnostics. **Arm fallback** is a collapsed disclosure containing arm calibration. Received motion/acceleration views show the iPad sensor stream on the Mac. See [Sensors](sensors.md).
 
 ### Scope tab (⌘8)
 
 `ScopeView.swift`. One **pitch field** — time along x (a fixed **8-second** window scrolling smoothly on the Live tab's timestamped-ring + `TimelineView` law, sampled at 60 Hz, redrawn at display rate in a `Canvas`; every trace is ONE stroke per contiguous run, a Catmull-Rom spline for pitch lines / a polyline for lanes, filled with a gradient of the per-sample colours), log-frequency along y with the **scale's own degree labels as gridlines** (every enabled degree in every octave inside the axis, `octaveMarked`, tonic lines brighter; the axis = the scale's compass ± an octave, widened to cover every taraf row and current pitch) — carrying three layers:
 
 - **Touched pitches** (white halo lines, ○ at the right edge): every finger currently down, from the finger registry the `.fingerAccel` dimension keeps (`AppController.currentTouches` — wire AND local lanes). It sits **above the glide queue**, so a parked or queued finger shows here even while the voice sounds elsewhere; on a plucked instrument the touch line is the finger while the sounding line is the string.
-- **Sounding pitches of the main voice** (**magma** by level — `ScopeColor.level`, the ONE level ramp shared with the iPad scopes; ● + `label Hz` readouts at the right edge): one trajectory per **physical string** — the bowed slots' target pitch + ring envelope (the kernel's per-string bridge-wave chunk peak, `bow_poly_scope_slots`), or the plucked instrument's strings at their **bent** pitch (`TanpuraEngine.scopeSlots`) with the kernel's auto-idle envelope. Held strings draw thick, released-but-ringing ones thin. Identity is slot + generation, so a remount starts a new trajectory. A held bowed string's readout also carries its **regime**: `f2.8` = the kernel's fundamental dominance (Helmholtz motion ≈ 2.5–3.5, an overtone lock under 1) and a `grip` tag, in orange, while the regime grip is correcting the bow ([Sarangi](sarangi.md)).
-- **Taraf lanes**: every modal-jawari row as a horizontal line at its pitch whose **luminance is the row's radiated level** (its own peak envelope after the per-string cap, in output units, on the 60 dB scale) and whose **hue is its harmonic character** (amber = fundamental-heavy … blue = the high jawari cluster: the energy-weighted spectral centroid of the kernel's per-mode radiated envelopes, modes 1–16, on a log mode axis, EMA-smoothed ~150 ms). A silent row draws only a faint dotted resting line; the **melody follower's** lane moves with the played note. Ringing rows are labelled in the right gutter.
+- **Sounding pitches of the main voice** (**magma** by level — `ScopeColor.level`, the shared level ramp; ● + `label Hz` readouts at the right edge): one trajectory per **physical string** — the bowed slots' target pitch + ring envelope (the kernel's per-string bridge-wave chunk peak, `bow_poly_scope_slots`), or the plucked instrument's strings at their **bent** pitch (`TanpuraEngine.scopeSlots`) with the kernel's auto-idle envelope. Held strings draw thick, released-but-ringing ones thin. Identity is slot + generation, so a remount starts a new trajectory. A held bowed string's readout also carries its **regime**: `f2.8` = the kernel's fundamental dominance (Helmholtz motion ≈ 2.5–3.5, an overtone lock under 1) and a `grip` tag, in orange, while the regime grip is correcting the bow ([Sarangi](sarangi.md)).
+- **Taraf lanes**: every modal-jawari row as a horizontal line at its pitch whose **luminance is the row's radiated level** (its own peak envelope after the per-string cap, in output units, on the 60 dB scale) and whose **hue is its harmonic character** (amber = fundamental-heavy … blue = the high jawari cluster: the energy-weighted spectral centroid of the kernel's per-mode radiated envelopes, modes 1–16, on a log mode axis, EMA-smoothed ~150 ms). A silent row draws only a faint dotted resting line. Ringing rows are labelled in the right gutter.
 
 A legend explains the three encodings.
 
 ### Taraf tab (⌘9)
 
-`TarafScopeView.swift`, sharing `ScopeModel` with the Scope tab. Every modal-jawari row, pitch-sorted, one strip each: the scale label (`scaleLabel(forRatio:)`; `follow` for the melody follower, `·c` for a chromatic-bridge row, a moon glyph + dimming for a row asleep under the quiescence gate), Hz, the radiated level (bar coloured on the lane hue + dB on the 60 dB scale), the **modal energy** spectrum — p_k² over modes 1–16 on 40 dB under the row's own peak, bars coloured by mode index on the taraf hue law (the rows radiate their bridge contact force, which weighs every mode flat, so this is also the row's radiated spectrum up to a constant — the jawari's upward cascade as it happens) — and the spectral centroid (mode units, EMA-smoothed like the lane hue).
+`TarafScopeView.swift`, sharing `ScopeModel` with the Scope tab. Every modal-jawari row, pitch-sorted, one strip each: the scale label (`scaleLabel(forRatio:)`; `·c` for a chromatic-bridge row, a moon glyph + dimming for a row asleep under the quiescence gate), Hz, the radiated level (bar coloured on the lane hue + dB on the 60 dB scale), the **modal energy** spectrum — p_k² over modes 1–16 on 40 dB under the row's own peak, bars coloured by mode index on the taraf hue law (the rows radiate their bridge contact force, which weighs every mode flat, so this is also the row's radiated spectrum up to a constant — the jawari's upward cascade as it happens) — and the spectral centroid (mode units, EMA-smoothed like the lane hue).
 The termination (pin) force the rows also radiate needs no change here: it
 contributes k·q_k per mode, which is p_k up to the row's ω_1, so the displayed
 modal energy is already that weighting too — the strip reads as the radiated

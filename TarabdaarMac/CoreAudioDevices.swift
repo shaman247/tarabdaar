@@ -10,9 +10,8 @@ struct AudioOutputDevice: Identifiable, Hashable {
 }
 
 /// Thin wrapper around `AudioObjectGetPropertyData` for enumerating
-/// output devices. The macOS app polls this when the Audio Settings
-/// section appears; we don't subscribe to device-added/removed
-/// notifications yet (Phase 6 nicety).
+/// output devices. Audio Settings reads it on appear and when
+/// AudioOutputRecovery reports a device/default-output change.
 enum CoreAudioDevices {
     static func listOutputDevices() -> [AudioOutputDevice] {
         let defaultID = systemDefaultOutputDevice()

@@ -5,7 +5,9 @@ Quick reference for shipping Tarabdaar (iOS) and TarabdaarMac outside of Xcode's
 ## Local build and commit checks
 
 `tools/build-mac.sh` regenerates the parameter documentation and HTML reference,
-then builds TarabdaarMac in `build/mac-ci`, separate from Xcode’s signed products.
+then explicitly builds TarabdaarMac with the Release configuration in
+`build/mac-ci`, separate from Xcode’s signed products. The local app is
+`build/mac-ci/Build/Products/Release/TarabdaarMac.app`.
 Compiler warnings and errors from both the parameter generator and app build are
 printed and fail the command. The only ignored diagnostic is Xcode’s
 “Metadata extraction skipped. No AppIntents.framework dependency found.” warning.
@@ -25,8 +27,14 @@ even when TarabdaarCore fails; either package failure blocks the commit. Deleted
 files and both sides of renames are classified, including names containing spaces
 or newlines. `git commit --no-verify` skips the hook once.
 
+`tools/test-full.sh` runs the non-timing suites in parallel in Debug, then runs
+`RealtimePerformanceTests` and `RebuildCostTests` serially in Release. Timing
+measures the optimized production host and DSP against the audio callback budget;
+SarangiKit's forced Debug optimization does not optimize the host render path.
+Both phases run even if one fails, and either failure fails the guard.
+
 Run `python3 -m unittest discover -s tools/tests` to check guard routing, package
-failure propagation, build-warning handling and generated documentation links
+failure propagation, timing configuration, build-warning handling and generated documentation links
 without compiling either package.
 
 ## macOS — Developer ID + Notarization

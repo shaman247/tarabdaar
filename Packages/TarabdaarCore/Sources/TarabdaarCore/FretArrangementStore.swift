@@ -32,28 +32,31 @@ extension FretSegment: Codable {
     }
 
     /// Legacy disabled entries become absent pairs; all retained entries use fixed geometry.
-    static func decodeList(from decoder: Decoder, legacyRows: Bool = false) throws -> [FretSegment] {
+    static func decodeList(from decoder: Decoder, rowCount: Int = FretRow.count) throws -> [FretSegment] {
         var list = try decoder.unkeyedContainer()
         var frets: [FretSegment] = []
         while !list.isAtEnd {
             let item = try list.superDecoder()
             let c = try item.container(keyedBy: CodingKeys.self)
             var fret = try FretSegment(from: item)
-            if legacyRows, let old = try c.decodeIfPresent(Int.self, forKey: .row) {
-                guard let row = FretRow.legacy(old) else { throw CocoaError(.coderReadCorrupt) }
-                fret.row = row
+            if let old = try c.decodeIfPresent(Int.self, forKey: .row) {
+                guard (1...rowCount).contains(old) else { throw CocoaError(.coderReadCorrupt) }
+                if rowCount < 9 {
+                    guard let row = FretRow.legacy(old, count: rowCount) else { throw CocoaError(.coderReadCorrupt) }
+                    fret.row = row
+                }
             }
             if try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true {
                 frets.append(fret)
             }
         }
-        return frets
+        return rowCount < 9 ? FretArrangement.expandingOverlaps(frets) : frets
     }
 }
 
-/// Version 7 stores pitch/row pairs; older coordinates migrate to the nearest row.
+/// Version 9 stores fifteen-row pitch/row pairs; older layouts retain assignments in rows 1–9.
 struct FretArrangementDocument: Codable {
-    var version: Int = 7
+    var version: Int = 9
     var segments: [FretSegment]
     var ghostExtentOctaves: Double?
     var droneRatios: [Double]?
@@ -71,8 +74,10 @@ struct FretArrangementDocument: Codable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decode(Int.self, forKey: .version)
-        guard (4...7).contains(version) else { throw CocoaError(.coderReadCorrupt) }
-        segments = try FretSegment.decodeList(from: c.superDecoder(forKey: .segments), legacyRows: version < 7)
+        guard (4...9).contains(version) else { throw CocoaError(.coderReadCorrupt) }
+        segments = try FretSegment.decodeList(from: c.superDecoder(forKey: .segments),
+            rowCount: version < 7 ? 3 : version == 7 ? 5 : version == 8 ? 9 : FretRow.count)
+        version = 9
         ghostExtentOctaves = try c.decodeIfPresent(Double.self, forKey: .ghostExtentOctaves)
         droneRatios = try c.decodeIfPresent([Double].self, forKey: .droneRatios)
     }

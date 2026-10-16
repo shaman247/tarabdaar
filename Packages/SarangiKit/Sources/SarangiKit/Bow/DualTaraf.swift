@@ -72,7 +72,7 @@ enum DualTaraf {
 
     static func install(kernel: UnsafeMutableRawPointer, row: Int, tables: JtTables,
                         useSAV: Bool = false) -> Bool {
-        guard tables.rowFreqs.indices.contains(row), row != Int(tables.trackRow),
+        guard tables.rowFreqs.indices.contains(row),
               tables.rowOutputGain.indices.contains(row) else { return false }
         let ratio = tables.rowFreqs[row] / 561
         guard ratio * 554.7063153796236 >= 70,

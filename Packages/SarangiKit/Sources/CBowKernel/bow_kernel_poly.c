@@ -81,6 +81,7 @@ void *bow_poly_init(int nb, double sr,
 {
     bow_poly_state_t *st = (bow_poly_state_t *)calloc(1, sizeof(bow_poly_state_t));
     st->sr = sr;
+    bow_chromatic_compressor_init(&st->jtCompressor, sr);
     st->nb = nb < 1 ? 1 : (nb > 64 ? 64 : nb);   /* chunk scratch is [64] */
     st->K = K > 0 ? K : 0;
     /* The builder's loop bound and the rendered body use the same modes.
@@ -252,6 +253,28 @@ static double poly_string_force(bow_poly_state_t *st, bow_pstring_t *S,
                 if (gutA2e > 0.0) gutA2e = pow(gutA2e, sReg);
             }
         }
+        /* Tune the complete loop, including the CURRENT nut/bridge losses
+           and dispersion. The gut output lowpass is outside the loop.
+           Evaluate at 3 kHz and ramp between updates; held coefficients
+           need no per-sample trigonometry. The clock belongs to the string,
+           so callback boundaries do not change the tuning trajectory. */
+        if (S->tuneTick == 0) {
+            const double w = 2.0 * M_PI / T;
+            const double sw = sin(w), cw = cos(w);
+            const double nutPhase = atan2(nutAf * sw, 1.0 - nutAf * cw);
+            const double brPhase = atan2(brAe * sw, 1.0 - brAe * cw);
+            int count = (int)(st->dispN + 0.5);
+            if (count < 1) count = 1; if (count > 4) count = 4;
+            const double apPhase = 2.0 * atan2((1.0 - st->bowDisp) * sin(0.5*w),
+                                               (1.0 + st->bowDisp) * cos(0.5*w));
+            const double delay = (nutPhase + brPhase + count * apPhase) / w;
+            if (!S->tuneValid) { S->tuneDelay = delay; S->tuneValid = 1; }
+            S->tuneStep = (delay - S->tuneDelay) / 32.0;
+            S->tuneTick = 32;
+        }
+        S->tuneDelay += S->tuneStep;
+        --S->tuneTick;
+        T = fmax(4.0 + 2.0 * bowWidth, T - S->tuneDelay);
         /* LOOP LENGTH = ONE PERIOD. The nut-side read cannot go under 2
            samples; once beta*T is shorter than the hair ribbon (+2) that
            floor would lengthen the round trip and the top of the range
@@ -1197,17 +1220,31 @@ void bow_poly_process4(void *vst, int n, int stride,
             }
             if (cplOn) jt_cpl_put(chroma, &cw, chroma->jtCplHold);
             const double gain = jt_gain_step(chroma);
-            const double value = gain * jt_lp_step(chroma, chroma->jtHold);
+            double value = gain * jt_lp_step(chroma, chroma->jtHold);
+            double side = 0, width = 0;
+            if (stOn) {
+                side = gain * jt_lp_stepS(chroma, chroma->jtHoldS);
+                if (st->stWidthOn)
+                    width = st->stWidthCur * poly_width_bank(chroma, 1, value);
+            }
+            const double reduction = bow_chromatic_compressor_gain(&st->jtCompressor,
+                value, side + width, st->jtInlineCap[t]);
+            if (reduction != 1) { value *= reduction; side *= reduction; width *= reduction; }
             jo[t] += value;
             if (meterC) meterC[t] += value;
             if (stOn) {
-                joS[t] += gain * jt_lp_stepS(chroma, chroma->jtHoldS);
-                if (st->stWidthOn)
-                    joS[t] += st->stWidthCur * poly_width_bank(chroma, 1, value);
+                joS[t] += side;
+                if (st->stWidthOn) joS[t] += width;
             }
         }
         chroma->jtCplW = cw;
     }
+}
+
+void bow_poly_jtc_compressor(void *vst, double ratio, double voiceRatio, double floorDB)
+{
+    bow_poly_state_t *st = (bow_poly_state_t *)vst;
+    if (st) bow_chromatic_compressor_set(&st->jtCompressor, ratio, voiceRatio, floorDB);
 }
 
 void bow_poly_reset_string(void *vst, int b)
@@ -1273,7 +1310,6 @@ void bow_poly_free(void *vst)
         free(st->jtPulseDecay); free(st->jtPulseAttack); free(st->jtPulseLeft);
         free(st->jtBurstRequest); free(st->jtBurstEnv); free(st->jtBurstDecay);
         free(st->jtBurstPhase); free(st->jtBurstLeft);
-        free(st->jtProfileTgt); free(st->jtProfileCur);
         free(st->jtOutputLevelTgt); free(st->jtOutputLevelCur);
         free(st->jtCapEnv); free(st->jtCapGain); free(st->jtCapRowGen);
         free(st->jtCapV); free(st->jtCapBuf); free(st->jtCapRing);

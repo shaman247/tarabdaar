@@ -46,14 +46,17 @@ public final class StringVoiceSource {
 
     /// ONE live String-voice knob: clamp it, cache it, push it. `neutral` is
     /// the value at which the engine sits in its build-time state, so
-    /// `setEngine` re-applies only the knobs that differ from it and a fresh
-    /// engine stays byte-null. `push` writes the cached value onto an engine;
+    /// `setEngine` normally re-applies only the knobs that differ from it.
+    /// Geometry is seeded before settling and refreshed at publication.
+    /// `push` writes the cached value onto an engine;
     /// the multi-field cap reads its siblings through `read`.
     private struct ControlKnob {
         /// Whether `setEngine` re-applies this knob itself.
         enum Reapply {
             /// Push when the cached value differs from `neutral`.
             case whenChanged
+            /// Seed physical geometry before settling; refresh even a return to neutral.
+            case settledGeometry
             /// Never — a sibling entry pushes this field (the cap pair).
             case viaSibling
         }
@@ -61,17 +64,18 @@ public final class StringVoiceSource {
         let clamp: (Double) -> Double
         /// The value a fresh engine has built in — the registry's default
         /// through the knob's own clamp (the LP knob maps its 20 kHz
-        /// "bypass" default to 0). A knob at neutral is never re-pushed.
+        /// "bypass" default to 0). Ordinary knobs at neutral are not re-pushed.
         let neutral: Double
         let reapply: Reapply
         let push: (BowEngine, Double, _ read: (String) -> Double) -> Void
 
         /// Single-field knob.
         init(_ key: String, _ clamp: @escaping (Double) -> Double,
+             reapply: Reapply = .whenChanged,
              _ push: @escaping (BowEngine, Double) -> Void) {
             self.key = key; self.clamp = clamp
             self.neutral = clamp(ParamRegistry.spec(key)?.def ?? 0)
-            self.reapply = .whenChanged
+            self.reapply = reapply
             self.push = { engine, v, _ in push(engine, v) }
         }
         /// Multi-field knob: pushes the whole group from the cache.
@@ -152,10 +156,17 @@ public final class StringVoiceSource {
         ControlKnob("bow_jt_pulse_decay_ms", reapply: .viaSibling,
                     { min(max($0, 10), 2000) }, group: pushJtPulse),
         // neutral = uniform bone across the register
-        ControlKnob("bow_jt_ev_reg", bipolar, { $0.setJtEvolveRegister($1) }),
+        ControlKnob("bow_jt_ev_reg", bipolar, reapply: .settledGeometry,
+                    { $0.setJtEvolveRegister($1) }),
         // neutral = the chromatic bridge's fitted bone
-        ControlKnob("bow_jtc_evolve", unit,
+        ControlKnob("bow_jtc_evolve", unit, reapply: .settledGeometry,
                     { $0.setJtEvolveChromatic($1) }),
+        ControlKnob("bow_jtc_comp_ratio", reapply: .whenChanged,
+                    { min(max($0, 1), 20) }, group: pushChromaticCompressor),
+        ControlKnob("bow_jtc_comp_voice", reapply: .viaSibling,
+                    { min(max($0, 0.1), 2) }, group: pushChromaticCompressor),
+        ControlKnob("bow_jtc_comp_floor_db", reapply: .viaSibling,
+                    { min(max($0, -80), 0) }, group: pushChromaticCompressor),
         // inject-ring arm: 0 = no foreign drive (byte-null)
         ControlKnob("bow_jt_inject", nonNegative, { $0.setJtInjectGain($1) }),
         ControlKnob("bow_bal", bipolar, { $0.setBusBalance($1) }),
@@ -165,6 +176,13 @@ public final class StringVoiceSource {
         ControlKnob("bow_jt_cap_ratio", reapply: .viaSibling,
                     { max($0, 0.01) }, group: pushJtCap),
     ]
+
+    private static func pushChromaticCompressor(_ engine: BowEngine,
+                                                _ read: (String) -> Double) {
+        engine.setChromaticCompressor(ratio: read("bow_jtc_comp_ratio"),
+                                      voiceRatio: read("bow_jtc_comp_voice"),
+                                      floorDB: read("bow_jtc_comp_floor_db"))
+    }
 
     private static func pushJtCap(_ engine: BowEngine,
                                   _ read: (String) -> Double) {
@@ -221,29 +239,6 @@ public final class StringVoiceSource {
             return (point.keyPrefix, values)
         })
     }
-    private var performanceProfile: (tonic: Double, ratios: [Double], gains: [Double], unmatchedGain: Double) = (1, [], [], 1)
-
-    public func setPerformanceProfile(tonic: Double, ratios: [Double], gains: [Double], unmatchedGain: Double) {
-        cacheLock.lock()
-        performanceProfile = (tonic, ratios, gains, unmatchedGain)
-        cacheLock.unlock()
-        if let engine = currentEngine() { republishPerformanceProfile(to: engine) }
-    }
-
-    private func republishPerformanceProfile(to engine: BowEngine) {
-        cacheLock.lock()
-        let profile = performanceProfile
-        cacheLock.unlock()
-        let values = engine.jtRowFreqs.map { hz -> Double in
-            guard !profile.gains.isEmpty else { return 1 }
-            guard let d = PerformancePitchProfile.nearestDegree(ratio: hz / profile.tonic,
-                                                                scale: profile.ratios),
-                  profile.gains.indices.contains(d) else { return profile.unmatchedGain }
-            return profile.gains[d]
-        }
-        engine.setPerformanceGains(values)
-    }
-
     /// The cached (clamped) value of one knob, or its neutral, from a snapshot.
     private static func controlValue(_ key: String,
                                      in values: [String: Double]) -> Double {
@@ -272,14 +267,15 @@ public final class StringVoiceSource {
         return true
     }
 
-    /// Re-publish every non-neutral knob onto a freshly built engine.
+    /// Refresh geometry and non-neutral controls on a freshly built engine.
     private func republishControls(to engine: BowEngine) {
         cacheLock.lock()
         let snapshot = controlValues
         cacheLock.unlock()
-        for knob in Self.controlKnobs where knob.reapply == .whenChanged {
+        for knob in Self.controlKnobs where knob.reapply != .viaSibling {
             let v = Self.controlValue(knob.key, in: snapshot)
-            if v != knob.neutral {
+            let restoreGeometry = knob.reapply == .settledGeometry && snapshot[knob.key] != nil
+            if restoreGeometry || v != knob.neutral {
                 knob.push(engine, v) { Self.controlValue($0, in: snapshot) }
             }
         }
@@ -455,7 +451,6 @@ public final class StringVoiceSource {
         if let engine {
             // re-apply the runtime playing state (a rebuild must not snap to defaults)
             republishControls(to: engine)
-            republishPerformanceProfile(to: engine)
             if busMeterOn { engine.setBusMeter(true) }
             if scopeOn { engine.setScopeArmed(true) }
             cacheLock.lock()
@@ -512,7 +507,6 @@ public final class StringVoiceSource {
     public func applyLiveParams(tonicHz: Double,
                                 strings: [ResolvedString],
                                 overrides: [String: Double],
-                                follower: (gain: Double, t60: Double)? = nil,
                                 needsJawariTables: Bool = true) -> Bool {
         guard let engine = currentEngine(),
               var bp = Presets.bowedStringParams() else { return false }
@@ -527,10 +521,9 @@ public final class StringVoiceSource {
         // the jawari tables are the expensive part — only when a jt key moved
         if needsJawariTables {
             let plan = Self.jawariRowPlan(bp: bp, tonicHz: tonicHz,
-                                          strings: strings, follower: follower)
+                                          strings: strings)
             tables.jt = BowTables.buildJawariTables(
                 rows: plan.rows, srk: modelSR * Double(osf), bp: bp,
-                trackRowIndex: follower != nil ? plan.rows.count - 1 : nil,
                 chromatic: plan.chromatic)
         }
         engine.setLiveParams(bp: bp, scalars: tables.scalars, tables: tables)
@@ -542,13 +535,8 @@ public final class StringVoiceSource {
     /// class median), remaining `bow_jt_max` slots by gain. The ONE
     /// implementation for `buildEngine` and the in-place path — a shape
     /// mismatch makes the kernel silently refuse a live jt reload.
-    ///
-    /// `follower`: the melody-follower string, appended LAST (outside the
-    /// selection; built at tonic/2 so the mode allocation covers the low
-    /// register — the kernel only trims modes as pitch rises).
     static func jawariRows(bp: BowParams, tonicHz: Double,
-                           taraf: [(f: Double, gain: Double, t60: Double)],
-                           follower: (gain: Double, t60: Double)? = nil)
+                           taraf: [(f: Double, gain: Double, t60: Double)])
         -> [(f: Double, gain: Double, t60: Double)] {
         func cents(_ f: Double) -> Double {
             var c = (1200.0 * log2(f / tonicHz))
@@ -598,18 +586,13 @@ public final class StringVoiceSource {
                 jtRows.append(r)
             }
         }
-        if let fw = follower {
-            jtRows.append((f: tonicHz * 0.5, gain: fw.gain, t60: fw.t60))
-        }
         return jtRows
     }
 
     /// The row plan for both bridges (`jawariRows` PER BRIDGE): raga rows,
-    /// chromatic rows, then the follower (index `rows.count - 1`). Shared by
-    /// `buildEngine` and the in-place path.
+    /// then chromatic rows. Shared by `buildEngine` and the in-place path.
     static func jawariRowPlan(bp: BowParams, tonicHz: Double,
-                              strings: [ResolvedString],
-                              follower: (gain: Double, t60: Double)? = nil)
+                              strings: [ResolvedString])
         -> (rows: [(f: Double, gain: Double, t60: Double)], chromatic: [Bool]) {
         let enabled = strings.filter(\.enabled)
         let raga = enabled.filter { !$0.chromatic }
@@ -619,14 +602,25 @@ public final class StringVoiceSource {
         let ragaRows = jawariRows(bp: bp, tonicHz: tonicHz, taraf: raga)
         let chromRows = chrom.isEmpty ? []
             : jawariRows(bp: bp, tonicHz: tonicHz, taraf: chrom)
-        var rows = ragaRows + chromRows
-        var flags = [Bool](repeating: false, count: ragaRows.count)
+        let rows = ragaRows + chromRows
+        let flags = [Bool](repeating: false, count: ragaRows.count)
             + [Bool](repeating: true, count: chromRows.count)
-        if let fw = follower {
-            rows.append((f: tonicHz * 0.5, gain: fw.gain, t60: fw.t60))
-            flags.append(true)
-        }
         return (rows, flags)
+    }
+
+    /// Off-thread host build: settle at the source's current contact geometry before publication.
+    func buildEngine(tonicHz: Double, strings: [ResolvedString],
+                     overrides: [String: Double]) -> BowEngine? {
+        cacheLock.lock()
+        let snapshot = controlValues
+        cacheLock.unlock()
+        var seeded = overrides
+        for knob in Self.controlKnobs where knob.reapply == .settledGeometry {
+            seeded[knob.key] = snapshot[knob.key] ?? overrides[knob.key] ?? knob.neutral
+        }
+        return Self.buildEngine(tonicHz: tonicHz, strings: strings, mapper: mapper,
+                                sr: modelSR, overrides: seeded, configureMapper: false,
+                                retainJawariTables: false)
     }
 
     /// Async hosts defer mapper changes and discard packed jawari build arrays; exporters retain them by default.
@@ -635,7 +629,6 @@ public final class StringVoiceSource {
                                    mapper: BowControlMapper,
                                    sr: Double = Config.sampleRate,
                                    overrides: [String: Double] = [:],
-                                   follower: (gain: Double, t60: Double)? = nil,
                                    configureMapper: Bool = true,
                                    retainJawariTables: Bool = true)
         -> BowEngine? {
@@ -648,15 +641,12 @@ public final class StringVoiceSource {
         let osf = max(1, Int(bp.v("bow_os", 2.0).rounded()))
         var tables = BowTables.buildOpenString(sr: sr * Double(osf),
                                                tonic: tonicHz, bp: bp)
-        // the shared row plan; the follower is the LAST row, marked for live retune
-        let plan = jawariRowPlan(bp: bp, tonicHz: tonicHz, strings: strings,
-                                 follower: follower)
+        let plan = jawariRowPlan(bp: bp, tonicHz: tonicHz, strings: strings)
         tables.jt = BowTables.buildJawariTables(
             rows: plan.rows, srk: sr * Double(osf), bp: bp,
-            trackRowIndex: follower != nil ? plan.rows.count - 1 : nil,
             chromatic: plan.chromatic)
         tables.jt?.dualRows = plan.rows.indices.filter {
-            !plan.chromatic[$0] && (follower == nil || $0 != plan.rows.count - 1)
+            !plan.chromatic[$0]
         }
         bp.num.removeValue(forKey: "bow_jt_dual_row")
         let engine = BowEngine(tables: tables, mapper: mapper, bp: bp,

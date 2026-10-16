@@ -175,15 +175,6 @@ void bow_poly_jt_pluck(void *vst, int s, double amp);
 void bow_poly_jt_drone_env(void *vst, double atkSec, double relSec, double onsetDecaySec);
 void bow_poly_jt_drone_tone(void *vst, double lpHz, double hpHz, double toneMix);
 
-/* MELODY-FOLLOWER row: live-retunes to the played pitch. track_config
-   arms `row` (off the audio thread; re-arm after jt_set_coeffs — keeps the
-   pitch): f0 = builder frequency, t60/fHf/bst = the damping law re-applied
-   in-kernel; row < 0 disarms. track_target (Hz, drone-setter contract):
-   slews ~15 ms, rebuilds only the f0-dependent mode tables, trims the
-   active modes to the fx corner. Never arming is byte-null. */
-void bow_poly_jt_track_config(void *vst, int row, double f0, double t60, double fHf, double bst);
-void bow_poly_jt_track_target(void *vst, double hz);
-
 /* Drone-setter contract. set_lp: one-pole coefficient on the radiated jt
    sum, a = 1 - exp(-2*pi*fc/sr) at the kernel rate (<= 0 = bypass).
    set_damp_t60: extra decay as an amplitude t60 in s (<= 0 = off). */
@@ -305,8 +296,6 @@ void bow_poly_jt_drive_weights(void *vst, const double *w, int n);
 /* Radiated-gain multiplier on the jt output, slewed ~30 ms. Clamped
    [0, 4]; 1 / never calling = byte-null. Drone-setter contract. */
 void bow_poly_jt_set_gain_mul(void *vst, double m);
-/* Smoothed per-row radiation attenuation; missing rows restore unity. */
-void bow_poly_jt_profile_gains(void *vst, const double *gains, int n);
 /* Per-row output levels, outside feedback and before the cap; 40 ms slew.
    immediate is init-only, before any rendering or worker activity. */
 void bow_poly_jt_output_levels(void *vst, const double *levels, int n, int immediate);
@@ -381,9 +370,13 @@ void bow_poly_process3(void *vst, int n, int stride, const double *f0, const dou
 void bow_poly_jt_meter_banks(void *vst, const unsigned char *chromatic, int count);
 void bow_poly_process4(void *vst, int n, int stride, const double *f0, const double *vb, const double *fb, const double *beta, const double *gate, const double *xv, double *out, double *outS, double *outJt, double *outJtS, double *meterC, double *meterR);
 
+/* Render-thread update: summed chromatic radiation only; ratio 1 bypasses.
+   floorDB is dB relative to unit kernel-bus amplitude, before output trim. */
+void bow_poly_jtc_compressor(void *vst, double ratio, double voiceRatio, double floorDB);
+
 /* Two-direction raga backend; multiple independently owned rows. Build before starting workers.
-   Takes ownership of contact ONLY on success. row is zero-based, must not be
-   the follower. Requires a 96 kHz jt tick and reference-coordinate contact
+   Takes ownership of contact ONLY on success. row is zero-based.
+   Requires a 96 kHz jt tick and reference-coordinate contact
    tables at BOW_JT_DUAL_CONTACT_RATE; that clock advances at fundamental_hz/561 times wall time.
    Pluck displacement is in reference metres (physical displacement * ratio).
    Return uses normal force only, before the fitted radiation FIR. */

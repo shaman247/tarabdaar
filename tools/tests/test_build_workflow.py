@@ -138,6 +138,27 @@ exit "${XCODE_RC:-0}"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('Packages/SarangiKit', self.calls.read_text())
 
+    def test_full_guard_times_release_and_reports_either_phase_failure(self):
+        shutil.copy2(ROOT / 'tools/test-full.sh', self.repo / 'tools/test-full.sh')
+        (self.repo / 'Packages/TarabdaarCore').mkdir(parents=True)
+        self.write_script(self.bin / 'swift', '''
+printf '%s\\n' "$TARABDAAR_SLOW_TESTS $*" >> "$CALLS"
+case "$*" in
+    *--parallel*) exit "${PHASE1_RC:-0}" ;;
+    *) exit "${PHASE2_RC:-0}" ;;
+esac
+''')
+        for rc1, rc2 in ((0, 0), (7, 0), (0, 8), (7, 8)):
+            with self.subTest(rc1=rc1, rc2=rc2):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_script('test-full.sh',
+                                         PHASE1_RC=str(rc1), PHASE2_RC=str(rc2))
+                self.assertEqual(self.calls.read_text().splitlines(), [
+                    '1 test --parallel --skip RealtimePerformanceTests --skip RebuildCostTests',
+                    '1 test --configuration release --filter RealtimePerformanceTests --filter RebuildCostTests',
+                ])
+                self.assertEqual(result.returncode, int(bool(rc1 or rc2)), result.stderr)
+
     def test_build_surfaces_and_fails_actionable_warnings(self):
         for variable in ('SWIFT_OUTPUT', 'XCODE_OUTPUT'):
             for warning in (

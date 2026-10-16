@@ -47,13 +47,16 @@ final class ChromaticTarafTests: XCTestCase {
             "a smooth glide generated a contact spike larger than the sustained radiation")
     }
 
-    private func engine(async: Bool) throws -> BowEngine {
+    private func engine(async: Bool, stereo: Bool = false, extraChromatic: Bool = false) throws -> BowEngine {
         var bp = try XCTUnwrap(Presets.bowedStringParams())
         bp.num["bow_jt_async"] = async ? 1 : 0
         bp.num["bow_jt_threads"] = async ? 2 : 0
+        if stereo { bp.num["bow_st_width"] = 0.6 }
         var t = BowTables.buildOpenString(sr: 96000, tonic: 280.5, bp: bp)
-        t.jt = BowTables.buildJawariTables(rows: [(561, 1, 2), (730, 1, 2), (280.5, 1, 2)],
-            srk: 96000, bp: bp, trackRowIndex: 2, chromatic: [false, true, true])
+        let rows: [(Double, Double, Double)] = extraChromatic
+            ? [(561, 1, 2), (730, 1, 2), (840, 1, 2)] : [(561, 1, 2), (730, 1, 2)]
+        t.jt = BowTables.buildJawariTables(rows: rows,
+            srk: 96000, bp: bp, chromatic: extraChromatic ? [false, true, true] : [false, true])
         t.jt?.dualRows = [0]
         let e = BowEngine(tables: t, mapper: BowControlMapper(), bp: bp, sr: 48000,
             rfir: [], eLp: 20000, reverbRT60: 1, reverbPredelayMs: 0,
@@ -72,18 +75,17 @@ final class ChromaticTarafTests: XCTestCase {
         return c
     }
 
-    /// Chromatic plucks and follower controls bypass raga buffering and replay across callback sizes.
+    /// Chromatic plucks and live controls bypass raga buffering and replay across callback sizes.
     func testCallbackBankIsIndependentOfRagaWorkers() throws {
         let serial = try engine(async: false), async = try engine(async: true)
         let injection = (0..<16384).map { 0.002 * sin(Double($0) * 0.037) }
         for e in [serial, async] {
+            bow_poly_jtc_compressor(e.pkernel, 4, 0.5, -60)
             bow_poly_jt_inject_gain(e.pkernel, 1)
             bow_poly_jt_inject_write(e.pkernel, injection, Int32(injection.count))
             e.setJtPluck(drive: 0.04, decayMs: 12)
             e.setJtEvolutionPulse(amount: 0.6, attackMs: 5, decayMs: 80)
             e.pluckTaraf(row: 1)
-            bow_poly_jt_track_target(e.pkernel, 840)
-            e.pluckTaraf(row: 2)
         }
         let first = chromatic(async, frames: 256)
         XCTAssertGreaterThan(first.map(abs).max() ?? 0, 1e-8,
@@ -94,19 +96,60 @@ final class ChromaticTarafTests: XCTestCase {
         XCTAssertEqual(actual, expected,
             "worker scheduling and callback sizes must not alter chromatic samples")
         XCTAssertTrue(actual.allSatisfy(\.isFinite))
-        XCTAssertGreaterThan(async.scopeRows()[2].f0Hz, 800,
-            "the follower must retune in its owning callback bank")
         XCTAssertGreaterThan(async.scopeRows()[1].level, 0,
             "row scope must read the callback bank")
         for e in [serial, async] {
+            bow_poly_jtc_compressor(e.pkernel, 8, 0.25, -50)
             e.setJtEvolveChromatic(0.7)
             e.setJtDrive(0.06)
             e.setJtDriveNorm(0.8)
-            e.setPerformanceGains([1, 0.4, 1])
             e.setJtBody(0.3)
             bow_poly_jt_set_cap(e.pkernel, 0.5, 1)
         }
         XCTAssertEqual(chromatic(serial, frames: 4096), chromatic(async, frames: 4096),
             "live bank controls must reach both serial and asynchronous hosts")
+    }
+
+    /// Summed compression reduces chromatic blooms without touching either bank's physical state or voice.
+    func testCompressorIsolationAndBypass() throws {
+        let reference = try engine(async: false, stereo: true, extraChromatic: true)
+        let bypass = try engine(async: false, stereo: true, extraChromatic: true)
+        let compressed = try engine(async: false, stereo: true, extraChromatic: true)
+        bypass.setChromaticCompressor(ratio: 1, voiceRatio: 0.1, floorDB: -80)
+        compressed.setChromaticCompressor(ratio: 20, voiceRatio: 0.1, floorDB: -80)
+        for e in [reference, bypass, compressed] {
+            e.updateChromaticCompressor()
+            e.setJtPluck(drive: 0.1, decayMs: 50)
+            e.pluckTaraf(row: 0)
+            e.pluckTaraf(row: 1)
+            e.pluckTaraf(row: 2)
+        }
+        let n = 256
+        let pitch = [Double](repeating: 561, count: n)
+        let zero = [Double](repeating: 0, count: n)
+        var rawEnergy = 0.0, compressedEnergy = 0.0, ragaEnergy = 0.0
+        func render(_ e: BowEngine) -> [[Double]] {
+            var v = zero, vs = zero, web = zero, side = zero, c = zero, r = zero
+            bow_poly_process4(e.pkernel, Int32(n), Int32(n), pitch, zero, zero,
+                pitch, zero, zero, &v, &vs, &web, &side, &c, &r)
+            return [v, vs, web, side, c, r]
+        }
+        for _ in 0..<150 {
+            let a = render(reference), b = render(bypass), c = render(compressed)
+            XCTAssertEqual(a, b, "1:1 must preserve every output bit")
+            XCTAssertEqual(a[0], c[0])
+            XCTAssertEqual(a[1], c[1])
+            XCTAssertEqual(a[5], c[5], "raga radiation must be unchanged")
+            rawEnergy += a[4].reduce(0) { $0 + $1 * $1 }
+            compressedEnergy += c[4].reduce(0) { $0 + $1 * $1 }
+            ragaEnergy += a[5].reduce(0) { $0 + $1 * $1 }
+            XCTAssertTrue(c.joined().allSatisfy(\.isFinite))
+        }
+        XCTAssertGreaterThan(rawEnergy, 1e-8)
+        XCTAssertGreaterThan(ragaEnergy, 1e-8)
+        XCTAssertGreaterThan(compressedEnergy, 0)
+        XCTAssertLessThan(compressedEnergy, rawEnergy * 0.5)
+        XCTAssertEqual(reference.scopeRows().map(\.level), compressed.scopeRows().map(\.level),
+            "compression must leave the physical rows ringing identically")
     }
 }

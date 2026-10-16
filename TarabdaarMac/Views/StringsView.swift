@@ -4,10 +4,13 @@ import TarabdaarCore
 import SwiftUI
 
 /// Two taraf banks, edited through matching tables and bank-local actions.
-/// Raga uses physical contact rows; chromatic includes the melody follower.
+/// Raga uses physical contact rows; chromatic uses the modal-jawari bank.
 struct StringsView: View {
     @ObservedObject var controller: AppController
     @ObservedObject var store: SarangiStore
+    @State private var showingSaveDialog = false
+    @State private var saveName = ""
+    @State private var presetError: String?
 
     init(controller: AppController) {
         self.controller = controller
@@ -41,8 +44,7 @@ struct StringsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                PerformanceProfileView(controller: controller)
-                Divider()
+                presetMenu
                 HeaderSection(controller: controller)
                 Divider()
                 StringsSection(bridge: .raga, degreeLabels: degreeLabels,
@@ -63,6 +65,68 @@ struct StringsView: View {
         }
         .environmentObject(store)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+        .onAppear { controller.refreshStringsPresetLibrary() }
+        .alert("Save Strings Preset", isPresented: $showingSaveDialog) {
+            TextField("Name", text: $saveName)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { perform { try controller.saveStringsPreset(name: saveName) } }
+        }
+        .alert("Strings Preset", isPresented: Binding(
+            get: { presetError != nil }, set: { if !$0 { presetError = nil } })) {
+            Button("OK", role: .cancel) { presetError = nil }
+        } message: {
+            Text(presetError ?? "")
+        }
+    }
+
+    private var presetMenu: some View {
+        Menu {
+            Button("Save As…") {
+                saveName = controller.stringsPresetName ?? ""
+                showingSaveDialog = true
+            }
+            if let name = controller.stringsPresetName {
+                Button("Save “\(name)”") { perform { try controller.saveStringsPreset(name: name) } }
+            }
+            Button("Save as Default") {
+                perform { try controller.saveStringsPreset(name: StringsPresetLibrary.defaultName) }
+            }
+            Divider()
+            Section("Load") {
+                ForEach(controller.savedStringsPresetNames, id: \.self) { name in
+                    Button {
+                        perform { try controller.loadStringsPreset(name: name) }
+                    } label: {
+                        if controller.stringsPresetName == name {
+                            Label(name, systemImage: "checkmark")
+                        } else {
+                            Text(name)
+                        }
+                    }
+                }
+            }
+            let deletable = controller.savedStringsPresetNames.filter { $0 != StringsPresetLibrary.defaultName }
+            if !deletable.isEmpty {
+                Divider()
+                Menu("Delete") {
+                    ForEach(deletable, id: \.self) { name in
+                        Button(name, role: .destructive) {
+                            perform { try controller.deleteStringsPreset(name: name) }
+                        }
+                    }
+                }
+            }
+        } label: {
+            Label(controller.stringsPresetName ?? "Strings Preset", systemImage: "tray.full")
+                .lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    private func perform(_ action: () throws -> Void) {
+        do { try action() }
+        catch { presetError = error.localizedDescription }
     }
 }
 
@@ -93,7 +157,7 @@ private struct HeaderSection: View {
 
 // MARK: - The string pool
 
-/// One bridge's table; the legacy melody follower lives with the chromatic bank.
+/// One bridge's string table.
 private struct StringsSection: View {
     @EnvironmentObject var store: SarangiStore
     let bridge: TarabSet
@@ -123,7 +187,6 @@ private struct StringsSection: View {
                 Button { store.addString(to: bridge) } label: { Image(systemName: "plus") }
                     .help(bridge == .raga ? "Add a raga string" : "Add a chromatic string")
             }
-            if bridge == .chromatic { FollowerRow() }
             if rows.isEmpty && bridge == .chromatic {
                 Text("—")
                     .font(.padCaption2).foregroundStyle(.tertiary)
@@ -137,32 +200,6 @@ private struct StringsSection: View {
                     }
                 }
             }
-        }
-    }
-}
-
-/// The melody-follower row, pinned above the chromatic pool: its pitch
-/// live-retunes to the highest note being played. Same Gain / t60 / On
-/// knobs; no octave or Hz readout; not a drone-button target.
-private struct FollowerRow: View {
-    @EnvironmentObject var store: SarangiStore
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Text("Follows melody")
-                .frame(width: Typography.scaledWidth(76 + 64 + 6), alignment: .leading)
-                .font(.padCaption).italic()
-                .help("A special sympathetic string that live-retunes to the highest note being played (glides included)")
-            Text("—")
-                .frame(width: Typography.scaledWidth(64), alignment: .leading)
-                .font(.padCaption).foregroundStyle(.tertiary)
-            TextField("", value: store.followerBinding(\.gain), format: .number.precision(.fractionLength(0...2)))
-                .frame(width: Typography.scaledWidth(52)).textFieldStyle(.roundedBorder).font(.padCaption)
-                .help("String loudness (0 silences it while keeping the row)")
-            TextField("", value: store.followerBinding(\.t60), format: .number.precision(.fractionLength(0...2)))
-                .frame(width: Typography.scaledWidth(48)).textFieldStyle(.roundedBorder).font(.padCaption)
-            Toggle("", isOn: store.followerBinding(\.enabled)).labelsHidden().frame(width: 30)
-            Spacer(minLength: 0)
         }
     }
 }

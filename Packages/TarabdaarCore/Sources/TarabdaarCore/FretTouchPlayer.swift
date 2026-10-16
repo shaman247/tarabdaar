@@ -33,8 +33,8 @@ public final class FretTouchPlayer {
     /// The engine the notes go to and the recorder that captures strokes —
     /// the surface binds them before its first event.
     public weak var engine: PitchPadEngine?
-    public weak var recorder: FretGestureRecorder?
-    /// Per settle tick, after the glide (the iPad's indicators ride it).
+    public weak var recorder: FretGestureCapture?
+    /// Per settle tick, after the glide.
     public var onTick: ((Int, FretDragAssist.Output) -> Void)?
 
     private struct Touch {
@@ -56,7 +56,7 @@ public final class FretTouchPlayer {
     public func begin(touchId: Int, at pt: CGPoint, context c: Context,
                       radiusPt: Double = 0,
                       time now: TimeInterval) -> Bool {
-        guard let engine, let recorder,
+        guard let engine,
               let onset = fretOnset(at: pt, placements: c.placements,
                                     snapDistance: c.snapDistance, warp: c.warp)
         else { return false }
@@ -69,7 +69,7 @@ public final class FretTouchPlayer {
         assist.setContext(placements: c.placements, snapDistance: c.snapDistance)
         assist.begin(touchId: touchId, x: pt.x, y: pt.y,
                      uncorrectedLog: onset.pitch, time: now, regionLogs: onset.logs)
-        if recorder.isRecording {
+        if let recorder, recorder.isRecording {
             recorder.begin(touchId: touchId,
                            context: .snapshot(
                                placements: c.placements, size: c.size,
@@ -90,7 +90,7 @@ public final class FretTouchPlayer {
     public func move(touchId: Int, at pt: CGPoint, context c: Context,
                      radiusPt: Double? = nil,
                      time now: TimeInterval) -> FretDragAssist.Output? {
-        guard let engine, let recorder, var touch = touches[touchId] else { return nil }
+        guard let engine, var touch = touches[touchId] else { return nil }
         touch.point = pt
         let regionLogs = regionPitches(for: touch, context: c)
         guard let raw = fretRegionValue(regionLogs, atY: pt.y, placements: c.placements) else { return nil }
@@ -104,7 +104,7 @@ public final class FretTouchPlayer {
                      fretPosition: fretPosition(at: pt, placements: c.placements,
                                                 padHeight: c.size.height))
         if let radiusPt { engine.setTouchRadius(touchId: touchId, radiusPt: radiusPt) }
-        recorder.sample(touchId: touchId, x: pt.x, y: pt.y,
+        recorder?.sample(touchId: touchId, x: pt.x, y: pt.y,
                         u: raw, o: out.log2Pitch, time: now, regionLogs: regionLogs)
         return out
     }

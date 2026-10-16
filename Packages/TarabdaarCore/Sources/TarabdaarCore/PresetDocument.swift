@@ -215,6 +215,22 @@ public struct TarabdaarPreset: Codable {
         droneVoice = try c.decodeIfPresent(String.self, forKey: .droneVoice)
         droneSequence = try c.decodeIfPresent([Int].self, forKey: .droneSequence)
         playingSurface = try c.decodeIfPresent(PresetPlayingSurface.self, forKey: .playingSurface)
+        removeRetiredSettings()
+    }
+
+    /// Retired settings are discarded before complete-snapshot validation.
+    private mutating func removeRetiredSettings() {
+        let keys: Set<String> = ["bow_lim_thresh", "bow_lim_rel_ms", "ctl_taraf_adapt"]
+        for key in keys {
+            paramValues?.removeValue(forKey: key)
+            stringOverrides?.removeValue(forKey: key)
+            tiltMapping?.mappings.removeValue(forKey: MapTarget(paramKey: key).storageKey)
+        }
+        composites = composites?.map { composite in
+            var result = composite
+            result.members.removeAll { keys.contains($0.key) }
+            return result
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -309,39 +325,36 @@ public enum PresetError: LocalizedError {
 /// Scale labels, exact ratios and the complete editable playing surface.
 public struct PresetPlayingSurface: Codable {
     public var scalePoints: [PitchPoint]
-    public var fretRowCount = 5
+    public var fretRowCount = FretRow.count
     public var fretSegments: [FretSegment]
     public var ghostExtentOctaves: Double
     public var droneRatios: [Double]
     public var snapPixels: Double
-    public var primeLimit: Int
 
     public init(scale: PitchScale, arrangement: FretArrangement,
-                snapPixels: Double, primeLimit: Int) {
+                snapPixels: Double) {
         scalePoints = scale.points
         fretSegments = arrangement.segments
         ghostExtentOctaves = arrangement.ghostExtentOctaves
         droneRatios = arrangement.droneRatios
         self.snapPixels = snapPixels
-        self.primeLimit = primeLimit
     }
 
     private enum CodingKeys: String, CodingKey {
-        case scalePoints, fretRowCount, fretSegments, ghostExtentOctaves, droneRatios, snapPixels, primeLimit
+        case scalePoints, fretRowCount, fretSegments, ghostExtentOctaves, droneRatios, snapPixels
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         scalePoints = try c.decode([PitchPoint].self, forKey: .scalePoints)
         fretRowCount = try c.decodeIfPresent(Int.self, forKey: .fretRowCount) ?? 3
-        guard [3, 5].contains(fretRowCount) else { throw CocoaError(.coderReadCorrupt) }
+        guard [3, 5, 9, FretRow.count].contains(fretRowCount) else { throw CocoaError(.coderReadCorrupt) }
         fretSegments = try FretSegment.decodeList(from: c.superDecoder(forKey: .fretSegments),
-                                                 legacyRows: fretRowCount == 3)
-        fretRowCount = 5
+                                                 rowCount: fretRowCount)
+        fretRowCount = FretRow.count
         ghostExtentOctaves = try c.decode(Double.self, forKey: .ghostExtentOctaves)
         droneRatios = try c.decode([Double].self, forKey: .droneRatios)
         snapPixels = try c.decode(Double.self, forKey: .snapPixels)
-        primeLimit = try c.decode(Int.self, forKey: .primeLimit)
     }
 
     public var arrangement: FretArrangement {

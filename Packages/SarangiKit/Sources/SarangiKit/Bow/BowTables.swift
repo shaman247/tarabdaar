@@ -118,14 +118,6 @@ public struct JtTables: Sendable {
     /// One-pole tone-LP coefficient on the radiated jt sum (`bow_jt_lp`;
     /// 0 = bypass). Applied via bow_jt_set_lp — not part of the load ABI.
     public var lpA: Double = 0
-    /// MELODY FOLLOWER: the row that live-retunes to the played pitch (-1 =
-    /// none) plus the law constants the in-kernel retune re-applies. Armed
-    /// via `bow_poly_jt_track_config` — not part of the load ABI (never
-    /// arming it is byte-null).
-    public var trackRow: Int32 = -1
-    public var trackT60: Double = 0
-    public var trackFhf: Double = 4000
-    public var trackBst: Double = 2.0e-4
     /// TWO BRIDGES: per row, whether it sits on the CHROMATIC bridge
     /// (`bow_jtc_*`) rather than the raga one (`bow_jt_*`), plus the
     /// per-row contact constants the engine pushes through
@@ -178,17 +170,12 @@ public enum BowTables {
     /// MODAL-JAWARI tables for the taraf rows. Keep every literal and the
     /// arithmetic order — the render hash depends on it.
     ///
-    /// `trackRowIndex` marks the melody FOLLOWER row. Its nominal `f`
-    /// should sit LOW: the mode allocation is fixed at build and the
-    /// kernel only TRIMS the active count as the pitch rises.
-    ///
     /// `chromatic` identifies the bank of each row. Bank levels scale each
     /// row against a fixed output reference, so neither bank controls the
     /// other's radiation or gain ramp. nil retains the unbanked fixture law.
     public static func buildJawariTables(
         rows: [(f: Double, gain: Double, t60: Double)],
         srk: Double, bp: BowParams,
-        trackRowIndex: Int? = nil,
         chromatic: [Bool]? = nil) -> JtTables? {
         guard !rows.isEmpty else { return nil }
         let J = Int(bp.v("bow_jt_J", 40.0) + 0.5)
@@ -397,12 +384,6 @@ public enum BowTables {
         let lpHz = bp.v("bow_jt_lp", 20000.0)
         T.lpA = lpHz < 19999.0
             ? OnePole.coefficient(hz: lpHz, sr: srk) : 0.0
-        if let ti = trackRowIndex, rows.indices.contains(ti) {
-            T.trackRow = Int32(ti)
-            T.trackT60 = rows[ti].t60
-            T.trackFhf = bp.v("bow_jt_fhf", 4000.0)
-            T.trackBst = bp.v("bow_jt_bst", 2.0e-4)
-        }
         return T
     }
 

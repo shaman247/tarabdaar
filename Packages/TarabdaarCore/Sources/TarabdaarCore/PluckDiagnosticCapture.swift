@@ -137,9 +137,6 @@ extension AudioEngine {
               !directory.isEmpty else { return }
         let capture = PluckDiagnosticCapture(format: format)
         pluckCapture = capture
-        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 512, format: format) { buffer, time in
-            capture.append(buffer, at: time)
-        }
         NSLog("Tarabdaar: first strip pluck or fret onset will capture 20 seconds of mixer output to %@", directory)
     }
 

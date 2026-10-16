@@ -155,6 +155,11 @@ final class AppController: ObservableObject {
     /// This class only feeds it raw axes and applies what it emits.
     let axes = ControlAxisEvaluator()
 
+    let fretRecorder = FretGestureRecorder()
+    private let fretRecordingReceiver = FretRecordingReceiver()
+    private var fretRecordingSession: UInt32 = 0
+
+
     /// The live `ctl_fret_warp` value, written only by the `applyParamToVoice`
     /// interception (main); read by the Mac pad, relayed over JOYCON_STATE.
     @Published private(set) var fretFieldWarp: Double = 0
@@ -234,7 +239,11 @@ final class AppController: ObservableObject {
 
     private static func loadComposites() -> [CompositeParam] {
         if let c = DefaultsStore.load([CompositeParam].self, key: compositesKey) {
-            return c
+            return c.map { composite in
+                var result = composite
+                result.members.removeAll { ParamRegistry.spec($0.key) == nil }
+                return result
+            }
         }
         return CompositeParam.defaults()
     }
@@ -503,6 +512,8 @@ final class AppController: ObservableObject {
     /// The `.live` routing — ONE switch on the registry's target.
     private func applyLive(_ target: ParamTarget, _ key: String, _ value: Double) {
         switch target {
+        case .finalOutput(let control):
+            audio.setFinalOutputControl(control, value)
         case .stringVoice:
             audio.setStringControlParam(key, value)
         case .strikeWindow:
@@ -517,8 +528,6 @@ final class AppController: ObservableObject {
             strumming.setAccelThreshold(value)
         case .glideQueue:
             audio.glideQueue.setControl(key, value)
-        case .tarafAdaptation:
-            DispatchQueue.main.async { [weak self] in self?.pitchProfile.amount = value }
         case .pitchAccent:
             audio.setPitchAccent(value)
         case .fretAssist(let control):
@@ -543,7 +552,6 @@ final class AppController: ObservableObject {
 
     // jt overload watchdog (see start())
     private var jtStatsTimer: Timer?
-    lazy var pitchProfile = PerformanceProfileModel(audio: audio, tuning: tuning)
 
     /// VOLUME READOUT relay: 60 Hz poll of `AudioEngine.volumeLevels`
     /// (integrate-and-dump — the ONE poller) → JOYCON_STATE, change-gated.
@@ -639,7 +647,10 @@ final class AppController: ObservableObject {
             ?? FretArrangement.defaultArrangement(
                 degrees: scaleDegrees(from: self.pitchPad.scale))
         // Loads the persisted/default document and builds the tarab tuning.
-        self.sarangi = SarangiStore(audio: audio)
+        let stringsDefault = (try? StringsPresetLibrary.standard().load(name: StringsPresetLibrary.defaultName))
+            ?? .bundledDefault
+        self.sarangi = SarangiStore(audio: audio, defaultState: stringsDefault.state(
+            tonicHz: tuning.tonicHz, scaleRatios: scaleDegrees(from: tuning.scale).map(\.ratio)))
         // Physics overrides — seeds the engine before the first BowEngine.
         self.stringParams = StringParamStore(
             audio: audio,
@@ -670,19 +681,26 @@ final class AppController: ObservableObject {
             degrees: { scaleDegrees(from: pad.scale) },
             fallbackRatios: { doc.state.strumStringRatios })
 
-        // Restore the output device rate on a clean quit (the engine forces
-        // 44.1 kHz to drop the output resampler). SIGKILL skips this.
+        // Existing working edits win; missing Strings settings use the saved default.
+        if UserDefaults.standard.object(forKey: "tarabdaar.droneVoice.v1") == nil {
+            droneVoice = AudioEngine.DroneVoiceMode(rawValue: stringsDefault.droneVoice) ?? .tanpura
+        }
+        if UserDefaults.standard.object(forKey: "tarabdaar.droneSequence.v1") == nil {
+            droneSequenceSteps = stringsDefault.droneSequence
+        }
+
+        // Stop recovery before restoring any output device rates on a clean quit.
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.audio.restoreOutputDeviceRate()
+            self?.audio.shutdownOutput()
         }
 
         // Arm the String voice. The Mac pads hold a flat CC11 per note; 32 ≈
         // the fitted expression median (the surfaces span ~16 dB around it).
-        audio.setSarangiModelVoiceEnabled(true)
+        audio.setSarangiModelVoiceEnabled(true, initialControls: paramValues)
 
         // The tanpura voice is always armed beside the String voice; its JI
         // slot grid builds off-main in `start()`. Restore the routing choices.
@@ -722,7 +740,6 @@ final class AppController: ObservableObject {
         // Voice/taraf volume readout → iPad (JOYCON_STATE vol bytes).
         startVolMeterRelay()
         startEngineWatchdog()
-        pitchProfile.start()
         wireTuningFollowers()
     }
 
@@ -853,6 +870,20 @@ final class AppController: ObservableObject {
             switch event {
             case .tarafPluck(let revision, let row):
                 DispatchQueue.main.async { self?.audio.pluckTaraf(revision: revision, row: row) }
+            case .fretRecordingChunk(let chunk):
+                DispatchQueue.main.async {
+                    guard let self, self.fretRecorder.isRecording || self.fretRecorder.isFinishing,
+                          let data = self.fretRecordingReceiver.receive(chunk) else { return }
+                    self.fretRecorder.appendRemote(data)
+                }
+            case .fretRecording(let session, let recording):
+                DispatchQueue.main.async {
+                    guard let self, !recording, self.fretRecorder.isFinishing,
+                          session == self.fretRecordingSession else { return }
+                    self.fretRecorder.finish()
+                    self.fretRecordingSession = 0
+                    self.fretRecordingReceiver.reset(session: 0)
+                }
             case .resyncRequest:
                 DispatchQueue.main.async { self?.pushCurrentState() }
             case .panic:
@@ -868,14 +899,52 @@ final class AppController: ObservableObject {
             NSLog("TarabLink: up=%d stale=%d rtt=%@",
                   status.isUp ? 1 : 0, status.isStale ? 1 : 0,
                   status.rttMs.map { String(format: "%.1fms", $0) } ?? "–")
-            DispatchQueue.main.async { self?.linkStatus = status }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let wasConnected = self.linkStatus.isUp && !self.linkStatus.isStale
+                let connected = status.isUp && !status.isStale
+                self.linkStatus = status
+                if !connected, self.fretRecorder.isFinishing {
+                    self.fretRecorder.finish()
+                    self.fretRecordingSession = 0
+                }
+                if !connected || !wasConnected {
+                    self.fretRecordingReceiver.reset(session: connected ? self.fretRecordingSession : 0)
+                    if connected { self.link.send(event: .fretRecording(session: self.fretRecordingSession, recording: self.fretRecorder.isRecording)) }
+                }
+            }
         }
+        fretRecorder.$isRecording.dropFirst().sink { [weak self] recording in
+            guard let self else { return }
+            if recording || !self.fretRecorder.isFinishing {
+                self.fretRecordingSession = recording ? UInt32.random(in: 1...UInt32.max) : 0
+                self.fretRecordingReceiver.reset(session: self.fretRecordingSession)
+            }
+            self.link.send(event: .fretRecording(session: self.fretRecordingSession, recording: recording))
+            if recording { self.refreshFretRecordingSession(self.fretRecordingSession) }
+        }.store(in: &cancellables)
         // A destination appearing/vanishing → re-greet; scale sync re-pushes.
         midi.$destinationCount
             .removeDuplicates()
             .sink { [weak self] _ in self?.link.kick() }
             .store(in: &cancellables)
         link.start()
+    }
+
+    /// Retry the session command and stop fence without restarting an active capture.
+    private func refreshFretRecordingSession(_ session: UInt32) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, self.fretRecordingSession == session, session != 0 else { return }
+            guard self.fretRecorder.isRecording || self.fretRecorder.isFinishing else {
+                self.fretRecordingSession = 0
+                self.fretRecordingReceiver.reset(session: 0)
+                return
+            }
+            if self.linkStatus.isUp, !self.linkStatus.isStale {
+                self.link.send(event: .fretRecording(session: session, recording: self.fretRecorder.isRecording))
+            }
+            self.refreshFretRecordingSession(session)
+        }
     }
 
     /// The Joy-Con's axes, buttons and connection edge.
@@ -933,11 +1002,7 @@ final class AppController: ObservableObject {
                 // ZL re-zeroes the arm AND wrist axes at the current poses.
                 guard pressed else { return }
                 self.joyCon.recenterBody()
-            case .minus:
-                if pressed { self.pitchProfile.toggleSeed() }
-            case .capture:
-                if pressed { self.pitchProfile.reset() }
-            case .sl, .sr, .stickClick:
+            case .sl, .sr, .stickClick, .minus, .capture:
                 // Unassigned — visible in the panel chips.
                 break
             case .dpadUp:
@@ -1134,6 +1199,48 @@ final class AppController: ObservableObject {
         if fretLayoutName == name { fretLayoutName = nil }
     }
 
+    // MARK: - Strings presets
+
+    let stringsPresetLibrary = StringsPresetLibrary.standard()
+    @Published var stringsPresetName: String? = nil
+    @Published private(set) var savedStringsPresetNames: [String] = []
+
+    func refreshStringsPresetLibrary() {
+        savedStringsPresetNames = stringsPresetLibrary.names()
+    }
+
+    func captureStringsPreset() -> StringsPreset {
+        if sarangi.state.scaleRatios != fretDegrees.map(\.ratio)
+            || sarangi.state.tonicHz != tuning.tonicHz { syncTarabFromScale() }
+        return StringsPreset(state: sarangi.state, droneVoice: droneVoice.rawValue,
+                             droneSequence: droneSequenceSteps)
+    }
+
+    func saveStringsPreset(name: String) throws {
+        stringsPresetName = try stringsPresetLibrary.save(captureStringsPreset(), name: name)
+        refreshStringsPresetLibrary()
+    }
+
+    func loadStringsPreset(name: String) throws {
+        let preset = try stringsPresetLibrary.load(name: name)
+        applyStringsPreset(preset)
+        stringsPresetName = name
+    }
+
+    private func applyStringsPreset(_ preset: StringsPreset) {
+        cancelSequencedDrone()
+        sarangi.replaceState(preset.state(tonicHz: tuning.tonicHz,
+                                         scaleRatios: fretDegrees.map(\.ratio)))
+        droneVoice = AudioEngine.DroneVoiceMode(rawValue: preset.droneVoice) ?? .tanpura
+        droneSequenceSteps = preset.droneSequence
+    }
+
+    func deleteStringsPreset(name: String) throws {
+        try stringsPresetLibrary.delete(name: name)
+        if stringsPresetName == name { stringsPresetName = nil }
+        refreshStringsPresetLibrary()
+    }
+
     // MARK: - Sarangi tarab ↔ Pitch Pad scale
 
     /// Push the scale into the tarab document. Pitches always follow; the row
@@ -1203,6 +1310,7 @@ final class AppController: ObservableObject {
                 blob: FretArrangementSysEx.encodeBlob(fretArrangement)))
         }
         link.send(event: .tarafBank(audio.tarafBank))
+        link.send(event: .fretRecording(session: fretRecordingSession, recording: fretRecorder.isRecording))
         // A freshly-linked iPad must also learn the JOYCON_STATE fields.
         joyConDisplay.resend()
     }
@@ -1416,7 +1524,7 @@ final class AppController: ObservableObject {
         p.droneVoice = droneVoice.rawValue
         p.droneSequence = droneSequenceSteps
         p.playingSurface = PresetPlayingSurface(scale: tuning.scale, arrangement: fretArrangement,
-            snapPixels: fretPad.marginPixels, primeLimit: fretPad.primeLimit)
+            snapPixels: fretPad.marginPixels)
         return p
     }
 
@@ -1433,7 +1541,6 @@ final class AppController: ObservableObject {
             if let surface = p.playingSurface {
                 fretArrangement = surface.arrangement
                 fretPad.marginPixels = surface.snapPixels
-                fretPad.primeLimit = surface.primeLimit
                 fretLayoutName = nil
             }
         }
@@ -1444,6 +1551,7 @@ final class AppController: ObservableObject {
         if let inst = p.instrument {
             sarangi.replaceState(inst)
         }
+        stringsPresetName = nil
         if let values = p.resolvedParamValues() {
             paramValues = Self.known(values)
             stringParams.replaceOverrides(Self.physicsOverrides(in: paramValues))
@@ -1472,16 +1580,15 @@ final class AppController: ObservableObject {
         else { axes.setMapping(tiltMapping); axes.reapply() }
     }
 
-    /// The shipped default as a full rig: generated bank, artifact physics,
-    /// default composites and bindings, String voice, tanpura drones.
+    /// Factory sound and controls, with the player's default Strings setup.
     func loadFactoryPreset(_ preset: Preset) {
-        sarangi.loadSarangiLiveDefault(preset)
         resetAllParams()
         composites = CompositeParam.defaults()
         tiltMapping = DimensionMapping.makeDefault()
         mainInstrument = .string
-        droneVoice = .tanpura
-        droneSequenceSteps = DroneSequence.defaultSteps
+        applyStringsPreset((try? stringsPresetLibrary.load(name: StringsPresetLibrary.defaultName))
+            ?? .bundledDefault)
+        stringsPresetName = StringsPresetLibrary.defaultName
     }
 
     // MARK: The preset library — no file panels

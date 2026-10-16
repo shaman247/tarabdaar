@@ -31,8 +31,9 @@ the zone matvecs, table copies), `Model/`, `Presets.swift`; Mac side
 TLP touches ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (one‑sample −Z·V load)
               ► formula body (modal resonators) ► voice bus ─┐
               ► raga physical rows (async pool) + chromatic quadratic rows (callback)
-                  ► bridge‑force radiation ► per‑row cap ► [body mix] ► tone LP/HP ► taraf bus ─┤
-              ► balance · taraf comp · FX rack (fx_*) · room · width · master gain · limiter
+                  ► bridge‑force radiation ► per‑row cap ► [body mix] ► tone LP/HP
+                  ► chromatic bank compressor (chromatic only) ► taraf bus ─┤
+              ► balance · FX rack (fx_*) · room · width · master gain · global FX
               ► StringVoiceSource ► symGain ► mainMixerNode
 ```
 
@@ -53,13 +54,18 @@ TLP touches ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (on
   cannot go under 2 samples; when β·T is shorter than the ribbon + 2 the
   excess comes off the bridge‑side read instead (the bow moves toward the
   bridge until the hair clears the finger), so the loop stays one period
-  to the top of the range — bit‑exact below that corner. The loop filters
-  (nut/bridge one‑poles, dispersion allpass, interpolation) add a fixed
-  phase delay of ≈2.4 samples; `pitch_cents`/`pitch_knots_oct` in
-  `bowed_string.json` pre‑correct the requested f0 for it (fitted knots to
-  C6, then a cents ∝ f0 fit measured to C8 — a fixed delay in samples is a
-  growing error in cents). A held table above the last knot was the
-  audible "flat above B6".
+  through the playable range. Before splitting the loop, the kernel subtracts
+  the nut and bridge one-poles' phase delays and every dispersion allpass's
+  phase delay at the requested fundamental. It uses the current coefficients,
+  including register damping, the nail law, slide dulling and live parameter
+  ramps. The extra gut output lowpass is outside this feedback loop and does
+  not enter the tuning calculation. A per-string 32-sample clock evaluates
+  the correction at 3 kHz and ramps it between evaluations, independently of
+  callback boundaries. `BowControlFilter` supplies the requested Hz directly;
+  no fitted cents table is applied. `BowPitchTests` measures rendered
+  fundamentals across registers, tonics and live damping edits. Bow pressure
+  and bridge loading can still pull the physical oscillation away from the
+  small-signal fundamental, especially with a heavy stroke.
 - **Traveling-wave interpolation.** Fractional reads use centered cubic
   Lagrange interpolation. This keeps numerical high-frequency loss small,
   so the nut, bridge and gut coefficients control decay. Reads shorter than
@@ -85,7 +91,7 @@ TLP touches ► BowControlMapper ► bow_live_poly gut strings on ONE bridge (on
 package. These resources contain the shared empirical coefficients and
 synthetic image-room impulse, with no recording samples or saved performance
 contours. `bow_fit.c` runs the output observation at 48 kHz before the existing
-room, master gain and limiter. The optional bridge-force tap only copies force;
+room, master gain and global FX. The optional bridge-force tap only copies force;
 it changes no physical return or taraf state. Current two-direction raga rows,
 chromatic rows and released-string damping retain their production paths.
 
@@ -136,6 +142,11 @@ is not claimed to reproduce the offline waveform sample for sample.
   `buildEngine` settles with a silent control snapshot, preserving held touches
   for publication. Async builds defer the mapper's polyphony change until
   accepted publication, so failed or superseded builds cannot release held slots.
+  Held drones re-arm on the replacement only in sympathetic drone mode;
+  Tanpura holds never start sustained drive in the taraf. Publication and
+  re-arming share the input-routing lock with drone presses, releases,
+  mapping edits and voice switches, so a release cannot be overtaken by a
+  stale hold snapshot. Rendering does not acquire this lock.
   A prepared bank receives one 4096-frame warmup block;
   fallback banks receive at least five with 50 ms damping. The physical kernel
   state is preserved while the discarded setup transient is cleared from the
@@ -344,7 +355,7 @@ Contact force is `kc_quadratic × eta²`. Four alternating coordinate passes
 approximate the coupled solution, updating the shared residual after each force
 change. The fixed pass count bounds callback work without an inner Newton solve.
 The four-contact projection and solver have a fixed-width fast path without
-changing their arithmetic. Startup equilibrium and follower retuning use the
+changing their arithmetic. Startup equilibrium uses the
 same active contact width; tables retain their fixed-width storage slots.
 Before publication, the initializer solves the requested resting bone position
 for owned modal rows. With the quiescence gate enabled, solved chromatic rows
@@ -356,8 +367,14 @@ After the DC-blocked physical return is captured, chromatic radiation passes
 through two half-sample averages, `[1, 2, 1] / 4`. This suppresses sample-scale
 contact chatter and adds one 96 kHz sample (10.4 microseconds) of audio delay.
 It does not filter the mechanical feedback or add a callback/FIFO reserve.
-History is cleared when a row sleeps. Bank levels and the radiation cap follow
-this cleanup.
+History is cleared when a row sleeps. Bank levels and the per-row radiation cap
+follow this cleanup. The summed chromatic output then passes through its own
+optional compressor after body/tone and stereo width, before joining raga and
+entering shared taraf FX. One gain controls both stereo channels. Its detector
+uses the louder channel, and its threshold is the greater of the recent played
+voice peak times `bow_jtc_comp_voice` and `bow_jtc_comp_floor_db` converted to
+internal bus amplitude. Physical return and individual row scope meters precede
+compression; the chromatic bank level meter follows it.
 
 The model retains modal coupling, dissipative contact loss, evolution and the
 four-quarter-step deep-contact fallback. The reference exponent calibrates
@@ -369,10 +386,8 @@ decay and is not fitted across all excitation amplitudes. Preset levels remain
 unchanged; the level matching used in the comparison recordings is not an
 additional runtime attenuation.
 
-The melody follower uses this same callback bank, including live retuning,
-recruitment, per-row levels, pluck/pulse articulation and the voice-relative cap.
 Raga retains its physical solver and existing audio reserve. Overall output trim
-and the limiter remain at their preset settings.
+uses its preset setting.
 
 ### Parameter ownership
 
@@ -381,12 +396,20 @@ their parameter keys; the historical `bow_jt_` prefix does not indicate a bank.
 
 | UI group | Parameters | Effect |
 | --- | --- | --- |
-| **Taraf · Shared** | `bow_jt_drive`, `bow_jt_drive_norm`, `bow_jt_sel`, `bow_jt_damp`, `bow_jt_lp`, `bow_jt_hp`, `bow_jt_body`, `bow_jt_couple`, `bow_jt_cap`, `bow_jt_cap_ratio`, `ctl_taraf_adapt` | Both banks: excitation/compensation, recruitment, extra damping, output tone/body, physical feedback, voice cap and performance adaptation. |
+| **Taraf · Shared** | `bow_jt_drive`, `bow_jt_drive_norm`, `bow_jt_sel`, `bow_jt_damp`, `bow_jt_lp`, `bow_jt_hp`, `bow_jt_body`, `bow_jt_couple`, `bow_jt_cap`, `bow_jt_cap_ratio` | Both banks: excitation/compensation, recruitment, extra damping, output tone/body, physical feedback, and voice cap. |
 | **Taraf · Raga** | `bow_jt_gain`, `bow_jt_norm`, `bow_jt_dual_pluck_level`, `bow_jt_dual_mm`, `bow_jt_bow_bloom`, `bow_jt_dual_lp`, `bow_jt_dual_select`, `bow_jt_sav` | Raga level/normalization, direct-pluck loudness and displacement, bow bloom, radiation cleanup/selectivity and contact solver. |
-| **Taraf · Chromatic** | `bow_jtc_gain`, `bow_jtc_norm`, `bow_jtc_evolve`; `bow_jt_ev_reg`, `bow_jt_apex`, `bow_jt_zone`, `bow_jt_alpha`, `bow_jt_hcb`, `bow_jt_fhf`, `bow_jt_bst`; `bow_jt_pluck`, `bow_jt_pluck_decay_ms`, `bow_jt_pulse`, `bow_jt_pulse_attack_ms`, `bow_jt_pulse_decay_ms` | Chromatic level/normalization, evolution/register, contact geometry/loss and force-burst/pulse articulation. The melody follower shares this bank's level, normalization, geometry and evolution. |
+| **Taraf · Chromatic** | `bow_jtc_gain`, `bow_jtc_norm`, `bow_jtc_evolve`; `bow_jt_ev_reg`, `bow_jt_apex`, `bow_jt_zone`, `bow_jt_alpha`, `bow_jt_hcb`, `bow_jt_fhf`, `bow_jt_bst`; `bow_jt_pluck`, `bow_jt_pluck_decay_ms`, `bow_jt_pulse`, `bow_jt_pulse_attack_ms`, `bow_jt_pulse_decay_ms` | Chromatic level/normalization, evolution/register, contact geometry/loss and force-burst/pulse articulation. |
 
 Each bank has its own **level** and **decay normalization**, with matching ranges and
 apply timing. Either level can reach zero while the other bank keeps ringing.
+Chromatic also owns `bow_jtc_comp_ratio`, `bow_jtc_comp_voice` and
+`bow_jtc_comp_floor_db`: live global controls for its summed output compressor.
+A ratio of 1 bypasses exactly after any existing reduction recovers; higher
+ratios apply a 6 dB soft knee, 5 ms gain attack and 250 ms recovery, without
+makeup gain or lookahead. The peak detector releases over 50 ms and the played
+voice reference uses the existing 1.2 s peak envelope. Controls are staged under
+the engine lock and adopted by the render thread; no compressor state belongs
+to the raga workers and processing allocates nothing.
 Banked tables keep the common output carrier at 0.3 and scale each row by its
 bank's level / 0.3, preserving the default arithmetic and the existing 40 ms
 output slews. The levels multiply audio after the physical return and before
@@ -406,7 +429,7 @@ Raga contact geometry, evolution and natural loss remain the fitted physical
 profile; the adjustable legacy geometry affects the chromatic model.
 `bow_jt_evolve` is retained only in the legacy engine interface, not offered
 as an app parameter: physical raga rows ignore its bone offset, and chromatic
-rows (including the follower) use `bow_jtc_evolve`. Saved bindings to the
+rows use `bow_jtc_evolve`. Saved bindings to the
 inactive key are pruned by the existing unknown-target handling.
 
 Per-string pitch, gain, t60 and enable controls live in Strings. Raga t60
@@ -428,8 +451,7 @@ energy and coupled return. Direct row plucks from an uncoupled, silent bridge
 remain byte-identical. Chromatic rows, contact geometry and radiation filters
 are unchanged; the physical solver accounts for the shaped force as its input.
 
-Kernel order is raga selection, chromatic selection, then the legacy melody
-follower. Each selected raga row owns a separate contact solver; a failed
+Kernel order is raga selection, then chromatic selection. Each selected raga row owns a separate contact solver; a failed
 physical-row build rejects the replacement engine instead of substituting
 the legacy model. The pluck strip addresses kernel rows directly and marks
 all physical raga rows orange. Drone mappings carry nominal Hz **and bridge**,
@@ -617,7 +639,7 @@ the full guard after changes to the contact models, return path or gain law.
   grazing margin from ×4 at zero to ×¼ at one. Pressed contact holds the
   harmonics relatively still; the open grazing band encourages the upward
   cascade. Row bone offsets slew over about 40 ms, with a cumulative 0.005
-  control dead band. The melody follower uses the same chromatic setting.
+  control dead band.
 - **`bow_jt_ev_reg`** (−1…1, live, default zero) offsets chromatic evolution
   by octave from the tonic: `clamp(e + reg * log2(tonic / rowHz), 0, 1)`.
   Positive opens lower rows and presses higher rows; negative reverses it.
@@ -709,8 +731,7 @@ more boost to match the chromatic bank's stronger low strings. This gain is
 after radiation filtering and outside the physical return, so displacement,
 contact timbre and bridge coupling retain their existing laws. Rows that have
 not been plucked stay byte-identical; during a pluck's tail, the envelope acts
-on that row's shared plucked/sympathetic radiation. Saved row gains, adaptation,
-cap, balance and the final limiter still apply. `DualTarafTests` pins the direct
+on that row's shared plucked/sympathetic radiation. Saved row gains, cap, balance and output gain still apply. `DualTarafTests` pins the direct
 pluck render as well as its worker replay.
 
 The row has 40 modes in each direction. Normal motion contacts the jawari;
@@ -800,7 +821,7 @@ the normal reaction converts back to newtons with the reciprocal factor.
 physical raga rows' contact solver: **0 = Newton** (default), **1 = corrected
 scalar auxiliary variable solver**. The setting is saved in presets and changes
 through a crossfaded engine rebuild; existing presets without the key use Newton.
-Chromatic rows and the follower retain their existing solver. Both options use
+Chromatic rows retain their existing solver. Both options use
 the same compressed geometry, 80 modes, eight contact sites, clock and radiation.
 
 The SAV option replaces Newton iterations with a closed-form positive contact
@@ -842,7 +863,7 @@ fitted response, not an independently measured pitch-dependent instrument body.
 
 The per-row t60 field does not retune this profile. Chromatic rows retain the
 ordinary geometry, evolution and excitation controls. Row gain, normalization
-and recruitment still apply. The follower is excluded. Tuning changes rebuild
+and recruitment still apply. Tuning changes rebuild
 the model. Supported nominal range is approximately 71–1820 Hz, with the shared
 taraf bus at 96 kHz. The 96 kHz contact integration rate deliberately changes
 the earlier 192 kHz discrete trajectory. The production comparison covers
@@ -871,7 +892,7 @@ the original worker partition and FIFO behavior remain unchanged.
 `RealtimePerformanceTests` exercises the default twelve-raga/27-chromatic
 bank with simultaneous plucks, three bowed notes and full coupling.
 `ChromaticTarafTests` pins immediate onsets, callback-size/worker independence,
-live controls, follower retuning and row meters. `DualTarafTests` pins independent row state, deterministic worker replay,
+live controls and row meters. `DualTarafTests` pins independent row state, deterministic worker replay,
 serial agreement and resizing the pool. Longer paced runs also measure
 asynchronous dropped jobs and missing samples; callback timing alone does
 not establish capacity. See the twelve-string probe (local research: `tools/experiments/taraf_twelve/README.md`). The offline physics study (local research: `tools/experiments/taraf_sitar/physics_v3/README.md`) retains the approved
@@ -894,74 +915,12 @@ equally, independent of the played note. **Loudness compensation:**
 `BowEngine.updateRecruitment` (an incoherent power sum over the kin scores plus a
 per‑row haze floor `recruitHazeFloor` 0.05, blending above 0.5 to one common
 level rows·haze + `recruitKinNominal` 1.75, capped ×`bow_jt_sel_comp` [4])
-drives `bow_poly_jt_set_gain_mul`. The follower and held‑drone rows count as
+drives `bow_poly_jt_set_gain_mul`. Held‑drone rows count as
 fully ringing (drone noise adds AFTER the weight — a held drone is never
 pumped or ducked); chords combine soft‑OR; with no gated note the last weights
 hold. With the chromatic set mounted every semitone has a unison row, so
 kin‑only still rings it. The **Taraf purity** composite sweeps 0.5 → 0 (1
 would park the instrument on the note‑independent flat wash).
-
-### Performance pitch profile and adaptive gain
-
-The Strings tab records **pitch occupancy** in 10-second, 60-second, and
-whole-performance windows. `PerformancePitchProfile` integrates the Mac's
-post-glide-queue touch onsets, pitch changes and releases using monotonic
-timestamps under the audio engine's control-state lock. The iPad, Mac pad
-and computer keyboard share this path. The configured strum chord and
-drone buttons do not contribute evidence. This measures held pitch intent,
-not microphone/audio energy: expression, attack sharpness and ringing tails
-do not weight it. Simultaneous fingers share each elapsed second equally.
-
-Pitches fold into one octave relative to the centralized tonic, in 120
-bins (10 cents), including pitches between scale degrees. Each chart shows
-percent of its window's occupied time; all three share an automatically
-scaled vertical axis. Silence adds no evidence and ages the rolling
-windows; the performance distribution stays. The recent windows use a
-bounded ring of 100 ms buckets, with proportional overlap at the oldest
-boundary (up to 100 ms boundary uncertainty). The cumulative window is
-exact for the received pitch events. A 10 Hz Mac timer publishes the view
-and pushes gains even while another tab is selected. Scale-ratio or tonic
-changes reset the profile; label-only changes relabel it. Profiles are
-session-only and do not save with presets.
-
-**Reset & seed** clears the profile and starts a seed capture. A note held
-within 30 cents of a scale degree for at least 180 ms marks that degree;
-short passages through other degrees do not mark them. **Finish seed**
-replaces the capture with an equal two-second prior per recognized degree
-and clears the recent windows. Subsequent playing adds actual occupancy
-to this prior. During capture, recognized degrees have equal gain targets.
-**Reset performance** clears all evidence and returns the gain targets to
-unity. On the Joy-Con, **Minus** starts/finishes seeding and **Capture**
-resets the performance, so these actions work away from the Mac.
-
-**Adaptation** is the registry's global live `ctl_taraf_adapt` amount
-(0–1, default 0). For gain inference, occupied bins within 50 cents of the
-nearest scale degree contribute to that degree, with octave wrap. Each
-window's assigned evidence is normalized, then mixed: performance 60%,
-60 seconds 25%, 10 seconds 15%. Empty windows contribute nothing. Dividing
-by the strongest mixed score gives relative salience `s`; the full-depth
-gain is `0.15 + 0.85 * sqrt(s)`. The amount interpolates from unity to this
-gain. No evidence means unity. Thus prominent degrees keep their saved
-level while incidental or absent degrees are attenuated, never boosted.
-The same octave-folded profile applies to both bridges; chromatic pitches
-outside the scale's 50-cent corridors take the 15% floor at full depth
-when a learned profile exists.
-The melody follower always stays at unity.
-
-This is a **radiation multiplier**, not an edit to `StringSpec.gain`:
-row enablement, row selection, tuning, decay, saved gains and bridge
-coupling remain governed by the existing bank. Missing or disabled rows
-are not created or enabled by seeding. `StringVoiceSource` caches the
-profile and reapplies it by nominal row frequency on every engine rebuild.
-`bow_poly_jt_profile_gains` publishes atomic targets; each row worker slews
-toward its target over 250 ms, including while asleep, and multiplies the
-DC-blocked radiation **after** the coupling pickup and per-row cap, before
-scope metering. Unity skips the multiplication exactly; returning the
-amount to zero restores saved levels smoothly. The experiment therefore
-changes the audible balance of the web without changing its charging or
-feedback dynamics. `PerformancePitchProfileTests` pins timing, silence,
-octave folding and seed reset; `ByteNullContractTests` pins unity and an
-active attenuation render.
 
 ### The quiescence gate (`bow_jt_gate`)
 
@@ -1011,22 +970,6 @@ may be ticking.
   0 = byte‑null). **`bow_jt_norm`** evens kin‑note hot spots at the cause
   (long‑ring anchors charge hotter; 0.6 ≈ even).
 
-### The melody follower
-
-One special row sits pinned above the raga pool: its pitch is not a scale
-degree — it **live‑retunes to the highest note being played** (glides
-included). Same Gain / t60 / On as any row; no octave, no Hz, not a drone
-target. **Default off** — disabled it adds no row and the render is
-byte‑identical. Built at tonic/2 (generous mode allocation), appended after
-both bridge selections, retuned in place by the kernel
-(`bow_poly_jt_track_config` / `_target`): the render thread pushes the highest
-gated slot's `f0Target` once per chunk, the row's tick slews toward it
-(~15 ms) and rewrites only the f0‑dependent mode tables — mode shapes, bone
-profile and radiation scale never move (retune‑by‑tension); the active mode
-count trims to the builder's 18 kHz corner as the pitch rises (an
-under‑resolved contact mode limit‑cycles into static). With no note held the
-target stays put, so the string rings out where the melody left it.
-
 ### Drone excitation
 
 The three Joy-Con drone slots pluck **mapped tarab rows** — no
@@ -1070,14 +1013,16 @@ range keys are bp scalars (`string.<key>`). Path: binding →
   300 Hz → 3 kHz) runs once per bus (voice mid and jt wash), slewed ~30 ms.
   Not a pan, not Haas/detune. L = mid ± side; side and the room's width tank
   cancel in L+R, so the **mono fold‑down is bit‑identical to the mono render**
-  (`BowStereoTests`). At 0.2 the melody's interaural coherence is ≈ 0.99
+  with chromatic compression and stereo-sensitive FX bypassed (`BowStereoTests`).
+  Armed chromatic compression follows the louder stereo channel, so width can
+  increase its reduction relative to a separate mono render while both stereo
+  channels retain one shared gain. At 0.2 the melody's interaural coherence is ≈ 0.99
   below 1 kHz → ~0.9 at 4–8 kHz, the bare wash ~0.3–0.4; 0.6 is very wide.
   It is the WHOLE stereo law — every source stays centred; the legacy
   per‑source pans are gone.
 - **Master gain** `bow_gain` (1 = bit‑exact) multiplies `bow_live_trim` as the
-  performance volume of the whole radiated instrument. **Limiter**: a
-  linked‑stereo safety limiter (`bow_lim_thresh` 0.8, `bow_lim_rel_ms`) at
-  the very end, bit‑exact below the ceiling. **Bus meter**:
+  performance volume of the whole radiated instrument. Global FX is the
+  final stage; output peaks are neither limited nor clamped. **Bus meter**:
   `BowEngine.setBusMeter` meters the main voice, chromatic taraf and raga
   taraf independently for the iPad toolbar. Bank taps follow shared body/tone
   filtering and balance, before shared taraf FX; shadow telemetry preserves
@@ -1108,8 +1053,7 @@ range keys are bp scalars (`string.<key>`). Path: binding →
   Regeneration is `RagaTuning.buildSpecs`: twelve scale pitches including the
   low Sa/Pa and upper Sa anchors. Surviving chromatic drone/strum mappings remain.
 - **UI:** two tables — "Raga strings (side bridges)" and "Chromatic strings (main bridge)"
-  with the legacy follower above the chromatic rows — each
-  with +, Enable/Disable all, "Reset chromatic set" / "Regenerate from scale".
+  — each with +, Enable/Disable all, "Reset chromatic set" / "Regenerate from scale".
   Rows: Pitch (the scale's own labels — [Scales & Tuning](scales-and-tuning.md)),
   Octave (−2…+2), read‑only Hz, Gain / t60 / On. The Drone buttons section maps
   the buttons to rows on either bridge and holds the drone Voice picker (Tanpura default).
@@ -1123,6 +1067,23 @@ range keys are bp scalars (`string.<key>`). Path: binding →
   pitch layouts remain as saved. Reopening schema 6 preserves edited rows. Stray retired keys
   decode away. Per‑string ratio/Hz inputs and manual
   raga tuning are not present — see `docs/history/`.
+- **Strings presets.** The tab's preset menu saves both banks together: every
+  row's identity, pitch source, degree, octave, gain, t60 and enable flag,
+  all drone and strum mappings, drone voice and drone sequence. **Save As…** creates a named setup; **Save as Default** replaces
+  the default snapshot. **Load** restores a setup onto the current scale
+  and tonic without regenerating its rows, even when degree counts differ.
+  Out-of-range scale degrees clamp at resolution; duplicate pitches fold
+  with mappings following the surviving row. The running drone sequence stops
+  on load. Temporary Tanpura octave shifts remain session state. Older preset
+  files may carry an `adaptation` field; it is ignored and omitted on save.
+  `StringsPresetLibrary` stores version-1 JSON files in
+  `Application Support/Tarabdaar/StringsPresets/`, validates before atomic
+  replacement and always lists **Default**. Without a user `Default.json`,
+  it reads the bundled `DefaultStrings.json`: the captured 12-raga/16-chromatic
+  setup, Tanpura drones and a 1 → 2 → 3 sequence. Fresh installs use this setup;
+  existing working edits still reopen from their autosaves. Removing a row
+  clears its drone and strum references. `StringsPresetTests` pins the document,
+  tuning independence, mapping folds and replacement/default behavior.
 
 ## Modelling research
 
@@ -1135,12 +1096,13 @@ changes to the fitted raga model.
 
 ## Presets and resources
 
-`Presets.state(.sarangiPilu, chromatic:)` generates the one seed document:
+`Presets.state(.sarangiPilu, chromatic:)` generates the DSP seed document:
 raga **Pilu**'s JI ratios as the scale, tonic 328.9 Hz, the generated raga
-layout and the default chromatic set. On launch the Fret Pad scale is pushed
-over it, so what ships is the LAYOUT and the gains/t60s. The timbre lives in
+layout and the generated chromatic set. The Mac's fresh-install bank instead
+comes from the Strings **Default** preset, resolved against the Fret Pad's
+scale and tonic. The timbre lives in
 `bowed_string.json`; the "Default (Sarangi Live)" reset restores the untouched
-artifact, zero overrides and the generated bank. Whole‑rig presets are
+artifact, zero overrides and the default Strings setup. Whole‑rig presets are
 `TarabdaarPreset` documents — [Sound Design](sound-design.md). A fitted
 per‑string table is not present; pitches resolve from the scale or fixed JI
 chromatic grid according to each row's pitch source.
@@ -1161,16 +1123,17 @@ tests; the sound is judged by ear.
 - **Kernel lockstep** (SarangiKit) — `BowedStringEngineTests` (formula body
   against the python reference, plus the shared `stringBP()`/`testTaraf`
   scaffold and a mapper‑driven string that speaks, answers press and
-  releases), `BowPolyTests` (a max‑force chord stays bounded), `BowStereoTests`
-  (fold‑down invariance), `TanpuraEngineTests` (exporter golden),
+  releases), `BowPolyTests` (a max‑force chord settles and releases), `BowStereoTests`
+  (fold‑down invariance and linear output gain above full scale), `TanpuraEngineTests` (exporter golden),
   `TouchMapperTests` (the allocation law on the one note path).
 - **`TarafCoupleTests`** (TarabdaarCore, gated) — two‑way coupling: a
   resting web returns no bridge load, a coupled ring at the top of the range
   goes fully silent with every row asleep, and the heavy chord still decays
   there.
-- **Realtime / rebuild / in‑place** (TarabdaarCore, gated; phase 2 serial in
-  `tools/test-full.sh`) — `RealtimePerformanceTests`, `RebuildCostTests`,
-  `ZipperTests`, `LiveParamPushTests`.
+- **Realtime / rebuild / in‑place** (TarabdaarCore, gated) —
+  `RealtimePerformanceTests` and `RebuildCostTests` run serially in Release in
+  phase 2 of `tools/test-full.sh`, measuring the optimized production host and
+  DSP. `ZipperTests` and `LiveParamPushTests` run in parallel in Debug in phase 1.
 - **Model, wire and control** (fast) — `ParamUnificationTests`,
   `FXRackTests`, `PresetCodingTests`, `TarabRatioTests`, `TarabSetTests`,
   `DroneStringTests`, `ScaleLabelTests`, `ScalePresetTests`,

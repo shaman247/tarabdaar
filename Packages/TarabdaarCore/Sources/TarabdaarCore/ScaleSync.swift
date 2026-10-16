@@ -141,22 +141,29 @@ public enum SyncedScaleStore {
 /// `FRET_ARRANGEMENT` event and is what the iPad's persisted store holds.
 /// Sent only while the Fret Pad is the active layout.
 ///
-/// Blob: `[ghostQuarterOctaves][flags=8][count]`, then
-/// `[degreeIndex][row: 1…5]` per fret and 3 drone ratios.
-/// Flag bit 3 selects five-row pairs. Legacy bit 2 selects three-row pairs.
+/// Blob: `[ghostTwentiethOctaves][flags=80][columnCount]`, then
+/// `[degreeIndex][rowMask u16 LE]` per pitch and 3 drone ratios.
+/// Flag bit 6 selects fifteen-row masks; legacy bits 5/3/2 select nine/five/three-row pairs.
+/// Flag bit 4 selects twentieth-octave extents; cached blobs without it use quarters.
 /// Cached legacy centres and extents migrate to rows. TLP versions the live wire.
 /// The live fret warp travels separately in JOYCON_STATE.
 public enum FretArrangementSysEx {
     /// The raw binary blob — the TLP `FRET_ARRANGEMENT` event payload.
     public static func encodeBlob(_ a: FretArrangement) -> [UInt8] {
         func b7(_ v: Int) -> UInt8 { UInt8(max(0, min(127, v))) }
-        let segments = a.segments.prefix(127)
-        var blob: [UInt8] = [b7(Int((a.ghostExtentOctaves * 4).rounded())),
-                             8,   // five-row pitch/row pairs
-                             UInt8(segments.count)]
-        for s in segments {
-            blob.append(b7(s.degreeIndex))
-            blob.append(UInt8(s.row.rawValue))
+        var degrees: [Int] = []
+        var masks: [Int: UInt16] = [:]
+        for segment in a.segments {
+            let degree = Int(b7(segment.degreeIndex))
+            if masks[degree] == nil { degrees.append(degree) }
+            masks[degree, default: 0] |= UInt16(1) << (segment.row.rawValue - 1)
+        }
+        var blob: [UInt8] = [b7(Int((a.ghostExtentOctaves * 20).rounded())),
+                             80,   // fifteen-row masks, twentieth-octave extent
+                             UInt8(degrees.count)]
+        for degree in degrees {
+            let mask = masks[degree]!
+            blob += [UInt8(degree), UInt8(mask & 0xFF), UInt8(mask >> 8)]
         }
         for i in 0..<FretArrangement.droneCount {
             let r = i < a.droneRatios.count ? a.droneRatios[i]
@@ -172,16 +179,19 @@ public enum FretArrangementSysEx {
     public static func decodeBlob(_ blob: [UInt8]) -> FretArrangement? {
         guard blob.count >= 3 else { return nil }
 
-        let extent = Double(blob[0]) / 4.0
-        guard blob[1] & ~UInt8(15) == 0 else { return nil }
+        guard blob[1] & ~UInt8(127) == 0 else { return nil }
+        let extent = Double(blob[0]) / (blob[1] & 16 != 0 ? 20.0 : 4.0)
         let hasRagaMasks = blob[1] & 1 != 0
+        let fifteenRows = blob[1] & 64 != 0
+        let nineRows = blob[1] & 32 != 0
         let fiveRows = blob[1] & 8 != 0
         let rows = blob[1] & 4 != 0
         let pairs = blob[1] & 2 != 0
-        guard [rows, pairs, fiveRows].filter({ $0 }).count <= 1 else { return nil }
-        let segmentSize = (fiveRows || rows ? 2 : pairs ? 3 : 6) + (hasRagaMasks ? 1 : 0)
+        guard [rows, pairs, fiveRows, nineRows, fifteenRows].filter({ $0 }).count <= 1,
+              !fifteenRows || !hasRagaMasks else { return nil }
+        let segmentSize = (fifteenRows ? 3 : nineRows || fiveRows || rows ? 2 : pairs ? 3 : 6) + (hasRagaMasks ? 1 : 0)
         let count = Int(blob[2])
-        if pairs || rows || fiveRows {
+        if pairs || rows || fiveRows || nineRows || fifteenRows {
             guard blob.count == 3 + count * segmentSize + 2 * FretArrangement.droneCount
             else { return nil }
         }
@@ -189,10 +199,20 @@ public enum FretArrangementSysEx {
         var segments: [FretSegment] = []
         for _ in 0..<count {
             guard i + segmentSize <= blob.count else { return nil }
+            if fifteenRows {
+                let mask = UInt16(blob[i + 1]) | UInt16(blob[i + 2]) << 8
+                guard blob[i] <= 127, mask != 0, mask & 0x8000 == 0 else { return nil }
+                for row in FretRow.allCases where mask & (UInt16(1) << (row.rawValue - 1)) != 0 {
+                    segments.append(FretSegment(degreeIndex: Int(blob[i]), row: row))
+                }
+                i += segmentSize
+                continue
+            }
             let row: FretRow
-            if rows || fiveRows {
-                guard let decoded = fiveRows ? FretRow(rawValue: Int(blob[i + 1]))
-                    : FretRow.legacy(Int(blob[i + 1])) else { return nil }
+            if rows || fiveRows || nineRows {
+                guard !nineRows || (1...9).contains(blob[i + 1]) else { return nil }
+                guard let decoded = nineRows ? FretRow(rawValue: Int(blob[i + 1]))
+                    : FretRow.legacy(Int(blob[i + 1]), count: fiveRows ? 5 : 3) else { return nil }
                 row = decoded
             } else {
                 let y = pairs ? Double(get14(blob, i + 1)) / 16383
@@ -201,7 +221,7 @@ public enum FretArrangementSysEx {
                 row = FretRow.legacy(old)!
             }
             let fret = FretSegment(degreeIndex: Int(blob[i]), row: row)
-            if rows || fiveRows || pairs || blob[i + 5] != 0 { segments.append(fret) }
+            if rows || fiveRows || nineRows || pairs || blob[i + 5] != 0 { segments.append(fret) }
             i += segmentSize
         }
         var drones = FretArrangement.defaultDroneRatios
@@ -212,7 +232,7 @@ public enum FretArrangementSysEx {
                 i += 2
             }
         }
-        return FretArrangement(segments: segments, ghostExtentOctaves: extent,
+        return FretArrangement(segments: nineRows || fifteenRows ? segments : FretArrangement.expandingOverlaps(segments), ghostExtentOctaves: extent,
                                droneRatios: drones)
     }
 }
@@ -378,14 +398,32 @@ public struct JoyConTiltDisplay: Equatable {
 
 // MARK: - iPad SysEx receiver
 
-/// The iPad's CoreMIDI SysEx receiver: reassembles incoming SysEx (split
-/// across packets/callbacks) and routes each complete message — TLP
-/// envelopes to `TarabLink` via `onSysEx`, legacy blobs to the appliers.
-/// Two receive paths feed the same per-source accumulator: an input port
-/// connected to every source (the Mac appears on the iPad as a source) and
-/// a virtual destination ("Tarabdaar Scale"). Connections refresh on every
-/// CoreMIDI setup change. Only SysEx is parsed.
+/// Sync belongs to the current live connection, never to the cached layout.
+public struct PadConnectionState: Equatable {
+    public private(set) var isConnected = false
+    private var receivedScale = false
+    private var receivedArrangement = false
+    public var isSynced: Bool { isConnected && receivedScale && receivedArrangement }
+
+    public init() {}
+
+    public mutating func setConnected(_ connected: Bool) {
+        isConnected = connected
+        if !connected {
+            receivedScale = false
+            receivedArrangement = false
+        }
+    }
+
+    mutating func appliedScale() { if isConnected { receivedScale = true } }
+    mutating func appliedArrangement() { if isConnected { receivedArrangement = true } }
+}
+
+/// The iPad's CoreMIDI SysEx receiver routes complete TLP envelopes to `TarabLink`.
+/// Its input port and virtual destination share per-source reassembly; connections
+/// refresh on every CoreMIDI setup change.
 public final class ScaleSyncReceiver: ObservableObject {
+    @Published public private(set) var connection = PadConnectionState()
     /// Bumped on every applied scale.
     @Published public private(set) var syncCount: Int = 0
     @Published public private(set) var tarafBank = TarafBank.empty
@@ -489,6 +527,7 @@ public final class ScaleSyncReceiver: ObservableObject {
             SyncedScaleStore.save(state)
             self.onState?(state)
             self.syncCount += 1
+            self.connection.appliedScale()
         }
     }
 
@@ -501,6 +540,16 @@ public final class ScaleSyncReceiver: ObservableObject {
             guard let self else { return }
             FretArrangementSyncStore.save(arrangement)
             self.fretArrangement = arrangement
+            self.connection.appliedArrangement()
+        }
+    }
+
+    public func applyLinkStatus(_ status: TarabLink.Status) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let connected = status.isUp && !status.isStale
+            guard self.connection.isConnected != connected else { return }
+            self.connection.setConnected(connected)
         }
     }
 

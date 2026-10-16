@@ -6,7 +6,7 @@ import SarangiKit
 final class RealtimePerformanceTests: XCTestCase {
     override func setUpWithError() throws { try skipUnlessSlowTestsEnabled() }
 
-    /// The twelve-string raga bank meets paced callback and worker deadlines with the chromatic choir.
+    /// Both banks with chromatic compression meet paced callback and worker deadlines.
     func testDualTarafFullBankRealtime() throws {
         try checkFullBank(ragaCount: 12)
     }
@@ -27,6 +27,9 @@ final class RealtimePerformanceTests: XCTestCase {
         let rows = engine.jtDualRows.sorted()
         XCTAssertEqual(rows.count, ragaCount)
         source.setEngine(engine, crossfadeMs: 0)
+        source.setControl("bow_jtc_comp_ratio", 4)
+        source.setControl("bow_jtc_comp_voice", 0.5)
+        source.setControl("bow_jtc_comp_floor_db", -40)
         if fitted {
             for key in ["bow_fit_timbre", "bow_fit_response", "bow_fit_ring", "bow_fit_room"] {
                 source.setControl(key, 1)

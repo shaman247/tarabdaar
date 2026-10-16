@@ -76,16 +76,17 @@ public struct ChordBarVisual: View {
 
 // MARK: - Band background and pitch grid
 
-private let fretRowShade = 0.035
-
 public extension GraphicsContext {
-    /// Row backgrounds, with brighter overlaps and no enclosing border.
+    /// Black rows separated by horizontal gridlines, with no enclosing border.
     func fillFretBand(_ band: CGRect) {
-        for row in FretRow.allCases {
-            let rect = CGRect(x: band.minX, y: band.minY + (row.y - FretSegment.height / 2) * band.height,
-                              width: band.width, height: FretSegment.height * band.height)
-            fill(Path(rect), with: .color(.white.opacity(fretRowShade)))
+        fill(Path(band), with: .color(.black))
+        var separators = Path()
+        for row in FretRow.allCases.dropLast() {
+            let y = band.minY + row.topY * band.height
+            separators.move(to: CGPoint(x: band.minX, y: y))
+            separators.addLine(to: CGPoint(x: band.maxX, y: y))
         }
+        stroke(separators, with: .color(Color(.sRGB, white: 0.10, opacity: 1)), lineWidth: 1)
     }
 
     /// Scale-pitch guides span the band, including unassigned pitches and octave copies.
@@ -105,7 +106,6 @@ public extension GraphicsContext {
                 var line = Path()
                 line.move(to: CGPoint(x: x, y: 0))
                 line.addLine(to: CGPoint(x: x, y: size.height))
-                // Opaque gray keeps the guide's shade constant across both backgrounds.
                 stroke(line, with: .color(Color(.sRGB, white: shade, opacity: 1)), lineWidth: 1)
             }
         }
@@ -184,15 +184,15 @@ public struct SoundingReadout: View {
 
 // MARK: - Recorded stroke context
 
-public extension FretGestureRecorder.Context {
+public extension FretGestureCapture.Context {
     /// Snapshot the geometry + live assist settings for a recorded stroke
     /// (both surfaces record into the same offline-fitting format).
     static func snapshot(placements: [FretPlacement], size: CGSize,
                          snapDistance: CGFloat,
                          ghostExtentOctaves: Double,
                          fieldWarp: Double,
-                         assist: FretDragAssist) -> FretGestureRecorder.Context {
-        FretGestureRecorder.Context(
+                         assist: FretDragAssist) -> FretGestureCapture.Context {
+        FretGestureCapture.Context(
             frets: placements.map {
                 .init(id: $0.id, log2Ratio: log2($0.ratio), x: Double($0.x),
                       topY: Double($0.topY), bottomY: Double($0.bottomY),

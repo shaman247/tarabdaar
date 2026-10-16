@@ -22,7 +22,6 @@ struct ContentView: View {
     /// they publish reaches SwiftUI through `scaleSync`.
     private let link: TarabLink
     private let playState: OutboundPlayState
-    private let fingerAccel: FingerAccelSampler
 
     /// Holds the destination-count subscription OUTSIDE the view tree.
     /// A `.onReceive(midi.$destinationCount…)` modifier re-subscribes on
@@ -33,6 +32,7 @@ struct ContentView: View {
     /// with `dropFirst()` (skip the subscription replay) instead.
     private final class SubscriptionBox { var c: AnyCancellable? }
     @State private var subscriptions = SubscriptionBox()
+    @State private var recording = FretRecordingPad()
 
     init() {
         // The MIDIEngine is the TLP tunnel's byte pump (SysEx out).
@@ -42,10 +42,6 @@ struct ContentView: View {
         _midi = StateObject(wrappedValue: sharedMidi)
         _pad = StateObject(wrappedValue: PitchPadEngine(state: state))
         self.playState = state
-        // Display-only finger-accel feed for the toolbar scope (the
-        // shared `FingerAccelTracker` law; the Mac evaluates its own
-        // instance for the `.fingerAccel` bindings).
-        self.fingerAccel = FingerAccelSampler(state: state)
         let link = TarabLink(role: .pad)
         link.attach(playState: state)
         self.link = link
@@ -88,8 +84,20 @@ struct ContentView: View {
             scaleSync.onSysEx = { [weak link] bytes in
                 link?.receivedSysEx(bytes)
             }
-            link.onEvent = { [weak scaleSync] event in
+            recording.onStroke = { [weak link] session, data in
+                link?.sendRecording(session: session, data: data)
+            }
+            recording.onSessionChange = { [weak link] previous, current in
+                if current == 0 { link?.finishRecordings(session: previous) }
+                else { link?.cancelRecordings() }
+            }
+            link.onEvent = { [weak scaleSync, recording] event in
                 switch event {
+                case .fretRecording(let session, let active):
+                    DispatchQueue.main.async {
+                        if active { recording.setSession(session) }
+                        else { recording.stopSession(session) }
+                    }
                 case .tarafBank(let bank):
                     scaleSync?.applyTarafBank(bank)
                 case .scaleState(let blob):
@@ -105,14 +113,6 @@ struct ContentView: View {
                 }
             }
             link.onJoyConState = { [weak scaleSync, weak pad] s in
-                scaleSync?.noteControls.update(s.noteControls)
-                // Volume readout: into the polled history, NOT the
-                // published display — level motion must not re-render
-                // the toolbar (the scope polls at UI rate).
-                scaleSync?.volumeHistory.record(
-                    voice: TLPVolume.value01(s.volVoice),
-                    chromatic: TLPVolume.value01(s.volChromatic),
-                    raga: TLPVolume.value01(s.volRaga))
                 let display = JoyConTiltDisplay(frame: s)
                 scaleSync?.applyJoyCon(display)
                 // The shift acts at the engine's outbound-pitch point
@@ -124,21 +124,15 @@ struct ContentView: View {
                     if pad.octaveShift != oct { pad.octaveShift = oct }
                 }
             }
-            // Link gone (down or stale) → the Mac's display axes are
-            // history: dim every square (the arm pane falls back to the
-            // iPad's own raw attitude).
-            link.onStatus = { [weak scaleSync, weak pad] status in
+            // Link gone: clear the remote bank and restore pad-control fallbacks.
+            link.onStatus = { [weak scaleSync, weak pad, weak link, recording] status in
+                scaleSync?.applyLinkStatus(status)
                 if !status.isUp || status.isStale {
                     scaleSync?.applyJoyCon(.idle)
                     scaleSync?.applyTarafBank(.empty)
-                    scaleSync?.noteControls.update(.idle)
-                    // The Mac's levels are history too — drop the scope
-                    // to silence instead of freezing at the last value.
-                    scaleSync?.volumeHistory.record(voice: 0, chromatic: 0, raga: 0)
-                    // And the octave shift with them — .idle shows 0, so
-                    // the engine must agree (a re-link resends the truth
-                    // via the forced state push).
                     DispatchQueue.main.async {
+                        recording.linkDropped()
+                        link?.cancelRecordings()
                         guard let pad else { return }
                         pad.fretAssistSettings = FretAssistSettings()
                         if pad.octaveShift != 0 { pad.octaveShift = 0 }
@@ -164,16 +158,12 @@ struct ContentView: View {
     /// fret layout built from the synced scale so the surface is playable.
     @ViewBuilder
     private var playingSurface: some View {
-        FretPadViewIOS(engine: pad, noteManager: noteManager, scaleSync: scaleSync,
-                       midi: midi,
+        FretPadViewIOS(engine: pad, scaleSync: scaleSync,
+                       midi: midi, recorder: recording.capture,
                        arrangement: scaleSync.fretArrangement
                            ?? FretArrangement.defaultArrangement(
                                degrees: scaleDegrees(from: pad.scale)),
-                       pluckTaraf: { revision, row in
-                           link.send(event: .tarafPluck(revision: revision, row: row))
-                       },
-                       motion: motion,
-                       fingerAccel: fingerAccel)
+                       motion: motion)
     }
 }
 

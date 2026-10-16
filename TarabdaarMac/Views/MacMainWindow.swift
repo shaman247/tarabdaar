@@ -46,6 +46,11 @@ struct MacMainWindow: View {
             Divider()
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Divider()
+            FinalOutputStrip(controller: controller)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color(white: 0.08))
         }
         .background(
             // Hidden buttons for keyboard shortcuts: ⌘1..⌘9 jump to each tab
@@ -110,6 +115,181 @@ struct MacMainWindow: View {
         case .body:       BodyView(controller: controller)
         case .transforms: BowTransformsView(controller: controller)
         }
+    }
+}
+
+// MARK: - Final output
+
+private struct FinalOutputStrip: View {
+    @ObservedObject var controller: AppController
+    @State private var editingGain = false
+    @FocusState private var gainFocused: Bool
+    private let spec = ParamRegistry.spec("output_gain_db")!
+
+    private var gain: Binding<Double> {
+        Binding(get: { controller.paramValue(spec.key) }, set: { value in
+            guard value.isFinite else { return }
+            controller.setParamValue(spec.key, spec.clamp(value))
+        })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            outputControls
+            Divider()
+            VStack(alignment: .leading, spacing: 5) {
+                Text("BUS RMS · dBFS · PRE-OUTPUT GAIN")
+                    .font(.padCaption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                TimelineView(.periodic(from: .now, by: 1.0 / 30)) { _ in
+                    let buses = controller.audio.performanceReadout()
+                    HStack(spacing: 24) {
+                        busMeter("Main", level: buses.voiceRMS,
+                                 maximum: buses.maximumVoiceRMS, color: .orange)
+                        busMeter("Chromatic taraf", level: buses.chromaticRMS,
+                                 maximum: buses.maximumChromaticRMS, color: .cyan)
+                        busMeter("Raga taraf", level: buses.ragaRMS,
+                                 maximum: buses.maximumRagaRMS, color: .purple)
+                    }
+                }
+            }
+        }
+        .font(.padCaption)
+        .onChange(of: gainFocused) { focused in
+            if !focused { editingGain = false }
+        }
+    }
+
+    private var outputControls: some View {
+        HStack(spacing: 24) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("OUTPUT GAIN")
+                    .font(.padCaption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .onTapGesture(count: 2) { controller.setParamValue(spec.key, spec.def) }
+                HStack(spacing: 8) {
+                    Slider(value: gain, in: spec.lo...spec.hi, step: 0.5)
+                        .accessibilityLabel("Final output gain")
+                    gainEntry
+                    Text("dB").foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 280)
+
+            TimelineView(.periodic(from: .now, by: 1.0 / 30)) { _ in
+                let peaks = controller.audio.outputPeaks()
+                HStack(spacing: 18) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("OUTPUT PEAK · dBFS")
+                            .font(.padCaption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        peakRow("L", level: peaks.left, maximum: peaks.maximumLeft)
+                        peakRow("R", level: peaks.right, maximum: peaks.maximumRight)
+                    }
+                    VStack(spacing: 4) {
+                        Text("LIMIT").font(.padCaption.weight(.semibold))
+                        Text(peaks.gainReductionDB >= 0.05
+                             ? String(format: "−%.1f dB", peaks.gainReductionDB) : "0.0 dB")
+                            .monospacedDigit()
+                    }
+                    .foregroundStyle(peaks.gainReductionDB >= 0.05 ? Color.orange : Color.secondary)
+                    .frame(width: Typography.scaledWidth(68))
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Output gain reduction")
+                    .accessibilityValue(String(format: "%.1f decibels", peaks.gainReductionDB))
+                    VStack(spacing: 6) {
+                        Label("CLIP", systemImage: "circle.fill")
+                            .font(.padCaption.weight(.bold))
+                            .foregroundStyle(peaks.clipped ? Color.red : Color.secondary)
+                            .accessibilityLabel(peaks.clipped ? "Output clipped" : "Output not clipped")
+                        Button("Reset meters") { controller.audio.resetOutputPeaks() }
+                            .controlSize(.small)
+                    }
+                }
+            }
+        }
+    }
+
+    private var gainEntry: some View {
+        Group {
+            if editingGain {
+                TextField("Gain", value: gain, format: .number.precision(.fractionLength(1)))
+                    .focused($gainFocused)
+                    .onAppear { DispatchQueue.main.async { gainFocused = true } }
+                    .onSubmit { editingGain = false; gainFocused = false }
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+            } else {
+                Button { editingGain = true } label: {
+                    Text(gain.wrappedValue, format: .number.precision(.fractionLength(1)))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .monospacedDigit()
+        .frame(width: Typography.scaledWidth(50))
+        .accessibilityLabel("Final output gain in decibels")
+    }
+
+    private func peakRow(_ channel: String, level: Double, maximum: Double) -> some View {
+        let db = level > 0 ? 20 * log10(level) : -.infinity
+        let color: Color = db >= 0 ? .red : db >= -6 ? .yellow : .green
+        return HStack(spacing: 8) {
+            Text(channel).frame(width: Typography.scaledWidth(10))
+            levelBar(level, color: color)
+            Text(dbText(level)).monospacedDigit().frame(width: Typography.scaledWidth(40), alignment: .trailing)
+            Text("max \(dbText(maximum))")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: Typography.scaledWidth(72), alignment: .trailing)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(channel == "L" ? "Left" : "Right") output peak")
+        .accessibilityValue("\(dbText(level)) dBFS, maximum \(dbText(maximum)) dBFS")
+    }
+
+    private func busMeter(_ name: String, level: Double, maximum: Double, color: Color) -> some View {
+        VStack(spacing: 5) {
+            HStack(spacing: 8) {
+                Text(name).foregroundStyle(color)
+                Spacer(minLength: 4)
+                Text(dbText(level)).monospacedDigit()
+                    .frame(width: Typography.scaledWidth(40), alignment: .trailing)
+                Text("max \(dbText(maximum))").monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: Typography.scaledWidth(72), alignment: .trailing)
+            }
+            levelBar(level, color: color)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(name) bus RMS before final output gain")
+        .accessibilityValue("\(dbText(level)) dBFS, maximum \(dbText(maximum)) dBFS")
+    }
+
+    private func levelBar(_ amplitude: Double, color: Color) -> some View {
+        let db = amplitude > 0 ? 20 * log10(amplitude) : -.infinity
+        let fraction = max(0, min(1, (db + 60) / 60))
+        return GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.secondary.opacity(0.18))
+                Capsule().fill(color).frame(width: geometry.size.width * fraction)
+                ForEach([-24.0, -12, -6, 0], id: \.self) { tick in
+                    Rectangle().fill(Color.primary.opacity(0.35))
+                        .frame(width: 1)
+                        .offset(x: (geometry.size.width - 1) * (tick + 60) / 60)
+                }
+            }
+        }
+        .frame(height: 8)
+    }
+
+    private func dbText(_ amplitude: Double) -> String {
+        guard amplitude.isFinite else { return "+∞" }
+        guard amplitude > 0 else { return "−∞" }
+        let db = 20 * log10(amplitude)
+        return db < -60 ? "≤−60" : String(format: "%.1f", db)
     }
 }
 

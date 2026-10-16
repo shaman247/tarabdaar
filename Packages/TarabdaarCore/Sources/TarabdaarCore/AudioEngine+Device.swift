@@ -11,36 +11,17 @@ extension AudioEngine {
     }
 
     #if os(macOS)
-    /// Route AVAudioEngine output to a specific CoreAudio device.
-    public func setOutputDevice(_ deviceID: AudioDeviceID) {
-        let wasRunning = isRunning
-        if wasRunning {
-            engine.pause()
+    /// Select a device, or zero to follow the system default. A rejected switch restores the prior route.
+    @discardableResult
+    public func setOutputDevice(_ deviceID: AudioDeviceID) -> Bool {
+        guard Thread.isMainThread else {
+            return DispatchQueue.main.sync { self.setOutputDevice(deviceID) }
         }
-        if let au = engine.outputNode.audioUnit {
-            var dev = deviceID
-            AudioUnitSetProperty(
-                au,
-                kAudioOutputUnitProperty_CurrentDevice,
-                kAudioUnitScope_Global,
-                0,
-                &dev,
-                UInt32(MemoryLayout<AudioDeviceID>.size)
-            )
+        guard let outputRecovery else {
+            outputDeviceError = "Audio output is not initialized"
+            return false
         }
-        // Match the NEW device to the engine rate (restoring the old one).
-        matchOutputDeviceToEngineRate(deviceID)
-        if wasRunning {
-            do {
-                try engine.start()
-                isRunning = true
-            } catch {
-                print("AudioEngine restart after device change failed: \(error)")
-                isRunning = false
-            }
-        }
-        // The IO buffer is per-device — re-apply to the new device.
-        setOutputBufferFrames(preferredBufferFrames(for: deviceID))
+        return outputRecovery.select(deviceID)
     }
 
     /// Current output device ID (or 0 if querying failed).
@@ -105,7 +86,7 @@ extension AudioEngine {
         return Config.jitterProneOutputBufferFrames
     }
 
-    private func deviceNominalSampleRate(_ dev: AudioDeviceID) -> Double {
+    func deviceNominalSampleRate(_ dev: AudioDeviceID) -> Double {
         var v: Double = 0
         var sz = UInt32(MemoryLayout<Double>.size)
         var a = AudioObjectPropertyAddress(
@@ -153,28 +134,41 @@ extension AudioEngine {
     func matchOutputDeviceToEngineRate(_ dev: AudioDeviceID) {
         guard dev != 0 else { return }
         let target = Config.sampleRate
-        // If we previously changed a DIFFERENT device, restore it first.
-        if let prev = changedDeviceRate, prev.device != dev {
-            setDeviceNominalSampleRate(prev.device, prev.originalRate)
-            changedDeviceRate = nil
-        }
+        guard let route = availableOutputRoutes.first(where: { $0.id == dev }) else { return }
+        restoreDeviceRates(except: route.uid)
         let current = deviceNominalSampleRate(dev)
+        guard current.isFinite, current > 0 else { return }
         guard abs(current - target) >= 1 else { return }   // already at target
         guard deviceSupportsSampleRate(dev, target) else {
             NSLog("Tarabdaar: output device lacks \(Int(target)) Hz — leaving at \(Int(current)) Hz (resampler stays)")
             return
         }
-        if changedDeviceRate == nil { changedDeviceRate = (dev, current) }
+        if changedDeviceRates[route.uid] == nil { changedDeviceRates[route.uid] = current }
         let ok = setDeviceNominalSampleRate(dev, target)
         NSLog("Tarabdaar: output device rate \(Int(current)) → \(Int(target)) Hz: \(ok ? "OK (no resampler)" : "FAILED")")
     }
 
     /// Restore any output device whose rate we changed (wired to the clean-quit hook).
     public func restoreOutputDeviceRate() {
-        guard let prev = changedDeviceRate else { return }
-        setDeviceNominalSampleRate(prev.device, prev.originalRate)
-        NSLog("Tarabdaar: restored output device rate → \(Int(prev.originalRate)) Hz")
-        changedDeviceRate = nil
+        restoreDeviceRates(except: nil)
+    }
+
+    private func restoreDeviceRates(except retainedUID: String?) {
+        let routes = availableOutputRoutes
+        for (uid, rate) in changedDeviceRates where uid != retainedUID {
+            guard let route = routes.first(where: { $0.uid == uid }) else { continue }
+            // A later external rate change supersedes our temporary 48 kHz request.
+            if abs(deviceNominalSampleRate(route.id) - Config.sampleRate) >= 1 {
+                changedDeviceRates.removeValue(forKey: uid)
+                continue
+            }
+            if setDeviceNominalSampleRate(route.id, rate) {
+                changedDeviceRates.removeValue(forKey: uid)
+                NSLog("Tarabdaar: restored output device rate → \(Int(rate)) Hz")
+            } else {
+                NSLog("Tarabdaar: output rate restoration failed for device \(route.id)")
+            }
+        }
     }
 
     /// The output device's IO buffer in frames (0 if unknown) — the HAL buffer.
@@ -193,22 +187,25 @@ extension AudioEngine {
     public func setOutputBufferFrames(_ frames: UInt32) -> UInt32 {
         guard let au = engine.outputNode.audioUnit else { return 0 }
         var n = frames
-        AudioUnitSetProperty(au, kAudioDevicePropertyBufferFrameSize,
+        let status = AudioUnitSetProperty(au, kAudioDevicePropertyBufferFrameSize,
                              kAudioUnitScope_Global, 0, &n,
                              UInt32(MemoryLayout<UInt32>.size))
+        if status != noErr { NSLog("Tarabdaar: IO buffer request failed (CoreAudio \(status))") }
         return outputBufferFrames
     }
 
     /// Log the latency budget: engine vs device rate, IO buffer, presentation latency.
     public func logAudioLatencyReport(_ context: String) {
         let engineSR = Config.sampleRate
+        let mixerSR = engine.mainMixerNode.outputFormat(forBus: 0).sampleRate
+        let outputInputSR = engine.outputNode.inputFormat(forBus: 0).sampleRate
         let deviceSR = engine.outputNode.outputFormat(forBus: 0).sampleRate
         let buf = outputBufferFrames
         let bufMs = deviceSR > 0 ? Double(buf) / deviceSR * 1000 : 0
         let outLatMs = engine.outputNode.presentationLatency * 1000
         let outSrcNote = (deviceSR != engineSR) ? " [output RESAMPLE]" : ""
         let msg = """
-        AUDIO LATENCY [\(context)]: engineSR=\(engineSR) deviceSR=\(deviceSR)\(outSrcNote) \
+        AUDIO LATENCY [\(context)]: engineSR=\(engineSR) mixerSR=\(mixerSR) outputInputSR=\(outputInputSR) deviceSR=\(deviceSR)\(outSrcNote) \
         ioBuffer=\(buf)f (\(String(format: "%.1f", bufMs))ms) \
         outputPresentationLatency=\(String(format: "%.1f", outLatMs))ms
         """

@@ -6,7 +6,7 @@ import SarangiKit
 /// The playable TANPURA: an `AVAudioSourceNode` over a `TanpuraEngine` that
 /// mounts one settled slot per pitch of the scale's JI grid (×0.25 … ×4 around
 /// the tonic), so drone buttons and frets pluck exact scale pitches. Second
-/// source on the graph (`node → symGain → mainMixerNode`, 48 kHz). Tonic/scale
+/// source on the graph (`node → symGain → final gain + limiter → mainMixerNode`, 48 kHz). Tonic/scale
 /// changes build a fresh engine OFF the render thread (`buildEngine`) and
 /// publish it via `setEngine` with an equal-power crossfade.
 public final class TanpuraVoiceSource {

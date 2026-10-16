@@ -36,6 +36,8 @@ px** (radiusScale × Snap, distance to the fret line's x), not log-pitch, and
 each recorded ctx fret carries its pixel `x` (record v2). v1 recordings (made
 on the pitch-mapped ribbon) still load — the fret x is derived from the old
 x↔pitch mapping — but the live surface has changed; prefer fresh recordings.
+Record v7 stores fifteen independent equal-height rows with boundary blends;
+v6 retains its nine-row geometry.
 Record v5 includes each fret's five-row identity and nine uncorrected region
 pitches per event. Each overlap corrects against its adjacent rows' union;
 corrections blend across region boundaries. Replay retains v4's hard boundaries
@@ -133,9 +135,11 @@ def load_strokes(paths, snap_px=None):
                 rows={row: [(fret_x(f), f["log2Ratio"], f["topY"], f["bottomY"])
                             for f in ctx["frets"] if f.get("row") == row]
                       for row in (1, 2, 3) if any(f.get("row") == row for f in ctx["frets"])},
-                regions=overlap_regions(ctx["frets"], fret_x) if s.get("v", 1) >= 4 else {},
+                regions=overlap_regions(ctx["frets"], fret_x, independent=s.get("v", 1) >= 6,
+                                        row_count=15 if s.get("v", 1) >= 7 else 9) if s.get("v", 1) >= 4 else {},
+                independent_rows=s.get("v", 1) >= 6,
                 blend_regions=s.get("v", 1) >= 5,
-                row_overlap=recorded_overlap(ctx["frets"], ctx["height"]) if s.get("v", 1) >= 4 else .2,
+                row_overlap=recorded_overlap(ctx["frets"], ctx["height"]) if 4 <= s.get("v", 1) < 6 else .2,
                 height=float(ctx["height"]),
                 radius=radius, params=ctx.get("assistParams", {}) or {},
             ))
@@ -160,9 +164,11 @@ def candidate(frets, radius, x, y):
     return best, bd, bx
 
 
-def overlap_regions(frets, fret_x):
+def overlap_regions(frets, fret_x, independent=False, row_count=9):
     rows = {row: [(fret_x(f), f["log2Ratio"], f["topY"], f["bottomY"])
-                  for f in frets if f.get("row") == row] for row in range(1, 6)}
+                  for f in frets if f.get("row") == row] for row in range(1, row_count + 1 if independent else 6)}
+    if independent:
+        return rows
     return {region: rows[(region + 1) // 2] if region % 2
             else rows[region // 2] + rows[region // 2 + 1] for region in range(1, 10)}
 
@@ -196,6 +202,17 @@ def overlap_weights(y, height, overlap=.2):
             blend = smoothstep((boundary + half_width - v) / (2 * half_width))
             return {lower: 1 - blend, lower + 1: blend}
     return {overlap_region(y, height, overlap): 1.0}
+
+
+def independent_row_weights(y, height, row_count=9):
+    v, half_width = y / height, .075 / row_count
+    for lower in range(1, row_count):
+        boundary = (row_count - lower) / row_count
+        if abs(v - boundary) < half_width:
+            blend = smoothstep((boundary + half_width - v) / (2 * half_width))
+            return {lower: 1 - blend, lower + 1: blend}
+    row = min(range(1, row_count + 1), key=lambda row: abs((row_count - row + .5) / row_count - v))
+    return {row: 1.0}
 
 
 def row_weights(rows, y):
@@ -237,7 +254,7 @@ def replay(stroke, params):
     overlap = stroke.get("row_overlap", .2)
     rows = regions or stroke.get("rows", {})
     corrections = {row: 0.0 for row in rows} if rows else {0: 0.0}
-    row_logs = moves[0, 6:15 if regions else 9] if rows else None
+    row_logs = moves[0, 6:6 + len(regions) if regions else 9] if rows else None
     impulse = 0.0
     dx_sign = 0
     last_x, last_y, last_u = moves[0, 1], moves[0, 2], moves[0, 3]
@@ -265,7 +282,7 @@ def replay(stroke, params):
                 dx_sign = s
             last_x, last_y, last_u = x, moves[idx, 2], moves[idx, 3]
             if rows:
-                row_logs = moves[idx, 6:15 if regions else 9]
+                row_logs = moves[idx, 6:6 + len(regions) if regions else 9]
             last_move = t
         last_update = t
         # Stopped-detector gate (mirrors FretDragAssist, 2026-08-17): the
@@ -307,7 +324,8 @@ def replay(stroke, params):
                 cap = slew_cap * dt
                 corr += min(cap, max(-cap, step))
             corrections[row] = corr
-        weights = (overlap_weights(last_y, stroke["height"], overlap) if stroke.get("blend_regions")
+        weights = (independent_row_weights(last_y, stroke["height"], len(regions)) if stroke.get("independent_rows")
+                   else overlap_weights(last_y, stroke["height"], overlap) if stroke.get("blend_regions")
                    else {overlap_region(last_y, stroke["height"], overlap): 1.0} if regions
                    else row_weights(rows, last_y) if rows else {0: 1.0})
         corr = sum(corrections[row] * weights.get(row, 0) for row in corrections)
@@ -722,6 +740,26 @@ def cmd_selftest():
         events[:, 3] = (.08 + .6) / 2
         boundary_stroke = dict(union_stroke, events=events, moves=events, blend_regions=True)
         assert abs(replay(boundary_stroke, params)[2][-1] - .5) < 1e-10
+    # Independent rows keep a former union as explicit assignments and blend at equal-height boundaries.
+    import tempfile
+    for version, count in [(6, 9), (7, 15)]:
+        for base in [0, count - 3]:
+            recorded = [dict(row=row+base, x=x, log2Ratio=log,
+                             topY=(count-row-base)*100, bottomY=(count+1-row-base)*100)
+                        for row, x, log in [(1, 0, 0), (2, 0, 0), (2, 100, 1), (3, 100, 1)]]
+            logs = [0.0] * count
+            logs[base:base+3] = [.08, .6, .95]
+            for depth, raw, expected in [(.5, .08, 0), (1.5, .6, 1), (1, .34, .5)]:
+                y = (count - base - depth) * 100
+                events = [[t, 70, y, raw, expected, 0] + logs for t in np.arange(0, 1, 1 / 60)]
+                ctx = dict(frets=recorded, width=1000, height=count*100,
+                           ghostExtentOctaves=0, snapDistance=100, assistParams=params)
+                with tempfile.NamedTemporaryFile(mode="w+", suffix=".jsonl") as fixture:
+                    fixture.write(json.dumps(dict(v=version, ctx=ctx, events=events, endT=1)))
+                    fixture.flush()
+                    stroke = load_strokes([fixture.name])[0]
+                assert len(stroke["regions"]) == count
+                assert abs(replay(stroke, params)[2][-1] - expected) < 1e-10
     rng = np.random.default_rng(7)
     width, height = 1400.0, 900.0
     frets = [dict(id=f"f{i}", log2Ratio=-0.5 + i / 12.0,

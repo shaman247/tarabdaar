@@ -3,62 +3,45 @@ import Foundation
 
 // MARK: - Fret Pad geometry
 //
-// Fixed-height frets store a scale-degree pitch reference and one of five rows.
+// Fixed-height frets store a scale-degree pitch reference and one of fifteen rows.
 // Horizontal positions follow log2(ratio); octave copies tile the band.
-// Each row and adjacent overlap resolves its own onset snap and drag field. See `docs/fret-pad.md`.
+// Each row resolves its own onset snap and drag field. See `docs/fret-pad.md`.
 
 // MARK: - Model
 
 /// Rows count upward from the bottom of the playable band.
 public enum FretRow: Int, CaseIterable, Codable, Sendable {
-    case bottom = 1, lower = 2, middle = 3, upper = 4, top = 5
+    case row1 = 1, row2, row3, row4, row5, row6, row7, row8, row9, row10, row11, row12, row13, row14, row15
 
-    public static let overlap = 0.3
-    public static let height = 1.0 / (5 - 4 * overlap)
-    public var y: Double { 1 - Self.height / 2 - Double(rawValue - 1) * Self.height * (1 - Self.overlap) }
-    public var topY: Double { y - Self.height / 2 }
-    public var bottomY: Double { y + Self.height / 2 }
+    public static let count = allCases.count
+    public static let height = 1.0 / Double(count)
+    public var y: Double { (Double(Self.count - rawValue) + 0.5) * Self.height }
+    public var topY: Double { Double(Self.count - rawValue) * Self.height }
+    public var bottomY: Double { Double(Self.count + 1 - rawValue) * Self.height }
     public static func nearest(toY y: Double) -> Self {
-        allCases.min { abs($0.y - y) < abs($1.y - y) } ?? .middle
+        allCases.min { abs($0.y - y) < abs($1.y - y) } ?? .row5
     }
-    static func legacy(_ row: Int) -> Self? {
-        guard (1...3).contains(row) else { return nil }
-        return Self(rawValue: row * 2 - 1)
+    static func legacy(_ row: Int, count: Int = 3) -> Self? {
+        guard (1...count).contains(row), [3, 5].contains(count) else { return nil }
+        return Self(rawValue: (row - 1) * (count == 3 ? 4 : 2) + 1)
     }
 }
 
-/// Five exclusive row interiors and four overlaps, ordered bottom to top.
-/// An overlap has the union of its two rows' assigned pitches.
+/// One independent pitch field per row, ordered bottom to top.
 public enum FretRegion: Int, CaseIterable, Sendable {
-    case bottom = 1, bottomLower, lower, lowerMiddle, middle, middleUpper, upper, upperTop, top
+    case row1 = 1, row2, row3, row4, row5, row6, row7, row8, row9, row10, row11, row12, row13, row14, row15
 
-    /// Boundary blends leave the central half of each overlap entirely union-owned.
-    public static let transitionHalfWidth = FretRow.overlap * FretRow.height / 4
+    /// Smooth pitch transitions occupy 15% of a row's height across each boundary.
+    public static let transitionHalfWidth = 0.075 * FretRow.height
 
-    public var rows: [FretRow] {
-        let lower = (rawValue + 1) / 2
-        return rawValue % 2 == 1 ? [FretRow(rawValue: lower)!]
-            : [FretRow(rawValue: lower)!, FretRow(rawValue: lower + 1)!]
-    }
-    public var topY: Double {
-        let row = rows[0]
-        return rows.count == 2 ? row.topY
-            : row.topY + (row == .top ? 0 : FretRow.overlap * FretRow.height)
-    }
-    public var bottomY: Double {
-        let row = rows[0]
-        return rows.count == 2 ? rows[1].bottomY
-            : row.bottomY - (row == .bottom ? 0 : FretRow.overlap * FretRow.height)
-    }
+    public var row: FretRow { FretRow(rawValue: rawValue)! }
+    public var topY: Double { row.topY }
+    public var bottomY: Double { row.bottomY }
     public static func at(y: Double) -> Self {
-        // Geometric membership; sounding pitch blends across this edge.
-        if let overlap = allCases.first(where: {
-            $0.rows.count == 2 && y >= $0.topY - 1e-12 && y <= $0.bottomY + 1e-12
-        }) { return overlap }
-        return Self(rawValue: FretRow.nearest(toY: y).rawValue * 2 - 1)!
+        Self(rawValue: FretRow.nearest(toY: y).rawValue)!
     }
     public func frets(in placements: [FretPlacement]) -> [FretPlacement] {
-        placements.filter { $0.isEnabled && rows.contains($0.row) }
+        placements.filter { $0.isEnabled && $0.row == row }
     }
 
     public static func weights(atY y: Double) -> [Self: Double] {
@@ -108,8 +91,8 @@ public struct FretArrangement: Equatable {
 
     public static let defaultDroneRatios = [0.5, 3.0 / 4.0, 1.0]
 
-    /// A 2.5-octave surface, including the one-octave base band.
-    public static let defaultGhostExtentOctaves = 0.75
+    /// A 2.8-octave surface, including the one-octave base band.
+    public static let defaultGhostExtentOctaves = 0.9
 
     public init(segments: [FretSegment],
                 ghostExtentOctaves: Double = FretArrangement.defaultGhostExtentOctaves,
@@ -129,30 +112,51 @@ public struct FretArrangement: Equatable {
         } else { segments.append(FretSegment(degreeIndex: degreeIndex, row: row)) }
     }
 
-    /// Pilu: naturals below, S/g/P/n in the middle, r/M/d above.
+    /// The saved playing layout in rows 1–9; rows 10–15 start unassigned.
     public static func defaultArrangement(
+        degrees: [(ratio: Double, label: String)]) -> FretArrangement {
+        let rows: [[FretRow]] = [
+            [.row3, .row4, .row5, .row6],
+            [.row6, .row7, .row8],
+            [.row2, .row3, .row4],
+            [.row5, .row6, .row7],
+            [.row1, .row2],
+            [.row1, .row2, .row3, .row4],
+            [.row8, .row9],
+            [.row3, .row4, .row5, .row6],
+            [.row6, .row7, .row8, .row9],
+            [.row1, .row2],
+            [.row4, .row5, .row6, .row7, .row8, .row9],
+            [.row1, .row2],
+        ]
+        return arrangement(degrees: degrees, expandOverlaps: false) { rows[$0] }
+    }
+
+    /// Pilu retains naturals in row 1, S/g/P/n in row 5, and r/M/d in row 9.
+    public static func piluArrangement(
         degrees: [(ratio: Double, label: String)]) -> FretArrangement {
         arrangement(degrees: degrees) { pc in
             switch pc {
-            case 0, 7: return [.bottom, .middle]
-            case 2, 4, 5, 9, 11: return [.bottom]
-            case 3, 10: return [.middle]
-            default: return [.top]
+            case 0, 7: return [.row1, .row5]
+            case 2, 4, 5, 9, 11: return [.row1]
+            case 3, 10: return [.row5]
+            default: return [.row9]
             }
         }
     }
 
-    /// Legacy factory alternatives use the outer two rows.
+    /// Legacy factory alternatives retain rows 1 and 9.
     public static func keyboardArrangement(
         degrees: [(ratio: Double, label: String)], invertedRows: Bool = false) -> FretArrangement {
         arrangement(degrees: degrees) { pc in
-            let rows: [FretRow] = [0, 7].contains(pc) ? [.bottom, .top]
-                : ([2, 4, 5, 9, 11].contains(pc) ? [.bottom] : [.top])
-            return invertedRows ? rows.map { $0 == .bottom ? .top : .bottom } : rows
+            let rows: [FretRow] = [0, 7].contains(pc) ? [.row1, .row9]
+                : ([2, 4, 5, 9, 11].contains(pc) ? [.row1] : [.row9])
+            return invertedRows ? rows.map { $0 == .row1 ? .row9 : .row1 } : rows
         }
     }
 
     static func arrangement(degrees: [(ratio: Double, label: String)],
+                            expandOverlaps: Bool = true,
                             rows: (Int) -> [FretRow]) -> FretArrangement {
         var segments: [FretSegment] = []
         for (i, degree) in degrees.enumerated() {
@@ -160,7 +164,21 @@ public struct FretArrangement: Equatable {
             let pc = ((Int((12 * log2(degree.ratio)).rounded()) % 12) + 12) % 12
             segments += rows(pc).map { FretSegment(degreeIndex: i, row: $0) }
         }
-        return FretArrangement(segments: segments)
+        return FretArrangement(segments: expandOverlaps ? expandingOverlaps(segments) : segments)
+    }
+
+    /// Materialize the former overlaps once, after mapping old assignments to odd rows.
+    static func expandingOverlaps(_ segments: [FretSegment]) -> [FretSegment] {
+        var result = segments
+        for raw in stride(from: 2, through: 8, by: 2) {
+            var seen = Set<Int>()
+            for fret in segments where abs(fret.row.rawValue - raw) == 1 {
+                if seen.insert(fret.degreeIndex).inserted {
+                    result.append(FretSegment(degreeIndex: fret.degreeIndex, row: FretRow(rawValue: raw)!))
+                }
+            }
+        }
+        return result
     }
 
 }
@@ -170,10 +188,11 @@ public struct FretArrangement: Equatable {
 /// The built-in fret layouts (Layout menu, beside `FretArrangementStore`'s
 /// saved ones). All are built from the current scale's degrees.
 public enum FretLayoutPreset: String, CaseIterable, Identifiable {
+    case standard
     case pilu
-    /// Two outer rows, one fret per pitch.
+    /// Rows 1 and 9, one fret per pitch before expanding legacy overlaps.
     case equalFreq
-    /// Two outer rows with paired tonic and fifth.
+    /// Rows 1 and 9 with paired tonic and fifth.
     case keyboard
     /// The keyboard layout with its upper and lower rows exchanged.
     case keyboardSharp
@@ -182,6 +201,7 @@ public enum FretLayoutPreset: String, CaseIterable, Identifiable {
 
     public var label: String {
         switch self {
+        case .standard: return "Default"
         case .pilu: return "Pilu"
         case .equalFreq: return "C Equal Freq"
         case .keyboard:  return "C Keyboard"
@@ -192,10 +212,11 @@ public enum FretLayoutPreset: String, CaseIterable, Identifiable {
     public func arrangement(
         degrees: [(ratio: Double, label: String)]) -> FretArrangement {
         switch self {
-        case .pilu: return .defaultArrangement(degrees: degrees)
+        case .standard: return .defaultArrangement(degrees: degrees)
+        case .pilu: return .piluArrangement(degrees: degrees)
         case .equalFreq:
             return .arrangement(degrees: degrees) {
-                [0, 2, 4, 5, 7, 9, 11].contains($0) ? [.bottom] : [.top]
+                [0, 2, 4, 5, 7, 9, 11].contains($0) ? [.row1] : [.row9]
             }
         case .keyboard:  return .keyboardArrangement(degrees: degrees)
         case .keyboardSharp: return .keyboardArrangement(degrees: degrees, invertedRows: true)
@@ -216,12 +237,12 @@ public func fretRatio(_ segment: FretSegment,
 // MARK: - Band
 
 /// The playable **band**: full width, `Config.fretPadHeightFraction` of the
-/// height, its top at `Config.fretPadBandTopFraction`. The taraf pluck strip
-/// sits above it and the optional chord bar below.
+/// height, its top at `Config.fretPadBandTopFraction`. Short surfaces reserve
+/// room for the taraf strip above while keeping the bottom edge fixed.
 public func fretPadBandRect(in size: CGSize) -> CGRect {
-    let h = size.height * Config.fretPadHeightFraction
-    let y = size.height * Config.fretPadBandTopFraction
-    return CGRect(x: 0, y: y, width: size.width, height: h)
+    let bottom = size.height * (Config.fretPadBandTopFraction + Config.fretPadHeightFraction)
+    let y = min(bottom, max(Config.tarafPluckStripHeight, size.height * Config.fretPadBandTopFraction))
+    return CGRect(x: 0, y: y, width: size.width, height: max(0, bottom - y))
 }
 
 // MARK: - Band ↔ pixel mapping
@@ -263,7 +284,7 @@ public struct FretPlacement: Identifiable {
 
     public init(id: String, segmentID: UUID, isGhost: Bool, ratio: Double,
                 name: String, x: CGFloat, topY: CGFloat, bottomY: CGFloat,
-                isEnabled: Bool = true, row: FretRow = .middle,
+                isEnabled: Bool = true, row: FretRow = .row5,
                 degreeIndex: Int = 0, logPerPixel: Double = 0) {
         self.id = id; self.segmentID = segmentID; self.isGhost = isGhost
         self.row = row
@@ -397,7 +418,7 @@ private func fretLinearLog(atX x: CGFloat, placements: [FretPlacement]) -> Doubl
     return log2(first.ratio) + Double(x - first.x) * slope
 }
 
-/// Each interior and overlap resolves one field from its own (possibly union) fret set.
+/// Each row resolves one field from its assigned fret set.
 public func fretRegionFields(atX x: CGFloat, placements: [FretPlacement],
                              warp: Double = 0) -> [FretRegion: Double] {
     guard let linear = fretLinearLog(atX: x, placements: placements) else { return [:] }
@@ -507,7 +528,7 @@ public func fretFillCells(_ placements: [FretPlacement],
 
 // MARK: - Hit-testing (editing)
 
-/// Clicking an overlap edits the nearer row centre; octave copies edit the base pair.
+/// Clicking a row edits its assignment; octave copies edit the base pair.
 public func fretAssignment(at pt: CGPoint, placements: [FretPlacement],
                             hitRadius: CGFloat) -> FretPlacement? {
     placements.filter {

@@ -32,7 +32,8 @@ final class TarafStripTests: XCTestCase {
         XCTAssertFalse(bank.contains(revision: 32, row: 2))
         for rows in [[TarafBank.Row(id: 0, frequency: .nan)],
                      [.init(id: 0, frequency: 220), .init(id: 0, frequency: 440)],
-                     [.init(id: 128, frequency: 220)], [.init(id: 0, frequency: 220, flags: 4)]] {
+                     [.init(id: 128, frequency: 220)], [.init(id: 0, frequency: 220, flags: 2)],
+                     [.init(id: 0, frequency: 220, flags: 3)], [.init(id: 0, frequency: 220, flags: 4)]] {
             let bytes = TLPFrame.event(seq: 1, .tarafBank(.init(revision: 1, tonic: 220, rows: rows))).encode()
             XCTAssertNil(TLPFrame.decode(bytes))
         }

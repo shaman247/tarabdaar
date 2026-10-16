@@ -4,33 +4,6 @@ import SarangiKit
 // Display-only readouts: the Live tab's performance readout, the iPad
 // volume levels, the voice telemetry passthroughs and the Scope snapshot.
 extension AudioEngine {
-    public func pitchProfile(tonicSemis: Double, ratios: [Double]) -> PerformancePitchProfile.Snapshot {
-        lock.lock()
-        defer { lock.unlock() }
-        let now = ProcessInfo.processInfo.systemUptime
-        performanceProfile.configure(tonicSemis: tonicSemis, ratios: ratios, at: now)
-        return performanceProfile.snapshot(at: now)
-    }
-
-    public func resetPitchProfile(seed: Bool = false) {
-        lock.lock()
-        performanceProfile.reset(at: ProcessInfo.processInfo.systemUptime, seed: seed)
-        lock.unlock()
-    }
-
-    public func finishPitchProfileSeed() {
-        lock.lock()
-        performanceProfile.finishSeed(at: ProcessInfo.processInfo.systemUptime)
-        lock.unlock()
-    }
-
-    public func setPerformanceTarafProfile(tonic: Double, ratios: [Double], gains: [Double], unmatchedGain: Double) {
-        lock.lock()
-        let source = stringVoiceSource
-        lock.unlock()
-        source?.setPerformanceProfile(tonic: tonic, ratios: ratios, gains: gains, unmatchedGain: unmatchedGain)
-    }
-
     /// Evaluated controls of the highest held bowed note; plucked voices have no bow controls.
     public func noteControls() -> TLPNoteControls {
         lock.lock()
@@ -51,11 +24,16 @@ extension AudioEngine {
 
     // MARK: - Live performance readout (Live tab)
 
-    /// Live-tab readout: held pitch and the latest main-voice interval RMS.
+    /// Live/output readout: held pitch, three bus interval RMS levels and maxima since reset.
     /// Released strings can still sound while `active` is false.
     public struct PerformanceReadout {
         public let pitchHz: Double
         public let voiceRMS: Double
+        public let chromaticRMS: Double
+        public let ragaRMS: Double
+        public let maximumVoiceRMS: Double
+        public let maximumChromaticRMS: Double
+        public let maximumRagaRMS: Double
         public let active: Bool
     }
 
@@ -64,6 +42,11 @@ extension AudioEngine {
         private let lock = NSLock()
         private var pitchHz = 0.0
         private var voiceRMS = 0.0
+        private var chromaticRMS = 0.0
+        private var ragaRMS = 0.0
+        private var maximumVoiceRMS = 0.0
+        private var maximumChromaticRMS = 0.0
+        private var maximumRagaRMS = 0.0
         private var active = false
 
         func storeTouch(_ touch: (Double, Bool)) {
@@ -78,14 +61,36 @@ extension AudioEngine {
             let levels = sample()
             lock.lock()
             voiceRMS = levels.voice
+            chromaticRMS = levels.chromatic
+            ragaRMS = levels.raga
+            maximumVoiceRMS = maximum(maximumVoiceRMS, levels.voice)
+            maximumChromaticRMS = maximum(maximumChromaticRMS, levels.chromatic)
+            maximumRagaRMS = maximum(maximumRagaRMS, levels.raga)
             lock.unlock()
             return levels
+        }
+
+        private func maximum(_ previous: Double, _ value: Double) -> Double {
+            value.isFinite ? max(previous, value) : .infinity
+        }
+
+        func resetMaxima() {
+            lock.lock()
+            maximumVoiceRMS = 0
+            maximumChromaticRMS = 0
+            maximumRagaRMS = 0
+            lock.unlock()
         }
 
         func readout() -> PerformanceReadout {
             lock.lock()
             defer { lock.unlock() }
-            return PerformanceReadout(pitchHz: pitchHz, voiceRMS: voiceRMS, active: active)
+            return PerformanceReadout(pitchHz: pitchHz, voiceRMS: voiceRMS,
+                                      chromaticRMS: chromaticRMS, ragaRMS: ragaRMS,
+                                      maximumVoiceRMS: maximumVoiceRMS,
+                                      maximumChromaticRMS: maximumChromaticRMS,
+                                      maximumRagaRMS: maximumRagaRMS,
+                                      active: active)
         }
     }
 

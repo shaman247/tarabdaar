@@ -65,7 +65,6 @@ final class TarabLinkTests: XCTestCase {
 
     /// Incompatible peers exchange only HELLO; a matching epoch restores delivery and sequence gates.
     func testVersionMismatchBlocksPayloadsAndRecovers() {
-        // Version 25 used quarter-point radii; version 26 uses half-points.
         for role in [TLPRole.pad, .host] {
             let peer: TLPRole = role == .pad ? .host : .pad
             let link = TarabLink(role: role)
@@ -116,7 +115,7 @@ final class TarabLinkTests: XCTestCase {
             link._testTick()
             XCTAssertEqual(received, 0)
             XCTAssertTrue(onlyHellosSent())
-            hello(25)
+            hello(TLP.versionMin - 1)
             incoming()
             link._testTick()
             XCTAssertFalse(link._testStatus.isUp)
@@ -131,7 +130,7 @@ final class TarabLinkTests: XCTestCase {
             XCTAssertTrue(sentState(), "held state survives the handshake")
 
             sent.removeAll()
-            hello(25)
+            hello(TLP.versionMin - 1)
             state.touchGlide("finger", pitchSemis: 62)
             incoming()
             link.send(event: .resyncRequest)
@@ -139,7 +138,7 @@ final class TarabLinkTests: XCTestCase {
             XCTAssertEqual(drops, 1, "an incompatible replacement releases the link lane")
             XCTAssertEqual(received, 3)
             XCTAssertTrue(onlyHellosSent())
-            hello(25)
+            hello(TLP.versionMin - 1)
             XCTAssertEqual(drops, 1, "repeated mismatches must not repeat the kill path")
 
             hello(TLP.versionMin)

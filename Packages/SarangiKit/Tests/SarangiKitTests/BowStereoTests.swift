@@ -4,7 +4,7 @@ import XCTest
 /// Stereo side path: L ≠ R, and the L+R fold-down equals the mono render.
 final class BowStereoTests: XCTestCase {
 
-    private func makeEngine(stereo: Bool) -> BowEngine {
+    private func makeEngine(stereo: Bool, gain: Double = 0.07) -> BowEngine {
         var bp = BowedStringEngineTests.stringBP()
         bp.num["bow_jt_gain"] = 1.0
         // the width law is the whole stereo law: every source stays centred
@@ -27,9 +27,7 @@ final class BowStereoTests: XCTestCase {
                                reverbMix: 0.08,
                                reverbWidth: stereo ? 0.6 : 0.0,
                                maxPoly: 8)
-        // headroom: fold-down invariance is a BELOW-CEILING contract — the
-        // linked-stereo limiter would legitimately break it above 0.8.
-        engine.outGain = 0.07
+        engine.outGain = gain
         return engine
     }
 
@@ -56,8 +54,7 @@ final class BowStereoTests: XCTestCase {
         return (l, r)
     }
 
-    /// Unarmed the render is L == R; armed it grows a side stream whose
-    /// L+R fold-down is still the mono render.
+    /// Unarmed the render is L == R; armed its side stream cancels in the mono fold-down.
     func testStereoSidePathAndMonoFoldDownInvariance() {
         let mono = renderSeconds(makeEngine(stereo: false), seconds: 2.0)
         let wide = renderSeconds(makeEngine(stereo: true), seconds: 2.0)
@@ -89,4 +86,22 @@ final class BowStereoTests: XCTestCase {
                           "armed L+R fold-down diverged from the mono render")
     }
 
+    /// Both output paths preserve linear gain above full scale without peak reduction or clamping.
+    func testOutputGainRemainsLinearAboveFullScale() {
+        let scale = 100.0
+        for stereo in [false, true] {
+            let reference = renderSeconds(makeEngine(stereo: stereo), seconds: 0.5)
+            let amplified = renderSeconds(makeEngine(stereo: stereo, gain: 0.07 * scale),
+                                          seconds: 0.5)
+            for (low, high) in [(reference.l, amplified.l), (reference.r, amplified.r)] {
+                XCTAssertGreaterThan(high.map { abs($0) }.max() ?? 0, 1.0)
+                var maxError = 0.0
+                for i in low.indices {
+                    XCTAssertTrue(high[i].isFinite)
+                    maxError = max(maxError, abs(high[i] - scale * low[i]))
+                }
+                XCTAssertLessThan(maxError, 1e-10, "output gain changed the waveform")
+            }
+        }
+    }
 }

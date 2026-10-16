@@ -9,8 +9,9 @@
 #      assert wall-clock budgets — the render suites are independent
 #      CPU-bound processes, so this phase is bounded by the longest
 #      suite (~2 min LiveParamPush) instead of the serial sum.
-#   2. RealtimePerformanceTests + RebuildCostTests run serially on a
-#      quiet machine — they measure realtime/rebuild budgets, and CPU
+#   2. RealtimePerformanceTests + RebuildCostTests run serially in Release
+#      on a quiet machine — the production host render path must be
+#      optimized as well as SarangiKit. They measure realtime/rebuild budgets, and CPU
 #      contention from phase 1 would flake them (the reason they are
 #      not in the parallel batch; do not "optimize" them into it).
 #
@@ -75,8 +76,8 @@ run_phase swift test --parallel \
   --skip RealtimePerformanceTests \
   --skip RebuildCostTests || RC1=$?
 
-echo "== phase 2/2: serial wall-clock guards =="
-run_phase swift test \
+echo "== phase 2/2: serial Release wall-clock guards =="
+run_phase swift test --configuration release \
   --filter RealtimePerformanceTests \
   --filter RebuildCostTests || RC2=$?
 

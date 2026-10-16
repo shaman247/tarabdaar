@@ -58,7 +58,7 @@ modes do not replace or feed back into the taraf. Body radiation blending change
 signed radiation residues, leaving body mobility and played-string feedback
 unchanged. The 6 kHz upper shelf currently acts on the combined radiated mix,
 unlike the research observer's played-body-only shelf; this is an explicit live
-adaptation and has its own control. All gains are before the existing limiter.
+adaptation and has its own control. The output chain ends at global FX, with no final limiter or clamp.
 
 Run the native audit from any working directory on macOS with Xcode command-line
 tools and a Python environment containing NumPy and SciPy:

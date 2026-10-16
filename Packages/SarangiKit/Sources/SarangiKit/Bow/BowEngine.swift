@@ -6,7 +6,8 @@ import CBowKernel
 /// rate and radiated through the post-chain (radiation FIR → low-pass →
 /// room). The kernel emits ONE mono stream with the taraf fused in; with
 /// `bow_st_width` armed it adds a SIDE stream and L/R = mid ± side, the
-/// L+R fold-down always equalling the mono output exactly.
+/// L+R fold-down equalling the mono output with stereo-sensitive FX and
+/// chromatic compression bypassed.
 ///
 /// POLYPHONY: every mapper slot is its own gut string loading the SAME
 /// bridge (one jawari web, one body, one post chain); each string's -Z·V
@@ -52,7 +53,7 @@ public final class BowEngine {
     /// STEREO SIDE PATH: with `bow_st_width` armed the kernel renders a
     /// SIDE stream (its diffuse-field difference bank on the whole radiated
     /// output) which rides decimator + radiation-chain twins here; L/R =
-    /// mid ± side, fold-down bit-identical to the mono path. Off = mono.
+    /// mid ± side, fold-down bit-identical before stereo-sensitive dynamics. Off = mono.
     private var stereoOn = false
     private var decS = HalfBandDecimator()
     private var radFIRS: FIRFilter?
@@ -98,10 +99,6 @@ public final class BowEngine {
     var dampAmtTarget = 0.0         // bow_jt_damp (0 = natural ring)
     var dampAmtCur = 0.0
     var dampAmtPushed = 0.0
-    // MELODY FOLLOWER: armed when the jt tables carry a tracked row; the
-    // render thread pushes the highest gated note as its target per chunk
-    private var trackArmed = false
-    private var trackHzPushed = 0.0
     // RECRUITMENT PROFILE (`bow_jt_sel`): each jawari row's bridge drive
     // across 0 = kin-only / 0.5 = fitted / 1 = equal contribution, the
     // radiated jt gain holding loudness. Rescored per chunk on the render
@@ -114,12 +111,12 @@ public final class BowEngine {
     var selKinCents: [Double] = []    // kin offsets (cents)
     var selKinStrength: [Double] = [] // (p·q)^-kinExp per kin
     var selRowFreqs: [Double] = []     // row f0s (builder)
-    var jtTrackRowIdx = -1            // follower row: always weight 1
     // Per-row bridge membership + apex (the builder's), for the
     // per-bridge evolve map and the Scope tab.
     var jtRowChromatic: [Bool] = []
     var jtRowApex: [Double] = []
     var jtHasChromatic = false
+    var jtCompressorPending: (ratio: Double, voiceRatio: Double, floorDB: Double)?
     var jtEvOfsArmed = false          // offsets ever pushed
     var jtDwTargets: [Double] = []    // scratch: weights to push
     var jtDwPushed: [Double] = []     // last pushed (skip no-ops)
@@ -134,17 +131,6 @@ public final class BowEngine {
     /// EQing mid and side alike equals EQing L/R, so the image holds.
     var tiltLoShelfS: Biquad
     var tiltHiShelfS: Biquad
-
-    // ---- OUTPUT SAFETY LIMITER: linked-stereo peak limiter at the very
-    // end of both post-chains. Instant attack, exponential release
-    // (`bow_lim_rel_ms`), gain smoothed ~0.2 ms, hard clamp at
-    // min(1, 1.25×ceiling) for the attack samples that slip through.
-    // Below the ceiling it multiplies nothing — bit-exact passthrough. ----
-    var limThresh = 0.8       // bow_lim_thresh (1.0 ≈ FS safety)
-    var limRelCoef = 0.000139 // bow_lim_rel_ms (150 ms at 48 k)
-    private let limAttCoef = 0.1      // ~0.2 ms gain smoothing
-    private var limEnv = 0.0
-    private var limGain = 1.0
 
     // preallocated per-buffer scratch; control arrays are SLOT-MAJOR at a
     // fixed stride (maxFrames·osFactor).
@@ -282,10 +268,6 @@ public final class BowEngine {
         tiltEqDbMax = bp.v("bow_tilt_eq_db", 9.0)
         tiltEqLoHz = bp.v("bow_tilt_eq_lo", 300.0)
         tiltEqHiHz = bp.v("bow_tilt_eq_hi", 2400.0)
-        // safety limiter resting values (live edits via applyPendingLive)
-        limThresh = min(max(bp.v("bow_lim_thresh", 0.8), 0.1), 1.0)
-        limRelCoef = OnePole.coefficient(
-            tau: max(bp.v("bow_lim_rel_ms", 150.0), 5.0) * 0.001, sr: sr)
         tiltLoShelf = Biquad.lowShelf(f0: bp.v("bow_tilt_eq_lo", 300.0),
                                       gainDB: 0.0, sr: sr)
         tiltHiShelf = Biquad.highShelf(f0: bp.v("bow_tilt_eq_hi", 2400.0),
@@ -303,7 +285,6 @@ public final class BowEngine {
             selKinCents = Self.recruitKin.map { 1200.0 * log2($0.ratio) }
             selKinStrength = Self.recruitKin.map { pow($0.pq, -kinExp) }
             selRowFreqs = jt.rowFreqs
-            jtTrackRowIdx = Int(jt.trackRow)
             jtRowChromatic = jt.rowChromatic
             jtRowApex = jt.rowApex
             jtHasChromatic = jt.hasChromatic
@@ -391,18 +372,6 @@ public final class BowEngine {
                 if gate > 0 {
                     bow_poly_jt_set_gate(
                         pk, jtApexRef * pow(10.0, -gate / 20.0))
-                }
-                // MELODY FOLLOWER: arm the tracked row at the tonic;
-                // renderPolyChunk retargets it to the highest gated note
-                if jt.trackRow >= 0 {
-                    let row = Int(jt.trackRow)
-                    bow_poly_jt_track_config(pk, jt.trackRow,
-                                             jt.rowFreqs[row], jt.trackT60,
-                                             jt.trackFhf, jt.trackBst)
-                    let tonic = tables.scalars.f0Open
-                    bow_poly_jt_track_target(pk, tonic)
-                    trackHzPushed = tonic
-                    trackArmed = true
                 }
             }
             // purity LP-sweep references (build corner or open → downward)
@@ -606,22 +575,10 @@ public final class BowEngine {
             return
         }
         updateFittedControls()
+        updateChromaticCompressor()
         bow_poly_observation_force(pk, fitForce)
         applyPendingAxisTransforms()
         if !settlingForPublication { mapper.snapshotPoly(into: &polySnap) }
-        // Melody follower: target = the HIGHEST gated note (bend included);
-        // no gated note keeps the last target, so the string rings out there.
-        if trackArmed {
-            var hi = 0.0
-            for s in 0..<maxPoly {
-                let slot = polySnap.slots[s]
-                if slot.gate > 0.0, slot.f0Target > hi { hi = slot.f0Target }
-            }
-            if hi > 0.0, hi != trackHzPushed {
-                trackHzPushed = hi
-                bow_poly_jt_track_target(pk, hi)
-            }
-        }
         // RECRUITMENT (bow_jt_sel): re-score the bridge-drive weights
         // against the gated pitch set (no-op while the axis is off)
         updateRecruitment(pk)
@@ -838,35 +795,6 @@ public final class BowEngine {
         gainPrev = outGain
         // global FX point after the whole chain (stereo room decorrelates L/R)
         fxUnits[FXPoint.global.rawValue].processLR(outL, outR, n48)
-        applyLimiter(n48: n48, outL: outL, outR: outR)
-    }
-
-    /// The output safety limiter. Linked stereo: one gain from max(|L|, |R|),
-    /// so limiting never leans the image. Below the ceiling — once the gain
-    /// has released back to exactly 1 — samples pass untouched (bit-exact).
-    private func applyLimiter(n48: Int, outL: UnsafeMutablePointer<Double>,
-                              outR: UnsafeMutablePointer<Double>) {
-        let clamp = min(1.0, limThresh * 1.25)
-        for i in 0..<n48 {
-            let a = max(abs(outL[i]), abs(outR[i]))
-            if a > limEnv { limEnv = a }                    // instant attack
-            else { limEnv += limRelCoef * (a - limEnv) }    // smooth release
-            if limEnv > limThresh || limGain < 1.0 {
-                let gT = limEnv > limThresh ? limThresh / limEnv : 1.0
-                limGain += limAttCoef * (gT - limGain)
-                if gT == 1.0, limGain > 0.99999 { limGain = 1.0 }
-                if limGain < 1.0 {
-                    var l = outL[i] * limGain
-                    var r = outR[i] * limGain
-                    // the ~0.2 ms gain smoothing lets a few attack
-                    // samples through hot — hard-stop them
-                    if l > clamp { l = clamp } else if l < -clamp { l = -clamp }
-                    if r > clamp { r = clamp } else if r < -clamp { r = -clamp }
-                    outL[i] = l
-                    outR[i] = r
-                }
-            }
-        }
     }
 
     /// Stereo post-chain: mid (y48) and side (y48S) each run their own
@@ -919,7 +847,6 @@ public final class BowEngine {
         gainPrev = outGain
         // FX rack, global point (see postChain)
         fxUnits[FXPoint.global.rawValue].processLR(outL, outR, n48)
-        applyLimiter(n48: n48, outL: outL, outR: outR)
     }
 
     /// Off-thread, once before publication: settle silent physics, discard its synthetic room tail, and verify silence.

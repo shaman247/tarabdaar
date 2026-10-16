@@ -21,7 +21,7 @@ struct FretPadView: View {
     /// The scale + tonic source, edited on this tab.
     @ObservedObject var pitchPad: PitchPadEngine
     /// Records play strokes for offline assist fitting (`tools/fretpad_fit.py`).
-    @StateObject private var recorder = FretGestureRecorder()
+    @ObservedObject private var recorder: FretGestureRecorder
     /// Drives the "Save As…" name prompt for the scale menu.
     @State private var showingSaveDialog = false
     @State private var saveName = ""
@@ -34,6 +34,7 @@ struct FretPadView: View {
         self.audio = controller.audio
         self.engine = controller.fretPad
         self.pitchPad = controller.pitchPad
+        self.recorder = controller.fretRecorder
     }
 
     /// The scale's enabled degrees, low→high, the frets draw their pitch from.
@@ -106,7 +107,6 @@ struct FretPadView: View {
                 octaveControl
                 snapControl
                 warpControl
-                primeLimitControl
                 Spacer()
                 tonicControl
             }
@@ -219,30 +219,14 @@ struct FretPadView: View {
         .help("Fret layouts: save the current fret positions under a name, load a saved one, or start from a built-in (C Equal Freq / C Keyboard). Layouts are independent of the scale — a layout loads onto whatever scale is active.")
     }
 
-    /// Prime-limit cap for the scale editor's scroll-stepping snap targets.
-    private var primeLimitControl: some View {
-        HStack(spacing: 4) {
-            Text("Prime ≤").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
-            Picker("", selection: $pitchPad.primeLimit) {
-                ForEach([2, 3, 5, 7, 11, 13, 17, 19, 23], id: \.self) { p in
-                    Text("\(p)").tag(p)
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .frame(width: 56)
-        }
-        .help("Prime-limit cap for the scale editor's scroll-to-next-gridline snap targets.")
-    }
-
-    /// Total octave span; half-octave steps keep the quarter-octave flanks exact on the wire.
+    /// Total octave span in tenth-octave steps.
     private var octaveControl: some View {
         HStack(spacing: 6) {
             Text("Octaves").font(.padCaption2).foregroundStyle(.secondary).lineLimit(1)
             Slider(value: Binding(
                 get: { 1 + 2 * controller.fretArrangement.ghostExtentOctaves },
                 set: { controller.fretArrangement.ghostExtentOctaves = ($0 - 1) / 2 }),
-                   in: 1...5, step: 0.5)
+                   in: 1...5, step: 0.1)
                 .frame(width: 80)
                 .accessibilityLabel("Octaves")
             Text(String(format: "%.1f", 1 + 2 * controller.fretArrangement.ghostExtentOctaves))
@@ -254,17 +238,21 @@ struct FretPadView: View {
     /// Record play strokes to JSONL for offline assist fitting.
     private var recordControl: some View {
         Toggle(isOn: Binding(get: { recorder.isRecording },
-                             set: { recorder.setRecording($0) })) {
+                             set: { on in
+                                 if on { recorder.setRecording(true) }
+                                 else { recorder.stop(waitForRemote: controller.linkStatus.isUp && !controller.linkStatus.isStale) }
+                             })) {
             HStack(spacing: 4) {
                 Circle()
                     .fill(recorder.isRecording ? Color.red : Color.secondary)
                     .frame(width: 7, height: 7)
-                Text(recorder.isRecording ? "Rec \(recorder.strokeCount)" : "Rec")
+                Text(recorder.isFinishing ? "Saving \(recorder.strokeCount)"
+                     : recorder.isRecording ? "Rec \(recorder.strokeCount)" : "Rec")
                     .font(.padCaption.monospacedDigit())
             }
         }
         .toggleStyle(.button)
-        .help("Record play strokes (raw movements + fret context) to Application Support/Tarabdaar/FretRecordings/ as JSONL, for fitting the drag-assist parameters to your real playing (tools/fretpad_fit.py). Play naturally: glides into stops, direction changes near notes, vibrato, fast runs.")
+        .disabled(recorder.isFinishing)
     }
 
     /// Horizontal onset-snap distance in px (`engine.marginPixels`); 0 = fretless.
@@ -409,16 +397,26 @@ private struct FretPadSurface: View {
                             ? pitchColor(forRatio: p.ratio, lightness: 0.82, chroma: 0.20)
                             : Color.gray.opacity(0.35)).opacity(dim ? 0.45 : 1.0)
                         ctx.stroke(p.linePath, with: .color(hue), lineWidth: dim ? 1 : 1.5)
-                        if !perform {
+                    }
+
+                    if !perform {
+                        let columns = Dictionary(grouping: editPlacements, by: \.ratio)
+                        for ratio in columns.keys.sorted() {
+                            guard let column = columns[ratio], let p = column.first else { continue }
+                            let enabled = column.contains { $0.isEnabled }
+                            let ghost = column.allSatisfy { $0.isGhost }
+                            let hue = (enabled
+                                ? pitchColor(forRatio: ratio, lightness: 0.82, chroma: 0.20)
+                                : Color.gray.opacity(0.35)).opacity(ghost ? 0.45 : 1.0)
                             let label = ctx.resolve(
                                 Text(p.name)
                                     .font(.padSmall(12, weight: .semibold))
                                     .foregroundColor(hue))
-                            let labelWidth = label.measure(in: band.size).width
+                            let halfWidth = label.measure(in: band.size).width / 2
                             ctx.draw(label,
-                                at: CGPoint(x: min(p.x + 4, band.width - labelWidth - 2),
-                                            y: (p.topY + p.bottomY) / 2),
-                                anchor: .leading)
+                                at: CGPoint(x: max(halfWidth, min(p.x, band.width - halfWidth)),
+                                            y: band.height + 8),
+                                anchor: .top)
                         }
                     }
                 }
@@ -744,7 +742,7 @@ private struct ScaleEditorRow: View {
 
             ScrollableField(
                 text: ratioBinding(),
-                onScrollStep: { dir in incrementPitch(by: dir) },
+                onScrollStep: { _ in },
                 onCommit: { txt in commitRatio(txt) }
             )
             .frame(width: Typography.scaledWidth(56), height: 20)
@@ -781,28 +779,6 @@ private struct ScaleEditorRow: View {
     }
 
     // MARK: - Scroll increments
-
-    private func incrementPitch(by direction: Int) {
-        guard let i = currentIndex else { return }
-        let curXF = engine.scale.points[i].xFraction
-        let sorted = engine.snapTargets().sorted {
-            log2(Double($0.num) / Double($0.den))
-                < log2(Double($1.num) / Double($1.den))
-        }
-        let pick: (num: Int, den: Int)?
-        if direction > 0 {
-            pick = sorted.first {
-                log2(Double($0.num) / Double($0.den)) > curXF + 1e-9
-            }
-        } else {
-            pick = sorted.last {
-                log2(Double($0.num) / Double($0.den)) < curXF - 1e-9
-            }
-        }
-        guard let n = pick else { return }
-        engine.scale.points[i].num = n.num
-        engine.scale.points[i].den = n.den
-    }
 
     private func incrementY(by direction: Int) {
         guard let i = currentIndex else { return }

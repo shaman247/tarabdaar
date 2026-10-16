@@ -211,10 +211,7 @@ struct JoyConStatusView: View {
             intro: "The Joy-Con's tilt calibration: hold the Joy-Con in the playing grip and capture a rest pose, then two wrist sweeps, each starting from rest. Up/down defines the Wrist ↕ axis exactly; inward/outward is fitted at right angles to it (the part shared with up/down is dropped) and becomes Wrist ↔; Wrist ⟲ is inferred as the axis perpendicular to both, with the mean of the two measured ranges. Rest = 0, sweep extremes ±1 on the Controls tab. Dpad-up advances, dpad-down steps back, ZL re-zeroes the rest pose. Without a calibration the wrist axes stay silent; Joy-Con Accel needs no calibration.")
     }
 
-    /// The Mac twin of the iPad's GYRO overlay: the same 3D attitude
-    /// trail, drawn from the TRANSMITTED values instead of the sensor —
-    /// put the two screens side by side to see what the wire does to
-    /// the motion.
+    /// The iPad's transmitted attitude, including high-passed yaw.
     private var receivedPanel: some View {
         Panel(title: "Received motion (3D)") {
             ReceivedMotionView(
@@ -222,7 +219,7 @@ struct JoyConStatusView: View {
                     (s.raw * 2 - SIMD3<Double>(1, 1, 1)) * (.pi / 2)
                 } },
                 names: ["pitch ", "roll  ", "yaw hp"],
-                caption: "as received over MIDI · last 8 s · compare against the iPad's GYRO overlay")
+                caption: "as received over MIDI · last 8 s")
         }
     }
 
@@ -265,15 +262,13 @@ struct JoyConStatusView: View {
         }
     }
 
-    /// The accelerometer twin — same wire, same A/B purpose against the
-    /// iPad overlay's accel half. Fixed ±0.5 g scale (strikeMaxG —
-    /// the top of the strike range; harder spikes clip briefly).
+    /// Received user acceleration on a fixed ±0.5 g display scale.
     private var accelPanel: some View {
         Panel(title: "Received acceleration (3D)") {
             VectorTrailView(
                 samples: { joyCon.liveAccelTrace },
                 viewRadius: 0.5, names: ["x", "y", "z"], unit: "g",
-                caption: "raw userAcceleration as received · last 8 s · compare against the iPad overlay")
+                caption: "raw userAcceleration as received · last 8 s")
         }
     }
 
@@ -310,14 +305,8 @@ struct JoyConStatusView: View {
 
 // MARK: - Received motion (3D)
 
-/// Shared attitude-trail view (the iPad GYRO overlay's rendering):
-/// turntable projection, age-faded trail and per-axis Δ° readouts over
-/// [pitch, roll, yaw] samples in radians. Two clients: "Received
-/// motion" (the TRANSMITTED tilt values — side by side with the iPad
-/// overlay this is the transmission A/B; the wire's yaw is the
-/// HIGH-PASSED, bias-corrected axis, so raw yaw drift visible on the
-/// iPad and absent there is correct behaviour) and the Joy-Con 2's
-/// fused attitude .
+/// Turntable projection, age-faded trail and per-axis Δ° readouts for
+/// the received iPad attitude and the Joy-Con's fused attitude.
 private struct ReceivedMotionView: View {
     /// Sampled fresh inside each 60 Hz timeline tick (attitude in
     /// radians). Deliberately not observed state: the TimelineView
@@ -328,14 +317,7 @@ private struct ReceivedMotionView: View {
 
     private static let spin = 0.3
     private static let colors: [Color] = [.orange, .green, .cyan]
-    /// Fixed view scale: ±30° of attitude to the frame edge, the same
-    /// constant as the iPad overlay — the two views render motion at
-    /// identical size, and the zoom no longer pumps with the trail's
-    /// extent (auto-zoom also blew sub-degree noise up into a
-    /// full-frame fuzz ball; at a fixed scale it reads as the near-
-    /// stillness it is, with the Δ° labels carrying the magnitude).
-    /// Only the scale is fixed — the view stays CENTRED on the trail
-    /// mean, since the rest pose is arbitrary.
+    /// Fixed ±30° scale, centred on the trail mean; Δ° carries small motion.
     private static let viewRadius = 30.0 * Double.pi / 180
 
     var body: some View {

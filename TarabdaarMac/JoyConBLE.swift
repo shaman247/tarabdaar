@@ -61,6 +61,7 @@ final class JoyConBLETransport: JoyConTransport {
     }
 
     func disconnect() {
+        ble.stop()
         ble.onNotification = nil
         ble.onAltNotification = nil
         ble.onCommandInput = nil
@@ -159,6 +160,9 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
+    private var session = JoyConConnectionSession()
+    private var announcedConnection = false
+    private var attemptStarted: TimeInterval = 0
     /// The command write characteristic.
     private var outputCharacteristic: CBCharacteristic?
     private var inputCharacteristic: CBCharacteristic?
@@ -189,10 +193,24 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     static let altFallbackDelay: TimeInterval = 2.0
 
     func start() {
+        guard central == nil else { return }
         central = CBCentralManager(delegate: self, queue: .main)
     }
 
+    func stop() {
+        central?.delegate = nil
+        if let central, central.state == .poweredOn {
+            central.stopScan()
+            if let peripheral { central.cancelPeripheralConnection(peripheral) }
+        }
+        resetSession()
+        central = nil
+    }
+
     func centralManagerDidUpdateState(_ c: CBCentralManager) {
+        guard central === c else { return }
+        NSLog("Tarabdaar ble: Bluetooth state %ld", c.state.rawValue)
+        if c.state != .poweredOn { resetSession() }
         switch c.state {
         case .poweredOn: scan()
         case .unauthorized: onStatus?("Bluetooth permission denied — grant in System Settings ▸ Privacy")
@@ -202,21 +220,64 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     private func scan() {
-        guard let central, central.state == .poweredOn, peripheral == nil
+        guard let central, central.state == .poweredOn, peripheral == nil, !central.isScanning
         else { return }
         // The advertisement doesn't list the vendor service — scan broadly.
         central.scanForPeripherals(withServices: nil)
+        NSLog("Tarabdaar ble: scanning")
         onStatus?("scanning — hold the Joy-Con 2 sync button")
+    }
+
+    /// All deferred protocol work belongs to one attempt, even if CoreBluetooth reuses the peripheral.
+    private func schedule(after delay: TimeInterval, _ action: @escaping (JoyCon2BLE) -> Void) {
+        let token = session.generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.session.accepts(token) else { return }
+            action(self)
+        }
+    }
+
+    private func logStage(_ stage: String) {
+        NSLog("Tarabdaar ble: attempt %llu +%.2f s — %@", session.generation,
+              ProcessInfo.processInfo.systemUptime - attemptStarted, stage)
+    }
+
+    private func armWatchdog() {
+        guard let deadline = session.deadline else { return }
+        let token = session.generation
+        schedule(after: max(0, deadline - ProcessInfo.processInfo.systemUptime)) { client in
+            guard client.session.deadline == deadline else { return }
+            if let phase = client.session.expire(at: ProcessInfo.processInfo.systemUptime, token: token) {
+                NSLog("Tarabdaar ble: attempt %llu timed out during %@ after %.2f s — cancelling and rescanning",
+                      token, phase.rawValue, ProcessInfo.processInfo.systemUptime - client.attemptStarted)
+                // Cancellation is asynchronous. A fresh manager fences off old delegate callbacks
+                // and permits recovery even if macOS never completes the cancellation callback.
+                client.stop()
+                client.start()
+            } else if client.session.deadline != nil {
+                client.armWatchdog()
+            }
+        }
+    }
+
+    private func receivedInput(_ p: CBPeripheral) {
+        guard session.phase == .settingUp else { return }
+        session.didReceiveInput()
+        logStage("input streaming")
+        announcedConnection = true
+        onConnect?(p.name ?? "Joy-Con 2")
     }
 
     func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral,
                         advertisementData ad: [String: Any], rssi: NSNumber) {
         // Name fallback only — a live Joy-Con 2 advertises an EMPTY name.
         let name = (ad[CBAdvertisementDataLocalNameKey] as? String ?? p.name ?? "")
-        guard peripheral == nil, JoyConBLEDiscovery.accepts(
+        guard central === c, c.state == .poweredOn, peripheral == nil, JoyConBLEDiscovery.accepts(
             manufacturerData: ad[CBAdvertisementDataManufacturerDataKey] as? Data,
             name: name) else { return }
         peripheral = p
+        attemptStarted = ProcessInfo.processInfo.systemUptime
+        session.begin(at: attemptStarted)
         isNYXI = name.lowercased().hasPrefix("nyxi")
         c.stopScan()
         let mfg = (ad[CBAdvertisementDataManufacturerDataKey] as? Data)?
@@ -225,23 +286,42 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         NSLog("Tarabdaar ble: discovered \"%@\" rssi %@ mfg [%@]",
               name.isEmpty ? "(no name)" : name, rssi, mfg)
         onStatus?("connecting — \(name.isEmpty ? "Joy-Con 2" : name)")
+        logStage("connecting \(p.identifier)")
         c.connect(p)
+        armWatchdog()
     }
 
     func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
+        guard central === c, peripheral === p, session.phase == .connecting else { return }
+        session.didConnect(at: ProcessInfo.processInfo.systemUptime)
+        logStage("link ready; discovering services")
+        onStatus?("discovering services — \(p.name ?? "Joy-Con 2")")
+        armWatchdog()
         p.delegate = self
         p.discoverServices([Self.service, Self.sessionService])
     }
 
     func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral,
                         error: Error?) {
-        peripheral = nil
+        guard central === c, peripheral === p else { return }
+        logStage("connect failed — \(error.map { String(describing: $0) } ?? "unknown error")")
+        resetSession()
         onStatus?("connect failed — \(error?.localizedDescription ?? "?")")
         scan()
     }
 
     func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral,
                         error: Error?) {
+        guard central === c, peripheral === p else { return }
+        logStage("disconnected after \(notifCount) notifications — \(error.map { String(describing: $0) } ?? "clean")")
+        resetSession()
+        onStatus?("disconnected")
+        scan()
+    }
+
+    private func resetSession() {
+        session.end()
+        peripheral?.delegate = nil
         peripheral = nil
         outputCharacteristic = nil
         inputCharacteristic = nil
@@ -258,16 +338,17 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         sessionCharacteristic = nil
         nyxiSessionStarted = false
         deferredNotifyChars = []
-        NSLog("Tarabdaar ble: disconnected after %d notifications — %@",
-              notifCount, error?.localizedDescription ?? "clean")
         notifCount = 0
+        lastNotifLog = 0
         lastButtonWord = nil
-        onDisconnect?()
-        onStatus?("disconnected")
-        scan()
+        let wasConnected = announcedConnection
+        announcedConnection = false
+        if wasConnected { onDisconnect?() }
     }
 
     func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
+        guard peripheral === p, session.phase != .idle else { return }
+        logStage("services discovered\(error.map { " — \($0)" } ?? "")")
         let services = p.services ?? []
         NSLog("Tarabdaar ble: services [%@]%@",
               services.map { $0.uuid.uuidString }.joined(separator: ", "),
@@ -284,6 +365,8 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func peripheral(_ p: CBPeripheral,
                     didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard peripheral === p, session.phase != .idle else { return }
+        logStage("characteristics discovered for \(service.uuid)\(error.map { " — \($0)" } ?? "")")
         NSLog("Tarabdaar ble: service %@ chars [%@]",
               service.uuid.uuidString,
               (service.characteristics ?? []).map {
@@ -332,14 +415,12 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         // A device exposing the input characteristic without the command
         // channel: subscribe directly.
         if inputCharacteristic != nil, !initStarted {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self, self.peripheral === p, !self.initStarted,
-                      let input = self.inputCharacteristic else { return }
-                self.initStarted = true
+            schedule(after: 1.0) { client in
+                guard !client.initStarted, let input = client.inputCharacteristic else { return }
+                client.initStarted = true
                 NSLog("Tarabdaar ble: no command channel — subscribing input directly")
                 p.setNotifyValue(true, for: input)
-                self.onConnect?(p.name ?? "Joy-Con 2")
-                self.scheduleAltFallback(p)
+                client.scheduleAltFallback(p)
             }
         }
     }
@@ -348,13 +429,12 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// `altFallbackDelay` after the standard subscribe, subscribe every
     /// other notify characteristic (a real Joy-Con 2 never reaches this).
     private func scheduleAltFallback(_ p: CBPeripheral) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.altFallbackDelay) { [weak self] in
-            guard let self, self.peripheral === p else { return }
+        schedule(after: Self.altFallbackDelay) { client in
             // Only a live standard input stream suppresses the fallback.
-            guard self.notifCount == 0 else { return }
+            guard client.notifCount == 0 else { return }
             NSLog("Tarabdaar ble: standard input silent for %.1f s — subscribing %d alternate characteristic(s) (clone fallback)",
-                  Self.altFallbackDelay, self.deferredNotifyChars.count)
-            for ch in self.deferredNotifyChars {
+                  Self.altFallbackDelay, client.deferredNotifyChars.count)
+            for ch in client.deferredNotifyChars {
                 p.setNotifyValue(true, for: ch)
             }
         }
@@ -379,6 +459,8 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
               outputCharacteristic != nil, cmdRespCharacteristic != nil
         else { return }
         initStarted = true
+        logStage("initializing controller")
+        onStatus?("initializing — \(p.name ?? "Joy-Con 2")")
         let steps: [(Double, String, () -> Void)] = [
             (0.30, "controller-info read", { [weak self] in self?.readControllerInfo() }),
             (0.55, "player LED", { [weak self] in self?.setPlayerLED(1) }),
@@ -387,14 +469,13 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             (1.30, "input subscribe", { [weak self] in
                 guard let self, self.peripheral === p else { return }
                 p.setNotifyValue(true, for: input)
-                self.onConnect?(p.name ?? "Joy-Con 2")
+                self.logStage("input subscription requested")
                 self.scheduleAltFallback(p)
             }),
         ]
         for (delay, name, action) in steps {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self, self.peripheral === p else { return }
-                NSLog("Tarabdaar ble: init — %@", name)
+            schedule(after: delay) { client in
+                client.logStage("init — \(name)")
                 action()
             }
         }
@@ -430,8 +511,8 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private func enableFeatures() {
         let flags: [UInt8] = [0x87, 0x00, 0x00, 0x00]
         writeCommand(0x0C, 0x02, flags)   // SUBCOMMAND_FEATURE_INIT
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.writeCommand(0x0C, 0x04, flags)   // SUBCOMMAND_FEATURE_ENABLE
+        schedule(after: 0.15) { client in
+            client.writeCommand(0x0C, 0x04, flags)   // SUBCOMMAND_FEATURE_ENABLE
         }
     }
 
@@ -477,7 +558,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// Walk every write-capable characteristic with both command dialects.
     /// Steps stop the moment `checkAltMotion` fires.
     private func startMotionProbe() {
-        guard let p = peripheral, !isNYXI,
+        guard peripheral != nil, !isNYXI,
               !altMotionSeen, !probeChars.isEmpty else { return }
         let feat: [[UInt8]] = [
             [0x0C, 0x91, 0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x87, 0x00, 0x00, 0x00],
@@ -495,25 +576,23 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         NSLog("Tarabdaar ble: motion probe starting — %d candidates over %d write chars",
               steps.count, probeChars.count)
         for (i, step) in steps.enumerated() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 1.2) { [weak self] in
-                guard let self, self.peripheral === p, !self.commandInputActive, !self.altMotionSeen
+            schedule(after: Double(i) * 1.2) { client in
+                guard !client.commandInputActive, !client.altMotionSeen
                 else { return }
-                self.probeStep = i
+                client.probeStep = i
                 NSLog("Tarabdaar ble: motion probe %d/%d — %@ → %@",
                       i + 1, steps.count, step.0, step.1.uuid.uuidString)
-                self.probeWrite(step.1, step.2[0])
+                client.probeWrite(step.1, step.2[0])
                 if step.2.count > 1 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                        guard let self, self.peripheral === p, !self.commandInputActive else { return }
-                        self.probeWrite(step.1, step.2[1])
+                    client.schedule(after: 0.15) { client in
+                        guard !client.commandInputActive else { return }
+                        client.probeWrite(step.1, step.2[1])
                     }
                 }
             }
         }
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + Double(steps.count) * 1.2 + 1.0
-        ) { [weak self] in
-            guard let self, self.peripheral === p, !self.commandInputActive, !self.altMotionSeen
+        schedule(after: Double(steps.count) * 1.2 + 1.0) { client in
+            guard !client.commandInputActive, !client.altMotionSeen
             else { return }
             NSLog("Tarabdaar ble: motion probe exhausted — IMU region still zero")
         }
@@ -522,6 +601,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func peripheral(_ p: CBPeripheral,
                     didUpdateNotificationStateFor ch: CBCharacteristic,
                     error: Error?) {
+        guard peripheral === p, session.phase != .idle else { return }
         NSLog("Tarabdaar ble: notify %@ on %@%@",
               ch.isNotifying ? "ON" : "OFF", ch.uuid.uuidString,
               error.map { " error: \($0.localizedDescription)" } ?? "")
@@ -529,6 +609,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func peripheral(_ p: CBPeripheral, didWriteValueFor ch: CBCharacteristic,
                     error: Error?) {
+        guard peripheral === p, session.phase != .idle else { return }
         if let error {
             NSLog("Tarabdaar ble: write to %@ FAILED — %@",
                   ch.uuid.uuidString, error.localizedDescription)
@@ -537,7 +618,7 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic,
                     error: Error?) {
-        guard peripheral === p else { return }
+        guard peripheral === p, session.phase != .idle else { return }
         if let error {
             // An "insufficient authentication" ATT error = a paired link is
             // wanted; macOS follows up by pairing.
@@ -550,6 +631,10 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                   data.map { String(format: "%02x", $0) }.joined(separator: " "))
         }
         if ch.uuid == Self.commandResponseCharacteristic {
+            if let data = ch.value, session.phase == .settingUp,
+               onCommandInput?(data, false) == true {
+                receivedInput(p)
+            }
             if let data = ch.value, onCommandInput?(data, notifCount == 0) == true {
                 if !commandInputActive {
                     commandInputActive = true
@@ -567,13 +652,14 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         if ch.uuid == Self.altInputCharacteristic {
             // Report-0x07 stream (clone fallback): forwarded only while the
             // standard characteristic is silent — never races the 0x05 parse.
-            if notifCount == 0, !isNYXI, let d = ch.value {
+            if notifCount == 0, !isNYXI, let d = ch.value, d.count >= 8 {
+                receivedInput(p)
                 onAltNotification?(d)
                 checkAltMotion(d)
                 if !probeStarted {
                     probeStarted = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                        self?.startMotionProbe()
+                    schedule(after: 2.0) { client in
+                        client.startMotionProbe()
                     }
                 }
             }
@@ -596,7 +682,8 @@ final class JoyCon2BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             setPlayerLED(1)
             enableFeatures()
         }
-        guard let d = ch.value else { return }
+        guard let d = ch.value, d.count >= 13 else { return }
+        receivedInput(p)
         notifCount += 1
         let now = CFAbsoluteTimeGetCurrent()
         if notifCount == 1 || now - lastNotifLog > 5 {

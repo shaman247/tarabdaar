@@ -36,7 +36,7 @@ Gestures pass untouched; a twist held motionless re-centres over about a minute;
 
 ### Motion views
 
-The iPad's GYRO overlay and the Mac Setup tab's "Received motion (3D)" draw the same attitude trail at a fixed ±30° scale centred on the trail mean — the standing sensor-vs-transmission A/B; only yaw may differ (raw on the iPad, corrected on the wire). Each pairs with an **accelerometer twin** (raw `userAcceleration`, origin-centred, fixed ±0.5 g); the Mac's copy reads the PERF_STATE accel fields (±4 g wire scale, display only).
+The Mac Setup tab's **Received motion (3D)** draws the transmitted attitude trail at a fixed ±30° scale centred on its mean; yaw is the corrected wire value. **Received acceleration (3D)** shows raw `userAcceleration`, origin-centred at a fixed ±0.5 g scale, from the PERF_STATE accel fields (±4 g wire scale, display only). The iPad keeps no diagnostic trail buffers. The Mac Live tab also shows wrist tilt/rate/acceleration bars and arm/stick squares.
 
 ## Strike (iPad)
 
@@ -58,10 +58,9 @@ Joy-Con Accel can drive the same parameter through its ordinary binding.
 
 `MotionManager.strikeLevel` is `strikeScale01(magnitude)` through a fast-attack / ~150 ms-decay tracker (`StrikeLaw.envelopeTau`), evolved at the full 200 Hz so a tap between 60 Hz report ticks still registers at height. It streams as the PERF_STATE `strike` byte (0–255 ↔ 0…1) and is the measurement behind the `.strike`/`.acceleration` dimension pair (below).
 
-### The player can see the law
+### Strike graph
 
-- The toolbar's **strike scope** (`StrikeScopePane`) draws the envelope — the exact signal the bindings consume — as a scrolling ~4 s trace on the 0–127 scale, the current value at the right. Buckets sit on a TIME-QUANTIZED grid (a moving origin shimmers); decimation is per-pixel PEAK-HOLD, never a sample stride (a stride aliases the 200 Hz stream). It polls the unpublished history at 30 Hz, so motion samples never re-render the toolbar.
-- Colour is playing state: pale yellow at onset fading down the magma ramp to violet over the strike blend window (violet = fully handed over to Acceleration), dark gray while nothing plays, a lighter backdrop on note-active frames. The surface reports melody-note begins/ends into `MotionManager.noteBegan/noteEnded` (id-keyed, so drone presses never unbalance it); the window length arrives as the JOYCON_STATE `strikeWin` byte.
+The Mac Live tab's **STRIKE** graph polls the received source envelope through `ControlAxisEvaluator.strikeLevel`. It shows a six-second trace and the current value on the 0–127 display scale, before sustained-acceleration smoothing. The iPad captures the envelope at 200 Hz and streams it without drawing a local graph.
 
 ## Control dimensions (Mac)
 
@@ -97,7 +96,7 @@ Saved arm bindings already use `tilt1–3`. Legacy wrist bindings (`tilt4`, `wri
 
 Both ride the strike envelope byte; what separates them is **time since the note started** (`StrikeBlendWindow`, `ControlAxisEvaluator.evaluateStrikeBlend`). The pair's contribution to a bound target's sum (the swing law below) is (1−w)·swing<sub>Strike</sub> + w·swing<sub>Acceleration</sub>, w ramping linearly 0→1 over the window:
 
-- **`ctl_strike_window`** (Parameters tab, "Strike blend" group, 0.25–8 s, default 2) — a control-layer `.live` key intercepted in `applyParamToVoice`; rides presets; relayed to the iPad scope as the JOYCON_STATE `strikeWin` byte (50 ms units).
+- **`ctl_strike_window`** (Parameters tab, "Strike blend" group, 0.25–8 s, default 2) — a control-layer `.live` key intercepted in `applyParamToVoice`; rides presets; retained in the JOYCON_STATE `strikeWin` byte (50 ms units) for wire compatibility.
 - A side without a binding swings 0: "Expression 0 → +0.3 on Strike, unbound on Acceleration" lifts a hard hit by 0.3 (about +6 dB) at onset and lets the lift fade back into the resting expression over the window.
 - Windows are **per note** (wire touch id; retriggers re-anchor). While notes overlap the NEWEST sounding note's age drives the weight — a fresh tap always gets full Strike, even mid-legato; releasing it falls back to the survivor's own un-reset age; with nothing sounding the last onset keeps aging, so the pair rests on the Acceleration side.
 - Delivery is `LinkIngest.onStrike` + the note-edge `onTouchGate` — deliberately NOT `applyTiltAxis` (that would double-apply the pair) — with a 30 Hz Mac-side timer moving the weight between change-gated wire events while bindings exist. Guard: `StrikeBlendTests`.
@@ -108,7 +107,7 @@ Strike is the onset's voice, Acceleration the sustained gesture's: bind accent-f
 
 The Controls tab's **Acceleration smoothing** panel has independent **iPad smoothing (ms)** (`ctl_ipad_accel_smooth`) and **Joy-Con smoothing (ms)** (`ctl_jc_accel_smooth`) controls. Each is a Mac-owned low-pass time constant from 0–1000 ms, applied live and saved with the preset through the parameter registry. Zero (the default) bypasses this additional filter exactly. Both source envelopes retain their fast attack and 150 ms decay; these controls smooth the envelopes further rather than changing the sensor-side tracking.
 
-The iPad filter feeds only the sustained `.acceleration` binding curves; `.strike`, the strum trigger retain their source response. The Joy-Con filter feeds `.jcAccel` bindings. The evaluator advances both held-input filters on its 30 Hz timer while either acceleration source or Strike is bound, so a change-gated source cannot freeze a ramp. Link loss/panic and Joy-Con IMU reset clear the corresponding tail immediately. The iPad strike scope and Joy-Con diagnostic bars continue to show the source signals before this Mac-side smoothing.
+The iPad filter feeds only the sustained `.acceleration` binding curves; `.strike`, the strum trigger retain their source response. The Joy-Con filter feeds `.jcAccel` bindings. The evaluator advances both held-input filters on its 30 Hz timer while either acceleration source or Strike is bound, so a change-gated source cannot freeze a ramp. Link loss/panic and Joy-Con IMU reset clear the corresponding tail immediately. The Mac Live strike graph and Joy-Con diagnostic bars continue to show the source signals before this Mac-side smoothing.
 
 ### Finger Accel
 
@@ -122,7 +121,7 @@ The SIGNED second derivative of the newest sounding touch's pitch trajectory, so
 
 Rest AND a constant-rate meend read 0; accelerating upward reads +, braking an upward slide or accelerating downward reads −. No new wire traffic: the Mac derives it from the pitch in every PERF_STATE frame (`LinkIngest.onTouchPitch`/`onTouchGate` → `ControlAxisEvaluator.fingerEvaluate`; the Mac pads feed the same tracker through the local-pump ingest) plus a 30 Hz decay tick while bound (frames are change-gated, so a resting finger would otherwise freeze the value). A tracked-finger change or a > 2-semitone per-sample jump is a snap/steal: the chain reseeds without driving. A plain `applyTiltAxis` axis — no blend. Guard: `FingerAccelTests`.
 
-The iPad toolbar shows a matching **finger-accel scope** beside the strike scope — bipolar, centreline = rest, green trace while a note sounds — from its own display-only instance of the same law (`FingerAccelSampler`, 120 Hz off-main from `OutboundPlayState`). The data's source side draws its own readout; the Mac's evaluation stays the control truth.
+The Mac Live tab's **FINGER ACCEL** graph uses a display-only `FingerAccelTracker` sampled at 60 Hz from `AppController.currentTouches()`. It follows the newest wire or local touch, decays at rest and works without a binding. Its trace is bipolar with a zero centreline. The iPad runs no display-only finger-acceleration sampler.
 
 ## Tilt calibration (Mac)
 
@@ -138,7 +137,7 @@ The iPad toolbar shows a matching **finger-accel scope** beside the strike scope
 | Persistence | `tarabdaar.armCal.v2`; absent calibration requires a new capture | `tarabdaar.wristCal.v1` |
 | Panel | "Arm calibration" — no Joy-Con needed | "Wrist calibration" — appears once the Joy-Con's motion fusion is live (Joy-Con 2 over BLE, or a controller with GC motion) |
 
-The two captures are independent. Joy-Con **dpad-up** advances and **dpad-down** steps back whichever capture is running ("Redo previous": clears the current partial capture and the previous phase's samples; everything earlier stands); **ZL re-zeroes BOTH rest poses** without re-fitting. The iPad's toolbar arm square shows the SOLVED arm axes while a calibration is driving (JOYCON_STATE `arm1–3`, flag `armLive`) and its own raw attitude otherwise; the wrist tilt bars likewise show the solved wrist axes once calibrated (and their d/dt bars differentiate whichever tilt is displayed).
+The two captures are independent. Joy-Con **dpad-up** advances and **dpad-down** steps back whichever capture is running ("Redo previous": clears the current partial capture and the previous phase's samples; everything earlier stands); **ZL re-zeroes BOTH rest poses** without re-fitting. The Mac Live arm square shows the SOLVED arm axes while a calibration is driving and the received raw attitude otherwise; the wrist tilt bars likewise show the solved wrist axes once calibrated (and their d/dt bars differentiate whichever tilt is displayed).
 
 Each calibrated dimension has a **Reverse** button in the calibration panel, including the inferred wrist rotation. It reverses that dimension immediately and saves the result with the calibration, preserving the rest pose and physical ranges. The other dimensions stay unchanged; pressing the button again restores the original direction. Reversal is available outside a running capture and also applies to the arm fallback calibration.
 
@@ -263,11 +262,7 @@ bound, because the estimator needs time steps between change-gated wire
 frames (and after the last finger lifts). Nothing is bound = nothing is
 tracked. Guard: `TouchSizeTests`.
 
-The iPad shows it on the **per-touch indicator ring**: the ring is sized
-by the raw radius with the points printed beside it, and the estimated
-0…1 value is drawn as an arc just outside the ring — from its own
-display-only `TouchSizeTracker`, no extra wire traffic (see
-[Fret Pad](fret-pad.md)).
+The iPad sends the radius without drawing a per-touch indicator or running a display-only estimator.
 
 ## Vibrato
 

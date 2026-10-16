@@ -65,7 +65,7 @@ public struct VoronoiCell {
 
 /// Map a frequency ratio (1..2 spans one octave) to a perceptually
 /// uniform hue using OKLCH. The hue wraps at the octave so `1/1` and
-/// `2/1` both land on red, the tritone (~√2) on cyan. `lightness` is the
+/// `2/1` both land on red (30°), the tritone (~√2) on cyan (210°). `lightness` is the
 /// OKLab L axis (0…1); `chroma` is the radius from neutral (values above
 /// ~0.2 drift out of sRGB gamut at some hues — clamped on conversion).
 public func pitchColor(forRatio ratio: Double,
@@ -73,7 +73,7 @@ public func pitchColor(forRatio ratio: Double,
                        chroma C: Double) -> Color {
     let phase = (log2(ratio).truncatingRemainder(dividingBy: 1.0) + 1.0)
         .truncatingRemainder(dividingBy: 1.0)
-    let hueDegrees = phase * 360.0
+    let hueDegrees = (30.0 + phase * 360.0).truncatingRemainder(dividingBy: 360.0)
     return oklchToColor(L: L, C: C, hueDegrees: hueDegrees)
 }
 

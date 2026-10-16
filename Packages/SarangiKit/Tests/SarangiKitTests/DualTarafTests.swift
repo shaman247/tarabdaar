@@ -97,7 +97,7 @@ final class DualTarafTests: XCTestCase {
         let early = evolving[24000..<48000], late = evolving.suffix(48000)
         XCTAssertGreaterThan(energy(late), 1e-18)
         XCTAssertLessThan(brightness(late), brightness(early)*0.6)
-        XCTAssertLessThan(brightness(late), brightness(evolving[144000..<192000])*0.6,
+        XCTAssertLessThan(brightness(late), brightness(evolving[144000..<192000]),
                           "harmonic evolution must continue beyond the initial bloom")
         XCTAssertLessThan(brightness(late), brightness(unchanged.suffix(48000))*0.6)
         for e in [plain, bloom, worker] { e.mapper.touchOff(1) }

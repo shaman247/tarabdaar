@@ -8,11 +8,11 @@ import Foundation
 // offline (`tools/fretpad_fit.py`). Toggled from the Fret Pad toolbar's Rec
 // button; one JSONL line per stroke:
 //
-//   {"v":5, "date":…, "offset":<onset snapOffsetLog>, "ctx":{frets, snap,
-//    extent, width, height, assistParams}, "events":[[t,x,y,u,o,tick,region1U,…,region9U],…],
+//   {"v":7, "date":…, "offset":<onset snapOffsetLog>, "ctx":{frets, snap,
+//    extent, width, height, assistParams}, "events":[[t,x,y,u,o,tick,region1U,…,region15U],…],
 //    "endT":t}
 //
-// Version 5 retains nine region pitches and blends corrections across region boundaries.
+// Version 7 records fifteen independent equal-height rows with blended boundary corrections.
 //
 //   t    seconds since the stroke began (CACurrentMediaTime-based)
 //   x,y  surface-local px (same space as the recorded fret extents)
@@ -24,12 +24,12 @@ import Foundation
 //        sample (parity check only — replays regenerate their own ticks)
 //
 // Files land in `Application Support/Tarabdaar/FretRecordings/` as
-// `fret-strokes-<yyyyMMdd-HHmmss>.jsonl` (one file per Rec session, appended
-// per stroke). Mac-side only for now; the class is platform-neutral.
-public final class FretGestureRecorder: ObservableObject {
+// `fret-strokes-<yyyyMMdd-HHmmss>-<UUID>.jsonl` (one file per Rec session, appended
+// per stroke). The iPad captures strokes in memory; only the Mac writes files.
+public class FretGestureCapture: ObservableObject {
     @Published public private(set) var isRecording = false
-    /// Strokes written in the current session (toolbar feedback).
-    @Published public private(set) var strokeCount = 0
+    /// Completed fitting records, forwarded by the iPad without filesystem access.
+    public var onStroke: ((Data) -> Void)?
 
     /// Per-stroke geometry + settings snapshot, enough to replay offline.
     public struct Context: Codable {
@@ -76,7 +76,7 @@ public final class FretGestureRecorder: ObservableObject {
         }
     }
 
-    private struct StrokeRecord: Codable {
+    struct StrokeRecord: Codable {
         var v: Int
         var date: String
         var offset: Double
@@ -97,55 +97,15 @@ public final class FretGestureRecorder: ObservableObject {
     }
 
     private var active: [Int: ActiveStroke] = [:]
-    private var handle: FileHandle?
-
-    /// Directory the session files land in. On the Mac: Application Support.
-    /// On the iPad: the app's **Documents** folder (user-visible via the
-    /// Files app and Finder's device browser — `UIFileSharingEnabled` — so
-    /// recordings can be copied to the Mac for fitting).
-    public static var dir: URL {
-        #if os(iOS)
-        let base = FileManager.default
-            .urls(for: .documentDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("FretRecordings", isDirectory: true)
-        #else
-        let appSupport = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return appSupport
-            .appendingPathComponent("Tarabdaar", isDirectory: true)
-            .appendingPathComponent("FretRecordings", isDirectory: true)
-        #endif
-    }
-
     public init() {}
 
-    /// Toggle recording. Turning it on opens a fresh session file; turning it
-    /// off closes it (in-flight strokes are dropped — they'd be partial).
     public func setRecording(_ on: Bool) {
-        guard on != isRecording else { return }
-        if on {
-            let fm = FileManager.default
-            try? fm.createDirectory(at: Self.dir, withIntermediateDirectories: true)
-            let stamp = Self.fileStamp.string(from: Date())
-            let url = Self.dir.appendingPathComponent("fret-strokes-\(stamp).jsonl")
-            fm.createFile(atPath: url.path, contents: nil)
-            handle = try? FileHandle(forWritingTo: url)
-            if handle == nil {
-                NSLog("Tarabdaar: FretGestureRecorder could not open \(url.path)")
-                return
-            }
-            NSLog("Tarabdaar: recording Fret Pad strokes to \(url.path)")
-            strokeCount = 0
-            isRecording = true
-        } else {
-            isRecording = false
-            active.removeAll()
-            try? handle?.close()
-            handle = nil
-        }
+        guard isRecording != on else { return }
+        isRecording = on
+        active.removeAll()
     }
+
+    func completed(_ data: Data) { onStroke?(data) }
 
     /// Register a play stroke at note-on.
     public func begin(touchId: Int, context: Context, offset: Double,
@@ -184,25 +144,17 @@ public final class FretGestureRecorder: ObservableObject {
         active[touchId] = s
     }
 
-    /// Finish the stroke and append it to the session file.
+    /// Finish the stroke and forward its complete fitting record.
     public func end(touchId: Int, time: TimeInterval) {
         guard var s = active.removeValue(forKey: touchId) else { return }
-        guard isRecording, let handle else { return }
+        guard isRecording else { return }
         s.events = s.events.map { $0.map { ($0 * 10000).rounded() / 10000 } }
-        let record = StrokeRecord(v: 5, date: Self.dateStamp.string(from: Date()),
+        let record = StrokeRecord(v: 7, date: Self.dateStamp.string(from: Date()),
                                   offset: s.offset, ctx: s.ctx,
                                   events: s.events, endT: time - s.start)
         guard let data = try? JSONEncoder().encode(record) else { return }
-        handle.write(data)
-        handle.write(Data([0x0A]))
-        strokeCount += 1
+        completed(data)
     }
-
-    private static let fileStamp: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyyMMdd-HHmmss"
-        return f
-    }()
 
     private static let dateStamp: DateFormatter = {
         let f = DateFormatter()
@@ -210,3 +162,87 @@ public final class FretGestureRecorder: ObservableObject {
         return f
     }()
 }
+
+#if os(macOS)
+/// The Mac owns the recording session and stores both local and iPad strokes.
+public final class FretGestureRecorder: FretGestureCapture {
+    @Published public private(set) var strokeCount = 0
+    @Published public private(set) var isFinishing = false
+    private var handle: FileHandle?
+    private let directory: URL
+
+    public static var dir: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory,
+                                           in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return base.appendingPathComponent("Tarabdaar/FretRecordings", isDirectory: true)
+    }
+
+    public init(directory: URL = FretGestureRecorder.dir) {
+        self.directory = directory
+        super.init()
+    }
+
+    public override func setRecording(_ on: Bool) {
+        guard isRecording != on, !isFinishing else { return }
+        if on {
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let stamp = Self.fileStamp.string(from: Date())
+                let url = directory.appendingPathComponent("fret-strokes-\(stamp)-\(UUID().uuidString).jsonl")
+                guard FileManager.default.createFile(atPath: url.path, contents: nil) else { return }
+                handle = try FileHandle(forWritingTo: url)
+                strokeCount = 0
+                super.setRecording(true)
+            } catch {
+                NSLog("Tarabdaar: cannot open fret recording: %@", String(describing: error))
+            }
+        } else {
+            stop(waitForRemote: false)
+        }
+    }
+
+    public func stop(waitForRemote: Bool) {
+        guard isRecording else { return }
+        isFinishing = waitForRemote
+        super.setRecording(false)
+        if !waitForRemote { finish() }
+    }
+
+    public func finish() {
+        try? handle?.close()
+        handle = nil
+        isFinishing = false
+    }
+
+    /// Import only complete fitting records; transport fragments never become JSONL lines.
+    public func appendRemote(_ data: Data) {
+        guard isRecording || isFinishing,
+              let record = try? JSONDecoder().decode(StrokeRecord.self, from: data),
+              record.v == 7, !record.events.isEmpty,
+              record.events.allSatisfy({ $0.count == 6 + FretRegion.allCases.count }),
+              let canonical = try? JSONEncoder().encode(record) else { return }
+        completed(canonical)
+    }
+
+    override func completed(_ data: Data) {
+        guard isRecording || isFinishing, let handle else { return }
+        do {
+            try handle.write(contentsOf: data + Data([0x0A]))
+            strokeCount += 1
+        } catch {
+            NSLog("Tarabdaar: cannot write fret recording: %@", String(describing: error))
+            finish()
+            setRecording(false)
+        }
+    }
+
+    deinit { try? handle?.close() }
+
+    private static let fileStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        return f
+    }()
+}
+#endif

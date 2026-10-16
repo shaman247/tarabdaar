@@ -11,7 +11,9 @@ final class PresetCodingTests: XCTestCase {
         p.savedAt = "2026-07-24T12:00:00Z"
         p.instrument = Presets.state(.sarangiPilu)
         p.stringOverrides = ["bow_body_q": 33.0, "bow_jt_apex": 1.4e-5, "bow_jt_sav": 1]
-        p.paramValues = ["bow_expr": 0.4, "bow_vib_cents": 12.0, "bow_jt_sav": 1,
+        p.paramValues = ["output_gain_db": 6, "bow_expr": 0.4, "bow_vib_cents": 12.0, "bow_jt_sav": 1,
+                         "output_limiter_ceiling_db": -3, "output_limiter_lookahead_ms": 8,
+                         "output_limiter_release_ms": 240,
                          "bow_expr_map_5": 0.17, "bow_press_map_10": 0.1,
                          "bow_pos_map_0": 0.4]
         p.composites = CompositeParam.defaults()
@@ -157,8 +159,8 @@ final class PresetCodingTests: XCTestCase {
         })
         p.playingSurface = PresetPlayingSurface(scale: scale,
             arrangement: FretArrangement(segments: [
-                FretSegment(degreeIndex: 1, row: .middle)
-            ], ghostExtentOctaves: 1.25), snapPixels: 19, primeLimit: 7)
+                FretSegment(degreeIndex: 1, row: .row5)
+            ], ghostExtentOctaves: 1.25), snapPixels: 19)
         return p
     }
 
@@ -171,11 +173,19 @@ final class PresetCodingTests: XCTestCase {
         XCTAssertEqual(b.instrument?.strings, a.instrument?.strings)
         XCTAssertEqual(b.instrument?.droneStringIds, a.instrument?.droneStringIds)
         XCTAssertEqual(b.instrument?.strumStringIds, a.instrument?.strumStringIds)
-        XCTAssertEqual(b.instrument?.follower, a.instrument?.follower)
         XCTAssertEqual(b.fxCurves, [:]) // Explicit flat rack, not an omitted section.
         XCTAssertEqual(b.playingSurface?.scalePoints, a.playingSurface?.scalePoints)
-        XCTAssertEqual(b.playingSurface?.fretSegments.first?.row, .middle)
+        XCTAssertEqual(b.playingSurface?.fretSegments.first?.row, .row5)
         XCTAssertEqual(b.resolvedScale(current: .defaultJI)?.points, a.playingSurface?.scalePoints)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var snapshot = try XCTUnwrap(legacy["snapshot"] as? [String: Any])
+        var surface = try XCTUnwrap(snapshot["playingSurface"] as? [String: Any])
+        XCTAssertNil(surface["primeLimit"])
+        surface["primeLimit"] = 7
+        snapshot["playingSurface"] = surface
+        legacy["snapshot"] = snapshot
+        let migrated = try TarabdaarPreset.decode(JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertEqual(try migrated.encoded(), data, "legacy prime limits are ignored and omitted on save")
         struct OldReader: Decodable {
             let version: Int
             let name: String
@@ -187,6 +197,33 @@ final class PresetCodingTests: XCTestCase {
         XCTAssertNil(old.instrument)
         XCTAssertNil(old.paramValues)
         XCTAssertNil(old.tiltMapping)
+    }
+
+    /// Legacy and complete presets discard retired values and bindings while preserving the rig.
+    func testRetiredSettingsMigrate() throws {
+        for version in [1, 2] {
+            var expected = completeSnapshot()
+            expected.version = version
+            expected.stringOverrides = ["bow_body_q": 33]
+            var old = expected
+            old.version = 1 // Encode the old payload without current snapshot validation.
+            for (key, value) in [("bow_lim_thresh", 0.8), ("bow_lim_rel_ms", 150.0), ("ctl_taraf_adapt", 0.8)] {
+                old.paramValues?[key] = value
+                old.stringOverrides?[key] = value
+                old.tiltMapping?.mappings[MapTarget(paramKey: key).storageKey] = ParameterMapping(
+                    bindings: [DimensionBinding(dimension: .tilt2, rangeMin: 0.1, rangeMax: 1)])
+                old.composites?[0].members.append(CompositeMember(key: key, lo: 0.1, hi: 1))
+            }
+            let payload = try JSONSerialization.jsonObject(with: old.encoded())
+            let raw: Any = version == 1 ? payload : ["version": 2, "name": old.name, "snapshot": payload]
+            let migrated = try TarabdaarPreset.decode(JSONSerialization.data(withJSONObject: raw))
+            XCTAssertEqual(try migrated.encoded(), try expected.encoded())
+        }
+        for key in ["bow_lim_thresh", "bow_lim_rel_ms", "ctl_taraf_adapt"] {
+            XCTAssertNil(ParamRegistry.spec(key))
+            XCTAssertFalse(ParamRegistry.appliesInPlace(key))
+            XCTAssertNil(MapTarget.from(storageKey: MapTarget(paramKey: key).storageKey))
+        }
     }
 
     /// Corrupt, downgraded and unsupported snapshots fail before any live state can be applied.

@@ -8,14 +8,13 @@ extension BowEngine {
 
     /// One modal-jawari taraf row as the Mac Scope tab reads it.
     public struct ScopeRow: Sendable {
-        /// The row's CURRENT fundamental (the follower's live retune).
+        /// The row's fundamental frequency.
         public var f0Hz: Double
         /// Radiated peak envelope in display units (voice-bus units × output
         /// gain), comparable with the bus meter.
         public var level: Double
         /// Frozen under the quiescence gate (reads silent).
         public var asleep: Bool
-        public var isFollower: Bool
         /// On the chromatic bridge.
         public var isChromatic: Bool
         /// Per-mode MODAL velocity envelopes |p_k|, modes 1…`scopeModeCount`
@@ -65,7 +64,6 @@ extension BowEngine {
         let g = outGain
         return (0..<min(n, got)).map { s in
             ScopeRow(f0Hz: f0[s], level: lv[s] * g, asleep: slp[s] != 0,
-                     isFollower: s == jtTrackRowIdx,
                      isChromatic: s < jtRowChromatic.count && jtRowChromatic[s],
                      modes: Array(modes[(s * K)..<((s + 1) * K)]))
         }

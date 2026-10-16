@@ -48,16 +48,13 @@ public enum Config {
     /// match the iPad's relative size and position. ≈ 1366 / 990 ≈ 1.38.
     public static let iPadSurfaceAspect: CGFloat =
         iPadScreenSize.width / (iPadScreenSize.height - iPadToolbarHeight)
-    /// The Fret Pad's playable **band**: a full-width strip spanning this
-    /// fraction of the surface height, its top at `fretPadBandTopFraction`
-    /// (`fretPadBandRect`). Both platforms draw the full surface — the Mac
-    /// tab letterboxes to `iPadSurfaceAspect` and mirrors the iPad exactly:
-    /// the band and the surrounding space, including the taraf pluck strip.
-    public static let fretPadHeightFraction: CGFloat = 0.5
-    /// The band's top edge as a fraction of the surface height. 0.25 is
-    /// centred, 0.5 flush with the bottom; 0.3 sits it a little below
-    /// centre (dead space 0.3 above, 0.2 below).
-    public static let fretPadBandTopFraction: CGFloat = 0.3
+    /// Preferred height of the full-width playable band (`fretPadBandRect`).
+    /// Both platforms share its geometry; the Mac letterboxes to
+    /// `iPadSurfaceAspect` and draws the taraf strip in the space above.
+    public static let fretPadHeightFraction: CGFloat = 0.7
+    /// Preferred top edge; short surfaces reserve at least the taraf strip's height.
+    public static let fretPadBandTopFraction: CGFloat = 0.1
+    public static let tarafPluckStripHeight: CGFloat = 64
     /// Whether the chord bar (the strip under the band) is laid out at all.
     /// Off: `chordBarCells` resolves to no cells, so neither surface draws
     /// it nor hit-tests it. Hidden for now.

@@ -287,10 +287,12 @@ final class TarabSetTests: XCTestCase {
 
     // MARK: - Registry
 
-    /// Chromatic registry defaults match the engine, with matching bank level ranges and timing.
+    /// Chromatic table defaults match the engine, with matching bank level ranges and timing.
     func testChromaticBridgeDefaultsAreTheEngineTruth() throws {
         let bp = try bp()
-        let specs = ParamRegistry.all.filter { $0.key.hasPrefix("bow_jtc_") }
+        let specs = ParamRegistry.all.filter {
+            $0.key.hasPrefix("bow_jtc_") && !$0.key.hasPrefix("bow_jtc_comp_")
+        }
         XCTAssertEqual(Set(specs.map(\.key)),
                        Set(BowTables.chromaticBridgeDefaults.keys))
         for s in specs {

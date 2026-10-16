@@ -8,7 +8,6 @@ public struct TarafBank: Equatable, Sendable {
         public let frequency: Float
         public let flags: UInt8
         public var isDual: Bool { flags & 1 != 0 }
-        public var isFollower: Bool { flags & 2 != 0 }
         public init(id: UInt8, frequency: Float, flags: UInt8 = 0) {
             self.id = id; self.frequency = frequency; self.flags = flags
         }
@@ -48,7 +47,7 @@ public struct TarafStrumGesture {
 
 /// Direct raga plucks above the fret band; melody touches remain owned by the pad below.
 public struct TarafPluckStrip: View {
-    public static let height: CGFloat = 64
+    public static let height = Config.tarafPluckStripHeight
     public let bank: TarafBank
     public let scale: PitchScale
     public let pluck: (UInt32, UInt8) -> Void
@@ -62,7 +61,7 @@ public struct TarafPluckStrip: View {
         self.bank = bank; self.scale = scale; self.pluck = pluck
     }
     public var body: some View {
-        let rows = bank.orderedRows.filter { $0.isDual && !$0.isFollower }
+        let rows = bank.orderedRows.filter(\.isDual)
         if !rows.isEmpty {
             GeometryReader { geometry in
                 HStack(spacing: 0) {

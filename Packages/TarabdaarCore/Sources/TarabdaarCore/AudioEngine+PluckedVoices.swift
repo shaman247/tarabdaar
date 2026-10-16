@@ -23,6 +23,8 @@ extension AudioEngine {
     /// False only when the fitted artifact is missing.
     @discardableResult
     private func setPluckedVoiceEnabled(_ v: PluckedVoice, _ on: Bool) -> Bool {
+        graphLock.lock()
+        defer { graphLock.unlock() }
         if on && v.source == nil {
             guard v.artifactLoads else {
                 NSLog("Tarabdaar: \(v.artifactFile) missing from the SarangiKit bundle")
@@ -206,6 +208,8 @@ extension AudioEngine {
     /// Which voice the drone buttons drive. Switching releases everything
     /// held so the buttons start clean in the new mode.
     public func setDroneVoiceMode(_ mode: DroneVoiceMode) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         lock.lock()
         guard mode != droneVoiceModeStorage else { lock.unlock(); return }
         let oldMode = droneVoiceModeStorage
@@ -334,6 +338,8 @@ extension AudioEngine {
         guard period >= 0.1 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + period) { [weak self] in
             guard let self else { return }
+            self.touchRoutingLock.lock()
+            defer { self.touchRoutingLock.unlock() }
             self.lock.lock()
             let live = self.droneCycleGen.indices.contains(index)
                 && self.droneCycleGen[index] == gen
@@ -362,6 +368,8 @@ extension AudioEngine {
     /// Update which strings the drone buttons pluck (mapping only — no
     /// rebuild). Any held button is released first.
     public func setDroneMappedFreqs(_ freqs: [Double?], chromatic: [Bool?] = []) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         lock.lock()
         let heldOld = droneHeld.indices
             .filter { droneHeld[$0] }
@@ -392,6 +400,8 @@ extension AudioEngine {
 
     /// Sequenced callers disable the same-slot re-pluck cycle.
     public func setDronePressed(_ index: Int, _ pressed: Bool, repeating: Bool) {
+        touchRoutingLock.lock()
+        defer { touchRoutingLock.unlock() }
         lock.lock()
         guard droneHeld.indices.contains(index),
               let hz = droneFreqs[index] else { lock.unlock(); return }

@@ -2,19 +2,13 @@
 
 Sound design lives on the Mac (TarabdaarMac). The iPad is a controller — it streams TLP touch/tilt frames ([MIDI & Audio](midi-and-audio.md)) and produces no audio. The Mac renders three voices from the one [Fret Pad](fret-pad.md): the sarangi **String voice** (the default played voice — this page), the [Tanpura](tanpura-voice.md) (default drone voice, optional main instrument) and the [Sitar](sitar-voice.md) (main-instrument only). The String voice is `SarangiKit.BowEngine` driving the `CBowKernel` C friction kernel. Its C/Swift signal path owns the bowed gut strings, physical raga and quadratic chromatic sympathetic banks, formula body, radiation and room.
 
-The Strings tab's **Adaptation** amount (`ctl_taraf_adapt`, default 0) applies
-live per-row radiation attenuation from performance pitch history. It is
-bounded at unity, slews over 250 ms, and leaves saved bank gains and bridge
-feedback intact. Seeding, windows and the gain law are described in
-[Sarangi — Performance pitch profile](sarangi.md#performance-pitch-profile-and-adaptive-gain).
-
 ## Signal path
 
 ```
-TLP touches ► BowControlMapper ► StringVoiceSource (BowEngine + CBowKernel, 96 kHz → 48 kHz) ► symGain ► mainMixerNode ► out
+TLP touches ► BowControlMapper ► StringVoiceSource (BowEngine + CBowKernel, 96 kHz → 48 kHz) ► symGain ► final gain + limiter ► mainMixerNode ► out
 ```
 
-`StringVoiceSource` (`Packages/TarabdaarCore/.../StringVoiceSource.swift`) wraps the `BowEngine` as a 48 kHz `AVAudioSourceNode` connected directly to `symGain → mainMixerNode`. The kernel runs at 96 kHz and half-band-decimates to 48 kHz; the mixer converts to the engine rate. The String engine owns its body and room; its four-point [FX rack](fx.md) also runs inside `BowEngine`. The tanpura and sitar are sibling source nodes; the sitar's output and the tanpura's `tp_taraf` tap charge the String kernel's jt web through its inject ring. Full physics: [Sarangi](sarangi.md).
+`StringVoiceSource` (`Packages/TarabdaarCore/.../StringVoiceSource.swift`) wraps the `BowEngine` as a 48 kHz `AVAudioSourceNode` connected directly to `symGain → final gain + limiter → mainMixerNode`. The kernel runs at 96 kHz and half-band-decimates to 48 kHz; the mixer converts to the engine rate. The String engine owns its body and room; its four-point [FX rack](fx.md) also runs inside `BowEngine`. The tanpura and sitar are sibling source nodes; the sitar's output and the tanpura's `tp_taraf` tap charge the String kernel's jt web through its inject ring. Full physics: [Sarangi](sarangi.md).
 
 ## The played voice — the String kernel
 
@@ -78,7 +72,7 @@ Modal resonators derived from physical scalars (no FIR/fingerprint artifacts): n
 
 ### Stereo
 
-ONE width law: `bow_st_width` (0.2) — the whole instrument (voice, taraf wash, drones, bow noise) heard from two observation points via a diffuse-field difference bank per bus. Lows stay identical in L/R, the upper spectrum decorrelates like a real instrument's, zero net lean, mono fold-down bit-identical, plus the width-decorrelated room (`Reverb.processMonoStereo`). It is the WHOLE stereo law — every source stays centred; the legacy per-source pans are gone. Details: [Sarangi](sarangi.md).
+ONE width law: `bow_st_width` (0.2) — the whole instrument (voice, taraf wash, drones, bow noise) heard from two observation points via a diffuse-field difference bank per bus. Lows stay identical in L/R, the upper spectrum decorrelates like a real instrument's, zero net lean, mono fold-down bit-identical with chromatic compression and stereo-sensitive FX bypassed, plus the width-decorrelated room (`Reverb.processMonoStereo`). It is the WHOLE stereo law — every source stays centred; the legacy per-source pans are gone. Details: [Sarangi](sarangi.md).
 
 ## Editing the sound
 
@@ -147,7 +141,7 @@ reproducibility: [live research port](../tools/live_research_port/README.md).
 
 ## The factory preset
 
-One factory preset ships — **"Default (Sarangi Live) — Pilu"** (`SarangiStore.loadSarangiLiveDefault` + `StringParamStore.resetToDefault`), also the fresh-install default: untouched artifact physics + the generated seed bank, replaced by the Fret Pad scale on the first push. The whole `InstrumentState` persists to UserDefaults (`tarabdaar.sarangiState.v8`).
+The **"Default (Sarangi Live) — Pilu"** factory action restores untouched artifact physics, default controls and the current Strings **Default** setup. Fresh installs use that Strings setup against the active Fret Pad scale; the bundled bank captures 12 raga and 16 chromatic rows. The whole `InstrumentState` persists to UserDefaults (`tarabdaar.sarangiState.v8`).
 
 ## Saving and loading presets
 
@@ -155,11 +149,16 @@ UserDefaults persists the sarangi `InstrumentState` (`tarabdaar.sarangiState.v8`
 
 Launch reads the current parameter, EQ-curve and bow-axis-curve stores. Missing stores use factory defaults; superseded defaults stores and retired scalar curve controls are not imported. File loading retains the version-1 preset compatibility below, including split parameter sections, scalar curves and the older strum-threshold units.
 
-They save and load as **one `TarabdaarPreset` document** via `AppController.capturePreset(name:)` / `applyPreset(_:)`. New saves are complete version-2 snapshots: both string banks and their identities, follower and drone/strum assignments, every resolved parameter rest (including defaults), all EQ and bow-axis curves, composites, controller bindings, voice routing, drone sequence, full scale points/labels, tonic, fret positions/extents, octave display range, snap distance and prime limit. Hybrid rests remain performance values; build-time vibrato capacity is never saved as an active depth. Empty EQ and composite sections are explicit, so loading a flat/empty setup clears the previous rig's values. The snapshot records the writing app's version/build. Device connections and calibrations, held notes, live sensor positions and temporary performance octave shifts remain session/device state.
+They save and load as **one `TarabdaarPreset` document** via `AppController.capturePreset(name:)` / `applyPreset(_:)`. New saves are complete version-2 snapshots: both string banks and their identities, drone/strum assignments, every resolved parameter rest (including defaults), all EQ and bow-axis curves, composites, controller bindings, voice routing, drone sequence, full scale points/labels, tonic, fret positions/extents, octave display range and snap distance. Hybrid rests remain performance values; build-time vibrato capacity is never saved as an active depth. Empty EQ and composite sections are explicit, so loading a flat/empty setup clears the previous rig's values. The snapshot records the writing app's version/build. Device connections and calibrations, held notes, live sensor positions and temporary performance octave shifts remain session/device state.
 
-Version 2 stores its required sections inside `snapshot`. A legacy flat-format reader sees no applicable sections rather than loading half a rig. The current reader rejects unsupported versions, incomplete snapshots, missing modern string-bank tags, unknown active controller targets and unsupported snapshot parameter keys before changing live state. Legacy version-1 full and partial files remain readable; missing sections in those files still leave existing state alone. Loading applies the saved scale and tonic to the shared `Tuning` before installing the string bank, and discards pending gesture rebuilds from the previous rig. The bank therefore retains its row identities through the subsequent scale sync.
+Version 2 stores its required sections inside `snapshot`. A legacy flat-format reader sees no applicable sections rather than loading half a rig. The current reader rejects unsupported versions, incomplete snapshots, missing modern string-bank tags, unknown active controller targets and unsupported snapshot parameter keys before changing live state. Retired prime-limit fields in older playing surfaces are ignored and omitted on save. The retired output-limiter keys (`bow_lim_thresh`, `bow_lim_rel_ms`) and pitch-history adaptation key (`ctl_taraf_adapt`) are removed from values, physics overrides, direct bindings and composite members before snapshot validation; unrelated unsupported keys still fail. Saved controller stores also prune retired targets and members at launch. Legacy version-1 full and partial files remain readable; missing sections in those files still leave existing state alone. Loading applies the saved scale and tonic to the shared `Tuning` before installing the string bank, and discards pending gesture rebuilds from the previous rig. The bank therefore retains its row identities through the subsequent scale sync.
 
 **No file panels.** Saved presets live in the app-managed **library** (`PresetLibrary`, `Application Support/Tarabdaar/Presets/`, one `.tarabdaar` file per preset named after it). **Save preset…** asks for a name. The library validates the encoded document, preserves the previous bytes under `Presets/Backups/` on overwrite, then replaces the preset atomically. A failed encode/validation does not overwrite the existing file. Every saved preset appears in **Load preset**; backups stay outside that menu. **Delete preset** removes the selected library entry. The menu refreshes on save/delete and toolbar appearance, so copying a `.tarabdaar` file into the folder imports it. Guards: `PresetCodingTests`.
+
+The Strings tab also has an independent [Strings preset library](sarangi.md#the-strings-tab-2-and-the-tarab-model).
+It saves the tab's editable configuration without changing the playing scale,
+tonic, other voice parameters or control bindings when loaded. Its **Default**
+snapshot seeds missing Strings settings on launch; existing autosaves take precedence.
 
 **Traps:**
 
@@ -172,7 +171,7 @@ The Joy-Con drone sequence uses three slots, each mapped to **one sympathetic st
 
 ## Levels
 
-Calibration is inside the fitted preset: `bow_live_trim` / `bow_rev_*` set the output level, and **`bow_gain`** (0…4, def 1 = bit-exact) multiplies the trim as the PERFORMANCE master volume of the whole radiated instrument — the knob that moves total loudness where expression can't, because the taraf keeps ringing. Its maximum is about +12 dB relative to the calibrated level, before the safety limiter. The expression command passes through the user-editable Expression transform
+Calibration is inside the fitted preset: `bow_live_trim` / `bow_rev_*` set the output level, and **`bow_gain`** (0…4, def 1 = bit-exact) multiplies the trim as the PERFORMANCE master volume of the whole radiated instrument — the knob that moves total loudness where expression can't, because the taraf keeps ringing. Its maximum is about +12 dB relative to the calibrated level. The expression command passes through the user-editable Expression transform
 before it controls the physical bow. Pressure and position have matching curves,
 initially identity. The Transforms tab edits freely placed input/output points
 with bounded linear interpolation; Identity restores raw response and Factory
@@ -192,16 +191,41 @@ note-dependent vibration regimes. At factory pressure/position, all-note RMS
 error is 0.54 dB. Measurement procedure, plots and limitations:
 expression calibration (local research: `tools/experiments/expression_response/README.md`).
 
-**The safety limiter.** Loud peaks are backstopped inside the kernel, and a **linked-stereo output safety limiter** rides the very end of both post-chains (after the global FX insert): instant-attack peak detector, `bow_lim_rel_ms` release, hard clamp at min(1, 1.25 × ceiling) for the attack samples. With its gain at unity and the envelope below `bow_lim_thresh` (default 0.8), it passes samples unchanged (`BowEngine.applyLimiter`). Gain recovery continues after an overload.
+**Final output.** `output_gain_db` (−60…+24 dB, default 0) applies after the complete String, Tanpura and Sitar outputs are summed, including drones, effects and release tails. The final audio unit ramps gain changes over 20 ms, then applies linked stereo peak protection. Its render callback uses preallocated storage and never waits for a control writer or meter reader. The Mac’s persistent output strip and Parameters → Output · Final edit the same registry value; presets, composites and bindings use the ordinary parameter path. Older presets without the key restore 0 dB. The existing `bow_gain` remains specific to String + taraf.
 
-**Kin notes and `bow_jt_norm`.** The notes that get near the ceiling are the KIN notes — a hard-struck unison Sa/Pa adds the played voice and the jt ring coherently (~+4 dB peak over a non-kin degree, more under high expression). The musical fix is **`bow_jt_norm`** (t60-response normalization — the long-ring Sa/Pa anchor rows charge hotter than the shortened crowd; **0.6 measures near-even across degrees**, 1.0 overshoots and the crowd wins); the limiter is the safety net behind it. For the ACCUMULATION side — the anchors remembering a whole phrase and blooming on the next kin note — the voice-relative cap below is the lever.
+The output-meter tap shares the mixer's explicitly connected 48 kHz output format.
+That connection is established before the tap, so the device consumes samples at
+the declared rate. See [the audio graph contract](midi-and-audio.md#audio-graph-mac-audioengineswift)
+for startup ordering and sample-rate diagnostics.
+
+The output strip shows independent L/R sample peaks after gain and limiting, before device volume. Bars hold for 600 ms, then fall at 24 dB/s; numerical maxima and **CLIP** latch until **Reset meters**. Any output sample at or above absolute amplitude 1 (0 dBFS), or invalid source sample, latches CLIP. Invalid source samples are replaced with zero before entering the delay. **LIMIT** shows the shared attenuation in dB, in amber while active; it holds the largest reduction for 600 ms before falling at 24 dB/s. The readouts are nondestructive. The shared main-mixer tap also feeds optional pluck diagnostics, so recordings capture the protected mix. These are sample peaks, not oversampled true peaks or measurements of analog output voltage.
+
+The output strip also exposes independent **Main**, **Chromatic taraf** and **Raga taraf** interval RMS levels with maxima retained by the existing 60 Hz bus-meter poll. **Reset meters** clears all output and bus maxima together. These RMS readings include their voice/bank gain and balance but precede `output_gain_db` and the final limiter. The bank taps precede shared taraf FX; Main includes its voice FX and the selected plucked main, excludes the separate drone, and precedes room/global FX. RMS maxima reveal sustained blooms without the limiter hiding their relative level. They do not add up to the final stereo sample peaks: effects, phase, crest factor and the separate drone also contribute to that output. The [bus-meter contract](midi-and-audio.md) defines the tap points.
+
+**Output protection.** The final mix has a linked stereo limiter with three global, live controls in **Parameters → Output · Final**. They save with presets and use the ordinary composite/binding path. Older presets without these keys use the defaults below.
+
+| Parameter | Range | Default |
+|---|---|---|
+| `output_limiter_ceiling_db` | −24…0 dBFS | −1 dBFS |
+| `output_limiter_lookahead_ms` | 1…20 ms | 5 ms |
+| `output_limiter_release_ms` | 20…1000 ms | 120 ms |
+
+The fixed 3 dB soft knee starts 1.5 dB below the selected sample ceiling. A shared gain follows the larger absolute L/R sample, preserving stereo balance. Lookahead sets both the audio delay and the triangular attack window, rounded to an even number of samples (240 at the default 48 kHz/5 ms); the AU reports the selected delay as its latency. Release sets exponential gain recovery. When inactive, samples pass unchanged apart from the delay and requested gain. The default one dB margin leaves output headroom; it is not an oversampled true-peak guarantee. A ceiling of 0 dBFS can light CLIP when samples reach full scale. Heavy sustained boost reduces dynamics; the limiter is intended to catch occasional peaks at performance gain settings such as +10 dB.
+
+Live limiter edits warm a second preallocated lane for its lookahead interval, seeding its envelope from the current attenuation, then crossfade the two protected outputs over 20 ms with a smoothstep curve. Neither lane changes delay or ceiling mid-render. During a ceiling change the output remains within the larger of the old and new ceilings, reaching the new ceiling after the transition. A lookahead change can briefly blend different waveform phases; it is best set between phrases. Rapid edits coalesce to the latest request after the current transition. Both lanes reserve the maximum delay storage before rendering, so edits allocate no audio-thread memory and never wait for control writers.
+
+`StereoOutputLimiter` holds each sample's required attenuation for the complete lookahead window with a monotonic minimum queue, then smooths it with two moving averages whose combined support equals that window. When the delayed sample exits, every contributing envelope value is at least as protective as that sample requires. The envelope therefore meets the ceiling without a waveform clipper; a final numerical guard handles roundoff and extreme source levels. `StereoOutputLimiterTests` pins delayed unity parity, burst containment at device sample rates, stereo linking, smooth attack/release and sustained-tone shape. `FinalOutputTests` covers the production three-source graph, gain edits and post-limiter metering.
+
+Both standalone String-engine post-chains still end at the global FX insert; `BowStereoTests` checks their linear gain above full scale. Final mix protection lives outside these engines, after the three-voice sum, and does not restore the retired `bow_lim_*` parameters. The kernel’s physical stability guards and optional voice-relative taraf cap remain independent.
+
+**Kin notes and `bow_jt_norm`.** The hottest notes are the KIN notes — a hard-struck unison Sa/Pa adds the played voice and the jt ring coherently (~+4 dB peak over a non-kin degree, more under high expression). The musical fix is **`bow_jt_norm`** (t60-response normalization — the long-ring Sa/Pa anchor rows charge hotter than the shortened crowd; **0.6 measures near-even across degrees**, 1.0 overshoots and the crowd wins). For the ACCUMULATION side — the anchors remembering a whole phrase and blooming on the next kin note — the voice-relative cap below is the lever.
 
 **Voice↔taraf balance.** One `.live` lever at the SPLIT-BUS merge — the same point as the FX voice/taraf inserts and the iPad volume-readout meter tap (`bow_poly_process3`; `ByteNullContractTests` pins meter-on and neutral-balance parity):
 
-- **`bow_bal`** (−1…+1, def 0): the voice↔taraf mix as a pure ATTENUATOR pair — −1 = voice only, +1 = taraf only, 0 = the calibrated mix bit-exactly. The favoured side never boosts past its calibrated level, so no new headroom appears and the limiter calibration holds. Slewed ~30 ms with per-sample interpolation; instant like `bow_gain`, so it binds well to a tilt. The iPad's separate main, chromatic and raga readouts include this balance. The bank taps precede shared taraf FX; see [MIDI & Audio](midi-and-audio.md).
+- **`bow_bal`** (−1…+1, def 0): the voice↔taraf mix as a pure ATTENUATOR pair — −1 = voice only, +1 = taraf only, 0 = the calibrated mix bit-exactly. The favoured side never boosts past its calibrated level, so the balance consumes no additional headroom. Slewed ~30 ms with per-sample interpolation; instant like `bow_gain`, so it binds well to a tilt. The iPad's separate main, chromatic and raga readouts include this balance. The bank taps precede shared taraf FX; see [MIDI & Audio](midi-and-audio.md).
 
 **Independent taraf levels.** `bow_jt_gain` controls raga radiation and
-`bow_jtc_gain` controls chromatic radiation, including the melody follower.
+`bow_jtc_gain` controls chromatic radiation.
 Either may be zero while the other bank rings. Both use in-place row gain
 slews, with the common output carrier held constant so moving one bank cannot
 pump the other's uncoupled sound. Shared bridge feedback still permits
@@ -216,7 +240,7 @@ stronger in the low register, approaches its peak smoothly over 4 ms and
 returns toward the ordinary sympathetic level with a 2 s time constant.
 The plectrum displacement and physical feedback are unchanged. Unplucked rows
 retain their ordinary sympathetic level; the plucked row's shared radiation
-receives the envelope for its tail. The normal row controls and final limiter
+receives the envelope for its tail. The normal row controls, balance and output gain
 remain downstream. Calibration and measurements:
 raga pluck balance (local research: `docs/history/Codex-2026-09-23-raga-pluck-levels.md`).
 
@@ -238,6 +262,31 @@ the distinction between an isolated pluck and a pluck in a driven bank.
 
 `ByteNullContractTests` pins the cap's hard-0 bypass. Active reduction is implemented by `cap_gain_step` in `bow_jt.c`; the former standalone cap suite is not part of the current guard set.
 
+**Chromatic bank compression.** The Taraf · Chromatic controls
+`bow_jtc_comp_ratio`, `bow_jtc_comp_voice` and `bow_jtc_comp_floor_db` restrain
+the summed chromatic radiation, including simultaneous rows and independent
+plucks. The default ratio 1 is a byte-null bypass; 4 is 4:1 compression, and
+20 approaches limiting. The threshold is
+`max(recentVoicePeak × voiceThreshold, 10^(minimumThresholdDB / 20))`.
+The voice multiplier defaults to 0.5 and the minimum to −40 dB (0.01 internal
+bus amplitude). This dB reference is before calibration trim, performance master
+gain and shared FX; it is not a final-output dBFS ceiling. The positive floor
+keeps a silent voice from suppressing independent plucks to silence.
+The separate shared per-row voice cap still acts earlier; if armed, its own
+silent-voice behavior remains in effect.
+
+Compression uses a 6 dB soft knee, a stereo-linked peak detector with a 50 ms
+release, 5 ms gain attack and 250 ms gain recovery. The voice reference holds
+recent peaks with a 1.2 s release. It only attenuates, has no makeup gain or
+lookahead, and does not guarantee a maximum transient peak. Returning to 1:1
+recovers smoothly to exact bypass. Bank tone/body, row caps and width precede
+the compressor; the combined taraf FX and output chain follow it. Raga audio,
+mechanical feedback and physical decay remain unchanged. Row scope meters show
+pre-compression radiation; the chromatic bank meter shows compressed output.
+`ChromaticCompressorTests` pins the relative/floor law, stereo linking and live
+bypass recovery; `ChromaticTarafTests` pins bank isolation, bypass parity and
+callback-size/worker independence.
+
 ## Re-fitting
 
 Change production DSP in `Packages/SarangiKit/`; `TarafRemovalParityTests` detects changes to the shipped render. The app edits values over bundled model artifacts and does not run fitting. Local research and artifact-conversion tools are separate from runtime. Keep fitted artifacts, their calibration and generated metadata consistent, and deliberately bless sound changes after the full guard and listening comparison. See [AGENTS.md](../AGENTS.md) and [Sarangi](sarangi.md).
@@ -252,8 +301,13 @@ Measure the current bank with `RebuildCostTests`; the former initialization
 and continuity timings are [archived measurements](history/documentation-audit-2026-10-12.md#original-rebuild-and-continuity-measurements).
 
 **The settle contract.** Setup uses an empty control snapshot; held touches
-stay on the shared mapper and mount after publication. Residual-checked
-stationary preparation permits one 4096-frame warmup block; unsupported
+stay on the shared mapper and mount after publication. The host seeds saved
+live controls before requesting its first build. Each build snapshots chromatic
+evolution and register offset into the initial geometry, before preparation and
+settling, so restoring these controls does not move a resting bridge after its
+silence check. Publication refreshes their latest values, including a return to
+neutral if the player changed them during construction; unchanged geometry is
+a no-op. Residual-checked stationary preparation permits one 4096-frame warmup block; unsupported
 states use at least five blocks with 50 ms momentum damping. Natural decay
 is then restored and output histories reset without resetting the physical
 state. Verification checks both channels and their sum below **−100 dBFS**,
@@ -265,9 +319,12 @@ plucked replacements likewise retain the engine and touch bindings; an
 intentionally empty plucked grid is a successful clear. The shared
 `EngineBuildCoordinator` skips obsolete queued work and rejects stale results
 before publication, including late String builds after disable.
-Neither the limiter nor a fade replaces the silence check.
+A publication fade does not replace the silence check.
 `RebuildCostTests` guards **−80 dBFS** publication across tunings and bone
 positions, plus preservation of held touches.
+`StringVoicePublicationTests` also checks saved live geometry against both
+audible startup output and bus-meter spikes, and preserves control changes
+made during construction.
 
 **Continuity.** `StringVoiceSource.setEngine` publishes through
 `EngineCrossfader` and renders outgoing and incoming engines through a

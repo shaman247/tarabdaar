@@ -6,7 +6,7 @@ import SarangiKit
 /// and the debounced rebuild funnel.
 final class LinkRelayTests: XCTestCase {
 
-    /// UI reads neither consume meter intervals nor hide released-string tails.
+    /// UI reads preserve intervals, released tails and maxima from every relay poll until reset.
     func testLiveVolumeSnapshotsShareTheRelayPoll() {
         let meter = AudioEngine.PerformanceMeter()
         var interval = (voice: 0.2, chromatic: 0.03, raga: 0.04)
@@ -28,15 +28,39 @@ final class LinkRelayTests: XCTestCase {
             let reading = meter.readout()
             XCTAssertFalse(reading.active)
             XCTAssertEqual(reading.voiceRMS, 0.2)
+            XCTAssertEqual(reading.chromaticRMS, 0.03)
+            XCTAssertEqual(reading.ragaRMS, 0.04)
+            XCTAssertEqual(reading.maximumVoiceRMS, 0.2)
+            XCTAssertEqual(reading.maximumChromaticRMS, 0.03)
+            XCTAssertEqual(reading.maximumRagaRMS, 0.04)
         }
         XCTAssertEqual(samples, 1, "UI reads must not steal the next audio interval")
         interval.voice = 0.1
+        interval.chromatic = 0.4
         relay.tick()
         XCTAssertEqual(meter.readout().voiceRMS, 0.1)
+        // A bloom between UI reads must survive the next silent interval.
         relay.tick()
         XCTAssertEqual(meter.readout().voiceRMS, 0)
+        XCTAssertEqual(meter.readout().chromaticRMS, 0)
+        XCTAssertEqual(meter.readout().ragaRMS, 0)
         XCTAssertEqual(sent.last, [0, 0, 0])
         XCTAssertEqual(samples, 3)
+        XCTAssertEqual(meter.readout().maximumVoiceRMS, 0.2)
+        XCTAssertEqual(meter.readout().maximumChromaticRMS, 0.4)
+        XCTAssertEqual(meter.readout().maximumRagaRMS, 0.04)
+        interval = (0.05, 0.1, 0.02)
+        relay.tick()
+        meter.resetMaxima()
+        XCTAssertEqual(meter.readout().maximumVoiceRMS, 0)
+        XCTAssertEqual(meter.readout().maximumChromaticRMS, 0)
+        XCTAssertEqual(meter.readout().maximumRagaRMS, 0)
+        XCTAssertEqual(meter.readout().chromaticRMS, 0.1, "Reset must not consume the current reading")
+        interval = (0.01, 0.02, 0.03)
+        relay.tick()
+        XCTAssertEqual(meter.readout().maximumVoiceRMS, 0.01)
+        XCTAssertEqual(meter.readout().maximumChromaticRMS, 0.02)
+        XCTAssertEqual(meter.readout().maximumRagaRMS, 0.03)
     }
 
     /// Each bank independently triggers the relay and silence clears all three readings.

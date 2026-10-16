@@ -7,7 +7,7 @@ import SarangiKit
 /// taraf + body + room) and the plucked tanpura / sitar
 /// (`TanpuraVoiceSource`) — summed through `symGain`:
 ///
-///   `{string, tanpura, sitar}.node → symGain → mainMixerNode → output`
+///   `{string, tanpura, sitar}.node → symGain → final gain + limiter → mainMixerNode → output`
 ///
 /// Touches arrive on the TLP path (via the glide queue) — there is no MIDI
 /// note vocabulary. Public methods take `lock` for state and release it
@@ -16,9 +16,14 @@ public class AudioEngine: ObservableObject {
     let engine = AVAudioEngine()
     /// Summing stage for the three source nodes, pinned at unity.
     let symGain = AVAudioMixerNode()
+    let finalOutput = FinalOutputStage()
+    var finalOutputTapInstalled = false
     let lock = NSLock()
-    /// Serialize input routing and instrument switches; callbacks re-enter
-    /// from the glide sequencer after its own lock has been released.
+    /// Graph lifecycle changes are serialized; render callbacks never acquire this lock.
+    let graphLock = NSRecursiveLock()
+    /// Serialize touch/drone routing, voice switches and engine publication.
+    /// Glide callbacks re-enter after the sequencer releases its own lock;
+    /// audio render callbacks never acquire this lock.
     let touchRoutingLock = NSRecursiveLock()
     var pluckCapture: PluckDiagnosticCapture?
 
@@ -36,8 +41,6 @@ public class AudioEngine: ObservableObject {
     /// Last structural tarab push, retained for (re)builds.
     var lastSarangiStrings: [ResolvedString] = []
     var lastSarangiTonic: Double = 261.63
-    /// The melody-follower string: (gain, t60) when enabled, nil when off.
-    var lastSarangiFollower: (gain: Double, t60: Double)?
     /// Scalar overrides applied over `bowed_string.json` at every build.
     public var stringVoiceOverrides: [String: Double] = [:]
     /// Drone buttons: each plucks ONE mapped sympathetic string, found by
@@ -107,8 +110,6 @@ public class AudioEngine: ObservableObject {
     var touchPitchSemis: [UInt16: Double] = [:]
     /// Still-held touches in play order, most-recent last.
     var heldTouchOrder: [UInt16] = []
-    var performanceProfile = PerformancePitchProfile()
-    private var profileExcludedTouches = Set<UInt16>()
     /// Per-touch expression scale (the strum chord; absent = 1). Delivered
     /// by `touchExpr` ahead of the onset; String: the mapper's per-slot
     /// scale, live while held; plucked mains: the pluck level at onset.
@@ -157,20 +158,17 @@ public class AudioEngine: ObservableObject {
     }
 
     private func setupAudio() {
-        #if os(macOS)
-        // Match the output device to the engine rate BEFORE the graph starts
-        // (no resampler to the device). Restored on quit.
-        matchOutputDeviceToEngineRate(systemDefaultOutputDevice())
-        #endif
         let sampleRate = Config.sampleRate
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate,
                                    channels: 2)!
 
         // source nodes attach + connect to symGain on enable
-        engine.attach(symGain)
-        engine.connect(symGain, to: engine.mainMixerNode, format: format)
-        symGain.outputVolume = 1
+        connectFinalOutput(format: format)
         installPluckDiagnosticCapture(format: format)
+        #if os(macOS)
+        startOutputRecovery()
+        #else
+        installFinalOutputTap(format: format)
 
         do {
             try engine.start()
@@ -178,20 +176,19 @@ public class AudioEngine: ObservableObject {
         } catch {
             print("AudioEngine failed to start: \(error)")
         }
-        #if os(macOS)
-        // transport-aware IO buffer (the device's HAL buffer)
-        let beforeBuf = outputBufferFrames
-        let wantBuf = preferredBufferFrames(for: currentOutputDevice)
-        let gotBuf = setOutputBufferFrames(wantBuf)
-        NSLog("Tarabdaar: output IO buffer \(beforeBuf)f → requested \(wantBuf)f → got \(gotBuf)f")
-        logAudioLatencyReport("engine started")
         #endif
     }
 
 
     #if os(macOS)
-    /// The device whose nominal rate we changed, plus its original rate (nil = none).
-    var changedDeviceRate: (device: AudioDeviceID, originalRate: Double)?
+    /// Original rates keyed by stable UID, never a numeric device ID that can be reused after unplugging.
+    var changedDeviceRates: [String: Double] = [:]
+    var outputRecovery: AudioOutputRecovery?
+    @Published public internal(set) var outputDeviceSelection: AudioDeviceID = 0
+    @Published public internal(set) var outputDeviceError: String?
+    @Published public internal(set) var outputDeviceRevision = 0
+    var lastOutputRoutes: [AudioOutputRoute] = []
+    var lastDefaultOutput: AudioDeviceID = 0
     #endif
 
     // MARK: - TarabLink touch ingestion (the wire path)
@@ -210,9 +207,6 @@ public class AudioEngine: ObservableObject {
     public func touchGlideExempt(_ id: UInt16) {
         touchRoutingLock.lock()
         defer { touchRoutingLock.unlock() }
-        lock.lock()
-        profileExcludedTouches.insert(id)
-        lock.unlock()
         glideQueue.markExempt(id)
     }
 
@@ -238,9 +232,6 @@ public class AudioEngine: ObservableObject {
         touchRoutingLock.lock()
         defer { touchRoutingLock.unlock() }
         lock.lock()
-        if !profileExcludedTouches.contains(id) {
-            performanceProfile.setPitch(pitchSemis, for: id, at: ProcessInfo.processInfo.systemUptime)
-        }
         touchPitchSemis[id] = pitchSemis
         heldTouchOrder.removeAll { $0 == id }
         heldTouchOrder.append(id)
@@ -259,7 +250,6 @@ public class AudioEngine: ObservableObject {
         touchRoutingLock.lock()
         defer { touchRoutingLock.unlock() }
         lock.lock()
-        performanceProfile.setPitch(pitchSemis, for: id, at: ProcessInfo.processInfo.systemUptime)
         touchPitchSemis[id] = pitchSemis
         heldTouchOrder.removeAll { $0 == id }
         heldTouchOrder.append(id)
@@ -351,9 +341,6 @@ public class AudioEngine: ObservableObject {
         defer { touchRoutingLock.unlock() }
         lock.lock()
         guard touchPitchSemis[id] != nil else { lock.unlock(); return }
-        if !profileExcludedTouches.contains(id) {
-            performanceProfile.setPitch(pitchSemis, for: id, at: ProcessInfo.processInfo.systemUptime)
-        }
         touchPitchSemis[id] = pitchSemis
         let voice = playedVoiceLocked(mainInstrumentStorage)
         let exprScale = pitchAccentAmount > 0 ? effectiveExprScaleLocked(id) : nil
@@ -370,8 +357,6 @@ public class AudioEngine: ObservableObject {
         defer { touchRoutingLock.unlock() }
         recordPlayingDiagnosticEvent(kind: "touchOff", id: id)
         lock.lock()
-        performanceProfile.setPitch(nil, for: id, at: ProcessInfo.processInfo.systemUptime)
-        profileExcludedTouches.remove(id)
         touchPitchSemis.removeValue(forKey: id)
         touchExprScale.removeValue(forKey: id)
         heldTouchOrder.removeAll { $0 == id }
@@ -401,8 +386,6 @@ public class AudioEngine: ObservableObject {
     /// Forget played-note bookkeeping after releasing an outgoing voice.
     /// Drone holds belong to a separate path. Callers hold `lock`.
     func clearTouchTrackingLocked() {
-        performanceProfile.releaseAll(at: ProcessInfo.processInfo.systemUptime)
-        profileExcludedTouches.removeAll()
         touchPitchSemis.removeAll(keepingCapacity: true)
         touchExprScale.removeAll(keepingCapacity: true)
         heldTouchOrder.removeAll(keepingCapacity: true)
@@ -415,6 +398,8 @@ public class AudioEngine: ObservableObject {
 
     deinit {
         #if os(macOS)
+        outputRecovery?.shutdown()
+        engine.stop()
         restoreOutputDeviceRate()
         #endif
         engine.stop()

@@ -89,20 +89,6 @@ public struct StringSpec: Identifiable, Codable, Sendable, Hashable {
     }
 }
 
-/// The melody-follower sympathetic string: one special string whose pitch
-/// live-retunes kernel-side (`bow_poly_jt_track_*`) to the highest note
-/// being played. Same Gain / t60 / On knobs as any row; no degree/octave,
-/// and it cannot be a drone-button target (no stable nominal Hz). Default
-/// disabled = no jt row, byte-null.
-public struct FollowerSpec: Codable, Sendable, Hashable {
-    public var gain: Double
-    public var t60: Double
-    public var enabled: Bool
-    public init(gain: Double = 0.9, t60: Double = 5.0, enabled: Bool = false) {
-        self.gain = gain; self.t60 = t60; self.enabled = enabled
-    }
-}
-
 /// A sympathetic string after scale/tonic resolution — what the String
 /// voice's taraf builder consumes.
 public struct ResolvedString: Sendable, Hashable {

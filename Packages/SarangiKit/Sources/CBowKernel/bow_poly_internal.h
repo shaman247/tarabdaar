@@ -30,6 +30,7 @@
 #include "bow_kernel.h"   /* bow_scalars_t + the public prototypes */
 #include "kernel_common.h"
 #include "bow_contact.h"
+#include "bow_compressor.h"
 
 #define MAXBOW 4096
 /* async jt ring sizes (also the two-way-coupling FIFO's) */
@@ -73,6 +74,8 @@ typedef struct {
     double kGate;
     double senv;        /* chunk peak of |brLp| — ring envelope for skip */
     double dampLoss, dampTarget; /* extra round-trip loss, slewed at the nut */
+    double tuneDelay, tuneStep; /* loop-filter phase delay, ramped at 3 kHz */
+    int tuneTick, tuneValid;
     /* torsional wave loop */
     double bufT[MAXBOW];
     int wti;
@@ -143,6 +146,7 @@ typedef struct {
     int jtInlineOnly;
     double jtQuadraticKc;
     double *jtInlineDrive, *jtInlineCap;
+    bow_chromatic_compressor_t jtCompressor;
     int njt, jtJ;
     int *jtM, *jtMOff, *jtZOff;
     double *jtCa, *jtCb, *jtCa4, *jtCb4, *jtWd, *jtWdI,
@@ -195,8 +199,6 @@ typedef struct {
     double jtCapTRel, jtCapAtk, jtCapRel;   /* per-jt-tick clocks */
     _Atomic double *jtOutputLevelTgt;
     double *jtOutputLevelCur;       /* worker-owned, 40 ms bank level slew */
-    _Atomic double *jtProfileTgt;    /* control writers, relaxed atomic loads */
-    double *jtProfileCur;           /* worker-owned, 250 ms gain slew */
     double *jtCapEnv, *jtCapGain;     /* per-row (worker-owned) */
     int jtCapGen, *jtCapRowGen;       /* arm generation, per-row copy */
     double *jtCapV;                   /* per-tick ceiling scratch */
@@ -365,20 +367,6 @@ typedef struct {
        balance */
     double *jtDnPh;
     double jtDnMix;
-    /* ---- MELODY-FOLLOWER row: one jt row live-retunes to the played pitch.
-       The host writes jtTrkTarget (Hz); the row's own tick slews jtTrkF0 and
-       recomputes ONLY the f0-dependent mode tables (retune-by-tension). The
-       active mode count jtTrkMUse = fx/f0 is trimmed live (modes above the fx
-       corner limit-cycle against the bone). jtTrkRow -1 = byte-null. */
-    int jtTrkRow;                 /* -1 = none */
-    double jtTrkTarget;           /* target f0 Hz (any thread writes) */
-    double jtTrkF0;               /* slewed current f0 (jt-thread owned) */
-    double jtTrkApplied;          /* f0 the coefficients were built for */
-    double jtTrkT60, jtTrkFhf, jtTrkBst, jtTrkFx;
-    double jtTrkSlew;             /* per-retune one-pole coefficient */
-    int jtTrkTick, jtTrkIval;
-    int jtTrkMUse;                /* active modes (<= jtM[row]) */
-    int jtTrkDirty;               /* force recompute (set_coeffs ran) */
     double jtDnA;                 /* release slew coeff (jt tick rate) */
     double jtDnAAtk;              /* attack slew coeff (jt tick rate) */
     double jtDnBDec;              /* onset-boost decay per jt tick */
@@ -674,7 +662,6 @@ double jt_tick(bow_poly_state_t *st, double Fd, double ev,
                       double *sideOut, double *cplOut);
 void jt_pool_stop(bow_poly_state_t *st);
 void jt_gate_eps(bow_poly_state_t *st, double refDisp);
-void jt_track_retune(bow_poly_state_t *st);
 double jt_dual_tick(bow_poly_state_t *st,int row,double drive,double *returned);
 void jt_dual_free(void *dual);
 double jt_dual_cost(void *dual);

@@ -22,8 +22,7 @@ import SwiftUI
 ///   its harmonic character (amber = fundamental-heavy … blue = the high
 ///   jawari cluster: the spectral centroid of the kernel's per-mode
 ///   modal-energy envelopes — with the flat bridge-force radiation the
-///   character as heard — EMA-smoothed so the hue doesn't flicker). The
-///   melody follower's lane moves with the played note.
+///   character as heard — EMA-smoothed so the hue doesn't flicker).
 ///
 /// The per-row taraf panel (level, radiated + modal spectra, brightness)
 /// lives on its own **Taraf** tab (⌘9, `TarafScopeView.swift`); both
@@ -135,7 +134,6 @@ final class ScopeModel: ObservableObject {
         let id: Int            // kernel row index
         let f0: Double
         let label: String
-        let isFollower: Bool
         let isChromatic: Bool
         let asleep: Bool
         let level01: Double
@@ -239,12 +237,9 @@ final class ScopeModel: ObservableObject {
             hz.append(Float(r.f0Hz)); lv.append(Float(l)); br.append(Float(b))
             // chromatic-bridge rows carry a mark: their pitch may not be a
             // scale degree at all (the label is then the nearest one)
-            let label = r.isFollower
-                ? "follow"
-                : scaleLabel(forRatio: r.f0Hz / tonicHz, degrees: degrees)
-                    + (r.isChromatic ? "·c" : "")
+            let label = scaleLabel(forRatio: r.f0Hz / tonicHz, degrees: degrees)
+                + (r.isChromatic ? "·c" : "")
             newRows.append(Row(id: i, f0: r.f0Hz, label: label,
-                               isFollower: r.isFollower,
                                isChromatic: r.isChromatic, asleep: r.asleep,
                                level01: l, centroid: c, bright01: b,
                                modes: r.modes))

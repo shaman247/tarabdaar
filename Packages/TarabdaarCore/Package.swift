@@ -22,7 +22,8 @@ let package = Package(
         .target(
             name: "TarabdaarCore",
             dependencies: ["SarangiKit"],
-            path: "Sources/TarabdaarCore"
+            path: "Sources/TarabdaarCore",
+            resources: [.process("Resources")]
         ),
         .executableTarget(
             name: "paramdoc",

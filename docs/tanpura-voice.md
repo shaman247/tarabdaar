@@ -53,7 +53,7 @@ buttons and the main-instrument routing use.
 ## Audio graph and lifecycle
 
 `TanpuraVoiceSource` (TarabdaarCore) is a second `AVAudioSourceNode` beside
-the String voice's — `node → symGain → mainMixerNode` — at the artifact's
+the String voice's — `node → symGain → final gain + limiter → mainMixerNode` — at the artifact's
 native 48 kHz. The engine swap is the one `EngineCrossfader` both voice
 sources use: a lock-published engine, an equal-power ~300 ms crossfade so
 ringing strings decay across a swap, swapped-out engines retained off the
@@ -67,7 +67,11 @@ skips obsolete queued requests before construction and rejects superseded
 in-flight results. Failed builds retain the working engine and touch bindings;
 an intentionally empty slot grid clears them. Repeated enables reuse a pending
 or successful build, and retry the latest failed request. Held tanpura drone
-buttons re-pluck only after a fresh engine publishes. Disabling a source cancels
+buttons re-pluck only after a fresh Tanpura engine publishes while Tanpura
+remains the selected drone voice. Rebuilding the String voice for a scale or
+taraf edit never turns Tanpura holds into sympathetic drone holds. Drone
+routing and engine publication are serialized with releases and voice switches.
+Disabling a source cancels
 outstanding publication while retaining an already-mounted engine for re-enable.
 The kernel renders through its
 **async worker pool** (the callback never computes; one block ≈ 32 ms of

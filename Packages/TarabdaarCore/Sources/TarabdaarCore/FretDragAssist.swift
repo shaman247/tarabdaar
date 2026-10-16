@@ -267,7 +267,7 @@ public final class FretDragAssist {
         var weights: [String: Double] = [:]
         for row in FretRegion.allCases {
             guard let raw = s.regionLogs[row] else { continue }
-            // Each interior and overlap owns its candidate and carried offset.
+            // Each row owns its candidate and carried offset.
             let cand = radiusPx > 0 ? row.frets(in: placements).filter {
                 abs($0.x - s.x) <= radiusPx
             }.min { abs($0.x - s.x) < abs($1.x - s.x) } : nil

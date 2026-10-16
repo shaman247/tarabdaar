@@ -320,6 +320,13 @@ public final class ControlAxisEvaluator {
 
     // MARK: - Axis drive
 
+    /// Source envelope for the Mac's strike graph, before binding smoothing.
+    public var strikeLevel: Double {
+        strikeLock.lock()
+        defer { strikeLock.unlock() }
+        return strikeMeasure
+    }
+
     private static let stickIndices = ControlAxes.stickDimensions.map {
         ControlAxes.dims.firstIndex(of: $0)!
     }

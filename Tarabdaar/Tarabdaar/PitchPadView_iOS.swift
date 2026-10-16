@@ -2,7 +2,6 @@ import CoreAudioKit
 import QuartzCore
 import TarabdaarCore
 import SwiftUI
-import simd
 
 /// The iPad's playing surface is the Fret Pad (`FretPadViewIOS`). Touches
 /// resolve to pitch via `FretPadGeometry` and ride the outbound TLP state with
@@ -11,151 +10,31 @@ import simd
 
 // MARK: - Shared pad toolbar (iPad)
 
-/// The iPad pad toolbar — PANIC, REC, scale-sync, tilt meters, scopes, the
-/// sounding readout and the read-only synced tonic.
+/// Connection problems overlay the pad without moving its touch geometry.
 struct PadToolbarIOS: View {
-    @ObservedObject var engine: PitchPadEngine
-    @ObservedObject var noteManager: NoteManager
     @ObservedObject var scaleSync: ScaleSyncReceiver
-    /// Drives the USB/Bluetooth transport indicators.
     @ObservedObject var midi: MIDIEngine
-    /// When set, a REC toggle records play strokes (`FretGestureRecorder`).
-    var recorder: FretGestureRecorder? = nil
-    /// When set, the strike scope draws beside the tilt panes.
-    var motion: MotionManager? = nil
-    /// When set, the finger-accel scope draws (display-only local instance of
-    /// the `FingerAccelTracker` law the Mac's bindings consume).
-    var fingerAccel: FingerAccelSampler? = nil
-    /// Toggles the raw-motion diagnostic overlay (GYRO button).
-    @Binding var showGyro: Bool
 
     var body: some View {
-        HStack(spacing: 14) {
-            button("PANIC", color: .red) { engine.panic() }
-            if let recorder {
-                RecToggleIOS(recorder: recorder)
-            }
-            button("GYRO", color: showGyro ? .blue : Color.gray.opacity(0.6)) {
-                showGyro.toggle()
-            }
-            ScaleSyncIndicator(scaleSync: scaleSync)
-            Spacer(minLength: 12)
-            // Joy-Con motion leads; keep the fallback arm readout beside it.
-            WristMotionPane(tilt: scaleSync.joyConTilt)
-            JoyConTiltPane(tilt: scaleSync.joyConTilt)
-            ArmTiltPane(localTilts: noteManager.currentTilt,
-                        display: scaleSync.joyConTilt)
-            if let motion {
-                // The onset fade tracks the Mac's blend window
-                // (`ctl_strike_window`, relayed over JOYCON_STATE).
-                ScopeTracePane(width: 150) {
-                    ScopeTraces.strike(motion: motion,
-                                       fadeS: scaleSync.joyConTilt.strikeWindowS)
+        if !scaleSync.connection.isSynced {
+            HStack(spacing: 14) {
+                ScaleSyncIndicator(scaleSync: scaleSync)
+                Spacer(minLength: 12)
+                if !scaleSync.connection.isConnected {
+                    TransportIndicatorsIOS(midi: midi)
                 }
             }
-            if let fingerAccel {
-                ScopeTracePane(width: 150) {
-                    ScopeTraces.fingerAccel(history: fingerAccel, motion: motion)
-                }
-            }
-            // The Mac's radiated voice/taraf levels (JOYCON_STATE).
-            ScopeTracePane(width: 120, labelFooter: 42) {
-                ScopeTraces.volume(history: scaleSync.volumeHistory,
-                                   motion: motion)
-            }
-            Spacer(minLength: 12)
-            SoundingReadout(sounding: engine.sounding,
-                            tonicFractionalMidi: engine.tonicFractionalMidi,
-                            style: .column(width: 150))
-            // The playing-range octave shift (Mac dpad, JOYCON_STATE).
-            Text("Oct \(engine.octaveShift > 0 ? "+" : "")\(engine.octaveShift)")
-                .font(.padCaption2.monospacedDigit())
-                .foregroundColor(engine.octaveShift == 0 ? .gray : .orange)
-                .fixedSize()
-            // Tonic is set on the Mac and synced over — read-only here.
-            Text("Tonic \(Scale.noteName(for: engine.tonicMidi))")
-                .font(.padCaption2).foregroundColor(.gray)
-                .fixedSize()
-            TransportIndicatorsIOS(midi: midi)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.black)
-    }
-
-    private func button(_ title: String, color: Color,
-                        action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.padCaption).fontWeight(.bold)
-                .foregroundColor(.white)
-                .padding(.horizontal, 10).padding(.vertical, 4)
-                .background(color.opacity(0.7))
-                .cornerRadius(6)
-        }
-    }
-}
-
-// MARK: - Stroke-recording toggle (Fret Pad)
-
-private struct NoteControlReadout: View {
-    let display: NoteControlDisplay
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 15.0)) { _ in
-            let controls = display.latest
-            VStack(spacing: 1) {
-                row("Expression", controls.expression, active: controls.active)
-                row("Pressure", controls.pressure, active: controls.active)
-                row("Position", controls.position, active: controls.active)
-            }
-            .font(.padCaption2.monospacedDigit())
-            .frame(width: 150)
-        }
-    }
-
-    private func row(_ label: String, _ byte: UInt8, active: Bool) -> some View {
-        HStack(spacing: 6) {
-            Text(label).foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-            Text(active ? String(format: "%.2f", Double(byte) / 255) : "—")
-                .foregroundStyle(active ? Color.white : Color.gray)
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-/// REC button: records play strokes to **Documents/FretRecordings/** as JSONL
-/// (visible in Files / Finder) for `tools/fretpad_fit.py`.
-private struct RecToggleIOS: View {
-    @ObservedObject var recorder: FretGestureRecorder
-
-    var body: some View {
-        Button {
-            recorder.setRecording(!recorder.isRecording)
-        } label: {
-            HStack(spacing: 5) {
-                Circle()
-                    .fill(recorder.isRecording ? Color.red : Color.gray.opacity(0.6))
-                    .frame(width: 7, height: 7)
-                Text(recorder.isRecording ? "REC \(recorder.strokeCount)" : "REC")
-                    .font(.padCaption).fontWeight(.bold).monospacedDigit()
-                    .foregroundColor(.white)
-            }
-            .padding(.horizontal, 10).padding(.vertical, 4)
-            .background((recorder.isRecording ? Color.red : Color.gray)
-                .opacity(recorder.isRecording ? 0.45 : 0.25))
-            .cornerRadius(6)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color.black)
         }
     }
 }
 
 // MARK: - Transport indicators + Bluetooth MIDI (BLE-MIDI advertise)
 
-/// USB + Bluetooth indicators: **green** = carrying the link (wired-first:
-/// USB whenever the cable is in, Bluetooth only without it — never both),
-/// **white** = idle, **dim gray** = absent; the bearer carrying the link is
-/// named beside the icons (`USB` / `BT`, `no link` when neither exists).
+/// Connection controls shown only while the TLP link is unavailable.
+/// White icons are available transports; dim gray icons are absent.
 /// The antenna presents the system BLE-MIDI peripheral sheet so the iPad
 /// can advertise (the Mac connects from Audio MIDI Setup → Bluetooth);
 /// advertising is per-session.
@@ -169,18 +48,17 @@ private struct TransportIndicatorsIOS: View {
         HStack(spacing: 10) {
             Image(systemName: "cable.connector")
                 .font(.padCaption)
-                .foregroundColor(color(present: usbPresent, active: usbPresent))
+                .foregroundColor(color(present: usbPresent))
             Button {
                 showBluetoothSheet = true
             } label: {
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .font(.padCaption)
-                    .foregroundColor(color(present: btPresent,
-                                           active: btPresent && !usbPresent))
+                    .foregroundColor(color(present: btPresent))
             }
             Text(bearerLabel)
                 .font(.padCaption2.weight(.bold))
-                .foregroundColor(midi.linkTransport == nil ? .gray.opacity(0.5) : .green)
+                .foregroundColor(.orange)
                 .fixedSize()
         }
         .sheet(isPresented: $showBluetoothSheet) {
@@ -190,14 +68,14 @@ private struct TransportIndicatorsIOS: View {
 
     private var bearerLabel: String {
         switch midi.linkTransport {
-        case .wired: return "USB"
-        case .bluetooth: return "BT"
+        case .wired: return "USB · no link"
+        case .bluetooth: return "BT · no link"
         case .virtualEndpoint, nil: return "no link"
         }
     }
 
-    private func color(present: Bool, active: Bool) -> Color {
-        active ? .green : (present ? .white.opacity(0.7) : .gray.opacity(0.35))
+    private func color(present: Bool) -> Color {
+        present ? .white.opacity(0.7) : .gray.opacity(0.35)
     }
 }
 
@@ -212,427 +90,19 @@ private struct BluetoothMIDIPeripheralSheet: UIViewControllerRepresentable {
 
 // MARK: - Scale-sync indicator
 
-/// Scale-sync status: green once the Mac has pushed a scale.
+/// Visible until the current connection has received both scale and arrangement.
 struct ScaleSyncIndicator: View {
     @ObservedObject var scaleSync: ScaleSyncReceiver
 
     var body: some View {
         HStack(spacing: 4) {
             Circle()
-                .fill(scaleSync.syncCount > 0 ? Color.green : Color.gray.opacity(0.4))
+                .fill(Color.orange)
                 .frame(width: 7, height: 7)
-            Text(scaleSync.syncCount > 0 ? "synced" : "no sync")
+            Text("no sync")
                 .font(.padSmall(9))
                 .foregroundColor(.gray)
         }
-    }
-}
-
-// MARK: - Tilt pad
-
-/// Third-axis dot color: purple → cyan → orange over −1 → 0 → +1.
-private func thirdAxisColor(_ v: Double) -> Color {
-    Color(hue: 0.5 - v * 0.35, saturation: 0.9, brightness: 1.0)
-}
-
-/// The ARM tilts (1 on x, 2 on y, 3 as dot color): the Mac's CALIBRATED axes
-/// while `armLive`, else the iPad's raw attitude, dimmed.
-private struct ArmTiltPane: View {
-    let localTilts: [Double]
-    let display: JoyConTiltDisplay
-
-    private func local(_ i: Int) -> Double {
-        max(-1.0, min(1.0, i < localTilts.count ? localTilts[i] : 0))
-    }
-
-    var body: some View {
-        let x = display.armLive ? display.arm1 : local(0)
-        let y = display.armLive ? display.arm2 : local(1)
-        let z = display.armLive ? display.arm3 : local(2)
-        TiltSquare(x: x, y: y, dotColor: thirdAxisColor(z),
-                   lit: display.armLive)
-    }
-}
-
-/// The WRIST cluster from the Mac's fusion (JOYCON_STATE, ~30 Hz): three
-/// bar triplets — the wrist tilt (fused attitude, or the solved axes once
-/// calibrated), its rate (`JoyConWristMotion.rateFullScale`, 360°/s
-/// rails) and the gravity-removed acceleration per body axis (±1 g) — and
-/// one bar for that acceleration's magnitude on the same 1 g scale.
-/// Dim while the fusion is silent.
-private struct WristMotionPane: View {
-    let tilt: JoyConTiltDisplay
-
-    var body: some View {
-        let lit = tilt.bodyLive
-        HStack(alignment: .top, spacing: 6) {
-            SignalBarGroup(caption: "wrist", color: .cyan, lit: lit,
-                           bipolar: [tilt.wrist1, tilt.wrist2, tilt.wrist3])
-            SignalBarGroup(caption: "d/dt", color: .yellow, lit: lit,
-                           bipolar: [tilt.wristRate1, tilt.wristRate2,
-                                     tilt.wristRate3])
-            SignalBarGroup(caption: "accel", color: .orange, lit: lit,
-                           bipolar: [tilt.accel1, tilt.accel2, tilt.accel3],
-                           unipolar: tilt.accelLevel)
-        }
-    }
-}
-
-/// A caption over a stack of `SignalBar`s: bipolar rows (−1…+1, centre
-/// tick) and an optional unipolar row (0…1, left-anchored) beneath them.
-private struct SignalBarGroup: View {
-    let caption: String
-    let color: Color
-    let lit: Bool
-    let bipolar: [Double]
-    var unipolar: Double? = nil
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(caption)
-                .font(.padCaption2)
-                .foregroundColor(lit ? color : .gray)
-                .fixedSize()
-            ForEach(bipolar.indices, id: \.self) { i in
-                SignalBar(value: bipolar[i], bipolar: true,
-                          color: color, lit: lit)
-            }
-            if let unipolar {
-                SignalBar(value: unipolar, bipolar: false,
-                          color: color, lit: lit)
-            }
-        }
-    }
-}
-
-/// One 40 × 5 pt horizontal bar. Bipolar: the fill grows from the centre
-/// tick toward either end (value −1…+1). Unipolar: from the left (0…1).
-private struct SignalBar: View {
-    let value: Double
-    let bipolar: Bool
-    let color: Color
-    let lit: Bool
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let h = geo.size.height
-            let v = CGFloat(max(-1.0, min(1.0, value)))
-            ZStack(alignment: .leading) {
-                Rectangle()
-                    .fill(Color.gray.opacity(lit ? 0.25 : 0.15))
-                if bipolar {
-                    Rectangle()
-                        .fill(lit ? color : Color.gray)
-                        .frame(width: abs(v) * w / 2, height: h)
-                        .offset(x: v >= 0 ? w / 2 : w / 2 + v * w / 2)
-                    Rectangle()
-                        .fill(Color.white.opacity(0.5))
-                        .frame(width: 1, height: h)
-                        .offset(x: w / 2 - 0.5)
-                } else {
-                    Rectangle()
-                        .fill(lit ? color : Color.gray)
-                        .frame(width: max(0, v) * w, height: h)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 2))
-        }
-        .frame(width: 40, height: 5)
-    }
-}
-
-/// The Mac's Joy-Con stick axes (`JOYCON_STATE` relay). Bright while deflected.
-private struct JoyConTiltPane: View {
-    let tilt: JoyConTiltDisplay
-
-    var body: some View {
-        TiltSquare(x: tilt.stickX, y: tilt.stickY,
-                   dotColor: tilt.stickLive ? .green : .gray,
-                   lit: tilt.stickLive)
-    }
-}
-
-/// Shared 36 pt crosshair square (values −1…+1, centre = 0, y up).
-private struct TiltSquare: View {
-    let x: Double
-    let y: Double
-    let dotColor: Color
-    let lit: Bool
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let h = geo.size.height
-            ZStack {
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.gray.opacity(lit ? 0.25 : 0.15))
-                Rectangle()
-                    .fill(Color.white.opacity(0.3))
-                    .frame(width: 1, height: h)
-                Rectangle()
-                    .fill(Color.white.opacity(0.3))
-                    .frame(width: w, height: 1)
-                Circle()
-                    .fill(dotColor)
-                    .frame(width: 7, height: 7)
-                    .position(x: (1 + CGFloat(x)) / 2 * w,
-                              y: (1 - CGFloat(y)) / 2 * h)
-            }
-        }
-        .frame(width: 36, height: 36)
-    }
-}
-
-/// One toolbar scope's frame of data: the traces to decimate, the note
-/// timeline behind them and how the pane reads them out. Built once per poll
-/// by `ScopeTraces.strike` / `.fingerAccel` / `.volume`; `ScopeTracePane`
-/// turns it into pixels.
-private struct ScopeTraceFrame {
-    struct Trace {
-        let samples: [(t: TimeInterval, v: Double)]
-        /// Peak-hold keeps the largest |v| with its sign (a centred trace)
-        /// rather than the largest v.
-        let signedPeak: Bool
-        /// Empty bins repeat the last value — sparse, change-gated feeds.
-        let forwardFill: Bool
-        /// Colour of the segment ending in a bin, from the bin's centre time
-        /// and whether a note was sounding there.
-        let color: (TimeInterval, Bool) -> Color
-    }
-    struct Label {
-        let text: Text
-        let box: CGSize
-        /// Vertical centre; nil = the top-right corner.
-        let y: CGFloat?
-    }
-    /// Which value the labels read per trace.
-    enum Readout {
-        /// The newest sample — dense feeds.
-        case newestSample
-        /// The last bin's held value — sparse, forward-filled feeds.
-        case lastBin
-    }
-
-    /// Drawn in order: the last trace on top.
-    let traces: [Trace]
-    let activity: [(t: TimeInterval, active: Int)]
-    /// The window scrolls with the clock rather than the newest sample.
-    let endsAtNow: Bool
-    let guides: [(fraction: Double, opacity: Double)]
-    /// Value → fraction of the pane height, bottom to top.
-    let y01: (Double) -> Double
-    /// A held reading marked by an amber tick at the right edge.
-    let tick: Double?
-    let readout: Readout
-    /// The value labels, from one readout per trace.
-    let labels: ([Double]) -> [Label]
-}
-
-/// The one toolbar scope view: polls a `ScopeTraceFrame`, decimates each
-/// trace per-bin (peak-hold), and draws the note backdrop, the guides, the
-/// traces, the tick and the labels over `ScopePane`'s grid.
-private struct ScopeTracePane: View {
-    let width: CGFloat
-    var labelFooter: CGFloat = 0
-    let sample: () -> ScopeTraceFrame
-
-    var body: some View {
-        ScopePane(width: width, footerHeight: labelFooter, sample: sample) { ctx, size, frame in
-            Self.draw(ctx, canvasSize: size, frame: frame, labelFooter: labelFooter)
-        }
-    }
-
-    private static func draw(_ ctx: GraphicsContext, canvasSize: CGSize,
-                             frame: ScopeTraceFrame, labelFooter: CGFloat) {
-        let size = CGSize(width: canvasSize.width, height: canvasSize.height - labelFooter)
-        let w = size.width, h = size.height
-        let newest = frame.traces.compactMap { $0.samples.last?.t }.max()
-        guard let newest else { return }
-        let end = frame.endsAtNow ? ProcessInfo.processInfo.systemUptime
-                                  : newest
-        let bins = ScopeTrace.Bins(width: w, endingAt: end)
-        // Per-bin peak-hold, so brief bursts survive decimation; NaN = empty.
-        let held: [[Double]] = frame.traces.map { trace in
-            var peak = [Double](repeating: .nan, count: bins.count)
-            var seed = Double.nan
-            for s in trace.samples {
-                guard s.t >= bins.t0 else { seed = s.v; continue }
-                let b = bins.index(of: s.t)
-                let above = trace.signedPeak ? abs(s.v) > abs(peak[b])
-                                             : s.v > peak[b]
-                if peak[b].isNaN || above { peak[b] = s.v }
-            }
-            if trace.forwardFill {
-                var fill = seed.isNaN ? 0.0 : seed
-                for b in 0..<bins.count {
-                    if peak[b].isNaN { peak[b] = fill } else { fill = peak[b] }
-                }
-            }
-            return peak
-        }
-        let soundingArr = ScopeTrace.soundingBins(frame.activity, bins: bins)
-        ScopeTrace.fillActivity(ctx, size: size, sounding: soundingArr)
-        ScopeTrace.guides(ctx, size: size, frame.guides)
-        func yFor(_ v: Double) -> CGFloat {
-            h - CGFloat(frame.y01(v)) * (h - 2) - 1
-        }
-        // Each trace stroked per-pair with the newer bin's colour.
-        for (trace, peak) in zip(frame.traces, held) {
-            var prevPt: CGPoint? = nil
-            for b in 0..<bins.count where !peak[b].isNaN {
-                let pt = CGPoint(x: bins.x(b, width: w), y: yFor(peak[b]))
-                if let pp = prevPt {
-                    var seg = Path()
-                    seg.move(to: pp)
-                    seg.addLine(to: pt)
-                    let c = trace.color(bins.center(b), soundingArr[b])
-                    ctx.stroke(seg, with: .color(c), lineWidth: 1.5)
-                }
-                prevPt = pt
-            }
-        }
-        if let tick = frame.tick {
-            var path = Path()
-            let y = yFor(tick)
-            path.move(to: CGPoint(x: w - 7, y: y))
-            path.addLine(to: CGPoint(x: w, y: y))
-            ctx.stroke(path, with: .color(.orange), lineWidth: 2)
-        }
-        let readouts: [Double]
-        switch frame.readout {
-        case .newestSample:
-            readouts = frame.traces.map { $0.samples.last?.v ?? 0 }
-        case .lastBin:
-            readouts = held.map { $0[bins.count - 1] }
-        }
-        for label in frame.labels(readouts) {
-            let y = labelFooter > 0 ? size.height + 6 + (label.y ?? label.box.height / 2)
-                                    : label.y
-            ScopeTrace.drawValueLabel(ctx, label.text, size: canvasSize,
-                                      measureIn: label.box, y: y)
-        }
-    }
-}
-
-/// The three toolbar scopes as `ScopeTraceFrame` builders.
-private enum ScopeTraces {
-    private static let idleGray = Color(white: 0.38).opacity(0.9)
-
-    /// The strike scope: the strike envelope (0–127 wire scale) with the
-    /// current value at the right. Pale yellow at an onset fading down `ScopeColor.level` over
-    /// `fadeS` (the Mac's `ctl_strike_window` blend window), dark gray
-    /// while nothing plays.
-    static func strike(motion: MotionManager, fadeS: Double) -> ScopeTraceFrame {
-        let onsets = motion.noteOnsets
-        let fade = max(fadeS, 0.05)
-        return ScopeTraceFrame(
-            traces: [.init(
-                samples: motion.strikeHistory.map { (t: $0.t, v: $0.level) },
-                signedPeak: false, forwardFill: false,
-                color: { binT, sounding in
-                    guard sounding else { return idleGray }
-                    let age = lastOnset(in: onsets, atOrBefore: binT)
-                        .map { binT - $0 } ?? fade
-                    let f = min(max(age / fade, 0.0), 1.0)
-                    return ScopeColor.level(1 - f).opacity(0.95)
-                })],
-            activity: motion.noteActivity,
-            endsAtNow: false,
-            // Guide lines at thirds (≈42 / 85).
-            guides: [(1.0 / 3.0, 0.12), (2.0 / 3.0, 0.12)],
-            y01: { $0 },
-            tick: nil,
-            readout: .newestSample,
-            labels: { v in [wireLabel(v[0], width: 40)] })
-    }
-
-    /// The finger-accel scope: the finger's pitch acceleration on the
-    /// `.fingerAccel` −1…+1 scale (centerline = rest or constant-rate
-    /// meend), from the iPad's own `FingerAccelSampler` instance of the
-    /// shared law. Green while a note sounds.
-    static func fingerAccel(history: FingerAccelSampler,
-                            motion: MotionManager?) -> ScopeTraceFrame {
-        ScopeTraceFrame(
-            traces: [.init(
-                samples: history.history(),
-                signedPeak: true, forwardFill: false,
-                color: { _, sounding in
-                    sounding
-                        ? Color(red: 0.55, green: 1.0, blue: 0.55).opacity(0.95)
-                        : idleGray
-                })],
-            activity: motion?.noteActivity ?? [],
-            endsAtNow: false,
-            // Centerline (rest) bright-ish, ±0.5 guides faint.
-            guides: [(0.5, 0.25), (0.25, 0.12), (0.75, 0.12)],
-            y01: { ($0 + 1) / 2 },
-            tick: nil,
-            readout: .newestSample,
-            labels: { v in [wireLabel(v[0], width: 44)] })
-    }
-
-    /// The volume scope: the Mac's main voice, chromatic and raga levels on the
-    /// wire's 0…1 log scale (−60…0 dBFS, `TLPVolume`; guides = 20 dB) with
-    /// the current dB at the right. Samples are unsmoothed RMS, change-gated
-    /// on the wire, so bins peak-hold and forward-fill and the window
-    /// scrolls with NOW rather than the last (sparse) sample. Main orange,
-    /// chromatic cyan, raga purple; colors persist through ringing tails.
-    static func volume(history: VolumeHistory,
-                       motion: MotionManager?) -> ScopeTraceFrame {
-        let samples = history.snapshot()
-        let now = ProcessInfo.processInfo.systemUptime
-        let voiceColor = Color.orange, chromaticColor = Color.cyan
-        let ragaColor = Color.purple
-        func trace(_ value: @escaping (VolumeHistory.Sample) -> Double,
-                   color: Color) -> ScopeTraceFrame.Trace {
-            .init(samples: samples.isEmpty ? [(t: now, v: 0)]
-                    : samples.map { (t: $0.t, v: value($0)) },
-                  signedPeak: false, forwardFill: true,
-                  color: { _, _ in color })
-        }
-        func label(_ name: String, _ v01: Double, _ color: Color,
-                   y: CGFloat) -> ScopeTraceFrame.Label {
-            let db = v01 > 0 ? "\(Int(TLPVolume.db(from01: v01).rounded()))" : "−∞"
-            return .init(text: Text("\(name) \(db)")
-                            .font(.padSmall(9).monospacedDigit())
-                            .foregroundColor(color.opacity(0.95)),
-                         box: CGSize(width: 84, height: 12), y: y)
-        }
-        return ScopeTraceFrame(
-            traces: [trace({ $0.raga }, color: ragaColor),
-                     trace({ $0.chromatic }, color: chromaticColor),
-                     trace({ $0.voice }, color: voiceColor)],
-            activity: motion?.noteActivity ?? [],
-            endsAtNow: true,
-            guides: [(1.0 / 3.0, 0.12), (2.0 / 3.0, 0.12)],
-            y01: { $0 },
-            tick: nil,
-            readout: .lastBin,
-            labels: { v in
-                [label("Main", v[2], voiceColor, y: 6),
-                 label("Chromatic", v[1], chromaticColor, y: 18),
-                 label("Raga", v[0], ragaColor, y: 30)]
-            })
-    }
-
-    /// The live value on the wire's ±127 scale.
-    private static func wireLabel(_ v: Double, width: CGFloat) -> ScopeTraceFrame.Label {
-        .init(text: Text("\(Int((v * 127).rounded()))")
-                  .font(.padSmall(10).monospacedDigit())
-                  .foregroundColor(.white.opacity(0.9)),
-              box: CGSize(width: width, height: 16), y: nil)
-    }
-
-    /// The newest onset at or before `t` (the onsets are ordered).
-    private static func lastOnset(in onsets: [TimeInterval],
-                                  atOrBefore t: TimeInterval) -> TimeInterval? {
-        var lo = 0, hi = onsets.count
-        while lo < hi {
-            let mid = (lo + hi) / 2
-            if onsets[mid] <= t { lo = mid + 1 } else { hi = mid }
-        }
-        return lo > 0 ? onsets[lo - 1] : nil
     }
 }
 
@@ -644,166 +114,24 @@ private enum ScopeTraces {
 /// drag laws as the Mac, fully multitouch.
 struct FretPadViewIOS: View {
     @ObservedObject var engine: PitchPadEngine
-    @ObservedObject var noteManager: NoteManager
     @ObservedObject var scaleSync: ScaleSyncReceiver
     @ObservedObject var midi: MIDIEngine
+    let recorder: FretGestureCapture
     let arrangement: FretArrangement
-    var pluckTaraf: (UInt32, UInt8) -> Void = { _, _ in }
-    /// The motion source, for the raw-motion diagnostic overlay.
+    /// The motion source supplies the strike envelope at onset.
     var motion: MotionManager? = nil
-    /// The display-only finger-accel feed for the toolbar scope.
-    var fingerAccel: FingerAccelSampler? = nil
 
-    /// Records play strokes to Documents/FretRecordings/ for offline fitting
-    /// of the drag-assist parameters (toolbar REC toggle).
-    @StateObject private var recorder = FretGestureRecorder()
-    @State private var showGyro = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            PadToolbarIOS(engine: engine, noteManager: noteManager, scaleSync: scaleSync,
-                          midi: midi, recorder: recorder, motion: motion,
-                          fingerAccel: fingerAccel,
-                          showGyro: $showGyro)
-            // The raga pluck strip sits immediately above the playable band.
+        ZStack(alignment: .top) {
             FretPadSurfaceIOS(engine: engine, arrangement: arrangement,
                               fieldWarp: scaleSync.joyConTilt.fieldWarp,
                               recorder: recorder,
-                              motion: motion,
-                              tarafBank: scaleSync.tarafBank,
-                              pluckTaraf: pluckTaraf)
+                              motion: motion)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .overlay(alignment: .topLeading) {
-                    NoteControlReadout(display: scaleSync.noteControls)
-                        .padding(12)
-                        .allowsHitTesting(false)
-                }
-                .overlay(alignment: .topTrailing) {
-                    if showGyro, let motion {
-                        HStack(alignment: .top, spacing: 10) {
-                            RawAccelOverlay(motion: motion)
-                            RawMotionOverlay(motion: motion)
-                        }
-                        .padding(12)
-                    }
-                }
+            PadToolbarIOS(scaleSync: scaleSync, midi: midi)
         }
         .background(Color.black.ignoresSafeArea())
-    }
-}
-
-// MARK: - Raw motion overlay (diagnostic)
-
-/// 3D view of RAW CoreMotion attitude over the last ~8 s, before the yaw
-/// high-pass and the wire (GYRO button): wobble HERE is the sensor, wobble
-/// only on the Mac's scope is the wire. Δ readouts are window peak-to-peak in
-/// degrees; raw yaw drift here is expected.
-struct RawMotionOverlay: View {
-    let motion: MotionManager
-
-    private static let spin = 0.3
-    private static let colors: [Color] = [.orange, .green, .cyan]
-    private static let names = ["pitch", "roll ", "yaw  "]
-    /// Fixed ±30° scale (the Mac view's constant); centred on the trail mean.
-    private static let viewRadius = 30.0 * Double.pi / 180
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-            let hist = motion.attitudeHistory
-            VStack(alignment: .leading, spacing: 3) {
-                Canvas { ctx, size in
-                    Self.draw(ctx, size: size, hist: hist,
-                              azimuth: Date().timeIntervalSinceReferenceDate
-                                  * Self.spin)
-                }
-                .frame(width: 250, height: 190)
-                ForEach(0..<3, id: \.self) { a in
-                    let vals = hist.map { a == 0 ? $0.p : a == 1 ? $0.r : $0.y }
-                    let pp = ((vals.max() ?? 0) - (vals.min() ?? 0)) * 180 / .pi
-                    let cur = (vals.last ?? 0) * 180 / .pi
-                    Text(String(format: "%@ %+8.3f°  Δ%.3f°",
-                                Self.names[a], cur, pp))
-                        .font(.padSmall(10).monospacedDigit())
-                        .foregroundColor(Self.colors[a])
-                }
-                Text("raw attitude, pre-wire · last 8 s")
-                    .font(.padSmall(9))
-                    .foregroundColor(.gray)
-            }
-            .padding(10)
-            .background(Color.black.opacity(0.85))
-            .cornerRadius(10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.white.opacity(0.25), lineWidth: 1)
-            )
-        }
-    }
-
-    private static func draw(_ ctx: GraphicsContext, size: CGSize,
-                             hist: [(t: TimeInterval, p: Double, r: Double, y: Double)],
-                             azimuth: Double) {
-        // Centred on the trail mean — the rest pose is arbitrary.
-        MotionScatter.drawTrail(ctx, size: size,
-                                points: hist.map { SIMD3($0.p, $0.r, $0.y) },
-                                maxRadius: viewRadius, axisColors: colors,
-                                azimuth: azimuth)
-    }
-}
-
-/// Raw userAcceleration (g) over the last ~8 s as the same turntable trail,
-/// centred on the origin, fixed ±0.5 g (the Mac view's constant).
-struct RawAccelOverlay: View {
-    let motion: MotionManager
-
-    private static let spin = 0.3
-    private static let colors: [Color] = [.orange, .green, .cyan]
-    private static let names = ["x", "y", "z"]
-    /// Fixed ±0.5 g to the frame edge (the Mac view's constant).
-    private static let viewRadius = 0.5
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-            let hist = motion.accelHistory3D
-            VStack(alignment: .leading, spacing: 3) {
-                Canvas { ctx, size in
-                    Self.draw(ctx, size: size, hist: hist,
-                              azimuth: Date().timeIntervalSinceReferenceDate
-                                  * Self.spin)
-                }
-                .frame(width: 250, height: 190)
-                ForEach(0..<3, id: \.self) { a in
-                    let vals = hist.map { a == 0 ? $0.x : a == 1 ? $0.y : $0.z }
-                    let pp = (vals.max() ?? 0) - (vals.min() ?? 0)
-                    let cur = vals.last ?? 0
-                    Text(String(format: "%@ %+8.3f g  Δ%.3f g",
-                                Self.names[a], cur, pp))
-                        .font(.padSmall(10).monospacedDigit())
-                        .foregroundColor(Self.colors[a])
-                }
-                Text("raw userAcceleration, pre-wire · last 8 s")
-                    .font(.padSmall(9))
-                    .foregroundColor(.gray)
-            }
-            .padding(10)
-            .background(Color.black.opacity(0.85))
-            .cornerRadius(10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.white.opacity(0.25), lineWidth: 1)
-            )
-        }
-    }
-
-    private static func draw(_ ctx: GraphicsContext, size: CGSize,
-                             hist: [(t: TimeInterval, x: Double, y: Double, z: Double)],
-                             azimuth: Double) {
-        // Origin-centred: acceleration has a natural zero.
-        MotionScatter.drawTrail(ctx, size: size,
-                                points: hist.map { SIMD3($0.x, $0.y, $0.z) },
-                                maxRadius: viewRadius,
-                                center: SIMD3<Double>(),
-                                axisColors: colors, azimuth: azimuth)
     }
 }
 
@@ -845,15 +173,11 @@ private struct FretPadSurfaceIOS: View {
     /// fingers. 0 (linear) while the link is down.
     let fieldWarp: Double
     /// Stroke recorder for offline assist fitting (no-op unless armed).
-    let recorder: FretGestureRecorder
-    /// Motion source for the Strike envelope and scope activity.
+    let recorder: FretGestureCapture
+    /// Motion source for the strike envelope.
     let motion: MotionManager?
-    let tarafBank: TarafBank
-    let pluckTaraf: (UInt32, UInt8) -> Void
     /// The touch pipeline (onset, drag, settle tick, release).
     @State private var player = FretTouchPlayer()
-    /// Per-touch indicator — a class so the settle timer can feed it.
-    @StateObject private var indicators = TouchIndicatorModel()
     /// The fret and chord-bar layout, memoised on what changes it.
     @State private var layout = FretLayoutMemo()
 
@@ -867,33 +191,21 @@ private struct FretPadSurfaceIOS: View {
                               height: max(1, geo.size.height - 2 * edgePad))
             // The playable band — the frets' coordinate space.
             let band = fretPadBandRect(in: size)
-            let (degrees, placements, chordCells) = layout.resolve(
+            let (_, placements, chordCells) = layout.resolve(
                 arrangement: arrangement, scale: engine.scale, size: size)
 
             ZStack(alignment: .topLeading) {
                 Color.black
 
-                // Always perform mode: scale guides and fret lines, ghosts like base frets.
+                // Always perform mode: colored frets on black, ghosts like base frets.
                 Canvas { ctx, _ in
                     ctx.translateBy(x: edgePad, y: edgePad)
-                    ctx.fillFretBand(band)
                     ctx.translateBy(x: band.minX, y: band.minY)
-                    ctx.strokeFretPitchGrid(degrees: degrees,
-                                            ghostExtentOctaves: arrangement.ghostExtentOctaves,
-                                            size: band.size)
                     for p in placements {
                         let hue = pitchColor(forRatio: p.ratio, lightness: 0.82, chroma: 0.20)
                         ctx.stroke(p.linePath, with: .color(hue), lineWidth: 1.5)
                     }
                 }
-
-                // Dynamic layer: live sounding glow (observes SoundingState).
-                CellFillsView(sounding: engine.sounding,
-                              cells: fretFillCells(placements), edgePad: edgePad)
-                    .offset(x: band.minX, y: band.minY)
-
-                // Per-touch indicator: fingertip-radius ring + size arc.
-                TouchIndicatorLayerIOS(model: indicators, edgePad: edgePad)
 
                 // The chord bar (display only; taps hit-tested in `began`).
                 ChordBarVisual(cells: chordCells,
@@ -910,16 +222,10 @@ private struct FretPadSurfaceIOS: View {
                     onTouchEnded: { id in
                         let now = CACurrentMediaTime()
                         player.end(touchId: id, time: now)
-                        indicators.end(id)
-                        motion?.noteEnded(id, at: now)   // scope coloring
                     }
                 )
                 .padding(edgePad)
 
-                TarafPluckStrip(bank: tarafBank, scale: engine.scale, pluck: pluckTaraf)
-                    .frame(width: band.width)
-                    .offset(x: edgePad + band.minX,
-                            y: edgePad + band.minY - TarafPluckStrip.height)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .clipped()
@@ -950,22 +256,14 @@ private struct FretPadSurfaceIOS: View {
         let now = CACurrentMediaTime()
         engine.setStrike(motion?.strikeLevel ?? 0)
         bindPlayer()
-        guard player.begin(touchId: ev.touchId, at: pt,
-                           context: playContext(placements: placements, size: band.size),
-                           radiusPt: ev.radius, time: now)
-        else { return }   // no frets — nothing to play
-        motion?.noteBegan(ev.touchId, at: now)   // strike-scope coloring
-        // Every touch is born stopped — the indicator starts amber.
-        indicators.begin(ev.touchId, point: spt, stopGate: 1,
-                         radiusPt: ev.radius, at: now)
+        player.begin(touchId: ev.touchId, at: pt,
+                     context: playContext(placements: placements, size: band.size),
+                     radiusPt: ev.radius, time: now)
     }
 
-    /// The player's engine, recorder and settle-tick hook (the indicators).
     private func bindPlayer() {
         player.engine = engine
         player.recorder = recorder
-        let indicators = self.indicators
-        player.onTick = { id, out in indicators.update(id, stopGate: out.stopGate) }
     }
 
     private func playContext(placements: [FretPlacement],
@@ -977,200 +275,13 @@ private struct FretPadSurfaceIOS: View {
     }
 
     /// Drag: the player glides (field pitch + onset offset + the assist's
-    /// slewed correction; never a re-snap mid-drag); the indicator follows.
+    /// slewed correction; never a re-snap mid-drag).
     private func moved(_ ev: TouchEvent, placements: [FretPlacement],
                        size: CGSize, band: CGRect) {
         let spt = CGPoint(x: ev.xFraction * size.width, y: ev.yFraction * size.height)
         let pt = CGPoint(x: spt.x - band.minX, y: spt.y - band.minY)
-        guard let out = player.move(touchId: ev.touchId, at: pt,
-                                    context: playContext(placements: placements, size: band.size),
-                                    radiusPt: ev.radius, time: CACurrentMediaTime())
-        else { return }
-        indicators.update(ev.touchId, point: spt, stopGate: out.stopGate,
-                          radiusPt: ev.radius)
-    }
-}
-
-// MARK: - Per-touch indicator overlay
-
-/// Live per-touch indicator state: the stop gate, the RAW FINGERTIP
-/// RADIUS (`UITouch.majorRadius`) and the estimated `.touchSize` axis
-/// the Mac derives from it. A class so the settle-timer closure can feed
-/// it; no-op updates are skipped.
-///
-/// The pitch-correction readout and the accelerometer strike ripple/number
-/// are deliberately NOT here any more — the toolbar's strike and
-/// finger-accel scopes are the surviving readouts for those.
-private final class TouchIndicatorModel: ObservableObject {
-    struct Info {
-        var point: CGPoint      // padded-content coords (the canvases' space)
-        var stopGate: Double    // 0 = moving … 1 = stopped
-        /// `UITouch.majorRadius` in points, as reported (0 = unknown).
-        var radiusPt: Double = 0
-        /// The `.touchSize` axis for THIS finger, 0…1 — the same mapping
-        /// and finger estimator the Mac's bindings run.
-        var axis: Double = 0
-    }
-
-    @Published private(set) var infos: [Int: Info] = [:]
-
-    /// DISPLAY-ONLY instances of the shared law (the finger-accel scope
-    /// pattern: the data's source side draws its own readout, no extra
-    /// wire traffic). One per touch — the Mac's control axis follows the
-    /// NEWEST touch, but on screen every finger shows its own value.
-    private var size: [Int: TouchSizeTracker] = [:]
-
-    /// The estimator needs regular time steps and UIKit only reports a
-    /// finger that MOVES, so a ~30 Hz ticker advances every tracker while
-    /// anything is down. `.common` mode so touch tracking can't starve it.
-    private var ticker: Timer?
-
-    func begin(_ id: Int, point: CGPoint, stopGate: Double,
-               radiusPt: Double, at t: TimeInterval) {
-        var tr = TouchSizeTracker()
-        tr.sample(radiusPt: radiusPt, at: t)     // seeds the clock at 0
-        size[id] = tr
-        infos[id] = Info(point: point, stopGate: stopGate,
-                         radiusPt: radiusPt, axis: tr.value)
-        armTicker()
-    }
-
-    /// `radiusPt` nil = a settle tick (the finger has not moved, so UIKit
-    /// reported no new size); the last radius stands, and the estimator
-    /// reads the silence as "no crossing yet".
-    func update(_ id: Int, point: CGPoint? = nil, stopGate: Double,
-                radiusPt: Double? = nil) {
-        guard var info = infos[id] else { return }
-        let p = point ?? info.point
-        let r = radiusPt ?? info.radiusPt
-        // ~half-px / quarter-point thresholds: a settled hold publishes
-        // nothing (the ticker publishes the ramp on its own).
-        if abs(info.stopGate - stopGate) < 0.01,
-           abs(info.radiusPt - r) < 0.25,
-           abs(p.x - info.point.x) + abs(p.y - info.point.y) < 0.5 { return }
-        info.point = p
-        info.stopGate = stopGate
-        info.radiusPt = r
-        infos[id] = info
-    }
-
-    func end(_ id: Int) {
-        size.removeValue(forKey: id)
-        infos.removeValue(forKey: id)
-        if infos.isEmpty {
-            ticker?.invalidate()
-            ticker = nil
-        }
-    }
-
-    private func armTicker() {
-        guard ticker == nil else { return }
-        let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) {
-            [weak self] timer in
-            guard let self, !self.infos.isEmpty else {
-                timer.invalidate()
-                self?.ticker = nil
-                return
-            }
-            let now = CACurrentMediaTime()
-            for (id, info) in self.infos {
-                guard var tr = self.size[id] else { continue }
-                let v = tr.sample(radiusPt: info.radiusPt, at: now)
-                self.size[id] = tr
-                guard abs(v - info.axis) > 0.002 else { continue }
-                var i = info
-                i.axis = v
-                self.infos[id] = i          // publishes
-            }
-        }
-        RunLoop.main.add(t, forMode: .common)
-        ticker = t
-    }
-}
-
-/// One ring per touch, SIZED BY THE RAW FINGERTIP RADIUS (cyan gliding →
-/// amber stopped), with the radius in points printed beside it and the
-/// **`.touchSize` axis drawn as an arc** just outside the ring — a full
-/// circle at 1, nothing at 0 — so the estimated 0…1 value the Mac's
-/// bindings actually see is visible while playing.
-private struct TouchIndicatorLayerIOS: View {
-    @ObservedObject var model: TouchIndicatorModel
-    let edgePad: CGFloat
-
-    /// Points → ring radius in px (a ~23 pt fingertip draws the historic
-    /// 46 px ring), clamped so an unknown or extreme reading still draws.
-    private func ringRadius(_ radiusPt: Double) -> CGFloat {
-        CGFloat(min(max(radiusPt * 2.0, 16.0), 120.0))
-    }
-
-    var body: some View {
-        Canvas { ctx, size in
-            ctx.translateBy(x: edgePad, y: edgePad)
-            for info in model.infos.values {
-                draw(info, in: &ctx, size: size)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-
-    private func draw(_ info: TouchIndicatorModel.Info,
-                      in ctx: inout GraphicsContext, size: CGSize) {
-        let g = info.stopGate
-        // Moving = cool cyan, stopped = warm amber, blended by the gate.
-        let color = Color(red: 0.25 + 0.75 * g,
-                          green: 0.75 - 0.15 * g,
-                          blue: 1.0 - 0.9 * g)
-        let radius = ringRadius(info.radiusPt)
-        let ring = Path(ellipseIn: CGRect(x: info.point.x - radius,
-                                          y: info.point.y - radius,
-                                          width: 2 * radius,
-                                          height: 2 * radius))
-        ctx.stroke(ring, with: .color(color.opacity(0.45 + 0.45 * g)),
-                   lineWidth: 3)
-        drawSizeArc(info, radius: radius, in: &ctx)
-        drawRadiusNumber(info, radius: radius, in: &ctx, size: size)
-    }
-
-    /// The estimated `.touchSize` value as an arc outside the ring,
-    /// clockwise from 12 o'clock: 0 draws nothing, 1 closes the circle.
-    private func drawSizeArc(_ info: TouchIndicatorModel.Info,
-                             radius: CGFloat,
-                             in ctx: inout GraphicsContext) {
-        let v = min(max(info.axis, 0), 1)
-        guard v > 0.005 else { return }
-        let r = radius + 7
-        var arc = Path()
-        arc.addArc(center: info.point, radius: r,
-                   startAngle: .degrees(-90),
-                   endAngle: .degrees(-90 + 360 * v),
-                   clockwise: false)
-        ctx.stroke(arc,
-                   with: .color(Color(red: 0.72, green: 0.45, blue: 1.0)
-                                    .opacity(0.9)),
-                   style: StrokeStyle(lineWidth: 4, lineCap: .round))
-    }
-
-    /// The raw `majorRadius` in points at the ring's right — the signal
-    /// itself, so the `Config.touchSizeLoPt`…`HiPt` window can be judged
-    /// by eye.
-    private func drawRadiusNumber(_ info: TouchIndicatorModel.Info,
-                                  radius: CGFloat,
-                                  in ctx: inout GraphicsContext,
-                                  size: CGSize) {
-        guard info.radiusPt > 0 else { return }
-        let text = Text(String(format: "%.1f", info.radiusPt))
-            .font(.system(size: 13, weight: .bold).monospacedDigit())
-            .foregroundColor(.white.opacity(0.92))
-        let resolved = ctx.resolve(text)
-        let sz = resolved.measure(in: CGSize(width: 80, height: 30))
-        let rightX = info.point.x + radius + 18 + sz.width / 2
-        let cx = min(rightX, size.width - 2 * edgePad - sz.width / 2 - 4)
-        let cy = min(max(info.point.y, sz.height / 2 + 4),
-                     size.height - 2 * edgePad - sz.height / 2 - 4)
-        let box = CGRect(x: cx - sz.width / 2 - 5, y: cy - sz.height / 2 - 2,
-                         width: sz.width + 10, height: sz.height + 4)
-        ctx.fill(Path(roundedRect: box, cornerRadius: 5),
-                 with: .color(.black.opacity(0.55)))
-        ctx.draw(resolved, at: CGPoint(x: cx, y: cy))
+        player.move(touchId: ev.touchId, at: pt,
+                    context: playContext(placements: placements, size: band.size),
+                    radiusPt: ev.radius, time: CACurrentMediaTime())
     }
 }

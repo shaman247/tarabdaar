@@ -110,6 +110,8 @@ public enum ParamTiming: String {
 /// (`AppController.applyParamToVoice`) switches on, so a control-layer
 /// knob is one registry entry and no special case.
 public enum ParamTarget: Sendable {
+    /// Gain and limiter controls after all three voices have been summed.
+    case finalOutput(FinalOutputControl)
     /// The String voice's control cache (`AudioEngine.setStringControlParam`).
     case stringVoice
     /// The strike→acceleration blend window (`ControlAxisEvaluator`), relayed to the iPad.
@@ -128,8 +130,6 @@ public enum ParamTarget: Sendable {
     case fretAssist(FretAssistControl)
     /// The pitch accent (`AudioEngine.setPitchAccent`): expression dips between frets.
     case pitchAccent
-    /// Performance-history attenuation of the taraf radiation.
-    case tarafAdaptation
 }
 
 /// One INSERT POINT of a repeated parameter block — the FX rack's four
@@ -743,11 +743,6 @@ public enum ParamRegistry {
                       effect: "Sets each taraf row's permitted level relative to the voice's recent peak. Only affects sound when voice cap is above 0.",
                       low: "A tighter ceiling; 0.5 allows roughly 6 dB below the voice peak.",
                       high: "A looser ceiling; 1 permits parity and 2 permits roughly 6 dB above it."),
-            ParamSpec("ctl_taraf_adapt", "history adaptation", group: "Taraf · Shared",
-                      0.0, 1.0, 0.0, apply: .live, target: .tarafAdaptation,
-                      effect: "Uses recent played-pitch history to attenuate incidental degrees in both taraf banks' radiation. Saved row gains and physical feedback stay intact.",
-                      low: "At 0, uses the saved gains without history-based attenuation.",
-                      high: "At 1, can reduce incidental degrees toward 15% of their saved gain; frequently used degrees remain prominent."),
         ]),
 
         ("Taraf · Raga", [
@@ -796,32 +791,47 @@ public enum ParamRegistry {
         ("Taraf · Chromatic", [
             ParamSpec("bow_jtc_gain", "level", group: "Taraf · Chromatic",
                       0.0, 3.0, 0.3,
-                      effect: "Sets the chromatic taraf and melody follower's audible level independently of the raga bank, preserving ringing state and physical bridge coupling.",
+                      effect: "Sets the chromatic taraf's audible level independently of the raga bank, preserving ringing state and physical bridge coupling.",
                       low: "Quieter chromatic radiation; 0 mutes this bank's output.",
                       high: "Louder chromatic radiation, including its drone and explicit plucks."),
             ParamSpec("bow_jtc_norm", "decay normalization", group: "Taraf · Chromatic",
                       0.0, 1.5, 0.0,
-                      effect: "Weights chromatic rows and the melody follower by decay response to reduce level differences. Does not alter physical decay.",
+                      effect: "Weights chromatic rows by decay response to reduce level differences. Does not alter physical decay.",
                       low: "At 0, preserves raw row gains and their natural level differences.",
                       high: "Applies stronger decay-based compensation; 1 is full modeled normalization and above 1 goes further."),
+            ParamSpec("bow_jtc_comp_ratio", "compression ratio", group: "Taraf · Chromatic",
+                      1.0, 20.0, 1.0, apply: .live,
+                      effect: "Compresses the summed chromatic radiation above a voice-relative threshold with a minimum floor. Stereo channels share gain; physical ringing and the raga bank are unchanged.",
+                      low: "At 1, bypasses compression exactly once any previous reduction has recovered.",
+                      high: "Stronger restraint of blooms; 4 applies 4:1 compression and 20 approaches limiting, with a soft knee and no makeup gain."),
+            ParamSpec("bow_jtc_comp_voice", "compression voice threshold", group: "Taraf · Chromatic",
+                      0.1, 2.0, 0.5, apply: .live,
+                      effect: "Sets the chromatic compressor threshold as a multiple of the played voice's recent peak, bounded below by the minimum threshold. Requires compression ratio above 1.",
+                      low: "Compression starts at a smaller fraction of the voice level.",
+                      high: "Allows a louder bloom before compression; 1 follows the voice peak and 2 allows roughly 6 dB above it."),
+            ParamSpec("bow_jtc_comp_floor_db", "compression minimum threshold (dB)", group: "Taraf · Chromatic",
+                      -80.0, 0.0, -40.0, apply: .live,
+                      effect: "Sets the minimum compressor threshold relative to unit internal bank amplitude, before output trim, master gain and shared FX. Keeps the threshold above silence for independent plucks.",
+                      low: "Restrains quiet independent plucks more strongly when the played voice is silent.",
+                      high: "Leaves more headroom for independent plucks; -40 dB corresponds to an internal peak amplitude of 0.01."),
             ParamSpec("bow_jtc_evolve", "evolution", group: "Taraf · Chromatic",
                       0.0, 1.0, 0.5, apply: .live,
-                      effect: "Moves chromatic rows and the melody follower between pressed and grazing jawari contact. The fitted geometry is 0.5; raga geometry is separate.",
+                      effect: "Moves chromatic rows between pressed and grazing jawari contact. The fitted geometry is 0.5; raga geometry is separate.",
                       low: "Toward 0, presses the string against the bone.",
                       high: "Toward 1, opens the grazing contact band for evolving harmonics; brightness and sustain depend on the geometry."),
             ParamSpec("bow_jt_ev_reg", "evolution register", group: "Taraf · Chromatic",
                       -1.0, 1.0, 0.0, apply: .live,
-                      effect: "Offsets chromatic and follower evolution by register relative to the tonic. Zero applies the same evolution at every pitch.",
+                      effect: "Offsets chromatic evolution by register relative to the tonic. Zero applies the same evolution at every pitch.",
                       low: "Negative values press lower rows and open higher rows.",
                       high: "Positive values open lower rows and press higher rows."),
             ParamSpec("bow_jt_apex", "graze depth (m)", group: "Taraf · Chromatic",
                       2e-6, 5e-5, 1e-5,
-                      effect: "Sets the effective contact protrusion into chromatic and follower strings.",
+                      effect: "Sets the effective contact protrusion into chromatic strings.",
                       low: "Shallower contact; the string may barely graze or miss the bone.",
                       high: "Deeper contact; beyond the grazing region the string becomes pressed, so more depth does not always mean more buzz."),
             ParamSpec("bow_jt_zone", "contact zone (m)", group: "Taraf · Chromatic",
                       0.002, 0.02, 0.006,
-                      effect: "Sets the length of the curved bone sampled by chromatic and follower strings, determining contact spacing and integration weight.",
+                      effect: "Sets the length of the curved bone sampled by chromatic strings, determining contact spacing and integration weight.",
                       low: "A shorter contact zone with closer contact points.",
                       high: "A longer contact zone with wider contact spacing and larger integration weights."),
             ParamSpec("bow_jt_alpha", "reference exponent", group: "Taraf · Chromatic",
@@ -831,17 +841,17 @@ public enum ParamRegistry {
                       high: "A higher reference exponent produces softer contact at the calibration depth."),
             ParamSpec("bow_jt_hcb", "contact damping", group: "Taraf · Chromatic",
                       1.0, 40.0, 8.0,
-                      effect: "Sets energy loss during chromatic and follower string-bone contact.",
+                      effect: "Sets energy loss during chromatic string-bone contact.",
                       low: "Less contact damping and sharper, more clangorous transients.",
                       high: "More contact damping, rounding buzz transients and dissipating more motion."),
             ParamSpec("bow_jt_fhf", "damping corner (Hz)", group: "Taraf · Chromatic",
                       800.0, 12000.0, 4000.0,
-                      effect: "Sets the frequency above which chromatic and follower partials receive progressively stronger damping.",
+                      effect: "Sets the frequency above which chromatic partials receive progressively stronger damping.",
                       low: "Upper partials die sooner, leaving a warmer ring.",
                       high: "Upper partials survive longer, keeping the ring brighter."),
             ParamSpec("bow_jt_bst", "inharmonicity", group: "Taraf · Chromatic",
                       0.0, 1.0e-3, 2.0e-4,
-                      effect: "Stretches chromatic and follower upper partials to model stiff wire.",
+                      effect: "Stretches chromatic upper partials to model stiff wire.",
                       low: "More harmonic tuning; 0 removes this stiffness stretch.",
                       high: "Sharper upper partials and a more metallic, bell-like character."),
             ParamSpec("bow_jt_pluck", "pluck excitation", group: "Taraf · Chromatic",
@@ -977,32 +987,45 @@ public enum ParamRegistry {
                       high: "Stronger excitation and a more prominent sympathetic response; bank output levels remain separate."),
         ]),
 
-        ("Output · Mix & limiter", [
-            ParamSpec("bow_gain", "master gain (String + taraf)", group: "Output · Mix & limiter",
+        ("Output · Final", [
+            ParamSpec("output_gain_db", "output gain (dB)", group: "Output · Final",
+                      -60, 24, 0, apply: .live, target: .finalOutput(.gain),
+                      effect: "Sets the final stereo gain after String, taraf, Tanpura and Sitar, including their effects and tails. A linked soft-knee limiter follows the gain, with adjustable ceiling, lookahead and release.",
+                      low: "Attenuates the complete mix, providing more digital headroom.",
+                      high: "Boosts the complete mix; the LIMIT readout shows peak attenuation and the final meters show the protected output."),
+            ParamSpec("output_limiter_ceiling_db", "limiter ceiling (dBFS)", group: "Output · Final",
+                      -24, 0, -1, apply: .live, target: .finalOutput(.limiterCeiling),
+                      effect: "Sets the final stereo sample-peak ceiling. The fixed 3 dB soft knee begins 1.5 dB below this level; live edits crossfade smoothly to the new ceiling.",
+                      low: "More output headroom and stronger attenuation of peaks.",
+                      high: "Less headroom; 0 dBFS allows samples to reach digital full scale. This is not a true-peak ceiling."),
+            ParamSpec("output_limiter_lookahead_ms", "limiter lookahead (ms)", group: "Output · Final",
+                      1, 20, 5, apply: .live, target: .finalOutput(.limiterLookahead),
+                      effect: "Sets the final limiter's lookahead delay and smooth attack window. Changes warm a second limiter and crossfade over 20 ms; rapid edits coalesce to the latest setting.",
+                      low: "Less added latency and a faster attack on peaks.",
+                      high: "A gentler attack with more added latency; changing delay while playing can briefly blend different waveform phases."),
+            ParamSpec("output_limiter_release_ms", "limiter release (ms)", group: "Output · Final",
+                      20, 1000, 120, apply: .live, target: .finalOutput(.limiterRelease),
+                      effect: "Sets the exponential recovery time of the linked stereo limiter after a peak. Live edits preserve the current attenuation and crossfade to the new response.",
+                      low: "Quicker recovery; very short releases can modulate low notes.",
+                      high: "Slower recovery with smoother attenuation across successive peaks."),
+        ]),
+
+        ("Output · Mix", [
+            ParamSpec("bow_gain", "master gain (String + taraf)", group: "Output · Mix",
                       0.0, 4.0, 1.0, apply: .live,
-                      effect: "Sets performance volume for the String engine's played voice, taraf and room together, on top of calibration trim. The output limiter still applies.",
+                      effect: "Sets performance volume for the String engine's played voice, taraf and room together, on top of calibration trim.",
                       low: "Quieter combined output; 0 mutes it.",
                       high: "Louder combined output; 1 is the calibrated level, and higher values add gain."),
-            ParamSpec("bow_bal", "voice↔taraf balance", group: "Output · Mix & limiter",
+            ParamSpec("bow_bal", "voice↔taraf balance", group: "Output · Mix",
                       -1.0, 1.0, 0.0, apply: .live,
                       effect: "Balances the String engine's played-voice and taraf buses by attenuating one side. Zero keeps the calibrated mix.",
                       low: "Toward −1, turns down the taraf until only the played-voice bus remains.",
                       high: "Toward +1, turns down the played-voice bus until only the taraf remains; bank levels still set their balance."),
-            ParamSpec("bow_live_trim", "output trim", group: "Output · Mix & limiter",
+            ParamSpec("bow_live_trim", "output trim", group: "Output · Mix",
                       0.01, 0.5, 0.175,
                       effect: "Sets the String engine's calibration output scale. Master gain is the separate performance-volume control.",
-                      low: "Quieter calibrated output with more headroom before the limiter.",
-                      high: "Louder calibrated output with more frequent limiting on strong peaks."),
-            ParamSpec("bow_lim_thresh", "limiter ceiling", group: "Output · Mix & limiter",
-                      0.1, 1.0, 0.8,
-                      effect: "Sets the String engine's linked-stereo peak ceiling after global FX; signals below it pass unchanged.",
-                      low: "A lower ceiling and more gain reduction on peaks.",
-                      high: "A higher permitted peak level and less frequent limiting."),
-            ParamSpec("bow_lim_rel_ms", "limiter release (ms)", group: "Output · Mix & limiter",
-                      20.0, 500.0, 150.0,
-                      effect: "Sets how quickly the String engine's limiter restores gain after a peak.",
-                      low: "Faster recovery, which can make sustained loud material pump.",
-                      high: "Slower recovery, keeping the following sound quieter for longer."),
+                      low: "Quieter calibrated output with more headroom.",
+                      high: "Louder calibrated output with higher peaks."),
         ]),
 
         ("Output · Tone & stereo", [
@@ -1246,7 +1269,7 @@ public enum ParamRegistry {
             blurb: "The sympathetic web's own radiated output, drones included."),
         FXInsertPoint(
             index: 3, name: "Global", keyPrefix: "fx_global_",
-            what: "the String engine’s combined stereo voice, taraf and room output, after tone and gain but before its limiter",
+            what: "the String engine’s combined stereo voice, taraf and room output, after tone and gain",
             blurb: "The final stereo output, after the whole fitted chain."),
     ]
 
@@ -1394,7 +1417,7 @@ public enum ParamRegistry {
         "bow_vib_cents", "bow_vib_hz",
         // --- output / room / radiation ---
         "bow_live_trim", "bow_rev_mix", "bow_rev_width",
-        "bow_rad_lp", "bow_rad_hp", "bow_lim_thresh", "bow_lim_rel_ms",
+        "bow_rad_lp", "bow_rad_hp",
         // --- coefficient arrays reloaded in place ---
         // The body modal bank (histories kept) and the modal-jawari tables
         // (the wrap is kept, so the web relaxes into its new geometry).

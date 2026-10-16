@@ -143,13 +143,6 @@ extension BowEngine {
                 pushJtEvolveOffsets()
             }
         }}}}}}}}}}}}}}}}}}
-        // Melody follower: refresh the retune-law constants; re-arming the
-        // SAME row keeps its current pitch
-        if jt.trackRow >= 0, Int(jt.trackRow) < jt.rowFreqs.count {
-            bow_poly_jt_track_config(st, jt.trackRow,
-                                     jt.rowFreqs[Int(jt.trackRow)],
-                                     jt.trackT60, jt.trackFhf, jt.trackBst)
-        }
         return bodyAccepted
     }
 
@@ -202,11 +195,6 @@ extension BowEngine {
                 for i in radHP.indices { radHP[i].copyCoefficients(from: fresh) }
                 for i in radHPS.indices { radHPS[i].copyCoefficients(from: fresh) }
             }
-            // output safety limiter: plain scalar adoption (the limiter's
-            // own gain smoothing makes threshold moves click-free)
-            limThresh = min(max(bp.v("bow_lim_thresh", 0.8), 0.1), 1.0)
-            limRelCoef = OnePole.coefficient(
-                tau: max(bp.v("bow_lim_rel_ms", 150.0), 5.0) * 0.001, sr: sr)
             liveRamping = true
         }
 

@@ -4,10 +4,8 @@ import TarabdaarCore
 import SwiftUI
 
 /// Output device routing + the String voice's control axes. The device
-/// picker enumerates CoreAudio output devices on appear; pick one to route
-/// AVAudioEngine through that HAL device. "System Default" routes via the
-/// `kAudioHardwarePropertyDefaultOutputDevice` device, so changing the
-/// system default in System Settings follows automatically.
+/// picker follows the recovery controller's selected route, including device loss and return.
+/// "System Default" retains that intent across changes in System Settings.
 struct AudioSettingsView: View {
     @ObservedObject var controller: AppController
     @ObservedObject var audio: AudioEngine
@@ -18,8 +16,7 @@ struct AudioSettingsView: View {
     }
 
     @State private var devices: [AudioOutputDevice] = []
-    @State private var selectedID: AudioDeviceID = 0
-    @State private var sampleRate: Double = 0
+    @State private var switchError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -33,8 +30,12 @@ struct AudioSettingsView: View {
         .padding(20)
         .onAppear {
             refreshDevices()
-            sampleRate = controller.audio.outputSampleRate
         }
+        .onChange(of: audio.outputDeviceRevision) { _ in refreshDevices() }
+        .alert("Audio output", isPresented: Binding(get: { switchError != nil },
+            set: { if !$0 { switchError = nil } })) {
+            Button("OK") { switchError = nil }
+        } message: { Text(switchError ?? "") }
     }
 
     // MARK: - Panels
@@ -55,8 +56,13 @@ struct AudioSettingsView: View {
     private var outputDevicePanel: some View {
         Panel(title: "Output device") {
             VStack(alignment: .leading, spacing: 10) {
-                Picker("Device", selection: $selectedID) {
+                Picker("Device", selection: Binding(get: { audio.outputDeviceSelection }, set: { id in
+                    if !audio.setOutputDevice(id) { switchError = audio.outputDeviceError }
+                })) {
                     Text("System Default").tag(AudioDeviceID(0))
+                    if audio.outputDeviceSelection != 0 && !devices.contains(where: { $0.id == audio.outputDeviceSelection }) {
+                        Text("Unavailable").tag(audio.outputDeviceSelection)
+                    }
                     Divider()
                     ForEach(devices) { d in
                         Text(d.isDefault ? "\(d.name) (system default)" : d.name)
@@ -64,13 +70,6 @@ struct AudioSettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                .onChange(of: selectedID) { newID in
-                    let target: AudioDeviceID = newID == 0
-                        ? CoreAudioDevices.systemDefaultOutputDevice()
-                        : newID
-                    controller.audio.setOutputDevice(target)
-                    sampleRate = controller.audio.outputSampleRate
-                }
 
                 HStack {
                     Button {
@@ -80,7 +79,7 @@ struct AudioSettingsView: View {
                     }
                     .buttonStyle(.borderless)
                     Spacer()
-                    if let dev = devices.first(where: { $0.id == selectedID }),
+                    if let dev = devices.first(where: { $0.id == audio.outputDeviceSelection }),
                        let mfg = dev.manufacturer {
                         Text(mfg)
                             .font(.padCaption)
@@ -95,10 +94,11 @@ struct AudioSettingsView: View {
         Panel(title: "Engine") {
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent("Running", value: controller.audio.isRunning ? "yes" : "no")
-                LabeledContent("Sample rate", value: sampleRate > 0
-                               ? String(format: "%.0f Hz", sampleRate)
+                LabeledContent("Sample rate", value: audio.outputSampleRate > 0
+                               ? String(format: "%.0f Hz", audio.outputSampleRate)
                                : "—")
                 LabeledContent("DSP sample rate", value: String(format: "%.0f Hz", Config.sampleRate))
+                if let error = audio.outputDeviceError { LabeledContent("Status", value: error) }
             }
             .font(.system(.body))
         }
@@ -108,15 +108,5 @@ struct AudioSettingsView: View {
 
     private func refreshDevices() {
         devices = CoreAudioDevices.listOutputDevices()
-        // Pre-select whatever the engine is currently using; if it
-        // matches the system default, leave selection at 0 ("System
-        // Default") so changing the OS default keeps working.
-        let current = controller.audio.currentOutputDevice
-        let systemDefault = CoreAudioDevices.systemDefaultOutputDevice()
-        if current == 0 || current == systemDefault {
-            selectedID = 0
-        } else {
-            selectedID = current
-        }
     }
 }

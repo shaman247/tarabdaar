@@ -82,20 +82,6 @@ final class ByteNullContractTests: XCTestCase {
         return l + r
     }
 
-    /// Performance attenuation reduces the radiated web without generating non-finite output.
-    func testPerformanceProfileAttenuatesRadiation() {
-        let reference = makeEngine()
-        reference.setBusBalance(1)
-        let adapted = makeEngine()
-        adapted.setBusBalance(1)
-        adapted.setPerformanceGains(adapted.jtRowFreqs.map { _ in 0.15 })
-        let a = phrase(reference), b = phrase(adapted)
-        let energy = a.reduce(0) { $0 + $1 * $1 }
-        XCTAssertGreaterThan(energy, 0)
-        XCTAssertTrue(b.allSatisfy(\.isFinite))
-        XCTAssertLessThan(b.reduce(0) { $0 + $1 * $1 }, energy * 0.8)
-    }
-
     func testRestingValuesAreByteNull() {
         let reference = phrase(makeEngine())
         XCTAssertTrue(reference.contains { $0 != 0 }, "the phrase must make sound")
@@ -110,8 +96,6 @@ final class ByteNullContractTests: XCTestCase {
             ("two-direction selectivity with backend off", { $0.setJtDualSelectivity(1) }),
             ("two-direction tone with backend off", { $0.setJtDualTone(hz: 2000) }),
             ("two-direction displacement with backend off", { $0.setJtDualDisplacement(mm: 1) }),
-            ("performance profile unity", { $0.setPerformanceGains($0.jtRowFreqs.map { _ in 1 }) }),
-            ("performance profile reset", { $0.setPerformanceGains([]) }),
             ("scope meters armed", { $0.setScopeArmed(true) }),
             ("bus meter armed", { $0.setBusMeter(true) }),
             ("fx rack at rest", { e in FXPoint.allCases.forEach { e.setFX($0, FXSettings()) } }),

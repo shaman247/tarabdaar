@@ -9,7 +9,7 @@ final class PitchAccentTests: XCTestCase {
     func testPublishedGridUsesIncomingArrangementAndTuning() throws {
         final class Layout: ObservableObject {
             @Published var arrangement = FretArrangement(segments: [
-                FretSegment(degreeIndex: 0, row: .middle),
+                FretSegment(degreeIndex: 0, row: .row5),
             ])
         }
         let tuning = Tuning()
@@ -21,7 +21,7 @@ final class PitchAccentTests: XCTestCase {
         defer { subscription.cancel() }
 
         layout.arrangement = FretArrangement(segments: [
-            FretSegment(degreeIndex: 7, row: .middle),
+            FretSegment(degreeIndex: 7, row: .row5),
         ])
         XCTAssertEqual(try XCTUnwrap(latest).degrees, [log2(1.5)])
 
@@ -43,10 +43,10 @@ final class PitchAccentTests: XCTestCase {
         XCTAssertEqual(degrees.count, 12)
         let d = 2, e = 4, fs = 6, f = 5
         let arrangement = FretArrangement(segments: [
-            FretSegment(degreeIndex: fs, row: .middle),
-            FretSegment(degreeIndex: d, row: .middle),
-            FretSegment(degreeIndex: e, row: .middle),
-            FretSegment(degreeIndex: 40, row: .middle),
+            FretSegment(degreeIndex: fs, row: .row5),
+            FretSegment(degreeIndex: d, row: .row5),
+            FretSegment(degreeIndex: e, row: .row5),
+            FretSegment(degreeIndex: 40, row: .row5),
         ])
         let grid = FretPitchGrid(tonicHz: 261.63, arrangement: arrangement,
                                  degrees: degrees)

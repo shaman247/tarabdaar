@@ -20,7 +20,6 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
 {
     bow_poly_state_t *st = (bow_poly_state_t *)vst;
     st->njt = njt; st->jtJ = J;
-    st->jtTrkRow = -1;            /* follower unarmed (byte-null) */
     if (njt <= 0) return;
     int mtot = 0, ztot = 0;
     st->jtM = (int *)malloc(sizeof(int) * njt);
@@ -79,13 +78,9 @@ void bow_poly_jt_load(void *vst, int njt, int J, const int *M,
     st->jtCapGain = (double *)malloc(sizeof(double) * (size_t)njt);
     st->jtOutputLevelTgt = malloc(sizeof(*st->jtOutputLevelTgt) * (size_t)njt);
     st->jtOutputLevelCur = malloc(sizeof(double) * (size_t)njt);
-    st->jtProfileTgt = malloc(sizeof(*st->jtProfileTgt) * (size_t)njt);
-    st->jtProfileCur = malloc(sizeof(double) * (size_t)njt);
     for (int s = 0; s < njt; s++) {
         atomic_init(&st->jtOutputLevelTgt[s], 1.0);
         st->jtOutputLevelCur[s] = 1.0;
-        atomic_init(&st->jtProfileTgt[s], 1.0);
-        st->jtProfileCur[s] = 1.0;
     }
     st->jtCapRowGen = (int *)calloc(njt, sizeof(int));
     for (int s = 0; s < njt; s++) st->jtCapGain[s] = 1.0;
@@ -418,89 +413,6 @@ static double jt_maxpen(int M, int J, const float *phiU,
     return (double)pen;
 }
 
-/* MELODY FOLLOWER: slew the row's f0 and rebuild its tables in place on
-   the ticking thread. The static wrap is NOT re-solved — the contact
-   re-settles on its own, exactly a string gliding under the bone. */
-void jt_track_retune(bow_poly_state_t *st)
-{
-    const int s = st->jtTrkRow;
-    double tgt = st->jtTrkTarget;
-    if (tgt < 20.0) return;
-    if (tgt > 0.45 * st->sr) tgt = 0.45 * st->sr;
-    double f = st->jtTrkF0;
-    const double d = tgt - f;
-    if (fabs(d) < 1e-5 * f) f = tgt;          /* < ~0.02 c: snap */
-    else f += st->jtTrkSlew * d;
-    st->jtTrkF0 = f;
-    if (f == st->jtTrkApplied && !st->jtTrkDirty) return;
-    st->jtTrkDirty = 0;
-    st->jtTrkApplied = f;
-    const int J = jt_row_contacts(st, s);
-    const int mo = st->jtMOff[s], zo = st->jtZOff[s];
-    const int Mall = st->jtM[s];
-    const double dtj = (double)st->jtDiv / st->sr;
-    const double dt4 = 0.25 * dtj;
-    /* active mode count, no floor: a mode above the fx corner limit-cycles into
-       static */
-    int mUse = (int)(st->jtTrkFx / f);
-    if (mUse < 2) mUse = 2;
-    if (mUse > Mall) mUse = Mall;
-    const double t60 = st->jtTrkT60 > 1e-3 ? st->jtTrkT60 : 1.0;
-    const double fHf = st->jtTrkFhf > 1.0 ? st->jtTrkFhf : 4000.0;
-    const double bst = st->jtTrkBst;
-    const double twoPi = 2.0 * 3.14159265358979;
-    for (int k = 0; k < mUse; k++) {
-        const double kk = (double)(k + 1);
-        const double w0 = twoPi * f * kk * sqrt(1.0 + bst * kk * kk);
-        const double fk = w0 / twoPi;
-        /* the builder's per-mode damping law */
-        const double t60k = 1.0 / (1.0 / t60
-            + (fk / fHf) * (fk / fHf) * (1.0 / t60));
-        const double sg = 6.91 / t60k;
-        const double wd2 = w0 * w0 - sg * sg;
-        const double wd = sqrt(wd2 > 1e-6 ? wd2 : 1e-6);
-        st->jtWd[mo + k] = wd;
-        st->jtWdI[mo + k] = 1.0 / wd;
-        const double e1 = exp(-sg * dtj), e4 = exp(-sg * dt4);
-        st->jtCa[mo + k] = e1 * cos(wd * dtj);
-        st->jtCb[mo + k] = e1 * sin(wd * dtj);
-        st->jtCa4[mo + k] = e4 * cos(wd * dt4);
-        st->jtCb4[mo + k] = e4 * sin(wd * dt4);
-    }
-    if (mUse != st->jtTrkMUse) {
-        /* modes leaving/entering the active set start from zero */
-        const int lo = mUse < st->jtTrkMUse ? mUse : st->jtTrkMUse;
-        int hi = mUse > st->jtTrkMUse ? mUse : st->jtTrkMUse;
-        if (hi > Mall) hi = Mall;
-        for (int k = lo; k < hi; k++) {
-            st->jtQ[mo + k] = 0.0;
-            st->jtP[mo + k] = 0.0;
-        }
-        /* contact compliance = prefix sum over the active modes: G[a][b] =
-           (dt^2/2) * sum_k phiU[k][a]*phiF[k][b] (phiF carries wj/mu) */
-        float *G = st->jtG + (size_t)s * (size_t)st->jtJ * st->jtJ;
-        float *G4 = st->jtG4 + (size_t)s * (size_t)st->jtJ * st->jtJ;
-        float *gd = st->jtGd + (size_t)s * st->jtJ;
-        float *gd4 = st->jtGd4 + (size_t)s * st->jtJ;
-        const float *phiU = st->jtPhiU + zo;
-        const float *phiF = st->jtPhiF + zo;
-        const double h2 = dtj * dtj / 2.0;
-        for (int a = 0; a < J; a++) {
-            for (int b2 = 0; b2 < J; b2++) {
-                double sum = 0.0;
-                for (int k = 0; k < mUse; k++)
-                    sum += (double)phiU[(size_t)k * J + a]
-                         * (double)phiF[(size_t)k * J + b2];
-                G[(size_t)a * J + b2] = (float)(h2 * sum);
-                G4[(size_t)a * J + b2] = (float)(h2 * sum / 16.0);
-            }
-            gd[a] = G[(size_t)a * J + a];
-            gd4[a] = G4[(size_t)a * J + a];
-        }
-        st->jtTrkMUse = mUse;
-    }
-}
-
 /* One cap stage: peak envelope against the ceiling, the pow(c/e, h) target
    and the attack/release gain slew. Shared by the per-string rows and the
    taraf bus — the caller owns the state triple and the exponent; a
@@ -570,11 +482,6 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         if (outputLevel != 1.0) y *= outputLevel;
         if (cap >= 0) y *= cap_gain_step(st, cap, fabs(y), st->jtCapHard,
             &st->jtCapRowGen[s], &st->jtCapEnv[s], &st->jtCapGain[s]);
-        double target = atomic_load_explicit(&st->jtProfileTgt[s], memory_order_relaxed);
-        double current = st->jtProfileCur[s];
-        double next = current + (1.0 / (0.250 * 96000 + 1)) * (target-current);
-        if(next != current) st->jtProfileCur[s] = next;
-        y *= next;
         if (st->scopeOn) st->scopeEnv[s] = peak_env(st->scopeEnv[s], fabs(y), st->scopeRel);
         return y;
     }
@@ -593,15 +500,6 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         st->jtBurstLeft[s] = (int)ceil(12 * decay / dtj);
     }
     const int burstActive = st->jtBurstLeft[s] > 0;
-    /* Slew even asleep, so waking never restores a stale profile. Unity
-       bypasses the multiply exactly; adaptation never changes bridge physics. */
-    const double profileTarget = atomic_load_explicit(&st->jtProfileTgt[s], memory_order_relaxed);
-    double profile = st->jtProfileCur[s];
-    if (profile != profileTarget) {
-        profile += (dtj / (0.250 + dtj)) * (profileTarget - profile);
-        if (fabs(profile - profileTarget) < 1e-9) profile = profileTarget;
-        st->jtProfileCur[s] = profile;
-    }
     /* DRIVE AT (NEAR-)CONSTANT LOUDNESS: dn already scales the bridge force
        in Fd; the drone drive and the quiescence floor follow it below, and
        the row's output (radiated AND returned) is scaled by comp
@@ -635,14 +533,8 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
         st->jtGateSlp[s] = 0;
         st->jtGateCnt[s] = st->jtGateHold;
     }
-    /* melody-follower retune, amortized every jtTrkIval ticks of the tracked
-       row */
-    if (s == st->jtTrkRow && --st->jtTrkTick <= 0) {
-        st->jtTrkTick = st->jtTrkIval;
-        jt_track_retune(st);
-    }
     {
-        const int Ms = s == st->jtTrkRow ? st->jtTrkMUse : st->jtM[s];
+        const int Ms = st->jtM[s];
         const int mo = st->jtMOff[s], zo = st->jtZOff[s];
         double *q = st->jtQ + mo, *p = st->jtP + mo;
         /* RECRUITMENT: slewed per-row drive weight (~30 ms), before the drone
@@ -913,7 +805,6 @@ static double jt_tick_string(bow_poly_state_t *st, int s, double Fd,
                                  &st->jtCapRowGen[s], &st->jtCapEnv[s],
                                  &st->jtCapGain[s]);
         }
-        if (profile != 1.0) yjt *= profile;
         /* SCOPE TELEMETRY (after the cap — what the row actually
            contributes) */
         if (st->scopeOn) {
@@ -1480,11 +1371,7 @@ int bow_poly_scope_jt(void *vst, int nrows, double *f0, double *level,
         const int mo = owner->jtMOff[s];
         const int slp = (owner->jtGateRef > 0.0 && owner->jtGateSlp
                          && owner->jtGateSlp[s]) ? 1 : 0;
-        if (f0) {
-            double f = owner->jtWd[mo] / (2.0 * M_PI);
-            if (s == owner->jtTrkRow && owner->jtTrkF0 > 0.0) f = owner->jtTrkF0;
-            f0[s] = f;
-        }
+        if (f0) f0[s] = owner->jtWd[mo] / (2.0 * M_PI);
         if (level) level[s] = slp ? 0.0 : owner->scopeEnv[s] * g;
         if (asleep) asleep[s] = (unsigned char)slp;
         if (modes && K > 0) {
@@ -1556,14 +1443,6 @@ int bow_poly_jt_set_coeffs(void *vst, int njt, int J, const int *M,
        tables must not snap it back to the artifact value */
     if (!st->jtDrvOn) {
         st->jtDrv = phys[5]; st->jtDrvTgt = phys[5]; st->jtDrvRef = phys[5];
-    }
-    /* the reload rebuilt the follower row at its BUILD pitch — the next tick
-       recomputes at the tracked pitch and re-trims G/gd */
-    if (st->jtTrkRow >= 0) {
-        st->jtTrkMUse = st->jtM[st->jtTrkRow];
-        st->jtTrkApplied = 0.0;
-        st->jtTrkDirty = 1;
-        st->jtTrkTick = 1;
     }
     return 1;
 }
@@ -1886,46 +1765,6 @@ void bow_poly_jt_excite(void *vst, int s, double amplitude, double decay)
     atomic_store_explicit(&st->jtBurstRequest[s], a | (de << 32), memory_order_relaxed);
 }
 
-/* MELODY FOLLOWER: arm `row` (f0 = builder frequency, t60/fHf/bst = the
-   builder's damping law). Engine build off the audio thread, or after
-   set_coeffs — re-arming the SAME row keeps its pitch. row < 0 disarms. */
-void bow_poly_jt_track_config(void *vst, int row, double f0, double t60,
-                              double fHf, double bst)
-{
-    bow_poly_state_t *st = (bow_poly_state_t *)vst;
-    if (st && st->jtInline) bow_poly_jt_track_config(st->jtInline, row, f0, t60, fHf, bst);
-    if (!st || st->njt <= 0) return;
-    if (row < 0 || row >= st->njt) { st->jtTrkRow = -1; return; }
-    st->jtTrkT60 = t60;
-    st->jtTrkFhf = fHf;
-    st->jtTrkBst = bst;
-    st->jtTrkFx = 18000.0 < 0.42 * st->sr / st->jtDiv
-        ? 18000.0 : 0.42 * st->sr / st->jtDiv;   /* the builder's fx */
-    st->jtTrkIval = 128;                          /* ~1.3 ms at 96 k */
-    const double dtj = (double)st->jtDiv / st->sr;
-    st->jtTrkSlew = kc_onepole_dt((double)st->jtTrkIval * dtj, 0.015);
-    st->jtTrkDirty = 1;
-    if (st->jtTrkRow != row) {
-        st->jtTrkRow = -1;        /* park while re-seeding (tick races) */
-        st->jtTrkF0 = f0 > 20.0 ? f0 : 20.0;
-        st->jtTrkApplied = 0.0;
-        st->jtTrkTarget = st->jtTrkF0;
-        st->jtTrkMUse = st->jtM[row];
-        st->jtTrkTick = 1;
-        st->jtTrkRow = row;
-    }
-}
-
-/* The follower's pitch target (Hz) — plain aligned store, any thread; the tick
-   slews to it */
-void bow_poly_jt_track_target(void *vst, double hz)
-{
-    bow_poly_state_t *st = (bow_poly_state_t *)vst;
-    if (st && st->jtInline) bow_poly_jt_track_target(st->jtInline, hz);
-    if (!st || st->jtTrkRow < 0) return;
-    if (hz > 0.0) st->jtTrkTarget = hz;
-}
-
 /* drone envelope times (seconds), engine build off the audio thread;
    non-positive values keep the load-time defaults */
 void bow_poly_jt_drone_env(void *vst, double atkSec, double relSec,
@@ -1956,19 +1795,6 @@ void bow_poly_jt_drone_tone(void *vst, double lpHz, double hpHz,
         st->jtDnALp2 = 1.0 - exp(-2.0 * 3.14159265358979 * hpHz * dtj);
     if (toneMix >= 0.0)
         st->jtDnMix = toneMix > 1.0 ? 1.0 : toneMix;
-}
-
-/* Per-performance radiation gains; independent of recruitment and table gains. */
-void bow_poly_jt_profile_gains(void *vst, const double *gains, int n)
-{
-    bow_poly_state_t *st = (bow_poly_state_t *)vst;
-    if (st && st->jtInline) bow_poly_jt_profile_gains(st->jtInline, gains, n);
-    if (!st || !st->jtProfileTgt) return;
-    for (int s = 0; s < st->njt; s++) {
-        double gain = gains && s < n && isfinite(gains[s]) ? gains[s] : 1.0;
-        gain = fmax(0.0, fmin(1.0, gain));
-        atomic_store_explicit(&st->jtProfileTgt[s], gain, memory_order_relaxed);
-    }
 }
 
 /* Initial values may be installed immediately only before rendering starts. */

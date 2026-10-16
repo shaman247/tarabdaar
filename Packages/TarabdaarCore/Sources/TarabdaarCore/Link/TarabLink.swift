@@ -26,6 +26,8 @@ public final class TarabLink {
                                       qos: .userInteractive)
     private let outbox = LinkOutbox()
     private var clockSync = LinkClockSync()
+    private let recordings = FretRecordingOutbox()
+    private var recordingTick = 0
 
     // Wiring (set before start()).
     /// Sends one complete SysEx message. `isEvent` = reliable traffic (sent
@@ -120,6 +122,22 @@ public final class TarabLink {
         }
     }
 
+    /// Completed iPad strokes use a paced auxiliary queue, after performance traffic.
+    public func sendRecording(session: UInt32, data: Data) {
+        queue.async {
+            guard self.status.isUp, !self.status.isStale else { return }
+            self.recordings.append(session: session, data: data)
+        }
+    }
+
+    public func finishRecordings(session: UInt32) {
+        queue.async { self.recordings.finish(session: session) }
+    }
+
+    public func cancelRecordings() {
+        queue.async { self.recordings.reset() }
+    }
+
     /// Host role: latest Joy-Con display state, emitted coalesced. `force`
     /// skips pacing.
     public func setJoyConState(_ display: JoyConTiltDisplay, immediate: Bool = false) {
@@ -191,10 +209,17 @@ public final class TarabLink {
             }
         }
         drainLocked()
+        recordingTick = (recordingTick + 1) % 4
+        if status.isUp, !status.isStale, recordingTick == 0,
+           let event = recordings.next() {
+            enqueueEventLocked(event)
+            drainLocked()
+        }
         // Staleness.
         if status.isUp, !status.isStale, let last = lastReceiveUs,
            LinkClock.elapsedUs(from: last, to: now) >= TarabLink.staleUs {
             status.isStale = true
+            recordings.reset()
             onStatus?(status)
             onLinkDrop?()
         }
@@ -265,6 +290,10 @@ public final class TarabLink {
         if status.isStale {
             status.isStale = false
             onStatus?(status)
+            if role == .pad {
+                enqueueEventLocked(.resyncRequest)
+                drainLocked()
+            }
         }
         switch frame {
         case .perfState(let s):
@@ -299,6 +328,7 @@ public final class TarabLink {
             let wasUp = status.isUp
             let wasStale = status.isStale
             status.isUp = compatible
+            if !compatible { recordings.reset() }
             status.isStale = false
             status.remoteVersionMax = maxVer
             lastReceiveUs = compatible ? LinkClock.nowUs() : nil

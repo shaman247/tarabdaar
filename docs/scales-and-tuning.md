@@ -13,7 +13,7 @@ row model and bank invariants.
 
 ## The playing scale (Fret Pad tab → iPad)
 
-The scale is the set of `PitchPoint` ratios edited in `ScaleListEditor`: add/remove pitches, snap to "simple" fractions, retune, disable, and a sidebar with text fields. Edits push to the connected iPad live (debounced) and on connect. Disabled pitches drop from the fret layout but stay listed to toggle back in.
+The scale is the set of `PitchPoint` ratios edited in `ScaleListEditor`: add/remove pitches, type exact ratios or decimal values, retune, disable, and edit labels and vertical positions in the sidebar. Ratio fields accept typed edits; vertical-position fields also support scroll stepping. Edits push to the connected iPad live (debounced) and on connect. Disabled pitches drop from the fret layout but stay listed to toggle back in.
 
 Named scales and fret arrangements encode completely before atomically replacing
 their JSON files. A failed save leaves the previous document intact; autosaved
@@ -57,7 +57,7 @@ Only these pitches differ from their respective base scales; every other ratio s
 
 `ScalePresetTests` checks every rotated interval relative to Ma with exact rational arithmetic, the Sa/Ma anchors, default labels/layout and exact ratio round-trip through scale sync.
 
-**How a tempered scale fits a rational model.** Every scale pitch is a `num/den` rational — in the JSON on disk and as two 14-bit integers in the [scale-sync blob](midi-and-audio.md#scale-sync-mac--ipad) — and a tempered semitone is irrational, so the preset ships each `2^(k/12)` as its best rational approximation with both terms under the blob's 16383 bound (`ScalePreset.equalTemperedRatios`, e.g. 11011/10393 for the semitone). The residual is below 0.0001 ¢, three orders of magnitude under the tonic's 0.01 ¢ wire resolution, so nothing in the app can tell it from true equal temperament, and the wire format, the persisted scale, the iPad's decode and the tarab's `(degree, octave)` references are all untouched. `ScalePresetTests` pins the bound and the accuracy. The editor shows the big fractions in its ratio fields, which is honest: retune one and it is that rational; "snap to simple fractions" pulls it back to JI. Loading the preset keeps the tarab's row layout and retunes scale-following rows to the tempered pitches. Fixed rows keep their chromatic JI ratios, placing them up to ~16 ¢ from the played pitches under this scale.
+**How a tempered scale fits a rational model.** Every scale pitch is a `num/den` rational — in the JSON on disk and as two 14-bit integers in the [scale-sync blob](midi-and-audio.md#scale-sync-mac--ipad) — and a tempered semitone is irrational, so the preset ships each `2^(k/12)` as its best rational approximation with both terms under the blob's 16383 bound (`ScalePreset.equalTemperedRatios`, e.g. 11011/10393 for the semitone). The residual is below 0.0001 ¢, three orders of magnitude under the tonic's 0.01 ¢ wire resolution, so nothing in the app can tell it from true equal temperament, and the wire format, the persisted scale, the iPad's decode and the tarab's `(degree, octave)` references are all untouched. `ScalePresetTests` pins the bound and the accuracy. The editor shows the exact fractions in its ratio fields; typing a new ratio retunes that degree. Loading the preset keeps the tarab's row layout and retunes scale-following rows to the tempered pitches. Fixed rows keep their chromatic JI ratios, placing them up to ~16 ¢ from the played pitches under this scale.
 
 ## The tonic (Fret Pad tab)
 
@@ -73,5 +73,13 @@ A "+12.0¢" readout follows the fields whenever the tonic sits off its note anch
 ## Pitch on the wire and in the engine
 
 Every touch travels as an f32 fractional-MIDI pitch (`tonicFractionalMidi + 12·log2(ratio)`) — no note + bend split. All pitch interpolation runs in `log2(freq)`. `SarangiKit.Pitch` is the ONE fractional-MIDI ↔ Hz conversion (`hz(fractionalMidi:)` / `fractionalMidi(hz:)`) and `NoteName` the one concert-name table (`Scale.noteName` reaches it from TarabdaarCore) — never hardcode a 12-TET formula, and never name a scale degree by a concert note.
+
+The bowed String kernel tunes its complete traveling-wave loop to that requested
+frequency by compensating the current loss-filter and dispersion phase delays.
+Register damping and live loss edits therefore update the correction along with
+the sound. This does not change the scale ratios: a JI degree retains its intended
+offset from an equal-tempered tuner. Heavy bow pressure can still pull the
+physical oscillation slightly from the requested pitch. See
+[Sarangi — signal path](sarangi.md#signal-path).
 
 The older keyboard-model `Scale` (tuning system, enabled pitch classes, key range) is not on the playing path — see `docs/history/`.
